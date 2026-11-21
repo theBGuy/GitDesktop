@@ -23739,17 +23739,7 @@ detached
     /// A directory link: a junction on Windows (no privilege needed), a symlink elsewhere.
     fn update_directory_link(link: &str, target: &str) {
         #[cfg(windows)]
-        {
-            let made = std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J", link, target])
-                .output()
-                .expect("run mklink");
-            assert!(
-                made.status.success(),
-                "mklink /J failed: {}",
-                String::from_utf8_lossy(&made.stderr)
-            );
-        }
+        crate::test_junction::make_junction(Path::new(link), Path::new(target));
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
     }
@@ -27294,22 +27284,7 @@ detached
         let leaf = Path::new("0123456789abcdef").join("gd-pr-resolve-origin-1-abc");
         std::fs::create_dir_all(real.join(&leaf)).unwrap();
         let link = tmp.path().join("link");
-        // Directory junctions need no elevation (unlike symlinks).
-        let made = std::process::Command::new("cmd")
-            .args([
-                "/C",
-                "mklink",
-                "/J",
-                &link.to_string_lossy(),
-                &real.to_string_lossy(),
-            ])
-            .output()
-            .expect("run mklink");
-        assert!(
-            made.status.success(),
-            "mklink /J failed: {}",
-            String::from_utf8_lossy(&made.stderr)
-        );
+        crate::test_junction::make_junction(&link, &real);
 
         let child_real = real.join(&leaf).to_string_lossy().into_owned();
         let child_link = link.join(&leaf).to_string_lossy().into_owned();
@@ -27412,21 +27387,7 @@ detached
         let root = base.join("0123456789abcdef");
         std::fs::create_dir_all(&root).unwrap();
         let junction = root.join("gd-pr-resolve-origin-1-abc");
-        let made = std::process::Command::new("cmd")
-            .args([
-                "/C",
-                "mklink",
-                "/J",
-                &junction.to_string_lossy(),
-                &target.to_string_lossy(),
-            ])
-            .output()
-            .expect("run mklink");
-        assert!(
-            made.status.success(),
-            "mklink /J failed: {}",
-            String::from_utf8_lossy(&made.stderr)
-        );
+        crate::test_junction::make_junction(&junction, &target);
 
         let listed = vec![target.to_string_lossy().into_owned()];
         let junction = junction.to_string_lossy().into_owned();
@@ -27529,6 +27490,7 @@ detached
         for name in [
             "git_resolve_conflict_core",
             "git_conflict_sides",
+            "git_conflict_marker_scan",
             "git_checkout_conflict_side_core",
         ] {
             assert!(
@@ -27902,23 +27864,7 @@ detached
     #[cfg(any(windows, unix))]
     fn discard_directory_link(link: &Path, target: &Path) {
         #[cfg(windows)]
-        {
-            let made = std::process::Command::new("cmd")
-                .args([
-                    "/C",
-                    "mklink",
-                    "/J",
-                    &link.to_string_lossy(),
-                    &target.to_string_lossy(),
-                ])
-                .output()
-                .expect("run mklink");
-            assert!(
-                made.status.success(),
-                "mklink /J failed: {}",
-                String::from_utf8_lossy(&made.stderr)
-            );
-        }
+        crate::test_junction::make_junction(link, target);
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
     }

@@ -49,6 +49,7 @@ import {
   noLongerConflicted,
 } from "@/lib/git/conflict-parse";
 import {
+  blockInputsOf,
   type ConflictBlockReason,
   conflictAiBlockReason,
 } from "@/lib/git/conflict-prefilter";
@@ -64,17 +65,13 @@ import { useContainerWidth } from "@/lib/use-container-width";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useToastClearance } from "@/lib/use-toast-clearance";
 import { conflictPathRefusal, PANE_SCROLL_KEYS } from "./conflict-banner-state";
+import { type ReadRefusal, readRefusalOf } from "./conflict-read-refusal";
 import { useRefuseIfMoved } from "./use-refuse-if-moved";
 
 type Phase = "loading" | "streaming" | "ready" | "blocked" | "idle";
 type ViewKey = "diff" | "proposed" | "ours" | "theirs" | "base";
 
 const baseName = (path: string) => path.split("/").pop() || path;
-
-/** Why a file never reaches the model, in the shared gate's priority. */
-function blockedReason(sides: ConflictSides | null): ConflictBlockReason {
-  return (sides && conflictAiBlockReason(sides)) ?? "excluded";
-}
 
 /** The non-UTF-8 arms name the byte-safe actions as the conflict editor words
  *  them, in place of the generic by-hand sentence the other two end with. */
@@ -95,6 +92,8 @@ const BLOCKED_COPY: Record<
       then stage it.
     </>
   ),
+  tooLarge: () =>
+    "This file is too large to send to a model whole, so it isn't sent. Resolve it in the conflict editor, or in your own editor.",
 };
 
 /** A path-gate refusal's closing guidance, worded as the conflict editor words
@@ -108,6 +107,59 @@ const PATH_REFUSAL_GUIDANCE = {
  *  single-file start reaches it, since Resolve all skips one. */
 const SUBMODULE_BLOCKED_COPY =
   "This is a submodule conflict, so there's no text for a model to merge. Pick a commit in the conflict editor instead.";
+
+/** The blocked body for a sides read refused as text: the file never reached
+ *  the gate, so none of BLOCKED_COPY's reasons apply. */
+const READ_REFUSAL_BLOCKED_COPY: Record<ReadRefusal, string> = {
+  tooLarge:
+    "This file is too large to show or to send to a model. Take a side with Accept all current or Accept all incoming, or resolve it in your editor, then Mark resolved.",
+  binary:
+    "This looks like a binary file, so there's no text for a model to merge. Take a side with Accept all current or Accept all incoming, or resolve it in your editor, then Mark resolved.",
+};
+
+/** Why the view is blocked: a refusal of the sides read, or the gate's verdict
+ *  over a read that succeeded. Only the gate can say `excluded`. */
+type Blocked =
+  | { kind: "path"; summary: string; linkedLeaf: boolean }
+  | { kind: "submodule" }
+  | { kind: "read"; refusal: ReadRefusal }
+  | { kind: "gate"; reason: ConflictBlockReason };
+
+const BLOCKED_BODY: {
+  [K in Blocked["kind"]]: (
+    blocked: Extract<Blocked, { kind: K }>,
+    fileName: string,
+  ) => ReactNode;
+} = {
+  path: ({ summary, linkedLeaf }) =>
+    `${summary} ${PATH_REFUSAL_GUIDANCE[linkedLeaf ? "leaf" : "other"]}`,
+  submodule: () => SUBMODULE_BLOCKED_COPY,
+  read: ({ refusal }) => READ_REFUSAL_BLOCKED_COPY[refusal],
+  gate: ({ reason }, fileName) => BLOCKED_COPY[reason](fileName),
+};
+
+/** A read refusal outranks the gate, which reads only a successful read's
+ *  sides; scripts/conflict-walk-refusal.test.mjs pins this order. */
+function blockedOf(
+  pathRefusal: { summary: string; linkedLeaf: boolean } | null,
+  submodule: boolean,
+  readRefusal: ReadRefusal | null,
+  sides: ConflictSides | null,
+): Blocked | null {
+  if (pathRefusal !== null) return { kind: "path", ...pathRefusal };
+  if (submodule) return { kind: "submodule" };
+  if (readRefusal !== null) return { kind: "read", refusal: readRefusal };
+  const reason = sides && conflictAiBlockReason(blockInputsOf(sides));
+  return reason ? { kind: "gate", reason } : null;
+}
+
+// TypeScript can't correlate a union member with its own row of the mapped
+// table, so the lookup widens the row once here.
+const blockedBody = (blocked: Blocked, fileName: string): ReactNode =>
+  (BLOCKED_BODY[blocked.kind] as (b: Blocked, f: string) => ReactNode)(
+    blocked,
+    fileName,
+  );
 
 /** Where focus goes once Accept settles without leaving this view, pinned to
  *  the file it was armed for and the element focused at the press. */
@@ -158,6 +210,9 @@ export function ConflictResolveView({
   } | null>(null);
   // The sides read refused a gitlink conflict: blocked, with its own body.
   const [submoduleConflict, setSubmoduleConflict] = useState(false);
+  // The sides read refused the file as text (too large to show, or binary):
+  // no retry can heal it, so it blocks with its own body too.
+  const [readRefusal, setReadRefusal] = useState<ReadRefusal | null>(null);
   const [proposed, setProposed] = useState("");
   const [previewDiff, setPreviewDiff] = useState<string | null>(null);
   const [view, setView] = useState<ViewKey>("diff");
@@ -246,6 +301,7 @@ export function ConflictResolveView({
     setSides(null);
     setPathRefusal(null);
     setSubmoduleConflict(false);
+    setReadRefusal(null);
     setProposed("");
     setPreviewDiff(null);
     setPhase("loading");
@@ -264,16 +320,18 @@ export function ConflictResolveView({
     } catch (e) {
       if (gen === genRef.current && !interruptedRef.current) {
         runningRef.current = false;
-        // Only a path-gate refusal or a gitlink conflict blocks; any other
-        // failure can heal, so it keeps its toast and Try again. The blocked
-        // body names the refusal.
+        // Only a path-gate refusal, a gitlink conflict or a text-read refusal
+        // (too large, binary) blocks; any other failure can heal, so it keeps
+        // its toast and Try again. The blocked body names the refusal.
         const refusal = isAppError(e)
           ? conflictPathRefusal(e.kind, presentError(e).summary)
           : null;
         const submodule = isSubmoduleConflictRefusal(e);
-        if (refusal !== null || submodule) {
+        const unreadable = readRefusalOf(e);
+        if (refusal !== null || submodule || unreadable !== null) {
           setPathRefusal(refusal);
           setSubmoduleConflict(submodule);
+          setReadRefusal(unreadable);
           setPhase("blocked");
         } else {
           toastError(e);
@@ -284,7 +342,7 @@ export function ConflictResolveView({
     }
     if (gen !== genRef.current || interruptedRef.current) return;
     setSides(resolved);
-    if (conflictAiBlockReason(resolved) !== null) {
+    if (conflictAiBlockReason(blockInputsOf(resolved)) !== null) {
       runningRef.current = false;
       setPhase("blocked");
       return;
@@ -551,6 +609,11 @@ export function ConflictResolveView({
   // `git diff --no-index` prints nothing for identical files. That empty diff gets
   // no tab (it would render blank) and a caption instead. The switcher only
   // mounts once the diff is settled, so the tab never vanishes under focus.
+  const blocked =
+    phase === "blocked"
+      ? blockedOf(pathRefusal, submoduleConflict, readRefusal, sides)
+      : null;
+
   const matchesOurs = previewDiff === "";
   const sideViews: { key: ViewKey; label: string; body: string | null }[] = [
     { key: "diff", label: "Diff", body: matchesOurs ? null : previewDiff },
@@ -644,13 +707,7 @@ export function ConflictResolveView({
       <div ref={paneRef} className="min-h-0 flex-1 overflow-auto">
         {phase === "blocked" ? (
           <p className="p-4 text-xs text-muted-foreground">
-            {/* scripts/conflict-walk-refusal.test.mjs pins this ternary's
-                shape: a path refusal never reaches the ignore-pattern copy. */}
-            {pathRefusal !== null
-              ? `${pathRefusal.summary} ${PATH_REFUSAL_GUIDANCE[pathRefusal.linkedLeaf ? "leaf" : "other"]}`
-              : submoduleConflict
-                ? SUBMODULE_BLOCKED_COPY
-                : BLOCKED_COPY[blockedReason(sides)](baseName(path))}
+            {blocked !== null && blockedBody(blocked, baseName(path))}
           </p>
         ) : phase === "loading" ? (
           <p className="flex items-center gap-2 p-4 text-xs text-muted-foreground">
@@ -740,10 +797,11 @@ export function ConflictResolveView({
           </>
         ) : (
           <>
-            {/* Blocked files (AI-ignored, not UTF-8 text, or refused by the
-                path gate) have no bypass: honoring the ignore, and keeping the
-                bytes exact, is the point, and a refused path can't heal on a
-                retry. Other idle states (cancelled / empty response) can retry. */}
+            {/* Blocked files (AI-ignored, not UTF-8 text, past the prompt
+                budget, or refused by the sides read) have no bypass: honoring
+                the ignore, and keeping the bytes exact, is the point, and a
+                refused read can't heal on a retry. Other idle states
+                (cancelled / empty response) can retry. */}
             {phase !== "blocked" && (
               <Button
                 variant="outline"

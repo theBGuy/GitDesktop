@@ -1748,17 +1748,7 @@ mod tests {
             let gone = root.path().join("gone");
             std::fs::create_dir(&gone).unwrap();
             let junction = root.path().join("docs");
-            let out = std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J"])
-                .arg(&junction)
-                .arg(&gone)
-                .output()
-                .expect("run mklink");
-            assert!(
-                out.status.success(),
-                "mklink /J failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            crate::test_junction::make_junction(&junction, &gone);
             std::fs::remove_dir(&gone).unwrap();
             assert!(default_open_refusal(junction.to_str().unwrap()).is_err());
         }
@@ -1784,7 +1774,7 @@ mod tests {
     }
 
     /// Tested set: missing (bare, and under a file), file, dir, a final-component
-    /// link (a junction on Windows: mklink /J needs no privilege), and refusals.
+    /// link (a junction on Windows: a junction needs no privilege), and refusals.
     #[test]
     fn path_kind_reads_missing_file_dir_and_link_without_following_it() {
         let root = tempfile::tempdir().unwrap();
@@ -1792,22 +1782,9 @@ mod tests {
         let repo = root.path().to_str().unwrap();
         std::fs::write(root.path().join("a.txt"), b"x").unwrap();
         std::fs::create_dir_all(root.path().join("sub/inner")).unwrap();
-        // mklink reads a `/` as a switch, so the link path is joined per segment.
         let link = root.path().join("sub").join("link");
         #[cfg(windows)]
-        {
-            let made = std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J"])
-                .arg(&link)
-                .arg(outside.path())
-                .output()
-                .expect("run mklink");
-            assert!(
-                made.status.success(),
-                "mklink /J failed: {}",
-                String::from_utf8_lossy(&made.stderr)
-            );
-        }
+        crate::test_junction::make_junction(&link, outside.path());
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), &link).unwrap();
         for (rel, kind) in [
@@ -1983,19 +1960,7 @@ mod tests {
         std::fs::create_dir(outside.path().join("nested")).unwrap();
         let link = sub.join("link");
         #[cfg(windows)]
-        {
-            let made = std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J"])
-                .arg(&link)
-                .arg(outside.path())
-                .output()
-                .expect("run mklink");
-            assert!(
-                made.status.success(),
-                "mklink /J failed: {}",
-                String::from_utf8_lossy(&made.stderr)
-            );
-        }
+        crate::test_junction::make_junction(&link, outside.path());
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), &link).unwrap();
         assert!(std::fs::symlink_metadata(&link)

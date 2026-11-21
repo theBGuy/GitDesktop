@@ -1,0 +1,157 @@
+[
+  {
+    "name": "marker after LF",
+    "hex": "610a3c3c3c3c3c3c3c206f7572730a",
+    "markers": true
+  },
+  {
+    "name": "marker after CR only",
+    "hex": "610d3c3c3c3c3c3c3c206f7572730d",
+    "markers": true
+  },
+  {
+    "name": "marker after CRLF",
+    "hex": "610d0a3c3c3c3c3c3c3c206f7572730d0a",
+    "markers": true
+  },
+  {
+    "name": "marker after U+2028",
+    "hex": "61e280a83c3c3c3c3c3c3c206f757273",
+    "markers": true
+  },
+  {
+    "name": "marker after U+2029",
+    "hex": "61e280a93c3c3c3c3c3c3c206f757273",
+    "markers": true
+  },
+  {
+    "name": "7-run then tab",
+    "hex": "3c3c3c3c3c3c3c096f7572730a",
+    "markers": true
+  },
+  {
+    "name": "7-run then space",
+    "hex": "3c3c3c3c3c3c3c206f7572730a",
+    "markers": true
+  },
+  {
+    "name": "7-run at EOF, no newline",
+    "hex": "610a3c3c3c3c3c3c3c",
+    "markers": true
+  },
+  {
+    "name": "8-run then LF",
+    "hex": "3c3c3c3c3c3c3c3c0a",
+    "markers": true
+  },
+  {
+    "name": "6-run is not a marker",
+    "hex": "610a3c3c3c3c3c3c0a620a",
+    "markers": false
+  },
+  {
+    "name": "7-run then x is not a marker",
+    "hex": "610a3c3c3c3c3c3c3c780a",
+    "markers": false
+  },
+  {
+    "name": "8-run then x is not a marker",
+    "hex": "3c3c3c3c3c3c3c3c780a",
+    "markers": false
+  },
+  {
+    "name": "bare ======= is not a marker",
+    "hex": "610a3d3d3d3d3d3d3d0a620a",
+    "markers": false
+  },
+  {
+    "name": "base marker |||||||",
+    "hex": "610a7c7c7c7c7c7c7c20626173650a",
+    "markers": true
+  },
+  {
+    "name": "bare >>>>>>> is a marker",
+    "hex": "610a3e3e3e3e3e3e3e0a",
+    "markers": true
+  },
+  {
+    "name": "mixed run is not a marker",
+    "hex": "3c3c3c3c3c3c3e3e20780a",
+    "markers": false
+  },
+  {
+    "name": "run mid-line is not a marker",
+    "hex": "61203c3c3c3c3c3c3c20780a",
+    "markers": false
+  },
+  {
+    "name": "BOM then run on line 1",
+    "hex": "efbbbf3c3c3c3c3c3c3c206f7572730a",
+    "markers": false
+  },
+  {
+    "name": "BOM line 1, marker on line 2",
+    "hex": "efbbbf610a3c3c3c3c3c3c3c0a",
+    "markers": true
+  },
+  {
+    "name": "invalid UTF-8 before a marker line",
+    "hex": "fffe0a3c3c3c3c3c3c3c206f7572730a",
+    "markers": true
+  },
+  {
+    "name": "U+0085 is not a terminator",
+    "hex": "61c2853c3c3c3c3c3c3c206f7572730a",
+    "markers": false
+  },
+  {
+    "name": "form feed is not a terminator",
+    "hex": "610c3c3c3c3c3c3c3c206f7572730a",
+    "markers": false
+  },
+  {
+    "name": "7-run then euro is not a marker",
+    "hex": "610a3c3c3c3c3c3c3ce282ac0a",
+    "markers": false
+  },
+  {
+    "name": "7-run then U+2028 is a marker",
+    "hex": "3c3c3c3c3c3c3ce280a878",
+    "markers": true
+  },
+  {
+    "name": "7-run then truncated E2 80 at EOF",
+    "hex": "3c3c3c3c3c3c3ce280",
+    "markers": false
+  },
+  {
+    "name": "7-run then E2 E2 80 A8 is not a marker",
+    "hex": "3c3c3c3c3c3c3ce2e280a878",
+    "markers": false
+  },
+  {
+    "name": "empty file",
+    "hex": "",
+    "markers": false
+  },
+  {
+    "name": "U+2028 split across a 3-byte chunk edge",
+    "hex": "6162e280a83c3c3c3c3c3c3c0a",
+    "markers": true
+  },
+  {
+    "name": "run split across a 3-byte chunk edge",
+    "hex": "61620a3c3c3c3c3c3c3c",
+    "markers": true
+  },
+  {
+    "name": "lone E2 then LF then marker",
+    "hex": "61e20a3c3c3c3c3c3c3c0a",
+    "markers": true
+  },
+  {
+    "name": "7-run then U+2019 (E2 80 99) is not a marker",
+    "hex": "3c3c3c3c3c3c3ce280990a",
+    "markers": false
+  }
+]

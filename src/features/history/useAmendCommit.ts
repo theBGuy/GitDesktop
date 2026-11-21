@@ -13,10 +13,16 @@ import { useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 import {
   replacesMessageConfirm,
   replacesTypedMessage,
 } from "./commit-confirms";
+import { useHeadPublishedElsewhere } from "./use-head-published";
+
+/** Which published state an amend confirm describes: the upstream (amending
+ *  force-pushes), a remote branch other than an upstream, or an unread check. */
+export type AmendConfirmVariant = "upstream" | "elsewhere" | "unchecked";
 
 /**
  * Loads a commit's message into the commit box and switches to the Changes
@@ -95,7 +101,7 @@ const selectAmendBranch = (s: RepoStatus) => ({
  * Whether rewriting HEAD means force-pushing it (an upstream exists, isn't gone,
  * and HEAD isn't ahead of it), and why such a rewrite can't run right now.
  * Amend and Edit dates share it for the force-push arm; a branch with no
- * upstream is outside it (Edit dates reads Undo's remotes count for that).
+ * upstream is outside it (both read `useHeadPublishedElsewhere` for that).
  */
 export function useForcePushGate(repoPath: string) {
   const branch = useQuery({
@@ -150,26 +156,46 @@ export function useForcePushGate(repoPath: string) {
 }
 
 /**
- * Amend, gated by a force-push confirmation when the commit is already on the
- * remote (an upstream exists and HEAD isn't ahead of it). Returns the request
- * function plus the state to drive an `<AmendForcePushDialog>`. Pair it with
- * that dialog at the call site.
+ * Amend, gated by a confirmation when the commit is already published: on the
+ * upstream (an upstream exists and HEAD isn't ahead of it, so it force-pushes),
+ * or, with no live upstream, on a remote branch or unchecked. Returns the
+ * request function plus the state to drive an `<AmendForcePushDialog>`. Pair it
+ * with that dialog at the call site.
  */
 export function useAmendWithConfirm(repoPath: string) {
   const gate = useForcePushGate(repoPath);
+  const publishedElsewhere = useHeadPublishedElsewhere(repoPath);
   const settings = useSettings();
   const amend = useAmendCommit(repoPath);
-  const [pendingHash, setPendingHash] = useState<string | null>(null);
+  // The variant latches with the hash: a count refetch under the open dialog
+  // must not change what it says.
+  const [pending, setPending] = useState<{
+    hash: string;
+    variant: AmendConfirmVariant;
+  } | null>(null);
   // A pending amend belongs to the repo it was asked in: a confirm left open
   // across a switch would amend the old repo's commit. Reset in render: an
   // effect would paint the dialog open over the new repo first.
   const [pendingRepo, setPendingRepo] = useState(repoPath);
   if (pendingRepo !== repoPath) {
     setPendingRepo(repoPath);
-    setPendingHash(null);
+    setPending(null);
   }
+  // Held through the close fade, so the closing dialog keeps its copy.
+  const shownVariant = useRetained<AmendConfirmVariant>(
+    pending?.variant ?? "upstream",
+    pending !== null,
+  );
 
   const { upstream, needsForcePush } = gate;
+  // A count still loading or disagreeing with HEAD amends without asking, as
+  // Edit dates shows no line then.
+  const variant = ((): AmendConfirmVariant | null => {
+    if (needsForcePush) return "upstream";
+    if (publishedElsewhere === "already-pushed") return "elsewhere";
+    if (publishedElsewhere === "unpushed-unchecked") return "unchecked";
+    return null;
+  })();
 
   // Amending an already-pushed commit means force-pushing it. Shared by request
   // and confirm so the two refusal paths can't drift.
@@ -182,8 +208,8 @@ export function useAmendWithConfirm(repoPath: string) {
 
   function requestAmend(hash: string) {
     if (forcePushRefused()) return;
-    if (needsForcePush && (settings.data?.confirmAmendForcePush ?? true)) {
-      setPendingHash(hash);
+    if (variant !== null && (settings.data?.confirmAmendForcePush ?? true)) {
+      setPending({ hash, variant });
     } else {
       amend(hash).catch(toastError);
     }
@@ -195,8 +221,8 @@ export function useAmendWithConfirm(repoPath: string) {
    *  under the open dialog), nor a landing the user navigated away from turns
    *  off the prompt. */
   async function confirmAmend(): Promise<boolean> {
-    const hash = pendingHash;
-    setPendingHash(null);
+    const hash = pending?.hash ?? null;
+    setPending(null);
     // The gate can flip under an open dialog: the rules may have settled to
     // blocked, or may still be settling. Every read it takes is pre-await.
     if (forcePushRefused()) return false;
@@ -213,10 +239,11 @@ export function useAmendWithConfirm(repoPath: string) {
     requestAmend,
     /** Props for the paired <AmendForcePushDialog>. */
     forcePushDialog: {
-      open: pendingHash !== null,
+      open: pending !== null,
+      variant: shownVariant,
       upstream,
       onConfirm: confirmAmend,
-      onCancel: () => setPendingHash(null),
+      onCancel: () => setPending(null),
     },
   };
 }

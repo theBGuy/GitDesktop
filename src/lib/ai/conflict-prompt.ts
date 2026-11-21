@@ -1,5 +1,5 @@
 import type { ConflictSides } from "@/lib/git/conflict";
-import { safeSlice } from "./truncate";
+import { PROMPT_SECTION_MAX } from "@/lib/git/conflict-prefilter";
 
 const CONFLICT_SYSTEM = `You resolve a single git merge conflict. You are given the conflicted file as it stands in the working tree. It usually carries its conflict markers, but a modify/delete conflict leaves only the surviving side's content, with no markers at all. You also get, when available, the clean BASE (common ancestor), OURS (current branch / HEAD side), and THEIRS (incoming side) versions of the whole file; a section stating that a side REMOVED the file has no version to show.
 
@@ -19,16 +19,16 @@ export interface ConflictPromptInput {
   globalInstructions: string;
 }
 
-/** Soft per-section cap so a large file's three sides don't blow the context.
- *  The backend already refuses files over 256 KB; this trims each rendered side. */
-const SECTION_MAX = 80_000;
-
+/** Renders one version whole: the model is asked for the whole merged file, so a
+ *  version is never cut. Callers gate on `exceedsPromptSection` first; an
+ *  over-budget section here is a bug, and throws rather than send a partial copy. */
 function section(title: string, body: string): string {
-  const clipped =
-    body.length > SECTION_MAX
-      ? `${safeSlice(body, SECTION_MAX)}\n[…truncated for length…]`
-      : body;
-  return `## ${title}\n\`\`\`\n${clipped}\n\`\`\``;
+  if (body.length > PROMPT_SECTION_MAX) {
+    throw new Error(
+      `The "${title}" section is over the ${PROMPT_SECTION_MAX}-character prompt budget.`,
+    );
+  }
+  return `## ${title}\n\`\`\`\n${body}\n\`\`\``;
 }
 
 /** A side that has no index stage, rendered as `absent` prose rather than

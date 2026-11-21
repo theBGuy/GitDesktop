@@ -61,6 +61,24 @@ export const conflictSides = (
   exclude: string[],
 ) => invoke<ConflictSides>("git_conflict_sides", { repoPath, path, exclude });
 
+/** Whether a working file holds conflict markers, read at any size (the sides
+ *  read refuses past its display cap). `exists` false: the file is gone.
+ *  `binary`: a NUL byte stopped the scan, and `markers` is then false. */
+export interface MarkerScan {
+  exists: boolean;
+  markers: boolean;
+  binary: boolean;
+}
+
+/** Scans a conflicted working file for markers with `hasConflictMarkers`'s
+ *  grammar, gated like `conflictSides`. */
+export function conflictMarkerScan(
+  repoPath: string,
+  path: string,
+): Promise<MarkerScan> {
+  return invoke<MarkerScan>("git_conflict_marker_scan", { repoPath, path });
+}
+
 /** Writes a resolution to the file, staging it when `stage` (which marks the
  *  conflict resolved). Per-region accepts pass `stage: false` while markers
  *  remain and `true` on the final region; the AI flow stages unless its

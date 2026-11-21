@@ -3316,6 +3316,27 @@ mod tests {
             .contains("gd/session/"));
     }
 
+    /// A HEAD git can't read refuses rather than pass as detached: `ref: refs/heads/`
+    /// with no name makes `symbolic-ref -q HEAD` exit 128 (measured, git 2.51.1).
+    #[tokio::test]
+    async fn session_publish_guard_refuses_an_unreadable_head() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-session-publish-head-")
+            .tempdir()
+            .expect("create temp dir");
+        let work = dir.path().to_string_lossy().into_owned();
+        git(&work, &["init", "-q", "-b", "main"]).await;
+        std::fs::write(dir.path().join(".git").join("HEAD"), "ref: refs/heads/\n").unwrap();
+        assert!(
+            crate::git::branches::current_branch_name(&work)
+                .await
+                .is_err(),
+            "fixture: HEAD is unreadable"
+        );
+
+        assert!(ensure_head_not_publishing_branch(&work).await.is_err());
+    }
+
     /// A bare origin, a teammate's `work` clone, and the clone the handler binds to —
     /// in which the user has PUSHED a commit the teammate then force-pushed away.
     /// That push is what arms the trap: it writes the commit into the clone's

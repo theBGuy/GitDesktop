@@ -165,10 +165,47 @@ function pinRouting(res) {
     /setSides\(null\);\s*setPathRefusal\(null\);/,
     "every start() must clear the last refusal beside the sides",
   );
+  const readClassify = source.search(/\breadRefusalOf\(e\)/);
+  assert.ok(
+    readClassify !== -1 && readClassify < blocked,
+    "start()'s catch must classify a read refusal via readRefusalOf before blocking",
+  );
+  assert.ok(
+    source.search(/setReadRefusal\(unreadable\)/) > readClassify &&
+      source.search(/unreadable !== null\) \{/) > readClassify,
+    "a read refusal must block, with the refusal stored",
+  );
+  assert.match(
+    startBody,
+    /setSubmoduleConflict\(false\);\s*setReadRefusal\(null\);/,
+    "every start() must clear the last read refusal",
+  );
+  // The blocked body: refusals first, the gate's reason only from a read that
+  // succeeded, so neither a path nor a read refusal reaches the ignore copy.
   assert.match(
     res,
-    /\{pathRefusal !== null\s*\?[\s\S]{0,200}?:\s*BLOCKED_COPY\[blockedReason\(sides\)\]/,
-    "a path refusal must never reach blockedReason's ignore-pattern copy",
+    /function blockedOf\([^)]*\): Blocked \| null \{\s*if \(pathRefusal !== null\) return \{ kind: "path", \.\.\.pathRefusal \};\s*if \(submodule\) return \{ kind: "submodule" \};\s*if \(readRefusal !== null\) return \{ kind: "read", refusal: readRefusal \};\s*const reason = sides && conflictAiBlockReason\(blockInputsOf\(sides\)\);\s*return reason \? \{ kind: "gate", reason \} : null;\s*\}/,
+    "blockedOf must rank path, submodule and read refusals ahead of the gate",
+  );
+  assert.match(
+    res,
+    /gate: \(\{ reason \}, fileName\) => BLOCKED_COPY\[reason\]\(fileName\),/,
+    "only the gate's reason may pick BLOCKED_COPY",
+  );
+  assert.equal(
+    res.match(/(?<![\w$])BLOCKED_COPY\[/g)?.length,
+    1,
+    "BLOCKED_COPY is read only through the gate arm",
+  );
+  assert.doesNotMatch(
+    res,
+    /\?\?\s*"excluded"/,
+    "no default may show the ignore-pattern copy",
+  );
+  assert.match(
+    res,
+    /\{blocked !== null && blockedBody\(blocked, baseName\(path\)\)\}/,
+    "the blocked screen renders the one blocked value",
   );
 }
 
@@ -273,7 +310,32 @@ test("the pins fail on a reworded or rerouted side", () => {
     /(setSides\(null\);)\s*setPathRefusal\(null\);/,
     "$1",
   );
+  // The catch before read refusals blocked: a too-large or binary read toasts.
+  const oldCatch = mutate(
+    res,
+    "if (refusal !== null || submodule || unreadable !== null) {",
+    "if (refusal !== null || submodule) {",
+  );
+  const noReadClear = mutate(
+    res,
+    /(setSubmoduleConflict\(false\);)\s*setReadRefusal\(null\);/,
+    "$1",
+  );
+  const gateFirst = mutate(
+    res,
+    /(if \(pathRefusal !== null\) return \{ kind: "path", \.\.\.pathRefusal \};)/,
+    'if (sides) return { kind: "gate", reason: "excluded" };\n  $1',
+  );
+  const defaultExcluded = mutate(
+    res,
+    'return reason ? { kind: "gate", reason } : null;',
+    'return { kind: "gate", reason: reason ?? "excluded" };',
+  );
   const cases = [
+    [() => pinRouting(oldCatch), /a read refusal must block/],
+    [() => pinRouting(noReadClear), /clear the last read refusal/],
+    [() => pinRouting(gateFirst), /ahead of the gate/],
+    [() => pinRouting(defaultExcluded), /ahead of the gate/],
     [
       () => pinStrings(badRustPrefix, view, P, T),
       /prefix differs from conflict\.rs/,

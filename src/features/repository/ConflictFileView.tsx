@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useDiffPaneHold } from "@/features/diff/diff-pane-hold";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
+import { HIGHLIGHT_MAX_CHARS_HLJS } from "@/features/diff/highlight-budget";
 import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import { awaitFocusRelease } from "@/lib/await-focus-release";
 import { appErrorDetail, presentError } from "@/lib/error-summary";
@@ -32,6 +33,7 @@ import {
   type ConflictSides,
   changedOnDiskCopy,
   conflictSides,
+  type MarkerScan,
 } from "@/lib/git/conflict";
 import {
   type ConflictChoice,
@@ -45,13 +47,18 @@ import {
   noLongerConflicted,
   parseConflictSegments,
   resolveBlock,
+  type Segment,
 } from "@/lib/git/conflict-parse";
-import { sidesRefusal } from "@/lib/git/conflict-prefilter";
+import {
+  exceedsPromptSection,
+  PROMPT_SECTION_MAX,
+} from "@/lib/git/conflict-prefilter";
 import {
   refreshConflictFile,
   repoKeys,
   useAcceptSubmoduleConflictSide,
   useCheckoutConflictSide,
+  useConflictMarkerScan,
   useHeldConflictFile,
   useMarkConflictResolved,
   useResolveConflict,
@@ -90,6 +97,11 @@ import {
   previousConflictIndex,
   shouldLandOnOpen,
 } from "./conflict-jump";
+import {
+  type ReadRefusal,
+  readRefusalOf,
+  refusedReadFlag,
+} from "./conflict-read-refusal";
 import { SubmoduleConflictPane } from "./SubmoduleConflictPane";
 import { useRefuseIfMoved } from "./use-refuse-if-moved";
 
@@ -169,6 +181,16 @@ const CONFLICT_UNDECODABLE_NOTE =
 const AI_UNDECODABLE_REASON =
   "This file isn't UTF-8 text, so AI resolution would change its bytes.";
 
+/** Why Resolve with AI holds over a file past the prompt budget: the model gets
+ *  a file whole or not at all (conflict-prefilter's `exceedsPromptSection`). */
+const AI_TOO_LARGE_LEAD = `Too large for AI: a version of this file is over ${PROMPT_SECTION_MAX.toLocaleString("en-US")} characters.`;
+/** Keyed by whether the view shows regions: an arm without them (a deletion,
+ *  unparsed markers) has none to point at. */
+const AI_TOO_LARGE_REASON = {
+  regions: `${AI_TOO_LARGE_LEAD} Resolve it region by region instead.`,
+  whole: AI_TOO_LARGE_LEAD,
+} as const;
+
 /** Mark resolved's hold while the file is read: the click-time read, a mount or
  *  show's own read, or the re-read after a failed write. */
 const MARK_BUSY_REASON = "Checking the file…";
@@ -240,17 +262,6 @@ const READ_ERROR_COPY: Partial<Record<AppError["kind"], ReactNode>> = {
 const READ_ERROR_FALLBACK =
   "Couldn't read this file, so it can't be shown here. Resolve the conflict in your editor.";
 
-/** The backend's two refusals to read a working file as text. Matched through
- *  the prefilter's twins of conflict.rs's sentences, never the error kind alone:
- *  path-gate refusals share `invalidArgument`, and staging is no answer there. */
-type ReadRefusal = "tooLarge" | "binary";
-
-function readRefusalOf(error: unknown): ReadRefusal | null {
-  if (!isAppError(error) || error.kind !== "invalidArgument") return null;
-  const refusal = sidesRefusal(appErrorDetail(error.kind, error.message), null);
-  return refusal === "tooLarge" || refusal === "binary" ? refusal : null;
-}
-
 const READ_REFUSAL_LEAD: Record<ReadRefusal, string> = {
   tooLarge:
     "This file is too large to show here, so its conflict can't be resolved region by region.",
@@ -264,10 +275,71 @@ const READ_REFUSAL_TAIL = (
     Take a side with <span className="font-medium">Accept all current</span> /{" "}
     <span className="font-medium">incoming</span>, or resolve it outside
     GitDesktop and then <span className="font-medium">Mark resolved</span> to
-    stage it exactly as it is on disk. You'll be asked first, because GitDesktop
-    can't check this file for conflict markers.
+    stage it exactly as it is on disk.
   </>
 );
+
+/** What the too-large strip's marker scan answered so far. */
+type ScanTail = "pending" | "markers" | "clean" | "binary" | "failed";
+
+/** The strip's closing sentence per refusal and scan answer: it says the stage
+ *  will ask exactly when Mark resolved's own check would. */
+const BINARY_TAIL = " You'll be asked to confirm first.";
+const SCAN_TAIL_COPY: Record<ScanTail, string | null> = {
+  pending: null,
+  markers: " It still has conflict markers, so you'll be asked first.",
+  clean: null,
+  binary: BINARY_TAIL,
+  failed:
+    " You'll be asked first, because GitDesktop couldn't check this file for conflict markers.",
+};
+
+function scanTailOf(scan: {
+  isError: boolean;
+  data: MarkerScan | undefined;
+}): ScanTail {
+  switch (true) {
+    case scan.isError:
+      return "failed";
+    case scan.data === undefined:
+      return "pending";
+    case !scan.data?.exists:
+      return "clean";
+    case scan.data?.binary:
+      return "binary";
+    case scan.data?.markers:
+      return "markers";
+    default:
+      return "clean";
+  }
+}
+
+/** FNV-1a over UTF-16 code units: a cheap content key, not a digest. */
+function textHash(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/** React keys for the region list, by each segment's own content plus its
+ *  occurrence among equal segments, never its index: an accept merges one
+ *  region into its context, and index keys would re-mount (and re-highlight)
+ *  every segment after it. */
+function segmentKeys(segments: Segment[]): string[] {
+  const seen = new Map<string, number>();
+  return segments.map((seg) => {
+    const base =
+      seg.kind === "context"
+        ? `ctx-${textHash(seg.text)}`
+        : `conflict-${textHash(seg.raw)}`;
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    return `${base}-${n}`;
+  });
+}
 
 /** The whole-file writes' answer when git no longer lists the path as
  *  conflicted at the click. */
@@ -356,6 +428,7 @@ function ConflictFallback({
   busy,
   busyReason,
   onMarkResolved,
+  plain,
 }: {
   path: string;
   sides: ConflictSides;
@@ -363,6 +436,8 @@ function ConflictFallback({
   busy: boolean;
   busyReason: string;
   onMarkResolved: () => void;
+  /** Past the highlight budget: every code block renders as plain text. */
+  plain: boolean;
 }) {
   const markButton = MARK_RESOLVED_ARMS.has(arm) ? (
     <DisabledReasonButton
@@ -412,7 +487,11 @@ function ConflictFallback({
             {lead}
           </p>
         )}
-        <HighlightedCode path={path} content={sides.working || " "} />
+        <HighlightedCode
+          path={path}
+          content={sides.working || " "}
+          plain={plain}
+        />
       </>
     );
   }
@@ -453,7 +532,7 @@ function ConflictFallback({
           </p>
           {markButton}
         </div>
-        <HighlightedCode path={path} content={sides.working} />
+        <HighlightedCode path={path} content={sides.working} plain={plain} />
       </>
     );
   }
@@ -483,7 +562,7 @@ function ConflictFallback({
         </p>
         {markButton}
       </div>
-      <HighlightedCode path={path} content={sides.working} />
+      <HighlightedCode path={path} content={sides.working} plain={plain} />
     </>
   );
 }
@@ -677,6 +756,9 @@ export function ConflictFileView({
   // region, so the region view always counts at least one.
   const regionView = !file.isError && segments !== null;
   const total = regionView && segments ? conflictCount(segments) : 0;
+  // Plain past the diff viewer's whole-buffer hljs budget: the region view
+  // shows files up to the display cap.
+  const plainCode = (file.data?.working.length ?? 0) > HIGHLIGHT_MAX_CHARS_HLJS;
 
   // Each mutation re-reads the conflict file before its isPending drops, a
   // failed one re-reads under `recovering`, Mark resolved's click-time read
@@ -733,6 +815,16 @@ export function ConflictFileView({
   // Such a read never re-polls, so Mark resolved re-checks status at the click.
   const readRefusal =
     file.isError && pathRefusal === null ? readRefusalOf(file.error) : null;
+  // Advisory only: Mark resolved scans again at the click.
+  const markerScan = useConflictMarkerScan(
+    repoPath,
+    path,
+    readRefusal === "tooLarge",
+  );
+  const refusalTail =
+    readRefusal === "binary"
+      ? BINARY_TAIL
+      : SCAN_TAIL_COPY[scanTailOf(markerScan)];
   // Held focusable, so the click-time read never blurs the pressed button. The
   // strip carries the hover reason: the button stays the strip's direct child.
   const markHeld = useDisabledReason({
@@ -770,6 +862,7 @@ export function ConflictFileView({
         <p className="min-w-0 flex-1">
           {READ_REFUSAL_LEAD[readRefusal]}
           {READ_REFUSAL_TAIL}
+          {refusalTail}
         </p>
         <Button
           size="xs"
@@ -861,6 +954,9 @@ export function ConflictFileView({
         stage,
         expectedHash,
       });
+      // Detaches the settled write from the observer, so its whole-file
+      // variables leave the mutation cache now (its gcTime is 0).
+      resolve.reset();
       // Lands on the region that took this one's place (or the new last one);
       // the effect counts regions in the post-write file.
       armLanding("region", pressed, index);
@@ -876,6 +972,7 @@ export function ConflictFileView({
     } catch (e) {
       disarm();
       toastError(e);
+      resolve.reset();
       await refreshAfterError();
       armLanding("region", pressed, index);
     } finally {
@@ -1046,12 +1143,17 @@ export function ConflictFileView({
     void queryClient.invalidateQueries({ queryKey: repoKeys.status(repoPath) });
   }, [notConflicted, queryClient, repoPath]);
 
+  // The same budget the walk's gate reads, so the button never offers a run
+  // that the walk would block.
+  const aiTooLarge = file.data !== undefined && exceedsPromptSection(file.data);
   const aiHeldReason = (() => {
     switch (true) {
       case notConflicted:
         return NOT_CONFLICTED_COPY;
       case workingUndecodable:
         return AI_UNDECODABLE_REASON;
+      case aiTooLarge:
+        return AI_TOO_LARGE_REASON[regionView ? "regions" : "whole"];
       default:
         return null;
     }
@@ -1059,7 +1161,7 @@ export function ConflictFileView({
 
   // Mark resolved's answer to a failed click-time read: the toast it stops
   // with, or null for a too-large or binary refusal of a path git still lists
-  // as conflicted, which stages after the confirm. That refused read never
+  // as conflicted, which takes the refused-read flag. That refused read never
   // re-polls, so the pane can be arbitrarily stale; status decides instead.
   async function rereadFailureStop(error: unknown): Promise<string | null> {
     if (readRefusalOf(error) === null) return REREAD_FAILED_TOAST;
@@ -1081,14 +1183,17 @@ export function ConflictFileView({
     inFlightRef.current = true;
     try {
       const markIn = repoPath;
-      // Null when the read refused a file git still lists as conflicted: its
-      // markers can't be checked, so the confirm always shows, worded for the
-      // refusal kept in `cause`.
-      let fresh: ConflictSides | null;
-      let cause: MarkerFlag["cause"];
+      // What the confirm asks about, or null to stage without one. A read
+      // refused for a file git still lists as conflicted takes the shared
+      // refused-read flag: a too-large file asks only when its scan finds
+      // markers or fails, a binary one always asks.
+      let flag: MarkerFlag | null;
       setChecking(true);
       try {
-        fresh = await conflictSides(repoPath, path, []);
+        const fresh = await conflictSides(repoPath, path, []);
+        flag = markNeedsConfirm(fresh)
+          ? { name: baseName(path), unchecked: false }
+          : null;
       } catch (err) {
         const stop = await rereadFailureStop(err);
         if (stop !== null) {
@@ -1097,8 +1202,7 @@ export function ConflictFileView({
           armLanding("header", pressed);
           return;
         }
-        fresh = null;
-        cause = readRefusalOf(err) ?? undefined;
+        flag = await refusedReadFlag(repoPath, path, baseName(path), err);
       } finally {
         setChecking(false);
       }
@@ -1110,8 +1214,7 @@ export function ConflictFileView({
         )
       )
         return;
-      if (fresh === null || markNeedsConfirm(fresh)) {
-        const flag = { name: baseName(path), unchecked: fresh === null, cause };
+      if (flag !== null) {
         const ok = await useConfirm
           .getState()
           .ask(markerStagePrompt([flag], false));
@@ -1163,6 +1266,7 @@ export function ConflictFileView({
   for (const seg of segments ?? []) {
     conflictOrdinals.push(seg.kind === "context" ? null : ++conflictSeen);
   }
+  const keys = segmentKeys(segments ?? []);
   // Regions the body renders now; none while it shows an error or a fallback.
   const regionCount = file.isError || segments === null ? 0 : conflictSeen + 1;
 
@@ -1397,7 +1501,9 @@ export function ConflictFileView({
                   // Changes tab, the hidden worktree in a PR takeover.
                   <DisabledReasonButton
                     size="xs"
-                    disabled={busy || notConflicted || workingUndecodable}
+                    disabled={
+                      busy || notConflicted || workingUndecodable || aiTooLarge
+                    }
                     reason={aiHeldReason}
                     onClick={() => startResolveAi(path, repoPath)}
                   >
@@ -1477,15 +1583,17 @@ export function ConflictFileView({
             busy={busy}
             busyReason={busyReason}
             onMarkResolved={markResolved}
+            plain={plainCode}
           />
         ) : (
           segments.map((seg, idx) => {
             if (seg.kind === "context") {
               return seg.text === "" ? null : (
                 <HighlightedCode
-                  key={`ctx-${idx}`}
+                  key={keys[idx]}
                   path={path}
                   content={seg.text}
+                  plain={plainCode}
                   className="px-3 py-1"
                 />
               );
@@ -1493,14 +1601,12 @@ export function ConflictFileView({
             // Non-context segments always have an ordinal (asserted non-null).
             const index = conflictOrdinals[idx] as number;
             return (
-              <div
-                key={`conflict-${idx}`}
-                className="border-y border-warning/40"
-              >
-                {/* Focusable by its conflict ordinal: segment keys shift after
-                    an accept, so a landing finds its region by this. Named by
-                    its label, so a landing announces which conflict it is; the
-                    accepts wrap under the label when narrow. */}
+              <div key={keys[idx]} className="border-y border-warning/40">
+                {/* Focusable by its conflict ordinal: segment keys follow
+                    content, not place, so a landing finds its region by
+                    this. Named by its label, so a landing announces which
+                    conflict it is; the accepts wrap under the label when
+                    narrow. */}
                 <div
                   role="group"
                   aria-labelledby={`${labelIdBase}-conflict-${index}`}
@@ -1551,6 +1657,7 @@ export function ConflictFileView({
                   <HighlightedCode
                     path={path}
                     content={seg.current || " "}
+                    plain={plainCode}
                     className="px-3 py-1"
                   />
                 </div>
@@ -1562,6 +1669,7 @@ export function ConflictFileView({
                   <HighlightedCode
                     path={path}
                     content={seg.incoming || " "}
+                    plain={plainCode}
                     className="px-3 py-1"
                   />
                 </div>

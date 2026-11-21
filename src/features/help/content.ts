@@ -738,7 +738,9 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
   while the branch is ahead of it; on a branch with no upstream whose latest commit a
   remote branch already has, its menu item says the commit is already pushed. While
   History is still checking which commits are pushed, the menu item waits and says so,
-  and the shortcut says to try again in a moment. If the repository's state can't be
+  and the shortcut says to try again in a moment. Undo checks the remotes once more just
+  before it runs, so a commit you pushed from a terminal a moment earlier stays where it
+  is and Undo says it's already pushed. If the repository's state can't be
   read, Undo stops without undoing anything and says so. On a detached first commit,
   or when the latest commit's parent was never fetched (the oldest commit of a shallow
   clone), there is nothing to undo onto, and Undo says so instead. Fetching more
@@ -801,7 +803,11 @@ the failed part's line when one shows.
 
 - **Amend** the most recent commit (reword, or fold in staged changes). If the commit
   box already holds a title or description other than that commit's message, Amend
-  asks before replacing it, and Cancel does nothing. The amend stays tied to where you
+  asks before replacing it, and Cancel does nothing. When the branch's upstream already
+  has the commit, Amend asks first, because the branch will then need a force push. On a
+  branch with no upstream, it asks when a remote branch already has the commit, and says
+  so when it couldn't check. **Don't show again** in that prompt turns it off for both
+  cases. The amend stays tied to where you
   started it: that commit, on that branch or on a detached HEAD. If a new commit
   lands, or HEAD detaches from that branch or reattaches from a detached
   start, the commit box holds the amend and says why until HEAD is back where you
@@ -817,13 +823,17 @@ the failed part's line when one shows.
   branch will need a force push, and a protected branch refuses. On a branch with no
   upstream, it also warns when a remote branch already has that commit. On an older
   unpushed commit it opens **Edit history** with that commit's date editor open. Elsewhere
-  the item is held and says why. It's in the command palette too (palette-only by default;
-  bind a key in Settings). Type a date as \`YYYY-MM-DD HH:MM:SS ±HH:MM\`; a \`T\`
+  the item is held and says why. It's in the command palette too (palette-only by
+  default; bind a key in Settings). While History has several commits selected or
+  is running a **Search all history** search, the commit detail view holds the item
+  and says which to clear, and the palette leaves it out.
+  Type a date as \`YYYY-MM-DD HH:MM:SS ±HH:MM\`; a \`T\`
   separator, \`±HHMM\`, \`Z\`, no seconds, and a date pasted from \`git log\`, in its
   default or \`--date=iso\` form and with its \`Date:\` label, all work. Where your
-  system has date and time pickers, the calendar button opens them, and a pick keeps
-  the offset you typed. Leaving the offset out keeps the commit's current one, **Now**
-  uses this computer's offset, and **Reset** restores the commit's current dates.
+  system has date and time pickers, the calendar button shows them and opens the date
+  picker each time you press it, and a pick keeps the offset you typed. Leaving the
+  offset out keeps the commit's current one, **Now** uses this computer's offset, and
+  **Reset** restores the commit's current dates.
   **Same as author date** is ticked when the commit's two dates are the same; untick
   it to set the committer date on its own. Years run from 1970 to 2099 and offsets
   from -12:00 to +14:00. A date in the future, or an author date later than the
@@ -866,7 +876,8 @@ the failed part's line when one shows.
   regenerate a message with AI.{{/ai}} Each row also shows the commit's author date:
   click it, or press {{key:d}} on the focused commit, to open a date editor under the
   row. Several can be open at once, and dates combine with any action in the same
-  rewrite. To give several commits one date, select them with {{key:shift+up}} /
+  rewrite. With a date editor open, {{key:tab}} from its last field moves on to the next
+  commit in the list. To give several commits one date, select them with {{key:shift+up}} /
   {{key:shift+down}}, {{key:shift}}-click or {{key:mod}}-click; a strip above the list
   sets the date, and **Apply to N** writes it to each selected commit. They keep their
   order. Squashed, fixed-up and dropped rows take no dates of their own; a squash uses
@@ -893,7 +904,9 @@ the failed part's line when one shows.
   there are no commits ahead of the default branch; the latest commit is a merge; its
   parent isn't in a shallow clone; or there's no older commit to rebase onto),
   **Edit history** is held and the menu says which. If the editor is open when that
-  happens, its footer says so.
+  happens, its footer says so. Closing the editor with rewords, drops, reorders or dates
+  you haven't applied asks before discarding them, whether you press {{key:escape}},
+  click outside it, or use its close button or **Cancel**.
 - **Create a branch** or **create a tag** at a commit, **check out** a commit (it asks
   first and explains the detached HEAD you land in), or copy
   its SHA.
@@ -1588,10 +1601,11 @@ split into regions. **Mark resolved** asks before staging a file that still has 
 markers, giving you the chance to clean them up first. The command palette offers all of
 these as **Mark conflict resolved**. Staging a conflicted file any other way (its row's
 **+** button, the right-click menu, **Stage all**, or the palette) asks the same question
-while markers remain, and always asks for a file it can't check: a binary or very large
-file, or one it can't read. A file too large to show, or a binary one, offers **Mark
-resolved** in its pane once you've resolved it on disk: it stages the file exactly as it is
-on disk and always asks first, because GitDesktop can't check it for conflict markers.
+while markers remain, checking files too large to show as well, and always asks for a
+binary file or one it can't check. The editor shows files up to 1 MB region by region. A
+larger file, or a binary one, offers **Mark resolved** in its pane once you've resolved it
+on disk: it stages the file exactly as it is on disk, asking first while a large file
+still has conflict markers or can't be checked, and always for a binary file.
 **Mark conflict resolved** in the command palette works there too.
 
 A conflicted submodule has no text to merge, so the editor shows its two commits instead:
@@ -1613,9 +1627,10 @@ on the file's context menu, and in the command palette ({{kbd:command-palette}})
 **Resolve conflict with AI**). Your configured **Review** model (Settings → AI) merges the
 file's sides and streams a proposal; you review it as a diff against your side, flip to the
 proposed file or the *ours* / *theirs* / *base* versions, then **Accept & stage** to apply
-it — nothing is written until you accept. If the file changed on disk after the proposal
-started, accepting writes nothing and the proposal stays on screen until you regenerate it
-from the file as it is now. **Regenerate** for another attempt, or
+it — nothing is written until you accept. A file with any version over 80,000 characters
+is too large for AI, and GitDesktop says so instead of sending it. If the file changed on
+disk after the proposal started, accepting writes nothing and the proposal stays on screen
+until you regenerate it from the file as it is now. **Regenerate** for another attempt, or
 **Discard** to drop the proposal. When a proposal still has conflict markers, a warning
 says so and the button reads **Accept**: it writes the file but leaves it unstaged and
 moves on. The file stays listed as conflicted: finish it in the conflict editor, or

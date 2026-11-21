@@ -19,11 +19,11 @@ use crate::git::runner::{
 };
 use crate::state::AppState;
 
-/// Cap on a conflicted file's working-tree size for AI resolution. Past this the
-/// three sides blow the model's context and the round-trip stops being useful;
-/// the UI disables the action for files this big (truncated diffs) and this is
-/// the backstop.
-const RESOLVE_MAX_BYTES: usize = 256_000;
+/// Display cap on a conflicted file's working bytes: equal to diff.rs's
+/// `VIEWER_MAX_BYTES`, so the conflict pane shows what the diff viewer would.
+/// Stage blobs read uncapped, since a modify/delete's survivor must still name
+/// the removal. The AI limit is the frontend's prompt budget, not this.
+const CONFLICT_DISPLAY_MAX_BYTES: usize = 1_000_000;
 
 /// Twin of ConflictFileView.tsx's NOT_CONFLICTED_COPY, pinned equal by
 /// scripts/conflict-walk-refusal.test.mjs: the pane matches this refusal by text.
@@ -31,7 +31,8 @@ pub(crate) const NOT_CONFLICTED_REFUSAL: &str = "This file is no longer conflict
 
 /// Twins of conflict-prefilter.ts's TOO_LARGE_REFUSAL and BINARY_REFUSAL, pinned
 /// equal by scripts/conflict-prefilter.test.mjs: "Resolve all" skips by this text.
-pub(crate) const RESOLVE_TOO_LARGE_REFUSAL: &str = "file is too large for AI conflict resolution";
+pub(crate) const RESOLVE_TOO_LARGE_REFUSAL: &str =
+    "file is too large to show for conflict resolution";
 pub(crate) const RESOLVE_BINARY_REFUSAL: &str = "binary file — resolve this conflict by hand";
 
 /// Twin of conflict-prefilter.ts's SUBMODULE_REFUSAL and api/submodules.ts's
@@ -281,7 +282,7 @@ async fn stage_blob(
 ///
 /// One `ls-files -u` spawn answers for every stage and returns only mode/sha/stage
 /// metadata; `git show :N:` costs the same spawn but materializes the whole blob
-/// (up to the 256 KB cap, binary bytes included) just to test for presence.
+/// (binary bytes included, at any size) just to test for presence.
 async fn unmerged_stages(repo: &str, spec: &str) -> AppResult<Vec<u8>> {
     Ok(unmerged_entries(repo, spec)
         .await?
@@ -417,15 +418,20 @@ pub async fn git_conflict_sides(
     // as "" with `working_exists` false. Every other read failure refuses the
     // whole read, so no caller can mistake an unreadable file for a marker-free
     // one.
-    let (working_bytes, working_exists) =
-        match tokio::fs::read(Path::new(&repo_path).join(&path)).await {
-            Ok(bytes) => (bytes, true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), false),
-            Err(e) => return Err(AppError::Io(e)),
-        };
-    if working_bytes.len() > RESOLVE_MAX_BYTES {
-        return Err(AppError::InvalidArgument(RESOLVE_TOO_LARGE_REFUSAL.into()));
-    }
+    let full = Path::new(&repo_path).join(&path);
+    let read = tauri::async_runtime::spawn_blocking(move || {
+        let file = std::fs::File::open(full)?;
+        let len = file.metadata()?.len();
+        read_capped(len, CONFLICT_DISPLAY_MAX_BYTES, || Ok(file))
+    })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+    let (working_bytes, working_exists) = match read {
+        Ok(Some(bytes)) => (bytes, true),
+        Ok(None) => return Err(AppError::InvalidArgument(RESOLVE_TOO_LARGE_REFUSAL.into())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), false),
+        Err(e) => return Err(AppError::Io(e)),
+    };
     // A binary conflict (a NUL byte, git's own text/binary heuristic) can't be
     // merged as text — a resolution would write garbage UTF-8 over the file.
     if working_bytes.contains(&0) {
@@ -465,6 +471,185 @@ pub async fn git_conflict_sides(
         working_hash,
         working_matches_survivor,
     })
+}
+
+/// Reads at most `cap` bytes; `None` when the stat'd `len` or the bytes read
+/// exceed it. The `take(cap + 1)` arm refuses a file that grew after the stat.
+fn read_capped<R: std::io::Read>(
+    len: u64,
+    cap: usize,
+    open: impl FnOnce() -> std::io::Result<R>,
+) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    if len > cap as u64 {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    open()?.take(cap as u64 + 1).read_to_end(&mut bytes)?;
+    Ok((bytes.len() <= cap).then_some(bytes))
+}
+
+/// Whether a working file holds conflict markers, read at any size.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkerScan {
+    /// False when the file is gone; `markers` and `binary` are then false too.
+    pub exists: bool,
+    pub markers: bool,
+    /// A NUL byte was found; the scan stops there with `markers` false.
+    pub binary: bool,
+}
+
+/// Scans `path`'s working bytes for conflict markers with no size cap, so a
+/// file past the sides read's display cap can still be gated on its markers.
+/// Bounded in time instead: past `MARKER_SCAN_BUDGET` from the call it errs.
+/// Gated like `git_conflict_sides`; reads the one file and spawns no git.
+#[tauri::command]
+pub async fn git_conflict_marker_scan(repo_path: String, path: String) -> AppResult<MarkerScan> {
+    let deadline = std::time::Instant::now() + MARKER_SCAN_BUDGET;
+    let path = conflict_rel_path(&path)?;
+    refuse_linked_path(&repo_path, &path, true).await?;
+    let full = Path::new(&repo_path).join(&path);
+    let bound = deadline.saturating_duration_since(std::time::Instant::now()) + MARKER_SCAN_GRACE;
+    let scan = run_blocking_bounded(bound, move || {
+        scan_markers(std::fs::File::open(full)?, MARKER_SCAN_CHUNK, || {
+            std::time::Instant::now() >= deadline
+        })
+    })
+    .await;
+    match scan {
+        Ok((markers, binary)) => Ok(MarkerScan {
+            exists: true,
+            markers,
+            binary,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(MarkerScan {
+            exists: false,
+            markers: false,
+            binary: false,
+        }),
+        Err(e) => Err(AppError::Io(e)),
+    }
+}
+
+const MARKER_SCAN_CHUNK: usize = 64 * 1024;
+
+/// How long a marker scan may read before it gives up; the stage gate reads
+/// any scan error as "couldn't check" and asks first.
+const MARKER_SCAN_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+const MARKER_SCAN_TIMED_OUT: &str = "file took too long to check for conflict markers";
+
+/// How long past its budget the command waits on a scan, so the scan's own deadline
+/// check answers first whenever its reads return.
+const MARKER_SCAN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Runs `work` on the blocking pool and answers `TimedOut` (the scan's own error) once
+/// `bound` passes, since the scan's deadline is checked only between reads and an open or
+/// read that stalls never reaches it. The stalled thread can't be cancelled and finishes
+/// on its own.
+async fn run_blocking_bounded<T: Send + 'static>(
+    bound: std::time::Duration,
+    work: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<T> {
+    let handle = tauri::async_runtime::spawn_blocking(work);
+    match tokio::time::timeout(bound, handle).await {
+        Ok(joined) => joined.map_err(|e| std::io::Error::other(e.to_string()))?,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            MARKER_SCAN_TIMED_OUT,
+        )),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ScanLine {
+    /// The next byte starts a line.
+    Start,
+    /// A line-start run of `n` copies of the marker byte `c`.
+    Run(u8, usize),
+    /// A 7+ run ended at an `E2` that may open a U+2028/U+2029 terminator.
+    Candidate,
+    /// Inside a line that can no longer start a marker.
+    Mid,
+    /// A marker was seen; only a NUL can still change the verdict.
+    Found,
+}
+
+/// Whether the bytes hold a conflict marker, or `(false, true)` when they hold a
+/// NUL anywhere (the sides read's binary test), which ends the scan. Reads
+/// `chunk` bytes at a time, carrying state across chunk edges, and errs
+/// `TimedOut` once `deadline_passed` answers true, asked before every read (the
+/// first included, so an expired deadline reads nothing). The check is injected
+/// so tests pin where it runs without racing a clock.
+///
+/// Mirrors `hasConflictMarkers` (conflict-parse.ts) token for token, pinned by
+/// the shared table conflict-marker-cases.json: `^(<{7,}|>{7,}|\|{7,})( |\t|$)`
+/// under the `m` flag, so a line starts at offset 0 or after LF, CR, U+2028 or
+/// U+2029 (JS's terminators; not U+0085 or form feed). Raw bytes agree with the
+/// regex over `from_utf8_lossy` text: lossy decoding never folds an ASCII byte
+/// into U+FFFD and always decodes a complete E2 80 A8/A9, and a BOM is U+FEFF.
+fn scan_markers<R: std::io::Read>(
+    mut reader: R,
+    chunk: usize,
+    mut deadline_passed: impl FnMut() -> bool,
+) -> std::io::Result<(bool, bool)> {
+    let mut buf = vec![0u8; chunk.max(1)];
+    let mut line = ScanLine::Start;
+    // Progress through an E2 80 (A8|A9) sequence: 0 none, 1 saw E2, 2 saw E2 80.
+    let mut e2 = 0u8;
+    loop {
+        if deadline_passed() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                MARKER_SCAN_TIMED_OUT,
+            ));
+        }
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        for &b in &buf[..n] {
+            if b == 0 {
+                return Ok((false, true));
+            }
+            if matches!(line, ScanLine::Found) {
+                continue;
+            }
+            let wide_term = e2 == 2 && (b == 0xA8 || b == 0xA9);
+            e2 = match (e2, b) {
+                (_, 0xE2) => 1,
+                (1, 0x80) => 2,
+                _ => 0,
+            };
+            let term = b == b'\n' || b == b'\r' || wide_term;
+            line = match line {
+                ScanLine::Run(c, k) if b == c => ScanLine::Run(c, k + 1),
+                ScanLine::Run(_, k) if k >= 7 => {
+                    if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+                        ScanLine::Found
+                    } else if b == 0xE2 {
+                        ScanLine::Candidate
+                    } else {
+                        ScanLine::Mid
+                    }
+                }
+                ScanLine::Candidate if wide_term => ScanLine::Found,
+                ScanLine::Candidate if e2 == 2 => ScanLine::Candidate,
+                ScanLine::Start if matches!(b, b'<' | b'>' | b'|') => ScanLine::Run(b, 1),
+                _ if term => ScanLine::Start,
+                _ => ScanLine::Mid,
+            };
+        }
+    }
+    let found = match line {
+        ScanLine::Found => true,
+        ScanLine::Run(_, k) => k >= 7,
+        _ => false,
+    };
+    Ok((found, false))
 }
 
 #[cfg(test)]
@@ -831,6 +1016,14 @@ mod tests {
                     .await
                     .err()
                     .expect("conflict path must refuse")
+                    .to_string(),
+                expected
+            );
+            assert_eq!(
+                git_conflict_marker_scan(repo.clone(), path.into())
+                    .await
+                    .err()
+                    .expect("conflict path must refuse the scan")
                     .to_string(),
                 expected
             );
@@ -2136,23 +2329,7 @@ mod tests {
     /// elsewhere.
     fn directory_link(link: &Path, target: &Path) {
         #[cfg(windows)]
-        {
-            let made = std::process::Command::new("cmd")
-                .args([
-                    "/C",
-                    "mklink",
-                    "/J",
-                    &link.to_string_lossy(),
-                    &target.to_string_lossy(),
-                ])
-                .output()
-                .expect("run mklink");
-            assert!(
-                made.status.success(),
-                "mklink /J failed: {}",
-                String::from_utf8_lossy(&made.stderr)
-            );
-        }
+        crate::test_junction::make_junction(link, target);
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
     }
@@ -2173,6 +2350,11 @@ mod tests {
             .err()
             .expect("a linked ancestor must refuse the read");
         assert_eq!(read.to_string(), linked_refusal("sub/file.txt"));
+        let scan = git_conflict_marker_scan(repo.clone(), "sub/file.txt".into())
+            .await
+            .err()
+            .expect("a linked ancestor must refuse the scan");
+        assert_eq!(scan.to_string(), linked_refusal("sub/file.txt"));
         let write = git_resolve_conflict_core(
             &AppState::default(),
             repo,
@@ -2196,11 +2378,16 @@ mod tests {
         std::fs::write(&victim, "precious\n").unwrap();
         std::fs::remove_file(dir.path().join("file.txt")).unwrap();
         std::os::unix::fs::symlink(&victim, dir.path().join("file.txt")).unwrap();
-        let error = git_conflict_sides(repo, "file.txt".into(), vec![])
+        let error = git_conflict_sides(repo.clone(), "file.txt".into(), vec![])
             .await
             .err()
             .expect("a linked survivor must refuse the read");
         assert_eq!(error.to_string(), leaf_refusal("file.txt"));
+        let scan = git_conflict_marker_scan(repo, "file.txt".into())
+            .await
+            .err()
+            .expect("a linked survivor must refuse the scan");
+        assert_eq!(scan.to_string(), leaf_refusal("file.txt"));
     }
 
     #[cfg(unix)]
@@ -2381,6 +2568,11 @@ mod tests {
             .err()
             .expect("a junction leaf must refuse the read");
         assert_eq!(read.to_string(), linked_refusal("file.txt"));
+        let scan = git_conflict_marker_scan(repo.clone(), "file.txt".into())
+            .await
+            .err()
+            .expect("a junction leaf must refuse the scan");
+        assert_eq!(scan.to_string(), linked_refusal("file.txt"));
         let write = git_resolve_conflict_core(
             &AppState::default(),
             repo.clone(),
@@ -2405,5 +2597,278 @@ mod tests {
         }
         assert_eq!(std::fs::read(&victim).unwrap(), b"precious\n");
         assert_eq!(stdout_of(&repo, &["ls-files", "-u"]).await, before);
+    }
+
+    fn too_large(result: AppResult<ConflictSides>) -> String {
+        result
+            .err()
+            .expect("past the display cap must refuse")
+            .to_string()
+    }
+
+    const TOO_LARGE_TEXT: &str =
+        "invalid argument: file is too large to show for conflict resolution";
+
+    /// Text of exactly `len` bytes, no NUL, in short lines.
+    fn text_of_len(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| if i % 64 == 63 { b'\n' } else { b'a' })
+            .collect()
+    }
+
+    #[test]
+    fn read_capped_refuses_past_the_cap_and_a_file_grown_since_the_stat() {
+        let read = |len: u64, bytes: &[u8]| {
+            read_capped(len, 8, || Ok(std::io::Cursor::new(bytes.to_vec()))).unwrap()
+        };
+        assert_eq!(read(8, b"12345678"), Some(b"12345678".to_vec()));
+        assert_eq!(read(0, b""), Some(Vec::new()));
+        // Stat'd under the cap, but the reader runs longer: grown since the stat.
+        assert_eq!(read(4, b"123456789"), None);
+        // Over the cap by its stat: refused without opening.
+        let opened = std::cell::Cell::new(false);
+        let refused = read_capped(9, 8, || {
+            opened.set(true);
+            Ok(std::io::Cursor::new(Vec::new()))
+        })
+        .unwrap();
+        assert_eq!(refused, None);
+        assert!(!opened.get());
+    }
+
+    #[tokio::test]
+    async fn sides_read_up_to_the_display_cap() {
+        let (dir, repo) = conflicted_repo("display-cap", "file.txt", &[]).await;
+        let file = dir.path().join("file.txt");
+        for len in [300_000, CONFLICT_DISPLAY_MAX_BYTES] {
+            std::fs::write(&file, text_of_len(len)).unwrap();
+            let sides = sides_of(&repo, "file.txt").await;
+            assert_eq!(sides.working.len(), len);
+            assert!(sides.working_exists);
+        }
+        std::fs::write(&file, text_of_len(CONFLICT_DISPLAY_MAX_BYTES + 1)).unwrap();
+        assert_eq!(
+            too_large(git_conflict_sides(repo, "file.txt".into(), vec![]).await),
+            TOO_LARGE_TEXT
+        );
+    }
+
+    /// The display cap covers the working file only: a survivor blob past it
+    /// still reads, so the pane can name a modify/delete's removal.
+    #[tokio::test]
+    async fn a_stage_blob_past_the_display_cap_still_reads() {
+        let big = text_of_len(CONFLICT_DISPLAY_MAX_BYTES + 1);
+        let (dir, repo) = modify_delete_repo_with("blob-cap", "file.txt", "ours", b"", &big).await;
+        assert_modify_delete(&repo, "file.txt", 3, 2).await;
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, "small\n").unwrap();
+        let sides = sides_of(&repo, "file.txt").await;
+        assert_eq!(sides.working, "small\n");
+        assert!(sides.working_exists);
+        assert!(sides.ours.is_none());
+        assert_eq!(sides.theirs.as_deref().map(str::len), Some(big.len()));
+        assert_eq!(sides.working_matches_survivor, Some(false));
+
+        std::fs::remove_file(&file).unwrap();
+        let sides = sides_of(&repo, "file.txt").await;
+        assert!(!sides.working_exists);
+        assert!(sides.working.is_empty());
+        assert!(sides.ours.is_none());
+        assert_eq!(sides.theirs.as_deref().map(str::len), Some(big.len()));
+        assert_eq!(sides.working_matches_survivor, None);
+    }
+
+    #[tokio::test]
+    async fn marker_scan_reads_past_the_display_cap() {
+        // Big enough sides that the merged working file is ~1.5 MB.
+        let body: Vec<u8> = (0..150_000)
+            .flat_map(|i| format!("line {i:06}\n").into_bytes())
+            .collect();
+        let with_head = |head: &[u8]| [head, body.as_slice()].concat();
+        let (dir, repo) = conflicted_repo_with(
+            "scan-big",
+            "file.txt",
+            &[],
+            &with_head(b"base\n"),
+            &with_head(b"ours\n"),
+            &with_head(b"theirs\n"),
+        )
+        .await;
+        let file = dir.path().join("file.txt");
+        let working = std::fs::read(&file).unwrap();
+        assert!(working.len() > 1_500_000, "{}", working.len());
+        assert_eq!(
+            too_large(git_conflict_sides(repo.clone(), "file.txt".into(), vec![]).await),
+            TOO_LARGE_TEXT
+        );
+        let scan = |repo: &str| git_conflict_marker_scan(repo.to_string(), "file.txt".into());
+        let found = scan(&repo).await.unwrap();
+        assert!(found.exists && found.markers && !found.binary);
+
+        let unmarked: Vec<u8> = working
+            .split_inclusive(|b| *b == b'\n')
+            .filter(|line| {
+                !(line.starts_with(b"<<<<<<<")
+                    || line.starts_with(b"=======")
+                    || line.starts_with(b">>>>>>>"))
+            })
+            .flatten()
+            .copied()
+            .collect();
+        std::fs::write(&file, &unmarked).unwrap();
+        let clean = scan(&repo).await.unwrap();
+        assert!(clean.exists && !clean.markers && !clean.binary);
+
+        std::fs::write(&file, [b"<<<<<<< ours\n".as_slice(), b"\0"].concat()).unwrap();
+        let binary = scan(&repo).await.unwrap();
+        assert!(binary.exists && !binary.markers && binary.binary);
+        std::fs::write(&file, b"a\0\n<<<<<<< ours\n").unwrap();
+        let binary = scan(&repo).await.unwrap();
+        assert!(binary.exists && !binary.markers && binary.binary);
+
+        std::fs::remove_file(&file).unwrap();
+        let gone = scan(&repo).await.unwrap();
+        assert!(!gone.exists && !gone.markers && !gone.binary);
+    }
+
+    /// A working file that exists but can't be read is an error, never a
+    /// marker-free verdict.
+    #[tokio::test]
+    async fn marker_scan_of_an_unreadable_file_fails() {
+        let (dir, repo) = conflicted_repo("scan-unreadable", "file.txt", &[]).await;
+        let file = dir.path().join("file.txt");
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        match git_conflict_marker_scan(repo, "file.txt".into()).await {
+            Err(AppError::Io(e)) => assert_ne!(e.kind(), std::io::ErrorKind::NotFound, "{e}"),
+            Err(other) => panic!("expected AppError::Io, got {other:?}"),
+            Ok(_) => panic!("an unreadable working file must not scan as Ok"),
+        }
+    }
+
+    #[test]
+    fn marker_scan_wire_keys() {
+        let json = serde_json::to_value(MarkerScan {
+            exists: true,
+            markers: false,
+            binary: true,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "exists": true, "markers": false, "binary": true })
+        );
+    }
+
+    fn bytes_of_hex(hex: &str) -> Vec<u8> {
+        assert!(hex.len().is_multiple_of(2), "{hex}");
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// The table scripts/conflict-marker-cases.test.mjs runs against
+    /// `hasConflictMarkers`, at chunk sizes that split runs and terminators.
+    #[test]
+    fn scan_markers_matches_the_shared_table() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            hex: String,
+            markers: bool,
+        }
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("conflict-marker-cases.json")).unwrap();
+        assert!(cases.len() >= 20);
+        for case in &cases {
+            let bytes = bytes_of_hex(&case.hex);
+            for chunk in [1, 2, 3, 7, 8, 64 * 1024] {
+                assert_eq!(
+                    scan_markers(bytes.as_slice(), chunk, never_passed()).unwrap(),
+                    (case.markers, false),
+                    "{} at chunk {chunk}",
+                    case.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scan_markers_reads_a_nul_anywhere_as_binary() {
+        assert_eq!(
+            scan_markers(b"<<<<<<< x\n\0".as_slice(), 4, never_passed()).unwrap(),
+            (false, true)
+        );
+        assert_eq!(
+            scan_markers(b"a\0<<<<<<< x\n".as_slice(), 4, never_passed()).unwrap(),
+            (false, true)
+        );
+    }
+
+    fn never_passed() -> impl FnMut() -> bool {
+        || false
+    }
+
+    /// Counts its reads, serving `<` forever.
+    struct CountingReader {
+        reads: usize,
+    }
+
+    impl std::io::Read for CountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            buf.fill(b'<');
+            Ok(buf.len())
+        }
+    }
+
+    fn assert_timed_out(result: std::io::Result<(bool, bool)>) {
+        let error = result.expect_err("a passed deadline must refuse");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), MARKER_SCAN_TIMED_OUT);
+    }
+
+    /// The zero-budget premise: an already-passed deadline refuses before the
+    /// first read, however fast the reader would answer.
+    #[test]
+    fn scan_markers_with_an_expired_deadline_reads_nothing() {
+        let mut reader = CountingReader { reads: 0 };
+        assert_timed_out(scan_markers(&mut reader, 8, || true));
+        assert_eq!(reader.reads, 0);
+    }
+
+    /// A deadline passing mid-scan stops at the next chunk.
+    #[test]
+    fn scan_markers_stops_at_the_chunk_after_the_deadline() {
+        let mut reader = CountingReader { reads: 0 };
+        let mut checks = 0;
+        let passed_after_first_check = || {
+            checks += 1;
+            checks > 1
+        };
+        assert_timed_out(scan_markers(&mut reader, 8, passed_after_first_check));
+        assert_eq!(reader.reads, 1);
+    }
+
+    /// A blocking scan that stalls past its bound answers `TimedOut` without waiting for
+    /// it; the outer bound turns a hang into a red.
+    #[tokio::test]
+    async fn run_blocking_bounded_answers_a_stalled_scan_at_its_bound() {
+        let stalled = run_blocking_bounded(std::time::Duration::from_millis(20), || {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            Ok(())
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), stalled)
+            .await
+            .expect("the bound must answer before the stalled scan returns");
+        assert_timed_out(result.map(|()| (false, false)));
+    }
+
+    #[tokio::test]
+    async fn run_blocking_bounded_passes_a_fast_result_through() {
+        let result =
+            run_blocking_bounded(std::time::Duration::from_secs(30), || Ok((true, false))).await;
+        assert_eq!(result.unwrap(), (true, false));
     }
 }

@@ -18,10 +18,13 @@ import { getSecret, gitStage, gitStatus } from "@/lib/git/api";
 import {
   type ConflictSides,
   checkoutConflictSide,
+  conflictMarkerScan,
   conflictSides,
+  type MarkerScan,
 } from "@/lib/git/conflict";
 import {
   BINARY_REFUSAL,
+  MARKER_SCAN_TIMED_OUT,
   TOO_LARGE_REFUSAL,
 } from "@/lib/git/conflict-prefilter";
 import type { RepoStatus } from "@/lib/git/types";
@@ -46,6 +49,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
 vi.mock("@/lib/git/conflict", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/conflict")>()),
   conflictSides: vi.fn(),
+  conflictMarkerScan: vi.fn(),
   checkoutConflictSide: vi.fn(),
 }));
 vi.mock("sonner", () => ({
@@ -94,7 +98,11 @@ const COPY = {
     "This file is too large to show here, so its conflict can't be resolved region by region.",
   binary:
     "This looks like a binary file, so its conflict can't be merged as text.",
-  tail: "Take a side with Accept all current / incoming, or resolve it outside GitDesktop and then Mark resolved to stage it exactly as it is on disk. You'll be asked first, because GitDesktop can't check this file for conflict markers.",
+  tail: "Take a side with Accept all current / incoming, or resolve it outside GitDesktop and then Mark resolved to stage it exactly as it is on disk.",
+  scanMarkers: " It still has conflict markers, so you'll be asked first.",
+  scanFailed:
+    " You'll be asked first, because GitDesktop couldn't check this file for conflict markers.",
+  binaryTail: " You'll be asked to confirm first.",
   reread: "Couldn't re-read the file — nothing was marked resolved.",
   notConflicted: `${BASE} is no longer conflicted — nothing was changed.`,
   resolved: `Resolved ${BASE}`,
@@ -102,6 +110,17 @@ const COPY = {
 
 /** What the sides read answers: the error it rejects with, or the sides. */
 let disk: ConflictSides | object;
+/** What the capless marker scan answers: the error it rejects with, or the
+ *  scan. Defaults to a file that still has markers. */
+let scan: MarkerScan | object;
+const SCAN_MARKED: MarkerScan = { exists: true, markers: true, binary: false };
+const SCAN_CLEAN: MarkerScan = { exists: true, markers: false, binary: false };
+const SCAN_BINARY: MarkerScan = { exists: true, markers: false, binary: true };
+const SCAN_FAILED = { kind: "io", message: "locked" };
+const SCAN_TIMED_OUT = {
+  kind: "io",
+  message: `io error: ${MARKER_SCAN_TIMED_OUT}`,
+};
 let conflicted: boolean;
 
 function status(): RepoStatus {
@@ -122,6 +141,13 @@ beforeEach(() => {
   vi.mocked(conflictSides).mockImplementation(async () => {
     if ("working" in disk) return disk as ConflictSides;
     throw disk;
+  });
+  scan = SCAN_MARKED;
+  // Drops any unconsumed once-answer, which clearMocks keeps.
+  vi.mocked(conflictMarkerScan).mockReset();
+  vi.mocked(conflictMarkerScan).mockImplementation(async () => {
+    if ("exists" in scan) return scan as MarkerScan;
+    throw scan;
   });
   // Read by the AI button's gate; no key keeps the button off.
   vi.mocked(getSecret).mockImplementation(async () => null);
@@ -177,16 +203,20 @@ const confirmRequest = () => useConfirm.getState().request;
 
 describe("Mark resolved on a too-large or binary refusal", () => {
   it.each([
-    ["tooLarge", TOO_LARGE, COPY.tooLarge],
-    ["binary", BINARY, COPY.binary],
+    ["tooLarge", TOO_LARGE, COPY.tooLarge, COPY.scanMarkers],
+    ["binary", BINARY, COPY.binary, COPY.binaryTail],
   ] as const)(
     "A1.1: the %s refusal offers Mark resolved with its copy",
-    async (_, error, lead) => {
+    async (_, error, lead, closing) => {
       disk = error;
       renderView();
       const button = await markButton();
       const strip = button.parentElement as HTMLElement;
-      expect(strip.textContent).toBe(`${lead} ${COPY.tail}Mark resolved`);
+      await waitFor(() =>
+        expect(strip.textContent).toBe(
+          `${lead} ${COPY.tail}${closing}Mark resolved`,
+        ),
+      );
     },
   );
 
@@ -255,11 +285,21 @@ describe("Mark resolved on a too-large or binary refusal", () => {
   );
 
   it.each([
-    ["tooLarge", TOO_LARGE],
-    ["binary", BINARY],
+    [
+      "tooLarge",
+      TOO_LARGE,
+      { name: BASE, unchecked: false },
+      `Stage ${BASE} with conflict markers?`,
+    ],
+    [
+      "binary",
+      BINARY,
+      { name: BASE, unchecked: true, cause: "binary" as const },
+      `Stage ${BASE} as it is on disk?`,
+    ],
   ] as const)(
-    "the press on the %s refusal asks the unchecked question naming its cause; Cancel stages nothing",
-    async (cause, error) => {
+    "the press on the %s refusal asks its question; Cancel stages nothing",
+    async (_, error, flag, title) => {
       disk = error;
       renderView();
       const button = await markButton();
@@ -267,18 +307,13 @@ describe("Mark resolved on a too-large or binary refusal", () => {
       await waitFor(() => expect(confirmRequest()).not.toBeNull());
       expect(gitStatus).toHaveBeenCalledWith(REPO);
       expect(gitStage).not.toHaveBeenCalled();
-      const expected = markerStagePrompt(
-        [{ name: BASE, unchecked: true, cause }],
-        false,
-      );
+      const expected = markerStagePrompt([flag], false);
       const request = confirmRequest();
       expect(request?.title).toBe(expected.title);
       expect(request?.body).toBe(expected.body);
       expect(request?.confirmLabel).toBe(expected.confirmLabel);
       expect(request?.confirmVariant).toBe("destructive");
-      expect(request?.title).toBe(
-        `Stage ${BASE} with possible conflict markers?`,
-      );
+      expect(request?.title).toBe(title);
       expect(request?.confirmLabel).toBe("Stage anyway");
       act(() => useConfirm.getState().answer(false));
       await waitFor(() => expect(button).toBeEnabled());
@@ -363,6 +398,145 @@ describe("Mark resolved on a too-large or binary refusal", () => {
     expect(gitStage).not.toHaveBeenCalled();
     await act(async () => useConfirm.getState().answer(true));
     await waitFor(() => expect(gitStage).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("a too-large file is checked with the capless scan", () => {
+  it("AC1: no markers stages with no confirm", async () => {
+    scan = SCAN_CLEAN;
+    renderView();
+    const button = await markButton();
+    await userEvent.setup().click(button);
+    await waitFor(() => expect(gitStage).toHaveBeenCalledTimes(1));
+    expect(confirmRequest()).toBeNull();
+    expect(conflictMarkerScan).toHaveBeenLastCalledWith(REPO, PATH);
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(COPY.resolved),
+    );
+  });
+
+  it("AC1: markers ask the checked marker question", async () => {
+    renderView();
+    const button = await markButton();
+    await userEvent.setup().click(button);
+    await waitFor(() => expect(confirmRequest()).not.toBeNull());
+    expect(confirmRequest()?.title).toBe(
+      `Stage ${BASE} with conflict markers?`,
+    );
+    expect(confirmRequest()?.body).toBe(
+      `${BASE} still has conflict markers. Staging it marks the conflict resolved with the markers in the file, and they'll be committed unless you remove them first.`,
+    );
+    expect(gitStage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "a timed-out scan asks the too-large unchecked question",
+      SCAN_TIMED_OUT,
+      `${BASE} is too large to read here, so it wasn't checked for conflict markers.`,
+    ],
+    [
+      "any other failed scan asks the uncaused unchecked question",
+      SCAN_FAILED,
+      `${BASE} couldn't be checked for conflict markers.`,
+    ],
+  ])("AC1: %s", async (_, failure, lead) => {
+    scan = failure;
+    renderView();
+    const button = await markButton();
+    await userEvent.setup().click(button);
+    await waitFor(() => expect(confirmRequest()).not.toBeNull());
+    expect(confirmRequest()?.title).toBe(
+      `Stage ${BASE} with possible conflict markers?`,
+    );
+    expect(confirmRequest()?.body).toBe(
+      `${lead} Staging it marks the conflict resolved with any markers in the file, and they'll be committed unless you remove them first.`,
+    );
+    expect(gitStage).not.toHaveBeenCalled();
+  });
+
+  it("AC1: a scan that finds a binary file asks the binary-only question", async () => {
+    scan = SCAN_BINARY;
+    renderView();
+    const button = await markButton();
+    await userEvent.setup().click(button);
+    await waitFor(() => expect(confirmRequest()).not.toBeNull());
+    expect(confirmRequest()?.title).toBe(`Stage ${BASE} as it is on disk?`);
+    expect(confirmRequest()?.body).toBe(
+      `${BASE} looks like a binary file, so GitDesktop can't merge it or check what it holds. Staging it marks the conflict resolved with the file exactly as it is on disk now.`,
+    );
+    expect(gitStage).not.toHaveBeenCalled();
+  });
+
+  it("a binary refusal never scans", async () => {
+    disk = BINARY;
+    renderView();
+    const button = await markButton();
+    await userEvent.setup().click(button);
+    await waitFor(() => expect(confirmRequest()).not.toBeNull());
+    expect(conflictMarkerScan).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["clean", SCAN_CLEAN, ""],
+    ["marked", SCAN_MARKED, COPY.scanMarkers],
+    ["binary", SCAN_BINARY, COPY.binaryTail],
+    ["failed", SCAN_FAILED, COPY.scanFailed],
+  ] as const)(
+    "AC3: the too-large strip's closing follows a %s scan",
+    async (_, answer, closing) => {
+      scan = answer;
+      renderView();
+      const button = await markButton();
+      const strip = button.parentElement as HTMLElement;
+      await waitFor(() => expect(conflictMarkerScan).toHaveBeenCalled());
+      await waitFor(() =>
+        expect(strip.textContent).toBe(
+          `${COPY.tooLarge} ${COPY.tail}${closing}Mark resolved`,
+        ),
+      );
+    },
+  );
+
+  it("S3-2: one io failure of the strip's scan retries before it says it couldn't check", async () => {
+    vi.mocked(conflictMarkerScan).mockRejectedValueOnce(SCAN_FAILED);
+    renderView();
+    const button = await markButton();
+    const strip = button.parentElement as HTMLElement;
+    await waitFor(() =>
+      expect(strip.textContent).toBe(
+        `${COPY.tooLarge} ${COPY.tail}${COPY.scanMarkers}Mark resolved`,
+      ),
+    );
+    expect(conflictMarkerScan).toHaveBeenCalledTimes(2);
+  });
+
+  it("S3-2: a second io failure says it couldn't check", async () => {
+    vi.mocked(conflictMarkerScan)
+      .mockRejectedValueOnce(SCAN_FAILED)
+      .mockRejectedValueOnce(SCAN_FAILED);
+    renderView();
+    const button = await markButton();
+    const strip = button.parentElement as HTMLElement;
+    await waitFor(() =>
+      expect(strip.textContent).toBe(
+        `${COPY.tooLarge} ${COPY.tail}${COPY.scanFailed}Mark resolved`,
+      ),
+    );
+    expect(conflictMarkerScan).toHaveBeenCalledTimes(2);
+  });
+
+  it("AC3: no asking sentence while the scan is pending", async () => {
+    vi.mocked(conflictMarkerScan).mockImplementation(
+      () => new Promise<MarkerScan>(() => undefined),
+    );
+    renderView();
+    const button = await markButton();
+    await waitFor(() => expect(conflictMarkerScan).toHaveBeenCalled());
+    const strip = button.parentElement as HTMLElement;
+    expect(strip.textContent).toBe(
+      `${COPY.tooLarge} ${COPY.tail}Mark resolved`,
+    );
   });
 });
 
