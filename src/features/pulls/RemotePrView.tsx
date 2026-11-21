@@ -31,6 +31,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { DetailRailFilterStatus } from "@/components/detail-rail";
 import { DetailTitleRow } from "@/components/detail-title-row";
 import { DiffStat } from "@/components/diff-stat";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -58,6 +59,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  FILE_FILTER_SURFACES,
+  useFileListFilter,
+} from "@/components/use-file-list-filter";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommitsList } from "@/features/conversations/CommitsList";
 import {
@@ -3196,11 +3201,25 @@ export function RemotePrView({
     setSelectedCommitOid(null);
     closePerPrDialogs();
   }
-  // Default to the first changed file until the user picks one.
-  const effectivePath =
-    selectedPath && pr?.files.some((f) => f.path === selectedPath)
-      ? selectedPath
-      : (pr?.files[0]?.path ?? null);
+  // The open file feeds the diff and the composer as well as the rail. `settled`
+  // leaves out the hold: a held PR's details are its own, and counting the hold
+  // would move its open file onto `files[0]` while it is held.
+  const openPathRef = useRef<string | null>(null);
+  const fileFilter = useFileListFilter({
+    ...FILE_FILTER_SURFACES["pr-files"],
+    files: pr?.files ?? [],
+    settled: pr !== undefined && !detailsPlaceholder,
+    picked: selectedPath,
+    onPick: (path) => {
+      if (path !== openPathRef.current)
+        useUiStore.getState().noteUserInteraction();
+      setSelectedPath(path);
+    },
+  });
+  useLayoutEffect(() => {
+    openPathRef.current = fileFilter.openPath;
+  }, [fileFilter.openPath]);
+  const effectivePath = fileFilter.openPath;
 
   // GitLab's merge sends a stale-view `sha` guard sourced from the forge-reported head.
   // Without one we can't guard, so GitLab disables Merge rather than merge unguarded on
@@ -3568,6 +3587,14 @@ export function RemotePrView({
     if (document.activeElement === document.body)
       viewRef.current?.focus({ preventScroll: true });
   }, [viewFrame]);
+  // A files read with nothing to draw: the Files tab shows its notice alone.
+  const filesMissing =
+    pr !== undefined && pr.filesUnknown && pr.files.length === 0;
+  const filesRailShown =
+    section === "files" &&
+    !showsLoadingFrame &&
+    pr !== undefined &&
+    !filesMissing;
   // Every arm but the resolve view renders inside the same host and frame, so the
   // frame's focus sink survives an arm swap and the hold dims whichever arm the
   // held PR showed. The resolve view replaces the sections: host node, no frame.
@@ -3578,6 +3605,12 @@ export function RemotePrView({
       className="flex h-full flex-col outline-none"
       {...heldParentProps(hold.holding)}
     >
+      {/* Busy only during a hold, whose inert frame blocks edits through the field;
+          a refresh of the held PR can still change the count. */}
+      <DetailRailFilterStatus
+        filter={fileFilter.rail}
+        blank={!filesRailShown}
+      />
       <HeldFrame
         holding={hold.holding}
         className="flex h-full min-h-0 flex-col"
@@ -4247,6 +4280,9 @@ export function RemotePrView({
         tabIndex={-1}
         className="flex h-full flex-col outline-none"
       >
+        {/* The framed arms' first child too, so leaving this view keeps the
+            status node rather than mounting one that already holds text. */}
+        <DetailRailFilterStatus filter={fileFilter.rail} blank />
         <header className="space-y-2 border-b px-4 py-3">
           <DetailTitleRow
             heading={
@@ -4339,8 +4375,6 @@ export function RemotePrView({
     paused: details.isPaused,
     onRetry: () => void details.refetch(),
   });
-  // A files read with nothing to draw: the Files tab shows its notice alone.
-  const filesMissing = pr.filesUnknown && pr.files.length === 0;
   // Whether the header's +/- totals are unreadable: always with no rows to show, and
   // with a partial list wherever the provider sums its totals from those rows.
   const totalsUnknown =
@@ -5536,9 +5570,8 @@ export function RemotePrView({
           {!filesMissing && (
             <ThreadReplyHoldContext value={conversationHold.composer}>
               <PrFilesPane
-                files={pr.files}
+                filter={fileFilter}
                 binaryPaths={binaryPaths}
-                effectivePath={effectivePath}
                 onSelectPath={pickPath}
                 fileDiff={fileDiff}
                 isPending={prDiff.isPending}

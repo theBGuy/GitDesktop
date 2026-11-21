@@ -27,10 +27,11 @@ permissions:
   contents: read
 
 jobs:
-  # BLOCKING. The ten scripts are Node-stdlib-only by design, so this job
+  # BLOCKING. The eleven scripts are Node-stdlib-only by design, so this job
   # needs no install step and stays a seconds-long gate on every PR.
   guards:
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       # Nothing here uses the git credential after checkout, so it is not left
       # in .git/config for later steps to reach.
@@ -44,7 +45,7 @@ jobs:
           node-version-file: .node-version
 
       # One step per script so a failure names its own check in the UI. The same
-      # ten scripts plus the self-tests below run locally via package.json's
+      # eleven scripts plus the self-tests below run locally via package.json's
       # `checks` alias — a new guard is added in BOTH places, and in
       # CONTRIBUTING.md's *Convention checks* list. Exception: a guard needing a
       # built artifact (check-built-whitespace.mjs) runs from the workflow that
@@ -79,6 +80,9 @@ jobs:
       - name: Record-scoped pending reads
         run: node scripts/check-reused-view-pending.mjs
 
+      - name: Workflow Node setup and job timeouts
+        run: node scripts/check-workflow-node-setup.mjs
+
       # Negative controls for the scanners themselves — their worst failure is a
       # silent fail-open, so the fixtures that prove each predicate still fires
       # run in CI. The test files run installless here (node:test/node:assert;
@@ -97,6 +101,7 @@ jobs:
   # without opening logs.
   advisory:
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:

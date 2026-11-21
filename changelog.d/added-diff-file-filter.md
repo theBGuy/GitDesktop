@@ -4,6 +4,8 @@
   the down arrow to move into the list. **Focus the filter** (`Ctrl`+`F`, or
   `⌘`+`F` on macOS) reaches the field while focus is in the list or the diff,
   and from anywhere on the Compare tab while it lists files. Your text stays
-  from one commit to the next, and a collapsed list shows a funnel while a
-  filter is applied. On a commit's files, in Compare, on a pull request's
-  Commits tab, on local pull requests and in an agent session's changes.
+  from one commit or pull request to the next (from stash to stash while the
+  stashes dialog is open), and a collapsed list shows a funnel while a filter
+  is applied. On a commit's files, in Compare, on a pull request's Files and
+  Commits tabs, on local pull requests, in View stashes, in Recover lost work
+  and in an agent session's changes.

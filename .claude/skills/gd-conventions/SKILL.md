@@ -70,7 +70,10 @@ the length of the run; its exit code is the suite's.
   `cargo test --manifest-path src-tauri/Cargo.toml -- git::branches:: git::remote::`),
   plus the modules that CALL each changed item, found with
   `git grep -n "<item>" -- src-tauri/src`. Frontend:
-  `pnpm exec vitest related --run <changed src files> <edited test files>`.
+  `pnpm exec vitest related --run <changed src files> <edited test files>`,
+  plus `node scripts/check-banned-patterns.mjs` on every frontend step: it
+  scans `src/test/` too, and tsc, biome and vitest all pass code it fails; the
+  required `guards` job runs it.
   In a session whose worktree-isolated Bash guard refuses a cargo filter
   containing `git::`, run the same command with the PowerShell tool.
 - **Full, once, at the end.** Before reporting done, commit-ready, or handing
@@ -699,18 +702,24 @@ and table row are the reference).
   without one, both stay `h-7`. A consumer derives its rendered rows, its
   `listKeyboardNav` items and its open path from the hook (`visible`,
   `activeIndex`, `openPath`), never from the full list, and renders
-  `DetailRailFilterStatus` outside its own `aria-busy` wrapper. A rail
-  without a filter may still pass one short line (a count) through `header`;
-  never a first-child band inside `children`: the strip is already a bordered
-  row, so a band under it stacks a second border and spends vertical space
-  the list wants. When a whole rail goes away with its field focused, a
-  same-scope rail mounting in that commit takes focus over by itself, onto
-  its field, or onto its caret when it mounts collapsed (the module's
-  `fieldHandoff`, cleared by a microtask; only while focus fell to
-  `<body>`); a host that swaps views of different types lands the rest with
-  `useRetryFocusRescue`, one instance per view on a keyed `contents` wrapper,
-  so focus moves only when it was inside the view that left (`SessionChanges`
-  in `src/features/sessions/SessionView.tsx`).
+  `DetailRailFilterStatus` outside its own `aria-busy` wrapper. The pull
+  request view is the sanctioned exception, with three placements: the Files
+  status renders in its hold frame's host (`aria-busy` only during a hold)
+  before `<HeldFrame>`, outside the inert frame that holds the field; the
+  Commits drill-in's renders inside the frame, first in `PrCommitDetail`'s own
+  host above its arms; and the conflict-resolve takeover's host renders an
+  always-blank status as its first child, so the same node survives leaving
+  the takeover. A rail without a filter takes no header line and never a
+  first-child band inside `children`: the strip is already a bordered row, so
+  a band under it stacks a second border and spends vertical space the list
+  wants. When a whole rail goes away with its field focused, a same-scope rail
+  mounting in that commit takes focus over by itself, onto its field, or onto
+  its caret when it mounts collapsed (the module's `fieldHandoff`, cleared by
+  a microtask; only while focus fell to `<body>`); a host that swaps views of
+  different types lands the rest with `useRetryFocusRescue`, one instance per
+  view on a keyed `contents` wrapper, so focus moves only when it was inside
+  the view that left (`SessionChanges` in
+  `src/features/sessions/SessionView.tsx`).
 - Avatars: vendored `Avatar`/`AvatarImage`/`AvatarFallback` (canonical:
   `AuthorAvatar` in `src/features/conversations/Thread.tsx`) — never
   hand-rolled `<img>`/background divs. Biome-ignore comments use `/*`, not `/**`.
@@ -1814,7 +1823,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Every test-build git goes through `TestGitEnv`** (`git/runner.rs`): the
   runner applies it, and a test that spawns git itself calls `.test_git_env()` —
   no system, global or XDG config, and no inherited repository or config
-  redirects. The removal list covers git's `local_repo_env` (v2.51.1) except
+  redirects. A test that needs global config passes a `GIT_CONFIG_GLOBAL`
+  file of its own: the runner panics on a `config --global` write without
+  one. The removal list covers git's `local_repo_env` (v2.51.1) except
   `GIT_CONFIG_COUNT`, plus `GIT_TEMPLATE_DIR` and a few other repository-shape
   names, and a test pins that coverage. Two names stay on purpose:
   `GIT_CEILING_DIRECTORIES` (a caller sets that pair before the trait) and
@@ -2030,21 +2041,38 @@ block (`src/test/help-guide-markdown.test.tsx` fails on one).
   inline `node -e`/shell string in a workflow file — it is invisible to biome,
   to `node --test`, and to every static review lane (four independent defects
   once shipped in one such predicate). Extract to `scripts/check-*.mjs` with
-  hit/miss fixtures in `scripts/checks.test.mjs`; the YAML step only invokes
-  the script.
+  hit/miss fixtures in `scripts/checks.test.mjs` or the script's own
+  `scripts/check-<name>.test.mjs`; the YAML step only invokes the script.
+- **CI jobs are bounded and run Node from `.node-version`:** every job that
+  runs steps carries a literal job-level `timeout-minutes` set from measured
+  durations, and a job that runs Node or a Node package manager first sets
+  Node up with `actions/setup-node` and `node-version-file: .node-version`,
+  after checkout. A setup-node under `continue-on-error` covers a later step
+  only if that step is `continue-on-error` too or its `if:` requires
+  `steps.<id>.outcome == 'success'`. A job without a bound runs to GitHub's
+  6-hour default on a hang, and the image's Node drifts from `.node-version`.
+  `scripts/check-workflow-node-setup.mjs` gates both; its `EXEMPT` map waives
+  only a container job or a composite action running Node, with a reason.
 - **Guard scripts default CLOSED on inputs they cannot read:** every
-  `scripts/check-*.mjs` enumerates its unreadable-input arms — unquoted or
-  folded YAML scalars, binary bytes, deleted/missing files, empty corpora,
-  non-string values, duplicate keys — and FAILS on them instead of skipping.
+  `scripts/check-*.mjs` validation guard enumerates its unreadable-input
+  arms — unquoted or folded YAML scalars, binary bytes, deleted/missing
+  files, empty corpora, non-string values, duplicate keys — and FAILS on
+  them instead of skipping (not `scripts/check-rust-gate.mjs`: it selects the
+  rust-tests matrix, skipping only on a valid exact identity a green run
+  recorded whose head commit matches the identity's eight members,
+  absences included, the tested `src-tauri` tree resting on the artifact
+  name alone; a failed artifact lookup, or no verified match, runs the
+  matrix; a candidate whose head listing cannot be read is rejected).
   Mining minted the fail-open-checker-arm class on 12+ records across 6 PRs,
   concentrated in the guard scripts the tripwire rule itself ships: a scanner
   that exits 0 on input it could not parse approves exactly what it cannot
-  see. Each arm gets a miss fixture in `scripts/checks.test.mjs`, and an
-  empty-corpus / zero-files-matched result is a FAIL or an explicit annotated
-  skip, never a pass. **A PR that ships a scanner/guard is a parser-grade
-  adversarial surface:** budget a dedicated adversarial loop over its input
-  grammar (aliased/namespace imports, destructured params, catch bindings —
-  the shapes reviewers actually threw) or ship the guard as its own PR — one
+  see. Each arm gets a miss fixture in `scripts/checks.test.mjs` or the
+  script's own `scripts/check-<name>.test.mjs`, and an empty-corpus /
+  zero-files-matched result is a FAIL or an explicit annotated skip, never a
+  pass. **A PR that ships a scanner/guard is a parser-grade adversarial
+  surface:** budget a dedicated adversarial loop over its input grammar
+  (aliased/namespace imports, destructured params, catch bindings — the
+  shapes reviewers actually threw) or ship the guard as its own PR — one
   cycle-3 PR (#425) paid 9+ consecutive reviewer rounds draining exactly those
   arms one at a time.
 
