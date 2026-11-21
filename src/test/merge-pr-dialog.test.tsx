@@ -2,7 +2,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MergePrDialog } from "@/features/pulls/MergePrDialog";
+import {
+  type DeleteBranchBlock,
+  MergePrDialog,
+} from "@/features/pulls/MergePrDialog";
 import {
   type MergeMessagePlan,
   mergeMessagePlan,
@@ -58,7 +61,8 @@ type HarnessProps = {
   host?: string;
   local?: boolean;
   headIsDefault?: boolean;
-  blocked?: boolean;
+  blocked?: DeleteBranchBlock;
+  deleteChecked?: boolean;
   onDeleteChange?: (checked: boolean) => void;
   stackNotice?: string;
 };
@@ -92,10 +96,10 @@ function Harness(p: HarnessProps) {
           p.local
             ? undefined
             : {
-                checked: false,
+                checked: p.deleteChecked ?? false,
                 onChange: p.onDeleteChange ?? ignore,
                 headIsDefault: p.headIsDefault ?? false,
-                blocked: p.blocked ?? false,
+                blocked: p.blocked ?? null,
               }
         }
         pending={p.pending ?? false}
@@ -712,7 +716,7 @@ describe("merge dialog: plan states", () => {
 
   it("offline says so with no Retry", () => {
     setup({ plan: { state: "offline" } });
-    expect(screen.getByText(O1, { selector: "p" })).toBeInTheDocument();
+    expect(screen.getByText(O1, { selector: "p > span" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
@@ -796,16 +800,34 @@ describe("merge dialog: plan states", () => {
     expect(group.children).toHaveLength(2);
     expect(group.lastElementChild).toBe(row);
     expect(host).toHaveAttribute("aria-busy", "true");
+    // The line's text sits in a min-w-0 item, so a long unbroken branch name
+    // wraps inside the scroller instead of widening the row past it.
+    const lineRow = (line: HTMLElement) => {
+      expect(line.tagName).toBe("SPAN");
+      expect(line).toHaveClass("min-w-0");
+      const p = line.parentElement as HTMLElement;
+      expect(p.tagName).toBe("P");
+      expect(p.childElementCount).toBe(1);
+      return p;
+    };
     rerender({ plan: { state: "offline" } });
-    expect(screen.getByText(O1, { selector: "p" })).toHaveClass(
+    expect(lineRow(screen.getByText(O1, { selector: "p > span" }))).toHaveClass(
       "flex",
       "min-h-6",
       "items-center",
     );
     rerender({ plan: ready([], "rebase") });
-    expect(
-      screen.getByText(/^Rebase and merge keeps/, { selector: "p" }),
-    ).toHaveClass("flex", "min-h-6", "items-center");
+    expect(lineRow(screen.getByText(/^Rebase and merge keeps/))).toHaveClass(
+      "flex",
+      "min-h-6",
+      "items-center",
+    );
+    rerender({ plan: ready([], "alreadyMerged") });
+    expect(lineRow(screen.getByText(/is already part of main/))).toHaveClass(
+      "flex",
+      "min-h-6",
+      "items-center",
+    );
     rerender({ plan: ready([]) });
     const empty = screen.getByRole("group", {
       name: "Commit message",
@@ -1263,12 +1285,19 @@ describe("merge dialog: confirm holds and targets", () => {
     const plan = squash({ title: TITLE, body: "" });
     const { rerender } = setup({ plan, headIsDefault: true });
     expect(screen.queryByRole("checkbox")).toBeNull();
-    rerender({ plan, blocked: true });
+    rerender({ plan, blocked: "rule" });
     expect(screen.getByRole("checkbox")).toHaveAttribute(
       "aria-disabled",
       "true",
     );
     expect(screen.getByText(/protected by a branch rule/)).toBeInTheDocument();
+    rerender({ plan, blocked: "session", deleteChecked: true });
+    const session = screen.getByRole("checkbox", {
+      name: /^Delete feat\/sync on the remote after merging\s*— reserved for agent sessions$/,
+    });
+    expect(session).toHaveAttribute("aria-disabled", "true");
+    expect(session).not.toBeChecked();
+    expect(screen.queryByText(/protected by a branch rule/)).toBeNull();
   });
 });
 

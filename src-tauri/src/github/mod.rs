@@ -79,7 +79,13 @@ pub(crate) async fn gh_lens_slug(repo_path: &str, lens: Option<&str>) -> AppResu
     let remote = lens_remote(lens)?;
     let url =
         crate::git::remote::git_remote_url(repo_path.to_string(), remote.to_string()).await?;
-    let slug = crate::forge::remote_path(&url).ok_or_else(|| {
+    slug_from_remote_url(remote, &url)
+}
+
+/// The grammar-checked slug of `remote`'s already-read `url`, so a caller that must pair
+/// the slug with other values from the same URL reads it only once.
+pub(crate) fn slug_from_remote_url(remote: &str, url: &str) -> AppResult<String> {
+    let slug = crate::forge::remote_path(url).ok_or_else(|| {
         AppError::Gh(format!(
             "could not determine the GitHub repository from the {remote} remote"
         ))

@@ -6,32 +6,46 @@
 // scrollbar over empty space below the app. Two arms, read on masked source,
 // class tokens taken from the string literals of each tag's `className`:
 // - ScrollArea: every `<ScrollArea>` in src/ (src/test/ included, the vendored
-//   src/components/ui/ left out) carries an unprefixed `overflow-hidden` or
-//   `overflow-clip`; the vendored Root is `relative` but clips nothing. A tag
+//   src/components/ui/ left out) resolves to hidden or clip on BOTH axes
+//   (vertical: overflow-y-* else overflow-*; horizontal likewise); the vendored
+//   Root is `relative` but clips nothing. auto/scroll would clip too, but make
+//   the Root a second scroll container, so they don't count. A tag
 //   with a spread counts as unclipped (the spread can override the class).
-//   RepoList's one ScrollArea is pinned to its exact tokens: the clip margin
-//   keeps the viewport's outset focus ring visible under the clip.
+//   RepoList's one ScrollArea is pinned to its exact tokens: under its clip
+//   the viewport's focus draws as an inset outline (the outset ring is zeroed).
 // - Popup: every opening tag inside a popup element's range (ROSTER, plus
 //   `<Alias>.Popup` for a raw Base UI part imported under another name), the
 //   popup tag included, whose tokens scroll (`overflow-auto`, `overflow-y-auto`,
-//   `overflow-scroll`, `overflow-y-scroll`, bare or variant-prefixed) carries an
-//   unprefixed `relative`. A `<ScrollArea>` in range is the first arm's.
+//   `overflow-scroll`, `overflow-y-scroll`, bare, variant-prefixed or
+//   important) resolves to `relative`. A `<ScrollArea>` in range is the first
+//   arm's.
+// "Resolves": cn( drops earlier conflicts as tailwind-merge does; then the most
+// specific property left wins, and two values at one specificity (stylesheet
+// order) or a disallowed variant/important (`!x`, `x!`) token fail closed.
 // SelectContent and ComboboxContent are out of the roster: their vendored
-// popups are `relative` and clip or scroll themselves, which VENDOR_PINS
-// asserts, so a re-vendor that drops it fails here. The roster was bounded by
-// a one-off sweep; this guard's own run is the effective bound for the set.
-// The viewport's `focus-visible:ring-[3px]` is pinned too: RepoList's 3px clip
-// margin mirrors that width, so a wider ring would be clipped again.
+// popups resolve to `relative` and scroll (select: y auto, x hidden) or clip
+// (combobox: hidden both axes) themselves, which VENDOR_PINS asserts through
+// the same resolver, so a re-vendor that undoes either fails here. The roster
+// was bounded by a one-off sweep; this guard's own run is the effective bound
+// for the set.
+// The viewport's `data-slot` (RepoList's selector) is pinned too, and so is its
+// whole `className` literal by exact string equality: RepoList's inset focus
+// outline overrides that paint, so any change to it is re-checked there.
 // Known exceptions sit in ALLOWLIST as per-file, per-arm counts; a count that
 // drifts either way, or an arm with no finding, fails. An aliased import of
 // ScrollArea or a vendored roster wrapper, a namespace import of a Base UI or
 // vendored ui module, a missing file, zero tags or zero popups all fail.
-// Out of sight: scrollers rendered by a component defined outside the popup's
-// range; popups built through a wrapper under another name or re-exported
-// under an alias; classes arriving through a constant, a prop or another
-// non-literal expression; whether an allowlisted scroller holds absolute
-// content; a popup whose own box is taller than the window; dialogs (`fixed`)
-// and in-app panels (under the app root's clip), by design.
+// Scope contract: the guard models literal class strings and a lone `cn()`
+// with tailwind-merge's conflict rules plus the cascade. Out of contract by
+// design, reviewed by hand rather than extended here: classes from constants,
+// props or template strings; conditional `cn()` arms; an important utility
+// (`relative!`, `overflow-hidden!`) on its own fails closed even when it
+// names an allowed value (remedy: drop the `!` or add an allowlist row); popups built through a
+// wrapper under another name or re-exported under an alias; escaped
+// delimiters inside arbitrary variants. Also out of sight: scrollers rendered
+// by a component defined outside the popup's range; whether an allowlisted
+// scroller holds absolute content; a popup whose own box is taller than the
+// window; dialogs (`fixed`) and in-app panels (under the app root's clip).
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -45,6 +59,7 @@ import {
   literalText,
   loadCorpus,
   maskNonCode,
+  matchBrace,
   openingTags,
   ScanError,
   srcEntries,
@@ -54,7 +69,14 @@ import {
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const VENDORED = "src/components/ui/";
 const REPO_LIST = "src/features/repository/RepoList.tsx";
-const REPO_LIST_TOKENS = ["[overflow-clip-margin:3px]", "overflow-clip"];
+const VIEWPORT_FOCUS = "**:data-[slot=scroll-area-viewport]:focus-visible:";
+const REPO_LIST_TOKENS = [
+  "overflow-clip",
+  ...["ring-0", "outline-2", "-outline-offset-2", "outline-solid"].map(
+    (u) => VIEWPORT_FOCUS + u,
+  ),
+  `${VIEWPORT_FOCUS}outline-ring/50`,
+].sort();
 
 const ROSTER = [
   "PopoverContent",
@@ -91,15 +113,26 @@ const UNALIASABLE = new Set([
   "ContextMenuSubContent",
 ]);
 
-/** Vendored tags and the class token each must keep. */
+const SELECT = "src/components/ui/select.tsx";
+const COMBOBOX = "src/components/ui/combobox.tsx";
+const SCROLL_AREA = "src/components/ui/scroll-area.tsx";
+/** Vendored tags, each with what its classes must resolve to (`position`,
+ *  `overflow-x`, `overflow-y`), the `data-slot` it must keep (`slot`), or the
+ *  whole `className` string literal it must carry (`classes`). */
 const VENDOR_PINS = [
-  ["src/components/ui/select.tsx", "SelectPrimitive.Popup", "relative"],
-  ["src/components/ui/combobox.tsx", "ComboboxPrimitive.Popup", "relative"],
-  ["src/components/ui/scroll-area.tsx", "ScrollAreaPrimitive.Root", "relative"],
+  [SELECT, "SelectPrimitive.Popup", "position", "relative"],
+  [SELECT, "SelectPrimitive.Popup", "overflow-x", "hidden"],
+  [SELECT, "SelectPrimitive.Popup", "overflow-y", "auto"],
+  [COMBOBOX, "ComboboxPrimitive.Popup", "position", "relative"],
+  [COMBOBOX, "ComboboxPrimitive.Popup", "overflow-x", "hidden"],
+  [COMBOBOX, "ComboboxPrimitive.Popup", "overflow-y", "hidden"],
+  [SCROLL_AREA, "ScrollAreaPrimitive.Root", "position", "relative"],
+  [SCROLL_AREA, "ScrollAreaPrimitive.Viewport", "slot", "scroll-area-viewport"],
   [
-    "src/components/ui/scroll-area.tsx",
+    SCROLL_AREA,
     "ScrollAreaPrimitive.Viewport",
-    "focus-visible:ring-[3px]",
+    "classes",
+    "size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1",
   ],
 ];
 
@@ -164,16 +197,102 @@ const ALLOWLIST = {
 };
 
 const SCROLL_AREA_OPEN = /<ScrollArea(?![\w.$-])/g;
-const SCROLLER = /^(?:\S*:)?overflow-(?:y-)?(?:auto|scroll)$/;
-const CLIPS = new Set(["overflow-hidden", "overflow-clip"]);
+const SCROLLER = /^overflow-(?:y-)?(?:auto|scroll)$/;
+const CLIPS = new Set(["hidden", "clip"]);
+const POSITIONED = new Set(["relative"]);
 
-/** The literal text of the `className` value on the opening tag [s, e), so a
- *  token spelled in another attribute (a `title`, a data prop) never counts. */
-function classNameText(text, masked, s, e) {
+/** A class token split into its utility (`base`, important `!` stripped) and
+ *  whether a variant prefix or an important marker overrides out of order. A
+ *  `:` inside `[…]` or `(…)` is part of the value, never a variant split. */
+function parseToken(tok) {
+  let depth = 0;
+  let cut = -1;
+  for (let i = 0; i < tok.length; i++) {
+    const c = tok[i];
+    if (c === "[" || c === "(") depth++;
+    else if ((c === "]" || c === ")") && depth > 0) depth--;
+    else if (c === ":" && depth === 0) cut = i;
+  }
+  const raw = tok.slice(cut + 1);
+  const base = raw.replace(/^!|!$/g, "");
+  return { base, override: cut >= 0 || base !== raw };
+}
+
+/** One property over a class value (the header's "resolves"). `classify(base)`
+ *  gives a utility's `{ level, prop, value }`, a higher level being the more
+ *  specific property, or null. Overriding tokens are returned apart. */
+function resolveAxis({ tokens, merged }, classify) {
+  const overrides = [];
+  let kept = [];
+  for (const t of tokens) {
+    const { base, override } = parseToken(t);
+    const c = classify(base);
+    if (!c) continue;
+    if (override) {
+      overrides.push(c.value);
+      continue;
+    }
+    if (merged) {
+      kept = kept.filter((r) => r.level <= c.level && r.prop !== c.prop);
+    }
+    kept.push(c);
+  }
+  const top = Math.max(-1, ...kept.map((k) => k.level));
+  const values = new Set(
+    kept.filter((k) => k.level === top).map((k) => k.value),
+  );
+  return { value: [...values][0], ambiguous: values.size > 1, overrides };
+}
+
+const position = (base) =>
+  /^(?:static|relative|absolute|fixed|sticky)$/.test(base)
+    ? { level: 0, prop: "position", value: base }
+    : null;
+const overflowOn = (axis) => (base) => {
+  const m = /^overflow-(?:([xy])-)?(visible|hidden|clip|scroll|auto)$/.exec(
+    base,
+  );
+  if (!m || (m[1] && m[1] !== axis)) return null;
+  return { level: m[1] ? 1 : 0, prop: m[1] ?? "both", value: m[2] };
+};
+const CLASSIFIERS = {
+  position,
+  "overflow-x": overflowOn("x"),
+  "overflow-y": overflowOn("y"),
+};
+
+const resolvesIn = (cls, kind, allowed) => {
+  const r = resolveAxis(cls, CLASSIFIERS[kind]);
+  return (
+    !r.ambiguous &&
+    allowed.has(r.value) &&
+    r.overrides.every((v) => allowed.has(v))
+  );
+};
+
+/** Whether offset `i` of the opening tag at `s` sits at its top level, outside
+ *  every attribute's `{…}` value, so an element nested in another attribute's
+ *  expression never lends the tag its classes (string contents are masked). */
+function topLevel(masked, s, i) {
+  let depth = 0;
+  for (let k = s; k < i; k++) {
+    if (masked[k] === "{") depth++;
+    else if (masked[k] === "}") depth--;
+  }
+  return depth === 0;
+}
+
+/** The `className` tokens on the opening tag [s, e), so a token spelled in
+ *  another attribute (a `title`, a data prop) never counts, and whether they
+ *  merge as one `className={cn(…)}` call (tailwind-merge) or stand as written. */
+function classValue(text, masked, s, e) {
   const out = [];
+  let values = 0;
+  let merged = false;
   const re = /\sclassName\s*=\s*/g;
   re.lastIndex = s;
   for (let m = re.exec(masked); m && m.index < e; m = re.exec(masked)) {
+    if (!topLevel(masked, s, m.index)) continue;
     const v = m.index + m[0].length;
     let end;
     if (masked[v] === '"' || masked[v] === "'") {
@@ -190,12 +309,17 @@ function classNameText(text, masked, s, e) {
       throw new ScanError("a className value runs past its tag");
     }
     out.push(literalText(text, masked, v, end));
+    values++;
+    const call = /^\{\s*cn\s*\(/.exec(masked.slice(v, end));
+    const close = call ? matchBrace(masked, v + call[0].length - 1) : -1;
+    merged = close > 0 && /^\s*\}$/.test(masked.slice(close + 1, end));
   }
-  return out.join(" ");
+  const tokens = out.join(" ").split(/\s+/).filter(Boolean);
+  return { tokens, merged: values === 1 && merged };
 }
 
 const classTokens = (text, masked, s, e) =>
-  classNameText(text, masked, s, e).split(/\s+/).filter(Boolean);
+  classValue(text, masked, s, e).tokens;
 
 const IMPORT =
   /\bimport\s+(type\s+)?([\w$\s,{}*]*?)\s*from\s*(["'])([^"']+)\3/g;
@@ -254,10 +378,27 @@ function repoListPin(files) {
   return [];
 }
 
-/** Each vendored pin's tag keeps its pinned class token. */
+/** The raw value of the tag's one `attr="…"` attribute in [s, e), located on
+ *  the masked source so a commented-out copy never counts; undefined when the
+ *  attribute is missing, repeated, or not a plain double-quoted string. */
+function attrLiteral(text, masked, s, e, attr) {
+  const re = new RegExp(`\\s${attr}\\s*=\\s*`, "g");
+  const hits = [...masked.slice(s, e).matchAll(re)].filter((m) =>
+    topLevel(masked, s, s + m.index),
+  );
+  if (hits.length !== 1) return undefined;
+  const q = s + hits[0].index + hits[0][0].length;
+  if (masked[q] !== '"') return undefined;
+  const close = masked.indexOf('"', q + 1);
+  if (close < 0 || close >= e) return undefined;
+  return text.slice(q + 1, close);
+}
+
+/** Each vendored pin's tag still resolves to its pinned value, or keeps its
+ *  pinned class token. */
 function vendorPins(vendor) {
   const out = [];
-  for (const [rel, name, token] of VENDOR_PINS) {
+  for (const [rel, name, kind, want] of VENDOR_PINS) {
     const text = vendor.get(rel);
     if (text === undefined) {
       out.push(`${rel}: not readable`);
@@ -271,8 +412,19 @@ function vendorPins(vendor) {
     }
     const [s] = opens[0];
     const e = tagEnd(masked, s) + 1;
-    if (!classTokens(text, masked, s, e).includes(token)) {
-      out.push(`${rel}:${lineOf(text, s)}: <${name}> lost its \`${token}\``);
+    const cls = classValue(text, masked, s, e);
+    const at = `${rel}:${lineOf(text, s)}: <${name}>`;
+    if (kind === "slot") {
+      const slot = attrLiteral(text, masked, s, e, "data-slot");
+      if (slot !== want) out.push(`${at} lost its data-slot="${want}"`);
+    } else if (kind === "classes") {
+      if (attrLiteral(text, masked, s, e, "className") !== want) {
+        out.push(
+          `${at} the vendored ScrollArea viewport classes changed: re-check RepoList's inset focus outline override (${REPO_LIST}), then update this pin`,
+        );
+      }
+    } else if (!resolvesIn(cls, kind, new Set([want]))) {
+      out.push(`${at} no longer resolves ${kind} to ${want}`);
     }
   }
   return out;
@@ -300,7 +452,9 @@ function scan(files) {
       if (e === 0) throw new ScanError(`${rel}: a <ScrollArea> never ends`);
       const clipped =
         !hasSpread(masked, m.index, e) &&
-        classTokens(text, masked, m.index, e).some((k) => CLIPS.has(k));
+        ["overflow-x", "overflow-y"].every((axis) =>
+          resolvesIn(classValue(text, masked, m.index, e), axis, CLIPS),
+        );
       if (!clipped) flag(rel, "scrollArea", lineOf(text, m.index));
     }
     const seen = new Set();
@@ -312,10 +466,10 @@ function scan(files) {
             continue;
           }
           seen.add(s);
-          const tokens = classTokens(text, masked, s, e);
+          const cls = classValue(text, masked, s, e);
           if (
-            tokens.some((k) => SCROLLER.test(k)) &&
-            !tokens.includes("relative")
+            cls.tokens.some((k) => SCROLLER.test(parseToken(k).base)) &&
+            !resolvesIn(cls, "position", POSITIONED)
           ) {
             flag(rel, "popupScroller", lineOf(text, s));
           }
@@ -376,7 +530,6 @@ test("every allowlist entry carries a rationale and a count", () => {
 });
 
 const REL = "src/features/zz/Synthetic.tsx";
-const withFile = (text, rel = REL) => new Map([...CORPUS, [rel, text]]);
 const component = (body) =>
   ["export function Picker() {", "  return (", ...body, "  );", "}", ""].join(
     "\n",
@@ -396,9 +549,35 @@ const area = (attrs) =>
     "    </ScrollArea>",
   ]);
 
+/** A minimal corpus for the synthetic checks: RepoList (its pin, and a
+ *  ScrollArea) and a stub popup, so no check needs the whole tree. */
+const STUB = "src/features/zz/Stub.tsx";
+const STUB_TEXT = component([
+  '    <Popover.Popup className="w-60">x</Popover.Popup>',
+]);
+const base = () =>
+  new Map([
+    [REPO_LIST, CORPUS.get(REPO_LIST)],
+    [STUB, STUB_TEXT],
+  ]);
+const withFile = (text, rel = REL) => base().set(rel, text);
+/** `problems` with the allowlist rows for the files present. */
+const check = (files, allowlist = ALLOWLIST, vendor = VENDOR) =>
+  problems(
+    files,
+    Object.fromEntries(
+      Object.entries(allowlist).filter(([rel]) => files.has(rel)),
+    ),
+    vendor,
+  );
+
+test("the minimal corpus passes on its own", () => {
+  assert.deepEqual(check(base()), []);
+});
+
 /** The single problem a fixture raises, asserted to match `re`. */
 function onlyProblem(files, re, allowlist) {
-  const got = problems(files, allowlist);
+  const got = check(files, allowlist);
   assert.equal(got.length, 1, got.join("\n"));
   assert.match(got[0], re);
 }
@@ -409,20 +588,16 @@ const repoListWith = (from, to) => {
   return real.replace(from, to);
 };
 
-test("G1: RepoList without its clip, its margin, or its cn( fails", () => {
-  const noMargin = repoListWith(
-    '"overflow-clip [overflow-clip-margin:3px]"',
-    '"overflow-clip"',
-  );
-  onlyProblem(
-    withFile(noMargin, REPO_LIST),
-    /RepoList\.tsx:\d+: ScrollArea tokens/,
-  );
-  const noClip = repoListWith(
-    '"overflow-clip [overflow-clip-margin:3px]"',
-    '"[overflow-clip-margin:3px]"',
-  );
-  const got = problems(withFile(noClip, REPO_LIST));
+test("G1: RepoList without its clip, its inset focus, or its cn( fails", () => {
+  for (const u of ["ring-0", "-outline-offset-2", "outline-solid"]) {
+    const cut = ` ${VIEWPORT_FOCUS}${u}`;
+    onlyProblem(
+      withFile(repoListWith(cut, ""), REPO_LIST),
+      /RepoList\.tsx:\d+: ScrollArea tokens/,
+    );
+  }
+  const noClip = repoListWith('"overflow-clip ', '"');
+  const got = check(withFile(noClip, REPO_LIST));
   assert.equal(got.length, 2, got.join("\n"));
   assert.match(got.join("\n"), /RepoList\.tsx:\d+: ScrollArea tokens/);
   assert.match(got.join("\n"), /RepoList\.tsx:\d+: 1 uncontained scrollArea/);
@@ -431,7 +606,7 @@ test("G1: RepoList without its clip, its margin, or its cn( fails", () => {
     "className={LIST_VIEWPORT_CLASS}",
   );
   assert.notEqual(bare, CORPUS.get(REPO_LIST));
-  const gotBare = problems(withFile(bare, REPO_LIST)).join("\n");
+  const gotBare = check(withFile(bare, REPO_LIST)).join("\n");
   assert.match(gotBare, /RepoList\.tsx:\d+: className is not cn\(/);
   assert.match(gotBare, /RepoList\.tsx:\d+: 1 uncontained scrollArea/);
 });
@@ -454,13 +629,43 @@ test("G2: an unclipped, variant-only or spread ScrollArea flags", () => {
     /Synthetic\.tsx:3: 1 uncontained scrollArea/,
   );
   assert.deepEqual(
-    problems(withFile(area('className="h-40 overflow-hidden"'))),
+    check(withFile(area('className="h-40 overflow-hidden"'))),
     [],
   );
-  assert.deepEqual(
-    problems(withFile(area('className="h-40 overflow-clip"'))),
-    [],
-  );
+  assert.deepEqual(check(withFile(area('className="h-40 overflow-clip"'))), []);
+});
+
+test("G2: overflow resolves per axis; ambiguity and overrides fail", () => {
+  for (const cls of [
+    'className={cn("overflow-hidden", "overflow-visible")}',
+    'className="h-40 overflow-hidden sm:overflow-visible"',
+    'className="overflow-hidden overflow-visible!"',
+    'className="overflow-hidden !overflow-visible"',
+    'className="overflow-hidden sm:overflow-x-auto"',
+    // Plain strings: one specificity, two values -> stylesheet-ordered.
+    'className="overflow-clip overflow-auto"',
+    'className="overflow-visible overflow-hidden"',
+    // Each axis must clip: y overrides the shorthand on its axis.
+    'className="overflow-clip overflow-y-visible"',
+    'className="overflow-hidden overflow-y-auto"',
+    'className="overflow-hidden overflow-x-auto"',
+    'className={cn("overflow-hidden", "overflow-y-auto")}',
+    'className="overflow-y-hidden"',
+  ]) {
+    onlyProblem(
+      withFile(area(cls)),
+      /Synthetic\.tsx:3: 1 uncontained scrollArea/,
+    );
+  }
+  for (const cls of [
+    'className={cn("overflow-visible", "overflow-hidden")}',
+    'className={cn("overflow-y-auto", "overflow-hidden")}',
+    'className="overflow-hidden md:overflow-clip"',
+    'className="overflow-x-hidden overflow-y-clip"',
+    'className="overflow-auto overflow-x-hidden overflow-y-hidden"',
+  ]) {
+    assert.deepEqual(check(withFile(area(cls))), [], cls);
+  }
 });
 
 test("G3: an unpositioned scroller in a popup flags; a relative one passes", () => {
@@ -472,7 +677,7 @@ test("G3: an unpositioned scroller in a popup flags; a relative one passes", () 
   );
   onlyProblem(withFile(popup("w-60", "max-h-64 md:overflow-auto")), hit);
   assert.deepEqual(
-    problems(withFile(popup("w-60", "relative max-h-64 overflow-y-auto"))),
+    check(withFile(popup("w-60", "relative max-h-64 overflow-y-auto"))),
     [],
   );
   onlyProblem(
@@ -485,6 +690,62 @@ test("G3: an unpositioned scroller in a popup flags; a relative one passes", () 
   );
 });
 
+test("G3: position resolves through cn; ambiguity and overrides fail", () => {
+  const hit = /Synthetic\.tsx:4: 1 uncontained popupScroller/;
+  const rail = (attr) =>
+    component([
+      '    <Popover.Popup className="w-60">',
+      `      <div ${attr}>`,
+      '        <span className="sr-only">held</span>',
+      "      </div>",
+      "    </Popover.Popup>",
+    ]);
+  for (const attr of [
+    'className={cn("relative overflow-y-auto", "static")}',
+    'className="relative max-h-64 overflow-y-auto md:static"',
+    'className="relative absolute overflow-y-auto"',
+    'className="relative overflow-y-auto !static"',
+    'className="relative overflow-y-auto static!"',
+    'className="static relative overflow-y-auto"',
+    'className="max-h-64 overflow-y-auto!"',
+    'className="max-h-64 sm:overflow-y-scroll!"',
+  ]) {
+    onlyProblem(withFile(rail(attr)), hit);
+  }
+  for (const attr of [
+    'className={cn("static", "relative overflow-y-auto")}',
+    'className="relative overflow-y-auto md:relative"',
+    'className="relative overflow-y-auto!"',
+  ]) {
+    assert.deepEqual(check(withFile(rail(attr))), [], attr);
+  }
+});
+
+test("G3: classes inside another attribute's value are not the tag's", () => {
+  const nested = (own) =>
+    component([
+      '    <Popover.Popup className="w-60">',
+      `      <LabeledGroup className="${own}" actions={<button className="relative pb-2" />}>`,
+      '        <span className="sr-only">held</span>',
+      "      </LabeledGroup>",
+      "    </Popover.Popup>",
+    ]);
+  onlyProblem(
+    withFile(nested("max-h-64 overflow-y-auto")),
+    /Synthetic\.tsx:4: 1 uncontained popupScroller/,
+  );
+  assert.deepEqual(
+    check(withFile(nested("relative max-h-64 overflow-y-auto"))),
+    [],
+  );
+  onlyProblem(
+    withFile(
+      area('className="h-40" actions={<b className="overflow-hidden" />}'),
+    ),
+    /Synthetic\.tsx:3: 1 uncontained scrollArea/,
+  );
+});
+
 test("G3: scrollers outside a popup and SelectContent ranges are ignored", () => {
   const after = component([
     "    <>",
@@ -492,11 +753,9 @@ test("G3: scrollers outside a popup and SelectContent ranges are ignored", () =>
     '      <div className="max-h-64 overflow-y-auto" />',
     "    </>",
   ]);
-  assert.deepEqual(problems(withFile(after)), []);
+  assert.deepEqual(check(withFile(after)), []);
   assert.deepEqual(
-    problems(
-      withFile(popup("w-60", "max-h-64 overflow-y-auto", "SelectContent")),
-    ),
+    check(withFile(popup("w-60", "max-h-64 overflow-y-auto", "SelectContent"))),
     [],
   );
 });
@@ -528,7 +787,7 @@ test("G4: an aliased ScrollArea or roster wrapper, or a namespace import, fails"
     /Synthetic\.tsx:1: namespace import/,
   );
   assert.deepEqual(
-    problems(
+    check(
       withFile(
         'import type { ScrollArea as SA } from "@/components/ui/scroll-area";\n',
       ),
@@ -537,43 +796,201 @@ test("G4: an aliased ScrollArea or roster wrapper, or a namespace import, fails"
   );
 });
 
-test("G4: a vendored popup or Root without `relative` fails", () => {
-  const rel = "src/components/ui/combobox.tsx";
+/** The vendored tags whose position (and, for the popups, overflow) resolve. */
+const RESOLVED_TAGS = [
+  [SELECT, "SelectPrimitive.Popup"],
+  [COMBOBOX, "ComboboxPrimitive.Popup"],
+  [SCROLL_AREA, "ScrollAreaPrimitive.Root"],
+];
+
+/** The vendored files with `name`'s first className string literal (the cn
+ *  base the vendor writes) rewritten through `edit(tokens)`. Located by tag,
+ *  never by its exact text, so a neutral vendor change keeps the fixtures. */
+function vendorWith(rel, name, edit) {
   const real = VENDOR.get(rel);
-  const cut = '"group/combobox-content relative ';
-  assert.equal(real.split(cut).length, 2, "the combobox Popup class, once");
-  const vendor = new Map([
-    ...VENDOR,
-    [rel, real.replace(cut, '"group/combobox-content ')],
-  ]);
-  const got = problems(CORPUS, ALLOWLIST, vendor);
-  assert.equal(got.length, 1, got.join("\n"));
-  assert.match(got[0], /combobox\.tsx:\d+: <ComboboxPrimitive\.Popup> lost/);
+  const masked = maskNonCode(real, true);
+  const ranges = elementRanges(rel, real, masked, name);
+  assert.equal(ranges.length, 1, `${rel}: one <${name}>`);
+  const s = ranges[0][0];
+  const e = tagEnd(masked, s) + 1;
+  const at = masked.indexOf("className", s);
+  const q = masked.indexOf('"', at);
+  assert.ok(at > s && q > at && q < e, `${rel}: <${name}> class string`);
+  const end = masked.indexOf('"', q + 1);
+  const tokens = real
+    .slice(q + 1, end)
+    .split(/\s+/)
+    .filter(Boolean);
+  const next = `${real.slice(0, q + 1)}${edit(tokens).join(" ")}${real.slice(end)}`;
+  assert.notEqual(next, real, `${rel}: the edit changed nothing`);
+  return new Map([...VENDOR, [rel, next]]);
+}
+const plus = (extra) => (tokens) => [...tokens, extra];
+const without = (token) => (tokens) => {
+  assert.ok(tokens.includes(token), token);
+  return tokens.filter((t) => t !== token);
+};
+/** The pin problems a vendor map raises, line numbers blanked. */
+const pinProblems = (vendor) =>
+  check(base(), {}, vendor).map((p) => p.replace(/:\d+:/, ":N:"));
+
+test("G4: each vendored pin resolves today", () => {
+  assert.deepEqual(vendorPins(VENDOR), []);
 });
 
-test("G4: a viewport focus ring wider than the clip margin fails", () => {
-  const rel = "src/components/ui/scroll-area.tsx";
-  const real = VENDOR.get(rel);
-  const cut = "focus-visible:ring-[3px]";
-  assert.equal(real.split(cut).length, 2, "the viewport ring width, once");
+for (const [rel, name] of RESOLVED_TAGS) {
+  test(`G4: <${name}> with a neutral class added still resolves`, () => {
+    const beside = (tokens) => {
+      const i = tokens.indexOf("relative");
+      assert.ok(i >= 0, "relative");
+      return [...tokens.slice(0, i + 1), "min-h-0", ...tokens.slice(i + 1)];
+    };
+    assert.deepEqual(pinProblems(vendorWith(rel, name, beside)), []);
+    assert.deepEqual(pinProblems(vendorWith(rel, name, plus("isolate"))), []);
+  });
+  for (const [edit, label] of [
+    [without("relative"), "without `relative`"],
+    [plus("static"), "with a later `static`"],
+    [plus("md:absolute"), "with a variant `md:absolute`"],
+  ]) {
+    test(`G4: <${name}> ${label} fails`, () => {
+      assert.deepEqual(pinProblems(vendorWith(rel, name, edit)), [
+        `${rel}:N: <${name}> no longer resolves position to relative`,
+      ]);
+    });
+  }
+}
+
+for (const [rel, name] of RESOLVED_TAGS.slice(0, 2)) {
+  test(`G4: <${name}> with a later \`overflow-visible\` fails`, () => {
+    const vendor = vendorWith(rel, name, plus("overflow-visible"));
+    assert.deepEqual(pinProblems(vendor), [
+      `${rel}:N: <${name}> no longer resolves overflow-x to hidden`,
+      `${rel}:N: <${name}> no longer resolves overflow-y to ${rel === SELECT ? "auto" : "hidden"}`,
+    ]);
+  });
+}
+
+for (const [rel, name, token, axes] of [
+  [SELECT, "SelectPrimitive.Popup", "overflow-y-auto", ["overflow-y to auto"]],
+  [
+    SELECT,
+    "SelectPrimitive.Popup",
+    "overflow-x-hidden",
+    ["overflow-x to hidden"],
+  ],
+  [
+    COMBOBOX,
+    "ComboboxPrimitive.Popup",
+    "overflow-hidden",
+    ["overflow-x to hidden", "overflow-y to hidden"],
+  ],
+]) {
+  test(`G4: <${name}> without its \`${token}\` fails`, () => {
+    assert.deepEqual(
+      pinProblems(vendorWith(rel, name, without(token))),
+      axes.map((a) => `${rel}:N: <${name}> no longer resolves ${a}`),
+    );
+  });
+}
+
+const VIEWPORT = "ScrollAreaPrimitive.Viewport";
+
+test("G4: any change to the viewport's class literal fails", () => {
+  const wider = (tokens) =>
+    tokens.map((t) =>
+      t === "focus-visible:ring-[3px]" ? "focus-visible:ring-[6px]" : t,
+    );
+  const want = [
+    `${SCROLL_AREA}:N: <${VIEWPORT}> the vendored ScrollArea viewport classes changed: re-check RepoList's inset focus outline override (${REPO_LIST}), then update this pin`,
+  ];
+  assert.deepEqual(pinProblems(vendorWith(SCROLL_AREA, VIEWPORT, wider)), want);
+  for (const extra of [
+    "focus-visible:outline-none!",
+    "focus-visible:outline-hidden",
+    "focus-visible:ring-inset",
+    "focus-visible:outline-dashed!",
+    "focus-visible:ring-offset-2",
+    "focus-visible:after:inset-0!",
+  ]) {
+    assert.deepEqual(
+      pinProblems(vendorWith(SCROLL_AREA, VIEWPORT, plus(extra))),
+      want,
+      extra,
+    );
+  }
+});
+
+test("G4: a viewport without RepoList's data-slot fails", () => {
+  const real = VENDOR.get(SCROLL_AREA);
+  const cut = 'data-slot="scroll-area-viewport"';
+  assert.equal(real.split(cut).length, 2, "the viewport slot, once");
   const vendor = new Map([
     ...VENDOR,
-    [rel, real.replace(cut, "focus-visible:ring-[4px]")],
+    [SCROLL_AREA, real.replace(cut, 'data-slot="viewport"')],
   ]);
-  const got = problems(CORPUS, ALLOWLIST, vendor);
-  assert.equal(got.length, 1, got.join("\n"));
-  assert.match(
-    got[0],
-    /scroll-area\.tsx:\d+: <ScrollAreaPrimitive\.Viewport> lost its `focus-visible:ring-\[3px\]`/,
+  assert.deepEqual(pinProblems(vendor), [
+    `${SCROLL_AREA}:N: <${VIEWPORT}> lost its data-slot="scroll-area-viewport"`,
+  ]);
+});
+
+const VIEWPORT_CLASSES = VENDOR_PINS.find(
+  ([, , kind]) => kind === "classes",
+)[3];
+const CLASS_MSG = `${SCROLL_AREA}:N: <${VIEWPORT}> the vendored ScrollArea viewport classes changed: re-check RepoList's inset focus outline override (${REPO_LIST}), then update this pin`;
+for (const [label, from, to, want] of [
+  [
+    "a commented-out className",
+    `className="${VIEWPORT_CLASSES}"`,
+    `// className="${VIEWPORT_CLASSES}"\n        className="${VIEWPORT_CLASSES} p-1"`,
+    CLASS_MSG,
+  ],
+  [
+    "a commented-out data-slot",
+    'data-slot="scroll-area-viewport"',
+    '// data-slot="scroll-area-viewport"\n        data-slot="viewport"',
+    `${SCROLL_AREA}:N: <${VIEWPORT}> lost its data-slot="scroll-area-viewport"`,
+  ],
+  [
+    "a second className",
+    `className="${VIEWPORT_CLASSES}"`,
+    `className="${VIEWPORT_CLASSES}" className="x"`,
+    CLASS_MSG,
+  ],
+]) {
+  test(`G4: ${label} on the viewport never satisfies its pin`, () => {
+    const real = VENDOR.get(SCROLL_AREA);
+    assert.equal(real.split(from).length, 2, `${from} once`);
+    const next = real.replace(from, () => to);
+    assert.deepEqual(pinProblems(new Map([...VENDOR, [SCROLL_AREA, next]])), [
+      want,
+    ]);
+  });
+}
+
+test("G4: a viewport attribute inside another attribute's value is not the viewport's", () => {
+  const real = VENDOR.get(SCROLL_AREA);
+  const from = `className="${VIEWPORT_CLASSES}"`;
+  const decoy = `render={<i className="${VIEWPORT_CLASSES}" data-slot="scroll-area-viewport" />}`;
+  const vendorOf = (own) =>
+    new Map([
+      ...VENDOR,
+      [SCROLL_AREA, real.replace(from, () => `${decoy} ${own}`)],
+    ]);
+  assert.deepEqual(pinProblems(vendorOf(from)), []);
+  assert.deepEqual(
+    pinProblems(vendorOf(`className="${VIEWPORT_CLASSES} p-1"`)),
+    [CLASS_MSG],
   );
 });
 
 test("G5: stale or drifted allowlist counts fail", () => {
   const stale = {
-    ...ALLOWLIST,
     "src/features/zz/Gone.tsx": { popupScroller: 1, rationale: "x" },
   };
-  onlyProblem(CORPUS, /Gone\.tsx: stale popupScroller/, stale);
+  const got = problems(base(), stale);
+  assert.equal(got.length, 1, got.join("\n"));
+  assert.match(got[0], /Gone\.tsx: stale popupScroller/);
   const drifted = withFile(area('className="h-40"'));
   onlyProblem(
     drifted,
@@ -591,7 +1008,7 @@ test("G6: zero files, zero tags or an unclosed popup fail closed", () => {
   const unclosed = component([
     '    <div><Popover.Popup className="w-60"></div>',
   ]);
-  assert.throws(() => problems(withFile(unclosed)), ScanError);
+  assert.throws(() => check(withFile(unclosed)), ScanError);
 });
 
 test("NC3: ProjectsPopover's rows scroller without `relative` fails", () => {

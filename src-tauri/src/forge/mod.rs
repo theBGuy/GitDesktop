@@ -2769,10 +2769,11 @@ pub(crate) fn merge_head_refusal(
 /// before anything is written.
 ///
 /// `cleanup_warning` on the returned [`PrMergeOutcome`](crate::github::pr::PrMergeOutcome)
-/// means the merge was accepted with a caveat — either the PR merged but post-merge
-/// branch cleanup failed, or (`queued`) a stacked PR went to a merge QUEUE and hasn't
-/// landed, so cleanup was skipped. Both are GitHub-only: GitLab/Bitbucket fold branch
-/// deletion into the server-side merge and have no stacked-merge queue. A merge
+/// means the merge was accepted with a caveat: the PR merged but post-merge branch
+/// cleanup failed, or (`queued`) the merge isn't confirmed landed (a merge queue took it,
+/// it lands once its requirements pass, or GitHub hadn't reported it merged yet) and any
+/// requested cleanup was skipped. Every caveat is GitHub-only: GitLab and Bitbucket fold
+/// branch deletion into the server-side merge and have no merge queue here. A merge
 /// FAILURE is still an `Err`.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // one flat arg per form field, IPC-shaped

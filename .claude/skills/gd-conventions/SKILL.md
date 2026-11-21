@@ -760,7 +760,7 @@ InsightsBoard was the outlier; every other main-side panel already complies).
 Tailwind animation overrides need the `!` important modifier — tw-merge doesn't
 dedupe the animate group, so `animate-none` vs an existing `animate-in` is a
 build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
-A scroller whose last content can be a Checkbox, Radio or Switch keeps at least
+A scroller holding a Checkbox, Radio or Switch anywhere keeps at least
 8px of bottom padding, since their hit area overhangs 8px: `DIALOG_SCROLL` /
 `DIALOG_SCROLL_X_HIDDEN` carry `pb-2 -mb-2`, a call site never overrides that
 padding (a stretched flex-row scroller takes `mb-0`), and other scrollers pad
@@ -770,8 +770,8 @@ An `sr-only` copy is `position: absolute`, so in a body-portaled popup it escape
 a scroller that isn't positioned and grows the document (a window scrollbar over
 empty space): a scroller inside a popup carries `relative`, and every
 `ScrollArea` carries a call-site `overflow-hidden` or `overflow-clip` or an
-allowlist row with its reason. RepoList's root pairs `overflow-clip` with
-`[overflow-clip-margin:3px]` so the viewport's outset focus ring still shows;
+allowlist row with its reason. A clipped root cuts the viewport's outset focus
+ring (WebKit has no `overflow-clip-margin`), so RepoList draws an inset outline;
 the ratchet is `scripts/popup-scroller-containment.test.mjs`.
 
 **State & rendering gotchas.**

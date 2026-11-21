@@ -179,11 +179,13 @@ export const ghPrDiscardPendingReview = (repoPath: string, reviewId: string) =>
   invoke<void>("gh_pr_discard_pending_review", { repoPath, reviewId });
 
 /** Outcome of an ACCEPTED forge merge (a failure rejects the invoke instead).
- *  `queued` means the forge took the merge but hasn't completed it — the PR is
- *  NOT merged yet. `cleanupWarning` carries the human-readable detail either
- *  way: on the merged path that the post-merge remote head-branch deletion
- *  failed (GitHub-only — GitLab and Bitbucket fold deletion into their atomic
- *  merge); on the queued path, what was queued. `null` = nothing to add. */
+ *  `queued` means the forge took the merge but it is not confirmed merged
+ *  (queued, waiting on its requirements, or GitHub hadn't reported it merged in
+ *  time), so it must not be treated as landed. `cleanupWarning` carries the
+ *  human-readable detail either way: on the merged path that the post-merge
+ *  remote head-branch deletion failed (GitHub-only — GitLab and Bitbucket fold
+ *  deletion into their atomic merge); on the queued path, why the merge isn't
+ *  confirmed and the branch was left. `null` = nothing to add. */
 export interface PrMergeOutcome {
   queued: boolean;
   cleanupWarning: string | null;

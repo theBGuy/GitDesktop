@@ -594,9 +594,10 @@ export function BranchRulesDialog({
                   >
                     You can still untick it for any merge. The setting doesn't
                     tick it for a {prNoun} from a fork, the default branch, a
-                    promotion branch, or a branch a rule blocks from deletion.
+                    promotion branch, an agent session's branch, or a branch a
+                    rule blocks from deletion.
                     {forgeChoiceLabel &&
-                      ` When the setting doesn't tick it, a ${prNoun} starts from its own delete choice on ${forgeChoiceLabel}.`}
+                      ` When the setting doesn't tick it, a ${prNoun} whose branch can be deleted starts from its own delete choice on ${forgeChoiceLabel}.`}
                   </p>
                 </section>
               )}

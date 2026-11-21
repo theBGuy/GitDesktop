@@ -59,6 +59,15 @@ type MergeTarget =
   | { kind: "remote"; number: number; host: string; prNoun: string }
   | { kind: "local" };
 
+/** Why the head can't be deleted from the dialog: a branch rule, or an
+ *  agent-session branch (reserved for Resume, never deleted). */
+export type DeleteBranchBlock = "rule" | "session";
+
+const DELETE_BLOCKED_SUFFIX: Record<DeleteBranchBlock, string> = {
+  rule: "protected by a branch rule",
+  session: "reserved for agent sessions",
+};
+
 interface MergePrDialogProps {
   open: boolean;
   onClose: () => void;
@@ -67,13 +76,13 @@ interface MergePrDialogProps {
   baseRefName: string;
   strategyLabel: string;
   /** Omitted = no delete-branch option (local PRs have none). `headIsDefault`
-   *  hides it (every forge refuses that delete); `blocked` (a branch rule)
-   *  shows it disabled. */
+   *  hides it (every forge refuses that delete); `blocked` names why it shows
+   *  disabled, null when it doesn't. */
   deleteBranch?: {
     checked: boolean;
     onChange: (v: boolean) => void;
     headIsDefault: boolean;
-    blocked: boolean;
+    blocked: DeleteBranchBlock | null;
   };
   pending: boolean;
   /** The host's own hold: offline (remote), the merge gate (local). */
@@ -392,11 +401,15 @@ function MergeDialogBody({
   const commits = plan.state === "ready" ? plan.defaults.commits : [];
   const two = commits.length > 1;
   const firstOpen = commits.find((c) => draft.rows[c.kind] !== undefined)?.kind;
-  // A branch rule's native disable outranks the pending hold.
+  // A blocked head's native disable outranks the pending hold.
   const deleteHold = useDisabledReason({
-    disabled: pending && deleteBranch?.blocked !== true,
+    disabled: pending && !deleteBranch?.blocked,
     reason: ACT_PENDING_REASON,
   });
+  // Base UI toggles a checkbox on a Space KEYUP with no keydown state, so the
+  // keyup of the Space that picked a menu item and opened the dialog would
+  // toggle the box focus landed on: only a Space pressed on the box toggles it.
+  const deleteSpaceDown = useRef(false);
   // The failure's "still here" line is true only while an open row still
   // differs from its default: a Reset makes it false.
   const anyEdited = commits.some((c) => {
@@ -467,7 +480,7 @@ function MergeDialogBody({
         return (
           <LabeledGroup label={ONE_ROW.caption} actions={<CaptionActions />}>
             <p className="flex min-h-6 items-center text-xs text-muted-foreground">
-              {offlineLine(host)}
+              <span className="min-w-0">{offlineLine(host)}</span>
             </p>
           </LabeledGroup>
         );
@@ -499,12 +512,17 @@ function MergeDialogBody({
       case "ready": {
         if (commits.length === 0) {
           const why = plan.defaults.reason;
+          // The text rides a min-w-0 item: as the row's anonymous flex item, a
+          // long unbroken branch name would set its min-content width past the
+          // scroller.
           return (
             <LabeledGroup label={ONE_ROW.caption} actions={<CaptionActions />}>
               <p className="flex min-h-6 items-center text-xs text-muted-foreground">
-                {why !== null
-                  ? NO_MESSAGE_LINE[why](headRefName, baseRefName)
-                  : null}
+                {why !== null ? (
+                  <span className="min-w-0">
+                    {NO_MESSAGE_LINE[why](headRefName, baseRefName)}
+                  </span>
+                ) : null}
               </p>
             </LabeledGroup>
           );
@@ -575,15 +593,16 @@ function MergeDialogBody({
         </div>
         {/* Deleting the head after merge is offered only when it's actually
           possible: never for the default branch (hidden: the forge refuses),
-          and disabled with a reason when a branch rule blocks its deletion.
+          and disabled with a reason when a branch rule blocks its deletion
+          or it is an agent-session branch.
           While the merge runs it is held readOnly, so focus and its reason
           stay. */}
         {deleteBranch !== undefined && !deleteBranch.headIsDefault && (
           <label
             className={cn(
               "flex items-start gap-2 text-xs text-muted-foreground",
-              deleteBranch.blocked && "opacity-70",
-              deleteBranch.blocked || deleteHold.blockedReason !== null
+              deleteBranch.blocked !== null && "opacity-70",
+              deleteBranch.blocked !== null || deleteHold.blockedReason !== null
                 ? "cursor-not-allowed"
                 : "cursor-pointer",
             )}
@@ -595,12 +614,12 @@ function MergeDialogBody({
               </span>
             )}
             <Checkbox
-              checked={deleteBranch.checked && !deleteBranch.blocked}
-              disabled={deleteBranch.blocked}
+              checked={deleteBranch.checked && deleteBranch.blocked === null}
+              disabled={deleteBranch.blocked !== null}
               readOnly={deleteHold.blockedReason !== null}
               // Set for both holds: an explicit prop replaces Base UI's own.
               aria-disabled={
-                deleteBranch.blocked ||
+                deleteBranch.blocked !== null ||
                 deleteHold.blockedReason !== null ||
                 undefined
               }
@@ -609,13 +628,28 @@ function MergeDialogBody({
               onCheckedChange={(checked) =>
                 deleteBranch.onChange(checked === true)
               }
+              onKeyDown={(e) => {
+                // A held Space's auto-repeat lands here too once focus moves.
+                if (e.key === " " && !e.repeat) deleteSpaceDown.current = true;
+              }}
+              onKeyUp={(e) => {
+                if (e.key !== " ") return;
+                if (!deleteSpaceDown.current) {
+                  e.preventDefault();
+                  e.preventBaseUIHandler();
+                }
+                deleteSpaceDown.current = false;
+              }}
+              onBlur={() => {
+                deleteSpaceDown.current = false;
+              }}
             />
             <span className="min-w-0">
               Delete {head} on the remote after merging
-              {deleteBranch.blocked && (
+              {deleteBranch.blocked !== null && (
                 <span className="text-warning">
                   {" "}
-                  — protected by a branch rule
+                  — {DELETE_BLOCKED_SUFFIX[deleteBranch.blocked]}
                 </span>
               )}
             </span>

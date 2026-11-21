@@ -502,9 +502,10 @@ export function RepoList({
       <ScrollArea
         className={cn(
           LIST_VIEWPORT_CLASS,
-          // The clip margin matches the vendored viewport's 3 px focus ring,
-          // so the ring still paints outside the clip.
-          "overflow-clip [overflow-clip-margin:3px]",
+          // The clip would cut the viewport's outset focus ring (WebKit has no
+          // overflow-clip-margin), so keyboard focus draws as an inset outline,
+          // which paints above the rows on every engine.
+          "overflow-clip **:data-[slot=scroll-area-viewport]:focus-visible:ring-0 **:data-[slot=scroll-area-viewport]:focus-visible:outline-2 **:data-[slot=scroll-area-viewport]:focus-visible:-outline-offset-2 **:data-[slot=scroll-area-viewport]:focus-visible:outline-solid **:data-[slot=scroll-area-viewport]:focus-visible:outline-ring/50",
         )}
         ref={listRef}
       >

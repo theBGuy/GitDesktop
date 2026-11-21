@@ -141,9 +141,10 @@ describe("Branch rules: After merging", () => {
       expect(hint?.textContent).toBe(
         "You can still untick it for any merge. The setting doesn't tick it " +
           "for a merge request from a fork, the default branch, a promotion " +
-          "branch, or a branch a rule blocks from deletion. When the setting " +
-          "doesn't tick it, a merge request starts from its own delete choice " +
-          "on GitLab.",
+          "branch, an agent session's branch, or a branch a rule blocks from " +
+          "deletion. When the setting " +
+          "doesn't tick it, a merge request whose branch can be deleted starts " +
+          "from its own delete choice on GitLab.",
       ),
     );
   });
@@ -163,7 +164,8 @@ describe("Branch rules: After merging", () => {
     expect(hint?.textContent).toBe(
       "You can still untick it for any merge. The setting doesn't tick it " +
         "for a pull request from a fork, the default branch, a promotion " +
-        "branch, or a branch a rule blocks from deletion.",
+        "branch, an agent session's branch, or a branch a rule blocks from " +
+        "deletion.",
     );
   });
 

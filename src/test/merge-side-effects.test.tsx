@@ -2,15 +2,26 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { forgeIssueList, forgeIssueView, gitFetch } from "@/lib/git/api";
+import {
+  forgeIssueList,
+  forgeIssueView,
+  forgePrView,
+  gitFetch,
+} from "@/lib/git/api";
 import {
   repoKeys,
   useIssueDetails,
   useIssueList,
   useMergePr,
+  usePrDetails,
 } from "@/lib/git/queries";
 import { LIST_RECHECK_MS } from "@/lib/git/queries/push-writes";
-import type { IssueDetails, IssueInfo, PrInfo } from "@/lib/git/types";
+import type {
+  IssueDetails,
+  IssueInfo,
+  PrDetails,
+  PrInfo,
+} from "@/lib/git/types";
 import { invoke } from "@/lib/tauri/invoke";
 
 // The merge write runs through the real hook and the real api function and is
@@ -25,6 +36,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   forgeIssueList: vi.fn(),
   forgeIssueView: vi.fn(),
+  forgePrView: vi.fn(),
   // A landed merge fetches unawaited, then re-reads the whole repo once more.
   gitFetch: vi.fn(async () => undefined),
 }));
@@ -35,13 +47,22 @@ let REPO = "";
 
 const clients: QueryClient[] = [];
 
-/** The only queued outcome the backend returns: queueing takes the stack path, and
- *  every queued result carries its cleanup warning. */
+/** A stacked enqueue, one of the queued outcomes the backend returns; every
+ *  queued result carries its cleanup warning. */
 const QUEUED_OUTCOME = {
   queued: true,
   cleanupWarning:
     "Merging #13 was queued on GitHub and will land when the queue completes.",
   stacked: true,
+};
+
+/** A plain merge GitHub accepted but hadn't reported merged within the confirm
+ *  wait: queued too, since it may be waiting in a merge queue. */
+const UNCONFIRMED_OUTCOME = {
+  queued: true,
+  cleanupWarning:
+    "GitHub accepted the merge of #13 but hasn't reported it merged yet, so the remote branch was left in place. It may be waiting in a merge queue.",
+  stacked: false,
 };
 
 beforeEach(() => {
@@ -54,6 +75,16 @@ beforeEach(() => {
   vi.mocked(forgeIssueList).mockImplementation(async () => [issueRow(3)]);
   vi.mocked(forgeIssueView).mockImplementation(
     async (_repo, number) => ({ number }) as unknown as IssueDetails,
+  );
+  vi.mocked(forgePrView).mockImplementation(
+    async (_repo, number) =>
+      ({
+        number,
+        state: "OPEN",
+        stack: null,
+        stackMembers: [],
+        membersUnknown: false,
+      }) as unknown as PrDetails,
   );
   vi.mocked(gitFetch).mockImplementation(async () => undefined);
 });
@@ -473,15 +504,21 @@ describe("a merge re-reads the lens's issues once more after a delay", () => {
     });
   });
 
-  it("a queued merge owes no issue re-read", async () => {
-    expect(await countAcrossDelay(QUEUED_OUTCOME)).toEqual({
-      result: { ...QUEUED_OUTCOME, cascaded: [] },
-      error: undefined,
-      list: 0,
-      origin: 0,
-      upstream: 0,
-    });
-  });
+  it.each([
+    ["a queued", QUEUED_OUTCOME],
+    ["an unconfirmed", UNCONFIRMED_OUTCOME],
+  ] as const)(
+    "%s merge re-reads the issue list and the lens's issue view once, like a landed one",
+    async (_, outcome) => {
+      expect(await countAcrossDelay(outcome)).toEqual({
+        result: { ...outcome, cascaded: [] },
+        error: undefined,
+        list: 1,
+        origin: 1,
+        upstream: 0,
+      });
+    },
+  );
 
   it("a rejected merge owes no issue re-read", async () => {
     const counts = await countAcrossDelay(
@@ -495,6 +532,81 @@ describe("a merge re-reads the lens's issues once more after a delay", () => {
       list: 0,
       origin: 0,
       upstream: 0,
+    });
+  });
+});
+
+describe("a queued merge re-reads the PR's details once more after a delay", () => {
+  /** The merge hook beside a mounted details view of the merged PR. */
+  async function mountWithDetails(
+    client: QueryClient,
+    lens: "origin" | "upstream",
+  ) {
+    const hook = renderHook(
+      () => ({
+        merge: useMergePr(REPO),
+        details: usePrDetails(REPO, 13, lens),
+      }),
+      { wrapper: wrapper(client) },
+    );
+    await flush();
+    return () => hook.result.current.merge;
+  }
+
+  const detailReads = () => vi.mocked(forgePrView).mock.calls.length;
+
+  /** The details reads inside the delayed window, split at its edge, and the
+   *  lens's rows once it has passed. */
+  async function readsAcrossDelay(
+    outcome: unknown,
+    lens: "origin" | "upstream" = "origin",
+  ) {
+    answerMerge(outcome);
+    const client = setup();
+    const mergeHook = await mountWithDetails(client, lens);
+    expect(detailReads()).toBe(1);
+    const { result } = await merge(mergeHook, 13, null, lens);
+    expect(wireCalls()).toHaveLength(1);
+    const settled = detailReads();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LIST_RECHECK_MS - 300);
+    });
+    const beforeEdge = detailReads() - settled;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    expect(wireCalls()).toHaveLength(1);
+    return {
+      result,
+      beforeEdge,
+      atEdge: detailReads() - settled - beforeEdge,
+      rows: statesOf(client.getQueryData(arrayPageKey(lens))),
+    };
+  }
+
+  it.each([
+    ["a queued", QUEUED_OUTCOME],
+    ["an unconfirmed", UNCONFIRMED_OUTCOME],
+  ] as const)(
+    "%s merge re-reads them once at the delay and files no row as merged",
+    async (_, outcome) => {
+      expect(await readsAcrossDelay(outcome)).toEqual({
+        result: { ...outcome, cascaded: [] },
+        beforeEdge: 0,
+        atEdge: 1,
+        rows: { 11: "OPEN", 12: "OPEN", 13: "OPEN", 20: "OPEN" },
+      });
+    },
+  );
+
+  // Upstream, where no run recheck re-reads the checks rollup at the same delay.
+  it("a landed merge leaves its details to the landed mark", async () => {
+    const landed = { queued: false, cleanupWarning: null, stacked: false };
+    expect(await readsAcrossDelay(landed, "upstream")).toEqual({
+      result: { ...landed, cascaded: [] },
+      beforeEdge: 0,
+      atEdge: 0,
+      rows: { 11: "OPEN", 12: "OPEN", 13: "MERGED", 20: "OPEN" },
     });
   });
 });

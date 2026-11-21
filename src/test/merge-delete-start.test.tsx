@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -82,6 +83,25 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
     throw new Error("not read");
   }),
   gitConflictPreview: vi.fn(async () => {
+    throw new Error("not read");
+  }),
+  // Side reads the view makes that no test here asserts on.
+  forgePrListPage: vi.fn(async () => {
+    throw new Error("not read");
+  }),
+  forgeRepoLabels: vi.fn(async () => {
+    throw new Error("not read");
+  }),
+  ghItemProjects: vi.fn(async () => {
+    throw new Error("not read");
+  }),
+  ghPrBaseDivergence: vi.fn(async () => {
+    throw new Error("not read");
+  }),
+  ghTokenScopes: vi.fn(async () => {
+    throw new Error("not read");
+  }),
+  gitRemoteUrl: vi.fn(async () => {
     throw new Error("not read");
   }),
   gitFindRemotePrResolve: vi.fn(async () => null),
@@ -248,7 +268,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   prOver = {};
   vi.mocked(invoke).mockReset();
+  // Recorded as well as thrown: React Query swallows the rejection of a read,
+  // so only the afterAll check would see an unexpected one.
   vi.mocked(invoke).mockImplementation(async (cmd) => {
+    unmockedCommands.push(cmd);
     throw new Error(`unexpected wire call: ${cmd}`);
   });
   vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
@@ -316,6 +339,10 @@ const settle = () => act(() => new Promise((r) => setTimeout(r, 30)));
 
 const wireCalls = () => vi.mocked(invoke).mock.calls;
 
+// Only the immediate merge and the auto-merge arm carry a strategy, so "not the
+// arm" pins the immediate merge without naming its state-write command here.
+const AUTO_MERGE_ARM = "forge_gl_mr_auto_merge";
+
 /** The first payload the wire saw carrying a strategy (a merge or an arm). */
 const strategyCall = () =>
   wireCalls().find(
@@ -364,6 +391,8 @@ async function confirmMerge(
   });
   await user.click(within(dialog).getByRole("button", { name: label }));
   await waitFor(() => expect(strategyCall()).toBeDefined());
+  // The command too: an auto-merge arm carries the same payload.
+  expect(strategyCall()?.[0]).not.toBe(AUTO_MERGE_ARM);
   return strategyCall()?.[1] as Record<string, unknown>;
 }
 
@@ -569,6 +598,7 @@ describe("merge dialog: the delete checkbox's start", () => {
     );
     await within(dialog).findByRole("alert");
     await settle();
+    expect(strategyCall()?.[0]).not.toBe(AUTO_MERGE_ARM);
     expect(strategyCall()?.[1]).toMatchObject({ deleteBranch: false });
     await cancel(user);
     const reopened = await openMerge(user);
@@ -595,18 +625,101 @@ describe("merge dialog: the delete checkbox's start", () => {
     expect(args.deleteBranch).toBe(false);
   });
 
-  // A19: the switch's own reset (closePerPrDialogs) is not what this pins; an
-  // untick on one PR must not carry into the next PR's open.
-  it("A19 the first open after a pull request switch re-seeds the box for the new pull request", async () => {
+  it("A17b a head a rule blocked after the open stays unticked once the rule is removed", async () => {
     vi.mocked(loadBranchRules).mockResolvedValue(PREF_ON);
     prOver = { crossRepository: false };
     const user = userEvent.setup();
     const view = mount();
     const dialog = await openMerge(user);
+    expect(box(dialog)).toBeChecked();
+    const reread = () =>
+      act(() =>
+        view.client.invalidateQueries({
+          queryKey: sharedBranchRulesOptions(REPO).queryKey,
+        }),
+      );
+    vi.mocked(loadSharedBranchRules).mockResolvedValue(BLOCKED_FEAT);
+    await reread();
+    await waitFor(() =>
+      expect(box(dialog)).toHaveAttribute("aria-disabled", "true"),
+    );
+    vi.mocked(loadSharedBranchRules).mockResolvedValue(EMPTY_BRANCH_RULES);
+    await reread();
+    await waitFor(() =>
+      expect(box(dialog)).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(box(dialog)).not.toBeChecked();
+    const args = await confirmMerge(user, dialog);
+    expect(args.deleteBranch).toBe(false);
+  });
+
+  it("A15c a forge-ticked head the default read hides stays unticked when the default moves to another branch", async () => {
+    vi.mocked(forgeStatus).mockResolvedValue(GITLAB);
+    const def = deferred<string | null>();
+    vi.mocked(gitDefaultBranch).mockReturnValue(def.promise);
+    prOver = { deleteSourceBranch: true };
+    const user = userEvent.setup();
+    const view = mount();
+    const dialog = await openMerge(user);
+    expect(box(dialog)).toBeChecked();
+    await act(async () => def.resolve("feat"));
+    await waitFor(() =>
+      expect(
+        within(dialog).queryByRole("checkbox", { name: /Delete feat/ }),
+      ).toBeNull(),
+    );
+    vi.mocked(gitDefaultBranch).mockResolvedValue("main");
+    await act(() =>
+      view.client.invalidateQueries({
+        queryKey: ["repo", REPO, "default-branch"],
+        exact: true,
+      }),
+    );
+    expect(await within(dialog).findByRole("checkbox")).not.toBeChecked();
+    const args = await confirmMerge(user, dialog);
+    expect(args.deleteBranch).toBe(false);
+  });
+
+  it("an agent-session head is held unticked with its reason, whatever the setting and the forge's flag", async () => {
+    vi.mocked(forgeStatus).mockResolvedValue(GITLAB);
+    vi.mocked(loadBranchRules).mockResolvedValue(PREF_ON);
+    const head = "gd/session/x";
+    prOver = {
+      headRefName: head,
+      crossRepository: false,
+      deleteSourceBranch: true,
+    };
+    const user = userEvent.setup();
+    mount();
+    const dialog = await openMerge(user);
+    const held = box(dialog, head);
+    expect(held).not.toBeChecked();
+    expect(held).toHaveAttribute("aria-disabled", "true");
+    expect(held).toHaveAccessibleName(/— reserved for agent sessions$/);
+    const args = await confirmMerge(user, dialog);
+    expect(args.deleteBranch).toBe(false);
+  });
+
+  // A19: the switch's own reset (closePerPrDialogs) is not what this pins: each
+  // open after a switch seeds from the pull request it opens on, never from the
+  // previous one's details or the box's last state.
+  it("A19 the first open after a pull request switch re-seeds the box for the new pull request", async () => {
+    vi.mocked(forgeStatus).mockResolvedValue(GITLAB);
+    vi.mocked(forgePrView).mockImplementation(async (_repo, number) => ({
+      ...pr(number),
+      deleteSourceBranch: number === 7,
+    }));
+    const user = userEvent.setup();
+    const view = mount();
+    const dialog = await openMerge(user);
+    expect(box(dialog)).toBeChecked();
     await user.click(box(dialog));
     expect(box(dialog)).not.toBeChecked();
     view.show(8);
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(box(await openMerge(user))).not.toBeChecked();
+    await cancel(user);
+    view.show(7);
     expect(box(await openMerge(user))).toBeChecked();
   });
 
@@ -629,4 +742,43 @@ describe("merge dialog: the delete checkbox's start", () => {
     expect(strategyCall()).toBeUndefined();
     expect(screen.getByRole("dialog")).toBe(dialog);
   });
+
+  // The menu item activates on the Space keydown; its keyup lands on the box
+  // the dialog focused, which Base UI would read as a press of the box.
+  for (const ticked of [true, false]) {
+    it(`the Space that picks the menu item leaves a ${ticked ? "ticked" : "unticked"} box as it started; a Space pressed on the box toggles it`, async () => {
+      if (ticked) vi.mocked(loadBranchRules).mockResolvedValue(PREF_ON);
+      prOver = { crossRepository: false, deleteSourceBranch: null };
+      // The defaults stay loading, so the box is the dialog's first stop.
+      vi.mocked(forgePrMergeMessageDefaults).mockReturnValue(
+        new Promise(() => undefined),
+      );
+      const user = userEvent.setup();
+      mount();
+      const trigger = await screen.findByRole(
+        "button",
+        { name: "Merge" },
+        { timeout: 3000 },
+      );
+      await waitFor(() =>
+        expect(trigger).not.toHaveAttribute("aria-disabled", "true"),
+      );
+      await user.click(trigger);
+      const item = await screen.findByRole("menuitem", {
+        name: "Squash and merge",
+      });
+      act(() => item.focus());
+      await user.keyboard("[Space>]");
+      const dialog = await screen.findByRole("dialog");
+      await waitFor(() => expect(box(dialog)).toHaveFocus());
+      expect(box(dialog).getAttribute("aria-checked")).toBe(String(ticked));
+      // The held key's auto-repeat now lands on the box.
+      fireEvent.keyDown(box(dialog), { key: " ", code: "Space", repeat: true });
+      await user.keyboard("[/Space]");
+      await settle();
+      expect(box(dialog).getAttribute("aria-checked")).toBe(String(ticked));
+      await user.keyboard(" ");
+      expect(box(dialog).getAttribute("aria-checked")).toBe(String(!ticked));
+    });
+  }
 });
