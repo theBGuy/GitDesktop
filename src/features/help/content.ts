@@ -3975,8 +3975,8 @@ empty for your account's default. The agent works in an **isolated git worktree*
 throwaway branch (\`gd/session/…\`) that never touches your working tree, and commits a
 **checkpoint** each turn. It works in the open: the conversation shows a **step-by-step
 transcript** of each file it reads, edits, searches, and command it runs, interleaved
-with its narration. If an opencode conversation can't be continued, the turn starts a
-fresh one and the timeline says so.
+with its narration. When GitDesktop can tell an opencode conversation can't be
+continued, the turn starts a fresh one and the timeline says so.
 **Expand any edit step** to see that file's diff inline, watch its
 **live changes** mid-turn, or read the cumulative diff under **Changes**. If a step's diff
 fails to refresh, the last one stays with a line saying it couldn't refresh and a

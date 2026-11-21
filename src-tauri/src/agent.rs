@@ -1652,12 +1652,13 @@ struct OpencodeFacts {
     /// then kept only to tell whether the next probe changed the answer. A refusal is
     /// never remembered, since its sentence tells the user to upgrade and try again.
     cli: HashMap<BinaryIdentity, (crate::opencode2::Cli, Instant)>,
-    /// Binaries whose DiffOnly lock a read-back confirmed; their later DiffOnly runs
-    /// skip the read-back. A probe answering anything but the remembered version drops
-    /// the binary's entry.
-    diff_only_proven: HashSet<BinaryIdentity>,
+    /// Binaries whose DiffOnly lock a read-back confirmed, each with the version it was
+    /// confirmed on; their later DiffOnly runs on that version skip the read-back. A
+    /// probe answering anything but the remembered version drops the binary's entry.
+    diff_only_proven: HashMap<BinaryIdentity, crate::opencode2::Version>,
     /// The last model catalog read, with its binary and when it was read; it is read
-    /// again for another binary or after `OPENCODE2_CATALOG_TTL`.
+    /// again for another binary, after `OPENCODE2_CATALOG_TTL`, or once a probe answers
+    /// another version.
     catalog: Option<(BinaryIdentity, Instant, Arc<crate::opencode2::ModelCatalog>)>,
 }
 
@@ -1667,6 +1668,16 @@ impl OpencodeFacts {
         self.diff_only_proven.clear();
         self.catalog = None;
     }
+}
+
+/// Whether a review on `version` may skip its DiffOnly read-back: only a proof made on
+/// that same version of the binary counts.
+fn diff_only_proven(
+    facts: &OpencodeFacts,
+    identity: Option<&BinaryIdentity>,
+    version: crate::opencode2::Version,
+) -> bool {
+    identity.is_some_and(|id| facts.diff_only_proven.get(id) == Some(&version))
 }
 
 /// Remembered binaries are forgotten before an insert past this many.
@@ -1775,9 +1786,13 @@ where
             (store.cli.get(&id), &verdict),
             (Some((known, _)), OpencodeVerdict::Supported(cli)) if known == cli
         );
-        // A DiffOnly proof holds only for the version it was made on.
+        // A DiffOnly proof and a model catalog are facts about one version of the binary,
+        // so a probe answering another version forgets both.
         if !unchanged {
             store.diff_only_proven.remove(&id);
+            if matches!(&store.catalog, Some((known, ..)) if *known == id) {
+                store.catalog = None;
+            }
         }
         match &verdict {
             OpencodeVerdict::Supported(cli) => {
@@ -1870,6 +1885,8 @@ const NO_SIGN_INS: &str = "This computer's opencode has no sign-ins to copy into
 
 const SIGN_INS_UNCHECKED: &str = "GitDesktop could not check this computer's opencode version, so this session has only the sign-ins from opencode 1.x's sign-in file, if there is one. Start a new session to try the copy again.";
 
+const SIGN_INS_HOST_REFUSED: &str = "GitDesktop can't run this computer's opencode version, so this session has only the sign-ins from opencode 1.x's sign-in file, if there is one. After you change opencode, start a new session to try the copy again.";
+
 /// How a container turn brings the host's sign-ins into its home.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SignInRoute {
@@ -1881,12 +1898,16 @@ enum SignInRoute {
 
 /// Only an opencode 2 host exports; any other verdict, or no host binary, copies. A
 /// version check that could not run also copies, and says so on a fresh home: that
-/// turn's database fixes the session's sign-ins, so no later turn exports.
+/// turn's database fixes the session's sign-ins, so no later turn exports. A refused
+/// version copies and says so on a fresh home for the same reason.
 fn opencode2_sign_in_route(verdict: Option<&OpencodeVerdict>, fresh: bool) -> SignInRoute {
     match verdict {
         Some(OpencodeVerdict::Supported(crate::opencode2::Cli::V2(_))) => SignInRoute::Export,
         Some(OpencodeVerdict::ProbeFailed(_)) if fresh => {
             SignInRoute::Copy(Some(SIGN_INS_UNCHECKED))
+        }
+        Some(OpencodeVerdict::Refused(_)) if fresh => {
+            SignInRoute::Copy(Some(SIGN_INS_HOST_REFUSED))
         }
         _ => SignInRoute::Copy(None),
     }
@@ -1961,9 +1982,9 @@ fn capture_command(req: &CaptureRequest<'_>) -> Command {
     cmd
 }
 
-/// Runs `req` to its exit, its timeout or its cancel. A timeout, a cancel, a failed read
-/// and output past `MAX_CAPTURE_BYTES` kill the whole tree and leave the guard armed;
-/// only an exit reaped by `child.wait()` disarms it. Neither stream reaches an error.
+/// Runs `req` to its exit, timeout or cancel. An exit disarms the guard; anything else
+/// kills the whole tree, and on unix a leader reaped after the kill disarms too, since an
+/// armed guard could signal a recycled group. Neither stream reaches an error.
 async fn capture_tree(req: CaptureRequest<'_>) -> AppResult<Captured> {
     // The run that follows sanitizes against the same landed shell PATH; a request without
     // a cancel waits watching one that never fires.
@@ -2026,6 +2047,9 @@ async fn capture_tree(req: CaptureRequest<'_>) -> AppResult<Captured> {
     };
     kill_process_tree(&mut child, &tree);
     let _ = tokio::time::timeout(CHILD_REAP_GRACE, child.wait()).await;
+    if tree_guard_disarms(cfg!(unix), child.id().is_none(), true, true) {
+        tree.disarm();
+    }
     failed
 }
 
@@ -6747,11 +6771,9 @@ async fn opencode2_review(
     let result = async {
         let servers: Vec<&str> = self_specs.iter().map(|s| s.name.as_str()).collect();
         let inherited_content = opencode2_inherited_content(mcp_config_path.as_deref());
-        let diff_only_proven = identity.as_ref().is_some_and(|id| {
-            opencode_facts()
-                .lock()
-                .is_ok_and(|facts| facts.diff_only_proven.contains(id))
-        });
+        let diff_only_proven = opencode_facts()
+            .lock()
+            .is_ok_and(|facts| diff_only_proven(&facts, identity.as_ref(), version));
         let inputs = Opencode2Inputs {
             turn: Opencode2Turn::Review {
                 version,
@@ -6810,7 +6832,7 @@ async fn opencode2_review(
         );
         if read_back && diff_only {
             if let (Some(id), Ok(mut facts)) = (identity, opencode_facts().lock()) {
-                facts.diff_only_proven.insert(id);
+                facts.diff_only_proven.insert(id, version);
             }
         }
         if opencode2_cancel_fired(&cancel) {
@@ -9776,8 +9798,19 @@ opencode/x-preview-f-free
         let id = binary_identity(&bin).expect("an identity");
         let facts = Mutex::new(OpencodeFacts::default());
         let probes = std::sync::atomic::AtomicUsize::new(0);
-        let proven = || facts.lock().unwrap().diff_only_proven.contains(&id);
-        let prove = || facts.lock().unwrap().diff_only_proven.insert(id.clone());
+        let Ok(crate::opencode2::Cli::V2(version)) =
+            crate::opencode2::classify_version("opencode v2.3.2")
+        else {
+            panic!("2.x");
+        };
+        let proven = || facts.lock().unwrap().diff_only_proven.contains_key(&id);
+        let prove = || {
+            facts
+                .lock()
+                .unwrap()
+                .diff_only_proven
+                .insert(id.clone(), version)
+        };
 
         let mut now = Instant::now();
         verdict_probing(&bin, &facts, now, &probes, printed("opencode v2.3.2")).await;
@@ -9796,6 +9829,71 @@ opencode/x-preview-f-free
             assert!(!proven(), "{verdict:?} kept the proof");
         }
         assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 5);
+    }
+
+    /// A catalog is a fact about one version too: a probe answering another version of
+    /// its binary forgets it, the same version keeps it, and another binary's survives.
+    #[tokio::test]
+    async fn opencode_verdict_change_drops_its_binarys_catalog() {
+        let printed = |text: &str| VersionProbe::Printed(text.to_string());
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bin = dir.path().join("opencode");
+        let other_bin = dir.path().join("opencode-other");
+        std::fs::write(&bin, b"1").unwrap();
+        std::fs::write(&other_bin, b"22").unwrap();
+        let id = binary_identity(&bin).expect("an identity");
+        let other = binary_identity(&other_bin).expect("an identity");
+        let facts = Mutex::new(OpencodeFacts::default());
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+        let remember = |of: &BinaryIdentity| {
+            facts.lock().unwrap().catalog = Some((of.clone(), Instant::now(), Arc::default()));
+        };
+        let remembered = || {
+            let store = facts.lock().unwrap();
+            store.catalog.as_ref().map(|(known, ..)| known.clone())
+        };
+
+        let mut now = Instant::now();
+        verdict_probing(&bin, &facts, now, &probes, printed("opencode v2.3.2")).await;
+        remember(&id);
+        now += OPENCODE_VERDICT_TTL;
+        verdict_probing(&bin, &facts, now, &probes, printed("opencode v2.3.2")).await;
+        assert_eq!(remembered(), Some(id.clone()), "the same version keeps it");
+        now += OPENCODE_VERDICT_TTL;
+        verdict_probing(&bin, &facts, now, &probes, printed("opencode v2.4.0")).await;
+        assert_eq!(remembered(), None, "another version forgets it");
+        remember(&other);
+        now += OPENCODE_VERDICT_TTL;
+        verdict_probing(&bin, &facts, now, &probes, printed("opencode v2.3.2")).await;
+        assert_eq!(remembered(), Some(other), "another binary's survives");
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    /// A proof names the version it was made on: a run on another version of the same
+    /// binary reads it as unproven, whatever the verdict cache holds.
+    #[test]
+    fn diff_only_proof_holds_only_for_its_version() {
+        let version = |text: &str| match crate::opencode2::classify_version(text) {
+            Ok(crate::opencode2::Cli::V2(version)) => version,
+            other => panic!("{other:?}"),
+        };
+        let (old, new) = (version("opencode v2.3.2"), version("opencode v2.4.0"));
+        let id = BinaryIdentity {
+            path: PathBuf::from("opencode"),
+            len: 1,
+            modified: None,
+        };
+        let other = BinaryIdentity {
+            len: 2,
+            ..id.clone()
+        };
+        let mut facts = OpencodeFacts::default();
+        assert!(!diff_only_proven(&facts, Some(&id), old));
+        facts.diff_only_proven.insert(id.clone(), old);
+        assert!(diff_only_proven(&facts, Some(&id), old));
+        assert!(!diff_only_proven(&facts, Some(&id), new));
+        assert!(!diff_only_proven(&facts, Some(&other), old));
+        assert!(!diff_only_proven(&facts, None, old));
     }
 
     #[test]
@@ -9830,7 +9928,10 @@ opencode/x-preview-f-free
         };
         let cli = crate::opencode2::classify_version("opencode v2.3.2").expect("2.x");
         facts.cli.insert(id.clone(), (cli, Instant::now()));
-        facts.diff_only_proven.insert(id.clone());
+        let crate::opencode2::Cli::V2(version) = cli else {
+            panic!("2.x");
+        };
+        facts.diff_only_proven.insert(id.clone(), version);
         facts.catalog = Some((id, Instant::now(), Arc::default()));
         facts.clear();
         assert!(facts.cli.is_empty());
@@ -11493,9 +11594,11 @@ opencode/x-preview-f-free
                 route(Some(&OpencodeVerdict::Supported(v1))),
                 SignInRoute::Copy(None)
             );
+            // A refused version copies, and tells only a fresh home why.
             assert_eq!(
                 route(Some(&OpencodeVerdict::Refused(refusal.clone()))),
-                SignInRoute::Copy(None)
+                SignInRoute::Copy(fresh.then_some(SIGN_INS_HOST_REFUSED)),
+                "{fresh}"
             );
             assert_eq!(route(None), SignInRoute::Copy(None));
             // A probe that could not run copies, and tells only a fresh home why.
@@ -14591,6 +14694,34 @@ opencode/x-preview-f-free
             ),
             "9",
         );
+    }
+
+    /// capture_tree's forced end: the tree kill, the bounded reap, then the guard's one
+    /// decision with no await since the reap, so a reaped unix leader disarms.
+    const CAPTURE_FORCED_END: &str = "kill_process_tree(&mutchild,&tree);let_=tokio::time::timeout(CHILD_REAP_GRACE,child.wait()).await;iftree_guard_disarms(cfg!(unix),child.id().is_none(),true,true){tree.disarm();}failed";
+
+    #[test]
+    fn capture_tree_forced_end_is_pinned() {
+        let body = stripped_fn_body(include_str!("agent.rs"), "async fn capture_tree(")
+            .expect("capture_tree's body");
+        let pinned = |b: &str| {
+            b.ends_with(CAPTURE_FORCED_END) && b.matches("tree_guard_disarms(").count() == 1
+        };
+        assert!(pinned(&body), "{body}");
+        let decision =
+            "iftree_guard_disarms(cfg!(unix),child.id().is_none(),true,true){tree.disarm();}";
+        for mutant in [
+            body.replacen(decision, "", 1),
+            body.replacen(
+                decision,
+                &format!("tokio::task::yield_now().await;{decision}"),
+                1,
+            ),
+            body.replacen("child.id().is_none()", "true", 1),
+        ] {
+            assert_ne!(mutant, body);
+            assert!(!pinned(&mutant), "{mutant}");
+        }
     }
 
     /// kill_process_tree's body as its pin reads it.

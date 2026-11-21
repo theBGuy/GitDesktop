@@ -45,10 +45,11 @@
 // The two host dispatches read their Cli from opencode_cli(..).await?, whose `?`
 // is the refusal; classify_version is called once, in opencode_verdict_with; the
 // container entry's first call is its image gate; agent.rs names core items only
-// as crate::opencode2::… (no use, no alias, no other path). A path-qualified name
-// (crate::opencode2::review_env) is another module's and never counts as the
-// 1.x call. Out of reach, besides the shapes above: what the opencode2_* bodies
-// do with their inputs, which N4-N11 and N13 take over.
+// as crate::opencode2::… (no use, no alias, no other path). Only that spelling
+// (crate::opencode2::review_env) is core's and never counts as the 1.x call; any
+// other path (self::, super::) counts as the bare name. Out of reach, besides
+// the shapes above: what the opencode2_* bodies do with their inputs, which
+// N4-N11 and N13 take over.
 //
 // N4-N11 hold the lock of every wired opencode 2 run: core's three lock producers
 // (probe_document, read_back, lock_document) are called once each, in
@@ -232,6 +233,8 @@ const CONTAINER_ENV =
 const HOST_ENV =
   "let host_extra_env: Vec<(&str, String)> = if kind == AgentKind::Opencode {";
 const RESEARCH = "let opencode_research = kind == AgentKind::Opencode && web";
+/** The one path that names core's fn rather than this file's. */
+const CORE_PATH = "crate::opencode2::";
 /** The container OPENCODE_CONFIG, compared in source text: its "opencode" key is a
  *  string literal, which the masked view blanks. */
 const CONTAINER_CONFIG =
@@ -256,8 +259,8 @@ function checkPinCallSites(text) {
     const line = lineAt(m.index);
     if (/\bfn\s+$/.test(masked.slice(Math.max(0, m.index - 8), m.index)))
       continue;
-    // A path-qualified name is another module's fn (crate::opencode2::review_env).
-    if (masked.slice(Math.max(0, m.index - 2), m.index) === "::") continue;
+    // Only crate::opencode2:: names core's fn; any other path is this file's.
+    if (masked.endsWith(CORE_PATH, m.index)) continue;
     const rest = masked.slice(m.index + m[0].length);
     const paren = /^\s*\(/.exec(rest);
     if (!paren) {
@@ -2083,6 +2086,30 @@ test("N0: a path-qualified review_env is another module's, never the 1.x call", 
     [
       "N8: crate::opencode2::review_env( must be called once in production, in opencode2_compose, with config_path first, saw 2",
     ],
+  );
+});
+
+test("N0: any other path names this file's fn, so it is counted", () => {
+  const review = checkPinCallSites(
+    mutate(
+      (t) =>
+        `${t}\nfn planted2(k: AgentKind) { let _ = self::review_env(k, true, None, &[]); }\n`,
+    ),
+  );
+  assert.ok(
+    review.some((p) =>
+      p.startsWith("expected 1 production review_env call, saw 2"),
+    ),
+    review.join("\n"),
+  );
+  const mention = checkPinCallSites(
+    mutate((t) => `${t}\nconst F: fn() = self::opencode_session_env;\n`),
+  );
+  assert.ok(
+    mention.some((p) =>
+      p.includes("mentions opencode_session_env without calling"),
+    ),
+    mention.join("\n"),
   );
 });
 

@@ -1683,8 +1683,8 @@ one grep away on the named symbol. Grows via Conventions-sync.
   path, model and isolation its run will pass. Unavailable levels stay listed
   and disabled with one reason line, a stored level is kept, and a
   Select-based picker marks a blocked level in its option text (the vendored
-  Select does not skip a disabled item on arrow keys). A new picker joins the
-  set that `git grep -E "EFFORT_LEVELS|EFFORT_LEVEL_LABELS|REVIEW_EFFORTS" -- src`
+  Select does not skip a disabled item on arrow keys). A new picker joins the set
+  that `git grep -E "EFFORT_LEVELS|EFFORT_LEVEL_LABELS|REVIEW_EFFORTS" -- src`
   closes.
 
 ## Rust / Tauri conventions
