@@ -1510,18 +1510,19 @@ mod tests {
         }
         assert!(hooks.starts_with(base), "{hooks:?} under {base:?}");
         assert!(outside.starts_with(base), "{outside:?} under {base:?}");
-        for path in [hooks, outside] {
-            let shown = path.to_string_lossy();
-            // make_junction quotes the paths; cmd still expands `%VAR%` inside quotes.
-            if shown.contains('%') {
-                eprintln!("skipped: temp path carries a `%` cmd would expand: {shown}");
-                return None;
-            }
-        }
-        assert!(cfg!(windows), "junctions are made only on Windows");
-        #[cfg(windows)]
+        make_hooks_junction(hooks, outside)
+    }
+
+    #[cfg(windows)]
+    fn make_hooks_junction(hooks: &Path, outside: &Path) -> Option<()> {
         crate::test_junction::make_junction(hooks, outside);
         Some(())
+    }
+
+    /// Only the Windows tests ask for a junction.
+    #[cfg(not(windows))]
+    fn make_hooks_junction(_hooks: &Path, _outside: &Path) -> Option<()> {
+        unreachable!("junctions are made only on Windows")
     }
 
     /// Installs, then moves `.git/hooks` (hook and all) to `<base>/outside` and links

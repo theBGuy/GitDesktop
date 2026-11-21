@@ -2437,10 +2437,10 @@ mod tests {
         assert_eq!(undo_snapshot(&repo).await, before, "nothing moved");
     }
 
-    /// A remote-tracking tip whose object is missing can't be read, so the any-remote
-    /// probe refuses rather than read the skipped ref as "not pushed": on a branch with
-    /// no upstream, and on one whose upstream is that tip (it fails to verify, so it
-    /// reads as gone and falls back to the same probe).
+    /// A remote-tracking tip whose object is missing can't be read, so the probe refuses
+    /// rather than read the skipped ref as "not pushed": on a branch with no upstream (the
+    /// any-remote probe), and on one whose upstream is that tip (`upstream_tip`'s
+    /// `for-each-ref` exits 128 on the missing object).
     #[tokio::test]
     async fn gui_undo_refuses_when_a_remote_tracking_tip_is_missing() {
         for with_upstream in [false, true] {

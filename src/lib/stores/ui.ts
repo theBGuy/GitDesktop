@@ -51,7 +51,7 @@ function isOverlayView(v: AppView): v is OverlayView {
   return v in OVERLAY_VIEWS;
 }
 /** Why History offers no single commit for Edit dates: several are selected,
- *  or a search filters the list. */
+ *  or Search all history is searching. */
 export type HistoryDatesHold = "multi-select" | "search";
 
 export type RepoTab =

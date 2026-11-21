@@ -629,10 +629,11 @@ function pinMarkerScanTimeout(rust, ts = MARKER_SCAN_TIMED_OUT) {
   const rustConst = RUST_SCAN_TIMED_OUT.exec(rust);
   assert.ok(rustConst, "conflict.rs must declare MARKER_SCAN_TIMED_OUT");
   assert.equal(ts, rustConst[1]);
-  assert.match(
-    rust,
-    /std::io::ErrorKind::TimedOut,\s*MARKER_SCAN_TIMED_OUT,\s*\)/,
-    "the scan must raise its timeout through MARKER_SCAN_TIMED_OUT",
+  assert.equal(
+    rust.match(/std::io::ErrorKind::TimedOut,\s*MARKER_SCAN_TIMED_OUT,\s*\)/g)
+      ?.length ?? 0,
+    2,
+    "scan_markers and run_blocking_bounded must each raise their timeout through MARKER_SCAN_TIMED_OUT",
   );
   assert.equal(rust.split(`"${rustConst[1]}"`).length - 1, 1);
   assert.match(
@@ -664,6 +665,19 @@ test("the marker scan's timeout twin matches the backend's sentence", () => {
         'std::io::ErrorKind::TimedOut,\n                "file took too long to check for conflict markers",',
       ),
     ),
+  );
+  // A swapped sentence at the run_blocking_bounded site (12-space indent) alone,
+  // which the scan_markers site's match would otherwise cover.
+  assert.throws(
+    () =>
+      pinMarkerScanTimeout(
+        mutate(
+          rust,
+          "std::io::ErrorKind::TimedOut,\n            MARKER_SCAN_TIMED_OUT,",
+          'std::io::ErrorKind::TimedOut,\n            "file took too long to scan for conflict markers",',
+        ),
+      ),
+    /scan_markers and run_blocking_bounded/,
   );
   assert.throws(() =>
     pinMarkerScanTimeout(
