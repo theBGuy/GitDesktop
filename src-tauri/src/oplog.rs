@@ -1698,19 +1698,7 @@ pub(crate) mod tests {
     /// symlink on unix.
     fn dir_link(target: &Path, link: &Path) {
         #[cfg(windows)]
-        {
-            let made = std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J"])
-                .arg(link)
-                .arg(target)
-                .output()
-                .expect("run mklink");
-            assert!(
-                made.status.success(),
-                "mklink /J failed: {}",
-                String::from_utf8_lossy(&made.stderr)
-            );
-        }
+        crate::test_junction::make_junction(link, target);
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
     }

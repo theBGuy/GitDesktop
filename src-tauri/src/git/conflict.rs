@@ -510,11 +510,13 @@ pub async fn git_conflict_marker_scan(repo_path: String, path: String) -> AppRes
     let path = conflict_rel_path(&path)?;
     refuse_linked_path(&repo_path, &path, true).await?;
     let full = Path::new(&repo_path).join(&path);
-    let scan = tauri::async_runtime::spawn_blocking(move || {
-        scan_markers(std::fs::File::open(full)?, MARKER_SCAN_CHUNK, deadline)
+    let bound = deadline.saturating_duration_since(std::time::Instant::now()) + MARKER_SCAN_GRACE;
+    let scan = run_blocking_bounded(bound, move || {
+        scan_markers(std::fs::File::open(full)?, MARKER_SCAN_CHUNK, || {
+            std::time::Instant::now() >= deadline
+        })
     })
-    .await
-    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+    .await;
     match scan {
         Ok((markers, binary)) => Ok(MarkerScan {
             exists: true,
@@ -538,6 +540,28 @@ const MARKER_SCAN_BUDGET: std::time::Duration = std::time::Duration::from_secs(3
 
 const MARKER_SCAN_TIMED_OUT: &str = "file took too long to check for conflict markers";
 
+/// How long past its budget the command waits on a scan, so the scan's own deadline
+/// check answers first whenever its reads return.
+const MARKER_SCAN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Runs `work` on the blocking pool and answers `TimedOut` (the scan's own error) once
+/// `bound` passes, since the scan's deadline is checked only between reads and an open or
+/// read that stalls never reaches it. The stalled thread can't be cancelled and finishes
+/// on its own.
+async fn run_blocking_bounded<T: Send + 'static>(
+    bound: std::time::Duration,
+    work: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<T> {
+    let handle = tauri::async_runtime::spawn_blocking(work);
+    match tokio::time::timeout(bound, handle).await {
+        Ok(joined) => joined.map_err(|e| std::io::Error::other(e.to_string()))?,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            MARKER_SCAN_TIMED_OUT,
+        )),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ScanLine {
     /// The next byte starts a line.
@@ -555,8 +579,9 @@ enum ScanLine {
 /// Whether the bytes hold a conflict marker, or `(false, true)` when they hold a
 /// NUL anywhere (the sides read's binary test), which ends the scan. Reads
 /// `chunk` bytes at a time, carrying state across chunk edges, and errs
-/// `TimedOut` once `deadline` has passed, checked before every read (the first
-/// included, so an expired deadline reads nothing).
+/// `TimedOut` once `deadline_passed` answers true, asked before every read (the
+/// first included, so an expired deadline reads nothing). The check is injected
+/// so tests pin where it runs without racing a clock.
 ///
 /// Mirrors `hasConflictMarkers` (conflict-parse.ts) token for token, pinned by
 /// the shared table conflict-marker-cases.json: `^(<{7,}|>{7,}|\|{7,})( |\t|$)`
@@ -567,14 +592,14 @@ enum ScanLine {
 fn scan_markers<R: std::io::Read>(
     mut reader: R,
     chunk: usize,
-    deadline: std::time::Instant,
+    mut deadline_passed: impl FnMut() -> bool,
 ) -> std::io::Result<(bool, bool)> {
     let mut buf = vec![0u8; chunk.max(1)];
     let mut line = ScanLine::Start;
     // Progress through an E2 80 (A8|A9) sequence: 0 none, 1 saw E2, 2 saw E2 80.
     let mut e2 = 0u8;
     loop {
-        if std::time::Instant::now() >= deadline {
+        if deadline_passed() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 MARKER_SCAN_TIMED_OUT,
@@ -2304,23 +2329,7 @@ mod tests {
     /// elsewhere.
     fn directory_link(link: &Path, target: &Path) {
         #[cfg(windows)]
-        {
-            let made = std::process::Command::new("cmd")
-                .args([
-                    "/C",
-                    "mklink",
-                    "/J",
-                    &link.to_string_lossy(),
-                    &target.to_string_lossy(),
-                ])
-                .output()
-                .expect("run mklink");
-            assert!(
-                made.status.success(),
-                "mklink /J failed: {}",
-                String::from_utf8_lossy(&made.stderr)
-            );
-        }
+        crate::test_junction::make_junction(link, target);
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
     }
@@ -2776,7 +2785,7 @@ mod tests {
             let bytes = bytes_of_hex(&case.hex);
             for chunk in [1, 2, 3, 7, 8, 64 * 1024] {
                 assert_eq!(
-                    scan_markers(bytes.as_slice(), chunk, far_deadline()).unwrap(),
+                    scan_markers(bytes.as_slice(), chunk, never_passed()).unwrap(),
                     (case.markers, false),
                     "{} at chunk {chunk}",
                     case.name
@@ -2788,29 +2797,27 @@ mod tests {
     #[test]
     fn scan_markers_reads_a_nul_anywhere_as_binary() {
         assert_eq!(
-            scan_markers(b"<<<<<<< x\n\0".as_slice(), 4, far_deadline()).unwrap(),
+            scan_markers(b"<<<<<<< x\n\0".as_slice(), 4, never_passed()).unwrap(),
             (false, true)
         );
         assert_eq!(
-            scan_markers(b"a\0<<<<<<< x\n".as_slice(), 4, far_deadline()).unwrap(),
+            scan_markers(b"a\0<<<<<<< x\n".as_slice(), 4, never_passed()).unwrap(),
             (false, true)
         );
     }
 
-    fn far_deadline() -> std::time::Instant {
-        std::time::Instant::now() + std::time::Duration::from_secs(3600)
+    fn never_passed() -> impl FnMut() -> bool {
+        || false
     }
 
-    /// Counts its reads, serving `<` forever, and runs `on_read` before each.
-    struct CountingReader<F: FnMut()> {
+    /// Counts its reads, serving `<` forever.
+    struct CountingReader {
         reads: usize,
-        on_read: F,
     }
 
-    impl<F: FnMut()> std::io::Read for CountingReader<F> {
+    impl std::io::Read for CountingReader {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             self.reads += 1;
-            (self.on_read)();
             buf.fill(b'<');
             Ok(buf.len())
         }
@@ -2826,28 +2833,42 @@ mod tests {
     /// first read, however fast the reader would answer.
     #[test]
     fn scan_markers_with_an_expired_deadline_reads_nothing() {
-        let mut reader = CountingReader {
-            reads: 0,
-            on_read: || {},
-        };
-        let expired = std::time::Instant::now();
-        assert_timed_out(scan_markers(&mut reader, 8, expired));
+        let mut reader = CountingReader { reads: 0 };
+        assert_timed_out(scan_markers(&mut reader, 8, || true));
         assert_eq!(reader.reads, 0);
     }
 
     /// A deadline passing mid-scan stops at the next chunk.
     #[test]
     fn scan_markers_stops_at_the_chunk_after_the_deadline() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
-        let mut reader = CountingReader {
-            reads: 0,
-            on_read: || {
-                while std::time::Instant::now() < deadline {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-            },
+        let mut reader = CountingReader { reads: 0 };
+        let mut checks = 0;
+        let passed_after_first_check = || {
+            checks += 1;
+            checks > 1
         };
-        assert_timed_out(scan_markers(&mut reader, 8, deadline));
+        assert_timed_out(scan_markers(&mut reader, 8, passed_after_first_check));
         assert_eq!(reader.reads, 1);
+    }
+
+    /// A blocking scan that stalls past its bound answers `TimedOut` without waiting for
+    /// it; the outer bound turns a hang into a red.
+    #[tokio::test]
+    async fn run_blocking_bounded_answers_a_stalled_scan_at_its_bound() {
+        let stalled = run_blocking_bounded(std::time::Duration::from_millis(20), || {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            Ok(())
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), stalled)
+            .await
+            .expect("the bound must answer before the stalled scan returns");
+        assert_timed_out(result.map(|()| (false, false)));
+    }
+
+    #[tokio::test]
+    async fn run_blocking_bounded_passes_a_fast_result_through() {
+        let result =
+            run_blocking_bounded(std::time::Duration::from_secs(30), || Ok((true, false))).await;
+        assert_eq!(result.unwrap(), (true, false));
     }
 }

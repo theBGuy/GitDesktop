@@ -111,6 +111,7 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { type HistoryDatesHold, useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
+import { isAppError } from "@/lib/tauri/invoke";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
@@ -240,11 +241,10 @@ const UNDO_ALREADY_PUSHED =
 /** The backend's pushed-commit refusals, read off a git-kind AppError's
  *  `stderr` (it carries no Display lead). */
 function undoPushedRefusal(error: unknown): string | null {
-  if (typeof error !== "object" || error === null) return null;
-  const e = error as { kind?: unknown; stderr?: unknown };
-  if (e.kind !== "git") return null;
-  return e.stderr === UNDO_ALREADY_PUSHED || e.stderr === UNDO_PUSHED_UNCHECKED
-    ? e.stderr
+  if (!isAppError(error) || error.kind !== "git") return null;
+  const { stderr } = error;
+  return stderr === UNDO_ALREADY_PUSHED || stderr === UNDO_PUSHED_UNCHECKED
+    ? stderr
     : null;
 }
 
@@ -645,9 +645,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
 
   const searchActive = searchMode && filterText.trim().length > 0;
   // The commit detail's Edit dates holds on what this panel offers: no single
-  // commit while several are selected or a search filters the list. Owned
-  // here, so no repo switch resets it; the cleanup clears it while History is
-  // hidden.
+  // commit while several are selected or Search all history is searching, with
+  // or without results. A plain filter over the loaded pages isn't held: its
+  // rows keep real-log positions, so the row menu keeps Edit dates there too.
+  // Owned here, so no repo switch resets it; the cleanup clears it while
+  // History is hidden.
   const datesHold = ((): HistoryDatesHold | null => {
     if (selected.size > 1) return "multi-select";
     if (searchActive) return "search";

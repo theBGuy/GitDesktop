@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useDiffPaneHold } from "@/features/diff/diff-pane-hold";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
+import { HIGHLIGHT_MAX_CHARS_HLJS } from "@/features/diff/highlight-budget";
 import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import { awaitFocusRelease } from "@/lib/await-focus-release";
 import { appErrorDetail, presentError } from "@/lib/error-summary";
@@ -312,11 +313,6 @@ function scanTailOf(scan: {
       return "clean";
   }
 }
-
-/** Plain past the diff viewer's whole-buffer highlight budget: the region view
- *  shows files up to the display cap. KEEP IN STEP with
- *  src/features/diff/DiffSurface.tsx's `HIGHLIGHT_MAX_CHARS_HLJS`. */
-const CONFLICT_HIGHLIGHT_MAX_CHARS = 400_000;
 
 /** FNV-1a over UTF-16 code units: a cheap content key, not a digest. */
 function textHash(text: string): string {
@@ -760,8 +756,9 @@ export function ConflictFileView({
   // region, so the region view always counts at least one.
   const regionView = !file.isError && segments !== null;
   const total = regionView && segments ? conflictCount(segments) : 0;
-  const plainCode =
-    (file.data?.working.length ?? 0) > CONFLICT_HIGHLIGHT_MAX_CHARS;
+  // Plain past the diff viewer's whole-buffer hljs budget: the region view
+  // shows files up to the display cap.
+  const plainCode = (file.data?.working.length ?? 0) > HIGHLIGHT_MAX_CHARS_HLJS;
 
   // Each mutation re-reads the conflict file before its isPending drops, a
   // failed one re-reads under `recovering`, Mark resolved's click-time read

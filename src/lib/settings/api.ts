@@ -314,8 +314,9 @@ export interface AppSettings {
   /** Hotkey overrides by action id; null = explicitly unbound. Actions not
    *  present use their registry default. */
   hotkeys: Record<string, string | null>;
-  /** Warn before amending a commit that's already on the remote (force push).
-   *  Cleared by the dialog's "Don't show this again". */
+  /** Warn before amending a commit that may be on a remote: one the upstream
+   *  holds (a force push), one another remote branch holds, or one whose check
+   *  failed. Cleared by the dialog's "Don't show this again". */
   confirmAmendForcePush: boolean;
   /** Skip the stash-and-reapply prompt and just recover whenever a pull, an
    *  update from upstream, or a branch update would overwrite uncommitted

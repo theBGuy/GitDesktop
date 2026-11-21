@@ -823,15 +823,17 @@ the failed part's line when one shows.
   branch will need a force push, and a protected branch refuses. On a branch with no
   upstream, it also warns when a remote branch already has that commit. On an older
   unpushed commit it opens **Edit history** with that commit's date editor open. Elsewhere
-  the item is held and says why. While History has several commits selected or its search
-  is filtering the list, the commit detail view holds the item and says which to clear,
-  and the command palette leaves it out. It's in the command palette too (palette-only by default;
-  bind a key in Settings). Type a date as \`YYYY-MM-DD HH:MM:SS ±HH:MM\`; a \`T\`
+  the item is held and says why. It's in the command palette too (palette-only by
+  default; bind a key in Settings). While History has several commits selected or
+  is running a **Search all history** search, the commit detail view holds the item
+  and says which to clear, and the palette leaves it out.
+  Type a date as \`YYYY-MM-DD HH:MM:SS ±HH:MM\`; a \`T\`
   separator, \`±HHMM\`, \`Z\`, no seconds, and a date pasted from \`git log\`, in its
   default or \`--date=iso\` form and with its \`Date:\` label, all work. Where your
   system has date and time pickers, the calendar button shows them and opens the date
-  picker each time you press it, and a pick keeps the offset you typed. Leaving the offset out keeps the commit's current one, **Now**
-  uses this computer's offset, and **Reset** restores the commit's current dates.
+  picker each time you press it, and a pick keeps the offset you typed. Leaving the
+  offset out keeps the commit's current one, **Now** uses this computer's offset, and
+  **Reset** restores the commit's current dates.
   **Same as author date** is ticked when the commit's two dates are the same; untick
   it to set the committer date on its own. Years run from 1970 to 2099 and offsets
   from -12:00 to +14:00. A date in the future, or an author date later than the

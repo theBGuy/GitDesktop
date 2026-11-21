@@ -1019,21 +1019,19 @@ async fn records_parent(repo_path: &str, oid: &str) -> AppResult<bool> {
 /// (`undoPushedHold`): a branch whose upstream resolves asks whether that upstream
 /// contains it (a local upstream included); detached, with no upstream, or with one gone,
 /// whether any remote-tracking ref does. Any failed probe is an Err, never a defaulted
-/// "not pushed".
-async fn head_published(repo_path: &str, head_oid: &str) -> AppResult<bool> {
+/// "not pushed". The branch is the pin's, read from HEAD only when unpinned: a switch
+/// after the caller's pin check must not swap in another branch's upstream.
+async fn head_published(repo_path: &str, head_oid: &str, pin: &ExpectedRef) -> AppResult<bool> {
     let failed = |out: &GitOutput| AppError::Git {
         code: out.code,
         stderr: out.full_failure_text(),
     };
-    let attached = run_git_raw(
-        Some(repo_path),
-        &["symbolic-ref", "-q", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    let upstream_oid = match attached.code {
-        0 => {
-            let branch_ref = attached.stdout_lossy().trim().to_string();
+    let branch_ref = match pin.cas_ref(repo_path).await? {
+        CasRef::Branch(full) => Some(full),
+        CasRef::Detached(_) => None,
+    };
+    let upstream_oid = match branch_ref {
+        Some(branch_ref) => {
             let listed = run_git_raw(
                 Some(repo_path),
                 &["for-each-ref", "--format=%(upstream)", &branch_ref],
@@ -1043,32 +1041,16 @@ async fn head_published(repo_path: &str, head_oid: &str) -> AppResult<bool> {
             if listed.code != 0 {
                 return Err(failed(&listed));
             }
-            let upstream_ref = listed.stdout_lossy().trim().to_string();
+            // Only the line terminator: git allows trailing Unicode whitespace in a name.
+            let listed = listed.stdout_lossy();
+            let upstream_ref = listed.trim_end_matches(['\r', '\n']);
             if upstream_ref.is_empty() {
                 None
             } else {
-                let peeled = run_git_raw(
-                    Some(repo_path),
-                    &[
-                        "rev-parse",
-                        "--verify",
-                        "-q",
-                        &format!("{upstream_ref}^{{commit}}"),
-                    ],
-                    DEFAULT_TIMEOUT,
-                )
-                .await?;
-                // Exit 1 is an upstream that doesn't resolve: the menu's "gone".
-                match peeled.code {
-                    0 => Some(peeled.stdout_lossy().trim().to_string()),
-                    1 => None,
-                    _ => return Err(failed(&peeled)),
-                }
+                upstream_tip(repo_path, upstream_ref).await?
             }
         }
-        // `-q` exits 1 exactly when HEAD is detached.
-        1 => None,
-        _ => return Err(failed(&attached)),
+        None => None,
     };
     let Some(upstream_oid) = upstream_oid else {
         return crate::git::branches::commit_on_remote(repo_path.to_string(), head_oid.to_string())
@@ -1084,6 +1066,45 @@ async fn head_published(repo_path: &str, head_oid: &str) -> AppResult<bool> {
         0 => Ok(true),
         1 => Ok(false),
         _ => Err(failed(&ancestor)),
+    }
+}
+
+/// The commit `upstream_ref` names, by that exact full ref; `None` when it is absent (the
+/// menu's "gone"). `for-each-ref`, never `rev-parse`: revision lookup would resolve a
+/// same-named tag for an absent ref, and exits as for an absent one on a missing object,
+/// which `for-each-ref` refuses (exit 128). A tip that isn't a commit is an Err too.
+async fn upstream_tip(repo_path: &str, upstream_ref: &str) -> AppResult<Option<String>> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &[
+            "for-each-ref",
+            "--format=%(objecttype) %(objectname) %(refname)",
+            upstream_ref,
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
+    // The pattern also matches refs below it (`<ref>/x`), so only the exact name counts.
+    let text = out.stdout_lossy();
+    let Some(line) = text
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .find(|line| line.splitn(3, ' ').nth(2) == Some(upstream_ref))
+    else {
+        return Ok(None);
+    };
+    match line.split_once(' ') {
+        Some(("commit", rest)) => Ok(rest.split_once(' ').map(|(oid, _)| oid.to_string())),
+        _ => Err(AppError::Git {
+            code: 1,
+            stderr: format!("{upstream_ref} doesn't point at a commit: {line}"),
+        }),
     }
 }
 
@@ -1180,7 +1201,7 @@ async fn undo_commit_inner(
             return Err(refuse(UNDO_UNRESOLVED));
         }
         if let (true, Some(head_oid)) = (refuse_published, &head) {
-            match head_published(&repo_path, head_oid).await {
+            match head_published(&repo_path, head_oid, &expected_ref).await {
                 Ok(false) => {}
                 Ok(true) => return Err(refuse(UNDO_ALREADY_PUSHED)),
                 Err(_) => return Err(refuse(UNDO_PUSHED_UNCHECKED)),
@@ -1197,8 +1218,8 @@ async fn undo_commit_inner(
         return soft_undo(&repo_path, &expected_ref, head_oid, &parent).await;
     }
     let head_oid = head.unwrap_or_default();
-    // What the root arm deletes: the ref HEAD named under this hold; `None` when
-    // unborn, where the arm deletes `HEAD` and git does nothing.
+    // What the root arm deletes: the pinned branch, or unpinned the ref HEAD names under
+    // this hold; `None` when unborn, where the arm deletes `HEAD` and git does nothing.
     let mut target: Option<String> = None;
     if !head_oid.is_empty() {
         if records_parent(&repo_path, &head_oid).await? {
@@ -1207,27 +1228,17 @@ async fn undo_commit_inner(
                 stderr: UNDO_SHALLOW_BOUNDARY.to_string(),
             });
         }
-        let attached = run_git_raw(
-            Some(&repo_path),
-            &["symbolic-ref", "-q", "HEAD"],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
-        // Fails closed: `-q` exits 1 exactly when HEAD is detached, and any other
-        // failure refuses with git's own error rather than risk deleting HEAD itself.
-        if attached.code == 1 {
+        #[cfg(test)]
+        run_phase_hook(&UNDO_ROOT_TARGET_HOOK).await;
+        // Fails closed: a detached HEAD refuses, and a failed read refuses with git's own
+        // error rather than risk deleting HEAD itself.
+        let CasRef::Branch(named) = expected_ref.cas_ref(&repo_path).await? else {
             return Err(AppError::Git {
                 code: 1,
                 stderr: UNDO_DETACHED_ROOT.to_string(),
             });
-        }
-        if attached.code != 0 {
-            return Err(AppError::Git {
-                code: attached.code,
-                stderr: attached.full_failure_text(),
-            });
-        }
-        target = Some(attached.stdout_lossy().trim().to_string());
+        };
+        target = Some(named);
     }
     #[cfg(test)]
     run_phase_hook(&UNDO_ROOT_HOOK).await;
@@ -1329,9 +1340,12 @@ tokio::task_local! {
     static DETACHED_SWAP_HOOK: PhaseHook;
     /// After the re-attachment pre-check and before its ref write.
     static REATTACH_HOOK: PhaseHook;
-    /// Awaited by the root undo it is scoped to, after `symbolic-ref` named the branch
-    /// and before the delete, so a test can switch HEAD inside that window.
+    /// Awaited by the root undo it is scoped to, after it chose the ref to delete and
+    /// before the delete, so a test can switch HEAD inside that window.
     static UNDO_ROOT_HOOK: PhaseHook;
+    /// Awaited by the root undo it is scoped to, after the pin checks and before it
+    /// chooses the ref to delete, so a test can switch HEAD inside that window.
+    static UNDO_ROOT_TARGET_HOOK: PhaseHook;
     /// Awaited by the pinned amend it is scoped to, after the pin checks and before the
     /// `commit --amend` spawn, so a test can move HEAD inside that window.
     static AMEND_PHASE_HOOK: PhaseHook;
@@ -2418,6 +2432,162 @@ mod tests {
         let before = undo_snapshot(&repo).await;
         assert_undo_refused(
             undo_gui(&repo, Some(b.clone()), branch_here(&repo).await).await,
+            UNDO_PUSHED_UNCHECKED,
+        );
+        assert_eq!(undo_snapshot(&repo).await, before, "nothing moved");
+    }
+
+    /// A remote-tracking tip whose object is missing can't be read, so the any-remote
+    /// probe refuses rather than read the skipped ref as "not pushed": on a branch with
+    /// no upstream, and on one whose upstream is that tip (it fails to verify, so it
+    /// reads as gone and falls back to the same probe).
+    #[tokio::test]
+    async fn gui_undo_refuses_when_a_remote_tracking_tip_is_missing() {
+        for with_upstream in [false, true] {
+            let (dir, _remote, repo, b) = remote_fixture("gd-undo-missing-tip-", false).await;
+            // update-ref refuses a missing object, so the loose ref is written directly.
+            let refs = dir
+                .path()
+                .join(".git")
+                .join("refs")
+                .join("remotes")
+                .join("origin");
+            std::fs::create_dir_all(&refs).unwrap();
+            std::fs::write(
+                refs.join("main"),
+                "0123456789abcdef0123456789abcdef01234567\n",
+            )
+            .unwrap();
+            if with_upstream {
+                run(&repo, &["config", "branch.main.remote", "origin"]).await;
+                run(&repo, &["config", "branch.main.merge", "refs/heads/main"]).await;
+            }
+            let before = undo_snapshot(&repo).await;
+            assert_undo_refused(
+                undo_gui(&repo, Some(b.clone()), branch_here(&repo).await).await,
+                UNDO_PUSHED_UNCHECKED,
+            );
+            assert_eq!(
+                undo_snapshot(&repo).await,
+                before,
+                "nothing moved (upstream: {with_upstream})"
+            );
+        }
+    }
+
+    /// The publication probe tests the pinned branch's upstream, not that of a branch
+    /// HEAD was switched to after the pin check.
+    #[tokio::test]
+    async fn head_published_tests_the_pinned_branch_not_the_one_head_names() {
+        let (dir, repo) = amend_fixture("gd-undo-pin-upstream-", &["-b", "main"]).await;
+        let b = raw_commit(&dir, &repo, "a.txt", "A").await;
+        run(&repo, &["branch", "base"]).await;
+        run(&repo, &["config", "branch.main.remote", "."]).await;
+        run(&repo, &["config", "branch.main.merge", "refs/heads/base"]).await;
+        run(&repo, &["switch", "-qc", "other"]).await;
+        let pinned = ExpectedRef::Branch("main".into());
+        assert!(
+            head_published(&repo, &b, &pinned).await.unwrap(),
+            "main's upstream contains HEAD"
+        );
+        assert!(
+            !head_published(&repo, &b, &ExpectedRef::Any).await.unwrap(),
+            "unpinned reads HEAD's branch, which has no upstream"
+        );
+    }
+
+    /// A pinned root undo deletes the pinned branch even when HEAD is switched to another
+    /// branch at the same root commit before the target is chosen; the switch is then
+    /// seen, the pinned branch put back, and the other branch left alone.
+    #[tokio::test]
+    async fn root_undo_targets_the_pinned_branch_when_head_switches_before_the_choice() {
+        let (dir, repo) = amend_fixture("gd-undo-root-pinned-", &["-b", "main"]).await;
+        let root = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let pinned = branch_here(&repo).await;
+
+        let result = UNDO_ROOT_TARGET_HOOK
+            .scope(
+                racing_git(&repo, &[&["switch", "-qc", "other"]]),
+                undo_on(&repo, Some(root.clone()), pinned),
+            )
+            .await;
+
+        assert_undo_refused(result, UNDO_BRANCH_SWITCHED);
+        assert_eq!(
+            ref_oid(&repo, "refs/heads/other").await.unwrap(),
+            Some(root.clone()),
+            "the branch HEAD switched to is untouched"
+        );
+        assert_eq!(
+            ref_oid(&repo, "refs/heads/main").await.unwrap(),
+            Some(root),
+            "the pinned branch is back"
+        );
+        assert_eq!(
+            run(&repo, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/other"
+        );
+    }
+
+    /// git allows trailing Unicode whitespace (U+00A0) in a ref name, so the probe strips
+    /// only line terminators from the branch and upstream names it reads.
+    #[tokio::test]
+    async fn head_published_keeps_trailing_unicode_whitespace_in_ref_names() {
+        let (dir, repo) = amend_fixture("gd-undo-nbsp-", &["-b", "main"]).await;
+        let b = raw_commit(&dir, &repo, "a.txt", "A").await;
+        run(&repo, &["switch", "-qc", "nb\u{a0}"]).await;
+        run(&repo, &["branch", "up\u{a0}"]).await;
+        run(&repo, &["branch", "--set-upstream-to=up\u{a0}"]).await;
+        assert!(head_published(&repo, &b, &ExpectedRef::Any).await.unwrap());
+    }
+
+    /// An absent upstream reads as gone even when a tag is named like it: revision
+    /// lookup would resolve the tag (pinned here), so the probe must not use it.
+    #[tokio::test]
+    async fn head_published_reads_past_a_tag_named_like_a_gone_upstream() {
+        let (_dir, _remote, repo, b) = remote_fixture("gd-undo-gone-tag-", false).await;
+        run(&repo, &["config", "branch.main.remote", "origin"]).await;
+        run(&repo, &["config", "branch.main.merge", "refs/heads/gone"]).await;
+        run(&repo, &["tag", "refs/remotes/origin/gone", &b]).await;
+        let dwim = run_git_raw(
+            Some(&repo),
+            &[
+                "rev-parse",
+                "--verify",
+                "-q",
+                "refs/remotes/origin/gone^{commit}",
+            ],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        assert_eq!(dwim.code, 0, "fixture: revision lookup finds the tag");
+        let pinned = branch_here(&repo).await;
+        assert!(!head_published(&repo, &b, &pinned).await.unwrap());
+    }
+
+    /// A local upstream whose tip object is missing can't be read, so the GUI undo
+    /// refuses rather than read it as gone and fall back to "not on a remote".
+    #[tokio::test]
+    async fn gui_undo_refuses_when_a_local_upstream_tip_is_missing() {
+        let (dir, repo) = amend_fixture("gd-undo-local-missing-", &["-b", "main"]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        run(&repo, &["config", "branch.main.remote", "."]).await;
+        run(&repo, &["config", "branch.main.merge", "refs/heads/base"]).await;
+        // update-ref refuses a missing object, so the loose ref is written directly.
+        std::fs::write(
+            dir.path()
+                .join(".git")
+                .join("refs")
+                .join("heads")
+                .join("base"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        let before = undo_snapshot(&repo).await;
+        assert_undo_refused(
+            undo_gui(&repo, Some(b), branch_here(&repo).await).await,
             UNDO_PUSHED_UNCHECKED,
         );
         assert_eq!(undo_snapshot(&repo).await, before, "nothing moved");

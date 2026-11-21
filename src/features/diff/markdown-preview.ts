@@ -14,7 +14,7 @@ export function isMdxPath(filePath: string): boolean {
 // Past this the preview shows a placeholder instead of parsing: marked, the
 // hljs fence pass, and DOMPurify all run synchronously on the main thread, so
 // the budget stays in the diff's own highlight-cap band
-// (HIGHLIGHT_MAX_CHARS_HLJS = 400_000).
+// (`HIGHLIGHT_MAX_CHARS_HLJS` in ./highlight-budget).
 export const PREVIEW_MAX_CHARS = 400_000;
 
 const stripCr = (line: string): string =>

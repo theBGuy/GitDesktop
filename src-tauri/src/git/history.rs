@@ -1607,17 +1607,7 @@ mod tests {
             .join("refs")
             .join("heads")
             .join("junction");
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(&link)
-            .arg(&outside)
-            .output()
-            .expect("run mklink");
-        assert!(
-            made.status.success(),
-            "mklink /J failed: {}",
-            String::from_utf8_lossy(&made.stderr)
-        );
+        crate::test_junction::make_junction(&link, &outside);
         let oid = git_out(&repo, &["rev-parse", "HEAD"]).await;
         let before = files_stamp(&repo).await;
         std::fs::write(outside.join("behind"), format!("{}\n", oid.trim())).unwrap();

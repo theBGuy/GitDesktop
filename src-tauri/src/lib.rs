@@ -40,6 +40,8 @@ mod sessions;
 mod state;
 mod store_lock;
 mod store_lock_commands;
+#[cfg(all(test, windows))]
+mod test_junction;
 mod tray;
 
 use state::AppState;

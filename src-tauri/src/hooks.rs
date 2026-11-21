@@ -1512,22 +1512,15 @@ mod tests {
         assert!(outside.starts_with(base), "{outside:?} under {base:?}");
         for path in [hooks, outside] {
             let shown = path.to_string_lossy();
-            if shown.contains(['&', '|', '<', '>', '^', '%', '!', '(', ')', '"']) {
-                eprintln!("skipped: temp path carries a cmd metacharacter: {shown}");
+            // make_junction quotes the paths; cmd still expands `%VAR%` inside quotes.
+            if shown.contains('%') {
+                eprintln!("skipped: temp path carries a `%` cmd would expand: {shown}");
                 return None;
             }
         }
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(hooks)
-            .arg(outside)
-            .output()
-            .expect("spawn cmd mklink /J");
-        assert!(
-            made.status.success(),
-            "mklink /J failed: {}",
-            String::from_utf8_lossy(&made.stderr)
-        );
+        assert!(cfg!(windows), "junctions are made only on Windows");
+        #[cfg(windows)]
+        crate::test_junction::make_junction(hooks, outside);
         Some(())
     }
 

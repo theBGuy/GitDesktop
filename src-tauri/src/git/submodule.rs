@@ -2147,19 +2147,10 @@ mod tests {
         // A junction on Windows: mklink /J needs no privilege, unlike a symlink.
         // It reads a `/` in a path as a switch, so both go backslashed.
         #[cfg(windows)]
-        {
-            let made = std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J"])
-                .arg(sub.replace('/', "\\"))
-                .arg(outside.replace('/', "\\"))
-                .output()
-                .expect("run mklink");
-            assert!(
-                made.status.success(),
-                "mklink /J failed: {}",
-                String::from_utf8_lossy(&made.stderr)
-            );
-        }
+        crate::test_junction::make_junction(
+            Path::new(&sub.replace('/', "\\")),
+            Path::new(&outside.replace('/', "\\")),
+        );
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, &sub).unwrap();
         let through = git(&sub, &["status", "--porcelain"]).await;

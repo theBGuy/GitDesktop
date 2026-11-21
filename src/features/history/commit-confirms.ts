@@ -171,7 +171,7 @@ export const UNDO_ROOT_COMMIT_CONFIRM = {
  *  applied; the confirm host's Cancel keeps the dialog and every draft. */
 export const EDIT_HISTORY_DISCARD_CONFIRM = {
   title: "Discard your unapplied edits?",
-  body: "Closing Edit history drops the rewords, drops, reorders and date changes you haven't applied.",
+  body: "Closing Edit history discards the rewords, drops, reorders and date changes you haven't applied.",
   confirmLabel: "Discard edits",
   confirmVariant: "destructive",
 } as const;
