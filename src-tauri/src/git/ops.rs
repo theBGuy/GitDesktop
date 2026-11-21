@@ -27529,6 +27529,7 @@ detached
         for name in [
             "git_resolve_conflict_core",
             "git_conflict_sides",
+            "git_conflict_marker_scan",
             "git_checkout_conflict_side_core",
         ] {
             assert!(

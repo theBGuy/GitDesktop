@@ -4,9 +4,9 @@
 // file loses its trailing newline, and a proposal identical to ours previews as
 // a one-line "\ No newline" diff instead of an empty one.
 //
-// `conflict-prompt.ts` imports `./truncate` extensionless, which Node's type
-// stripping cannot resolve, so the shared src hooks go in first and the import
-// is dynamic (a static one links before the hooks exist).
+// `conflict-prompt.ts` imports `@/lib/git/conflict-prefilter` through the path
+// alias, which Node's type stripping cannot resolve, so the shared src hooks go
+// in first and the import is dynamic (a static one links before the hooks exist).
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { installSrcHooks } from "./lib/src-import-hooks.mjs";

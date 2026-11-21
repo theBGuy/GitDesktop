@@ -191,15 +191,30 @@ test("the conflict file polls on an interval gated on the panel and the error ki
     /(?<![\w$.])panelActive(?![\w$])/,
     "refetchInterval does not read the panel gate",
   );
-  const retry = onlyValue(src, open, "retry");
-  assert.match(
-    retry.masked,
-    /^\(\s*failureCount\s*,\s*error\s*\)\s*=>\s*failureCount\s*<\s*1\s*&&\s*isAppError\s*\(\s*error\s*\)\s*&&\s*error\.kind\s*===\s*"\s*"$/,
-    "retry must be exactly one retry, for a single AppError kind",
+  assert.equal(
+    onlyValue(src, open, "retry").masked,
+    "retryConflictReadOnIo",
+    "retry must be the conflict reads' shared retryConflictReadOnIo rule",
   );
+  const rule =
+    /\bconst\s+retryConflictReadOnIo\s*=\s*(\(\s*failureCount\s*:\s*number\s*,\s*error\s*:\s*Error\s*\)\s*=>\s*failureCount\s*<\s*1\s*&&\s*isAppError\s*\(\s*error\s*\)\s*&&\s*error\.kind\s*===\s*"\s*")\s*;/.exec(
+      src.masked,
+    );
   assert.ok(
-    hasStringLiteral(src, retry, "io") &&
-      !hasStringLiteral(src, retry, "invalidArgument"),
+    rule,
+    "retryConflictReadOnIo must be exactly one retry, for a single AppError kind",
+  );
+  const ruleValue = {
+    masked: rule[1],
+    source: src.source.slice(
+      rule.index + rule[0].indexOf(rule[1]),
+      rule.index + rule[0].indexOf(rule[1]) + rule[1].length,
+    ),
+    start: rule.index + rule[0].indexOf(rule[1]),
+  };
+  assert.ok(
+    hasStringLiteral(src, ruleValue, "io") &&
+      !hasStringLiteral(src, ruleValue, "invalidArgument"),
     'retry must cover only "io" failures: invalidArgument can never heal',
   );
   assert.equal(
@@ -248,8 +263,8 @@ test("each conflict mutation awaits only the conflict-file re-read, the working 
     );
     assert.match(
       onlyValue(src, open, "invalidateAfter").masked,
-      /^workingTreeKeys\s*\(\s*repo\s*\)$/,
-      `${hook}: invalidateAfter must be workingTreeKeys(repo), so status and diffs refresh unawaited`,
+      /^\[\s*\.\.\.workingTreeKeys\s*\(\s*repo\s*\)\s*,\s*conflictMarkerScanKey\s*\(\s*repo\s*\)\s*,?\s*\]$/,
+      `${hook}: invalidateAfter must be [...workingTreeKeys(repo), conflictMarkerScanKey(repo)], so status, diffs and the whole-file marker scan refresh unawaited`,
     );
     return hook;
   });
@@ -569,6 +584,11 @@ test("the header's whole-file actions explain their notConflicted and path-gate 
         /(?<![\w$.])workingUndecodable(?![\w$])/,
         `"${label}" must be disabled while the working file isn't UTF-8 text`,
       );
+      assert.match(
+        prop("disabled"),
+        /(?<![\w$.])aiTooLarge(?![\w$])/,
+        `"${label}" must be disabled while a version is past the prompt budget`,
+      );
     } else {
       // `sideRefusal` is every path refusal but a leaf link, which git's side
       // checkout replaces or removes itself (pinned below and in
@@ -613,8 +633,13 @@ test("the header's whole-file actions explain their notConflicted and path-gate 
   );
   assert.match(
     held[1],
-    /\bcase\s+workingUndecodable\s*:\s*return\s+AI_UNDECODABLE_REASON\s*;/,
-    "aiHeldReason must hold a non-UTF-8 working file with AI_UNDECODABLE_REASON",
+    /\bcase\s+workingUndecodable\s*:\s*return\s+AI_UNDECODABLE_REASON\s*;\s*case\s+aiTooLarge\s*:\s*return\s+AI_TOO_LARGE_REASON\[\s*regionView\s*\?\s*"\s*"\s*:\s*"\s*"\s*\]\s*;\s*default\s*:/,
+    "aiHeldReason must hold a non-UTF-8 working file with AI_UNDECODABLE_REASON, then a file past the prompt budget with AI_TOO_LARGE_REASON",
+  );
+  assert.match(
+    src.masked,
+    /\bconst\s+aiTooLarge\s*=\s*file\.data\s*!==\s*undefined\s*&&\s*exceedsPromptSection\(file\.data\)\s*;/,
+    "aiTooLarge must read the walk gate's shared budget predicate",
   );
   assert.match(
     src.source,

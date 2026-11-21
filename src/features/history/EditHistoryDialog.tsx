@@ -74,7 +74,7 @@ import {
   useSaveSettingsPatch,
   useSettings,
 } from "@/lib/settings/queries";
-import { useConfirm } from "@/lib/stores/confirm";
+import { type ConfirmRequest, useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
@@ -88,6 +88,7 @@ import { CommitDateField, SameAsAuthorCheckbox } from "./CommitDateField";
 import {
   beforeParentNote,
   datesBeforeParentConfirm,
+  EDIT_HISTORY_DISCARD_CONFIRM,
   PARENT_DATE_PENDING,
 } from "./commit-confirms";
 import {
@@ -575,7 +576,16 @@ interface StripDraft {
   committer: string;
   fallback: CommitDate;
   fallbackCommitter: CommitDate;
+  /** The texts at the seed or the last Apply: a draft that differs holds an
+   *  edit not yet applied to any row. */
+  baseline: { author: string; same: boolean; committer: string };
 }
+
+/** Whether the strip holds text its rows haven't taken yet. */
+const stripUnapplied = (s: StripDraft) =>
+  s.author !== s.baseline.author ||
+  s.same !== s.baseline.same ||
+  (!s.same && s.committer !== s.baseline.committer);
 
 function SelectionStrip({
   count,
@@ -1014,6 +1024,11 @@ export function EditHistoryDialog({
 
   const canTakeDates = (row: EditRow) =>
     structuralHold(row.action, dateInfo.get(row.hash)) === null;
+  // A busy editor stays rendered and inert; any other hold drops it.
+  const editorShownFor = (row: EditRow) =>
+    canTakeDates(row) &&
+    dateInfo.get(row.hash)?.kind === "ok" &&
+    openDates.has(row.hash);
   const selectedOf = (set: ReadonlySet<string>) =>
     shownRows.filter((r) => set.has(r.hash) && canTakeDates(r));
   const selected = selectedOf(picked);
@@ -1027,19 +1042,35 @@ export function EditHistoryDialog({
     const info = dateInfo.get(seedRow.hash);
     if (info?.kind === "ok") {
       const { planned } = info.resolved;
-      setStrip({
-        seedHash: seedRow.hash,
+      const texts = {
         author: formatCommitDate(planned.author ?? info.original.author),
         same: info.resolved.same,
         committer: formatCommitDate(
           planned.committer ?? info.original.committer,
         ),
+      };
+      setStrip({
+        seedHash: seedRow.hash,
+        ...texts,
         fallback: info.original.author,
         fallbackCommitter: info.original.committer,
+        baseline: texts,
       });
     }
   }
   if (!stripShown && strip !== null) setStrip(null);
+
+  // Whether a user close would drop work. `plan.changed` misses a date draft in
+  // error (such a row carries no dates) and the strip's unapplied text, so the
+  // drafts count through each row's `dateInfo` `resolved.changed` (true for an
+  // error too, false for a draft equal to the commit's own dates), never through
+  // the presence of a `dateDrafts` key or an open editor.
+  const dirty =
+    plan.changed ||
+    [...dateInfo.values()].some(
+      (info) => info.kind === "ok" && info.resolved.changed,
+    ) ||
+    (stripShown && strip !== null && stripUnapplied(strip));
 
   // The first row, in display order, whose date can't be read as typed.
   const invalidDateRow = shownRows.find((r) => {
@@ -1227,6 +1258,14 @@ export function EditHistoryDialog({
       const next = { ...d };
       for (const r of selected) next[r.hash] = draft;
       return next;
+    });
+    setStrip({
+      ...strip,
+      baseline: {
+        author: strip.author,
+        same: strip.same,
+        committer: strip.committer,
+      },
     });
     announce(
       `Dates applied to ${selected.length} ${commitsWord(selected.length)}${skippedTail(skipped)}`,
@@ -1538,6 +1577,48 @@ export function EditHistoryDialog({
     }
   }
 
+  // Set while the discard prompt is up, so a second close request (an Escape
+  // landing before the prompt takes focus) neither closes nor asks again.
+  const discardPending = useRef(false);
+  // The prompt's own request, so an unmount withdraws only that one.
+  const discardRequest = useRef<ConfirmRequest | null>(null);
+  /** Whether a user close asks first (or is already asking) instead of closing. */
+  const closeAsks = () => dirty || discardPending.current;
+  /** Every user close goes through here; Apply's own closes do not. */
+  function requestClose() {
+    if (busy || discardPending.current) return;
+    if (!dirty) {
+      onOpenChange(false);
+      return;
+    }
+    discardPending.current = true;
+    // App-scoped: a repo switch unmounts this dialog and drops the plan, so the
+    // repo scope's "didn't discard" notice would be false. The unmount below
+    // withdraws the prompt silently instead.
+    const asked = useConfirm
+      .getState()
+      .ask({ ...EDIT_HISTORY_DISCARD_CONFIRM, scope: "app" });
+    discardRequest.current = useConfirm.getState().request;
+    void asked.then((ok) => {
+      discardPending.current = false;
+      discardRequest.current = null;
+      if (ok) onOpenChange(false);
+    });
+  }
+  useEffect(
+    () => () => {
+      const pending = discardRequest.current;
+      if (
+        discardPending.current &&
+        pending !== null &&
+        useConfirm.getState().request === pending
+      ) {
+        useConfirm.getState().answer(false);
+      }
+    },
+    [],
+  );
+
   return (
     <Dialog
       open={open}
@@ -1545,10 +1626,19 @@ export function EditHistoryDialog({
       // local operation whose outcome this dialog still owes the user. A repo
       // switch, or leaving the repository view, unmounts it anyway; the
       // awaited continuation still settles, and its tab hand-off guards on
-      // the live repo.
-      onOpenChange={(next) => {
+      // the live repo. A modal closes only for these three reasons.
+      onOpenChange={(next, details) => {
         if (!next && busy) return;
-        onOpenChange(next);
+        const userClose =
+          details.reason === "escape-key" ||
+          details.reason === "outside-press" ||
+          details.reason === "close-press";
+        if (next || !userClose) {
+          onOpenChange(next);
+          return;
+        }
+        if (closeAsks()) details.cancel();
+        requestClose();
       }}
     >
       {/* The Root renders no element, so this sits in the host's own DOM, not
@@ -1655,6 +1745,17 @@ export function EditHistoryDialog({
           onFocusCapture={onListFocusCapture}
         >
           {shownRows.map((row, shown) => {
+            const rowProps = nav.rowProps(row);
+            // Besides the roving stop, a row with an open editor and the row
+            // after it ON SCREEN are Tab stops, so Tab from an editor's last
+            // control reaches the next commit and Shift+Tab gets back to its row.
+            const prevShown = shownRows[shown - 1];
+            const tabIndex =
+              rowProps.tabIndex === 0 ||
+              editorShownFor(row) ||
+              (prevShown !== undefined && editorShownFor(prevShown))
+                ? 0
+                : -1;
             const index = displayIndex(shown, rows.length, reversed);
             const view = plan.views[index];
             const dropped = row.action === "drop";
@@ -1709,9 +1810,7 @@ export function EditHistoryDialog({
               }
             })();
             const dateHold: DateHold | null = busy ? "busy" : structural;
-            // A busy editor stays rendered and inert; any other hold drops it.
-            const editorShown =
-              ok !== null && structural === null && openDates.has(row.hash);
+            const editorShown = editorShownFor(row);
             const editorId = `${idBase}-dates-${row.hash}`;
             const changed = row.dates !== undefined;
             const flagged = parentFlagOf.get(row.hash);
@@ -1751,7 +1850,8 @@ export function EditHistoryDialog({
               <div
                 key={row.hash}
                 role="listitem"
-                {...nav.rowProps(row)}
+                {...rowProps}
+                tabIndex={tabIndex}
                 aria-label={`${ACTION_LABEL.get(row.action)} ${row.hash.slice(0, 7)} ${row.subject}${foldState}${flagged !== undefined ? PARENT_FLAG_NAME[parentFlagKind(flagged)] : ""}${changed ? ", dates changed" : ""}${isSelected ? ", selected" : ""}`}
                 aria-keyshortcuts={ROW_KEYSHORTCUTS}
                 className={cn(
@@ -2036,7 +2136,7 @@ export function EditHistoryDialog({
                   </div>
                 )}
 
-                {editorShown && (
+                {editorShown && ok !== null && (
                   <RowDatesEditor
                     id={editorId}
                     subject={row.subject}
@@ -2134,7 +2234,7 @@ export function EditHistoryDialog({
             variant="outline"
             disabled={busy}
             reason={BUSY_REASON}
-            onClick={() => onOpenChange(false)}
+            onClick={requestClose}
           >
             Cancel
           </DisabledReasonButton>

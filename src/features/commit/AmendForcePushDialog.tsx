@@ -9,22 +9,48 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import type { AmendConfirmVariant } from "@/features/history/useAmendCommit";
 import { loadSettings } from "@/lib/settings/api";
 import { useSaveSettings } from "@/lib/settings/queries";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
+const COPY: Record<
+  AmendConfirmVariant,
+  { title: string; description: (upstream: string | null) => string }
+> = {
+  upstream: {
+    title: "Amending will require a force push",
+    description: (upstream) =>
+      `This commit is already on ${upstream ?? "the remote"}. Amending rewrites it, so your branch and the remote will diverge and you'll need to force push to update it. GitDesktop force pushes with --force-with-lease and, where your Git can check it, --force-if-includes (the pair won't overwrite others' work your branch doesn't include), but it still rewrites the branch's history.`,
+  },
+  elsewhere: {
+    title: "This commit is already on a remote branch",
+    description: () =>
+      "Amending rewrites it on this branch only: the remote branch keeps the original, and the two will differ.",
+  },
+  unchecked: {
+    title: "This commit may already be on a remote branch",
+    description: () =>
+      "Couldn't check whether a remote branch has this commit. If one does, amending rewrites it on this branch only.",
+  },
+};
+
 /**
- * Asks before amending a commit that's already on the remote, since the
- * rewrite will require a force push. "Don't show again" persists in settings
- * (`confirmAmendForcePush`). Confirming starts the amend.
+ * Asks before amending a commit that's already published: on the upstream,
+ * where the rewrite will require a force push, or on another remote branch (or
+ * unchecked) with no live upstream. "Don't show again" persists in settings
+ * (`confirmAmendForcePush`) and covers every variant. Confirming starts the
+ * amend.
  */
 export function AmendForcePushDialog({
   open,
+  variant,
   upstream,
   onConfirm,
   onCancel,
 }: {
   open: boolean;
+  variant: AmendConfirmVariant;
   upstream: string | null;
   /** Starts the amend, resolving true once it actually began. False covers a
    *  gate refusal (a branch rule, or a read still settling), a commit that
@@ -68,14 +94,9 @@ export function AmendForcePushDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Amending will require a force push</DialogTitle>
+          <DialogTitle className="pr-8">{COPY[variant].title}</DialogTitle>
           <DialogDescription>
-            This commit is already on {upstream ?? "the remote"}. Amending
-            rewrites it, so your branch and the remote will diverge and you'll
-            need to force push to update it. GitDesktop force pushes with
-            --force-with-lease and, where your Git can check it,
-            --force-if-includes (the pair won't overwrite others' work your
-            branch doesn't include), but it still rewrites the branch's history.
+            {COPY[variant].description(upstream)}
           </DialogDescription>
         </DialogHeader>
         <label className="flex cursor-pointer items-center gap-2 text-xs">

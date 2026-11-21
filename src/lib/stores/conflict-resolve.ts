@@ -6,6 +6,7 @@ import { appErrorDetail, presentError } from "@/lib/error-summary";
 import { conflictSides } from "@/lib/git/conflict";
 import { noLongerConflicted } from "@/lib/git/conflict-parse";
 import {
+  blockInputsOf,
   type PrefilterRead,
   partition,
   prefilterToast,
@@ -209,9 +210,7 @@ async function prefilterSplit(
         chunk.map((p) =>
           conflictSides(scope, p, exclude).then(
             (s): PrefilterRead => ({
-              undecodable: s.undecodable,
-              workingUndecodable: s.workingUndecodable,
-              aiIgnored: s.aiIgnored,
+              ...blockInputsOf(s),
               resolved: noLongerConflicted(s),
             }),
             refusalRead,

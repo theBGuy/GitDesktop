@@ -167,6 +167,15 @@ export const UNDO_ROOT_COMMIT_CONFIRM = {
   confirmVariant: "destructive",
 } as const;
 
+/** Asked when a user close of Edit history would drop a plan it hasn't
+ *  applied; the confirm host's Cancel keeps the dialog and every draft. */
+export const EDIT_HISTORY_DISCARD_CONFIRM = {
+  title: "Discard your unapplied edits?",
+  body: "Closing Edit history drops the rewords, drops, reorders and date changes you haven't applied.",
+  confirmLabel: "Discard edits",
+  confirmVariant: "destructive",
+} as const;
+
 /** Which commit's parent went unread: Edit history's oldest planned commit, or
  *  the one commit the HEAD dialog changes. */
 export type UnreadParentSubject = "oldest" | "this";

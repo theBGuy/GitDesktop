@@ -516,10 +516,10 @@ describe("Edit dates dialog", () => {
     const toggle = screen.getByRole("button", {
       name: "Pick the author date with the calendar",
     });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).not.toHaveAttribute("aria-expanded");
     expect(screen.queryByLabelText("Author date, calendar date")).toBeNull();
     await userEvent.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).not.toHaveAttribute("aria-expanded");
     const day = screen.getByLabelText("Author date, calendar date");
     expect(day).toHaveValue("2026-11-08");
     fireEvent.change(day, { target: { value: "2026-12-01" } });

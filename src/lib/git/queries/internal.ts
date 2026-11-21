@@ -437,6 +437,10 @@ export function useRepoMutation<TArgs, TData>(
      *  whose handler calls `refuseWhileOffline`) is refused at the press instead;
      *  any route that skips that gate still parks. */
     networkMode?: "always";
+    /** How long a settled mutation stays in the mutation cache; query-core reads
+     *  it off the live options, so pass a constant. A write whose variables are
+     *  large (a whole file) passes 0 so they are freed at the settle. */
+    gcTime?: number;
   } = {},
 ) {
   const queryClient = useQueryClient();
@@ -453,6 +457,7 @@ export function useRepoMutation<TArgs, TData>(
     mutationFn,
     ...(opts.identity ? { mutationKey: opts.identity } : {}),
     ...(opts.networkMode ? { networkMode: opts.networkMode } : {}),
+    ...(opts.gcTime !== undefined ? { gcTime: opts.gcTime } : {}),
     ...repoMutationCallbacks(
       queryClient,
       {

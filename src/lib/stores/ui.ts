@@ -50,6 +50,10 @@ const OVERLAY_VIEWS: Record<OverlayView, true> = {
 function isOverlayView(v: AppView): v is OverlayView {
   return v in OVERLAY_VIEWS;
 }
+/** Why History offers no single commit for Edit dates: several are selected,
+ *  or a search filters the list. */
+export type HistoryDatesHold = "multi-select" | "search";
+
 export type RepoTab =
   | "changes"
   | "history"
@@ -413,6 +417,11 @@ export interface UiState {
   } | null;
   selectedFile: SelectedFile | null;
   selectedCommitHash: string | null;
+  /** Why History's commit detail holds Edit dates: History offers no single
+   *  commit to act on. Owned by HistoryPanel's publish effect (null while it
+   *  isn't mounted or shown), so no repo switch resets it. Not a selection
+   *  field: Back/Forward never records it. */
+  historyDatesHold: HistoryDatesHold | null;
   /** Commit selected on the Compare tab. Separate from `selectedCommitHash` (History's) so
    *  neither clobbers the other. Reset when the compare branch changes — a commit from one
    *  branch's compare list may not exist in another's. */
@@ -697,6 +706,9 @@ export interface UiState {
    *  edit-dates continuation). A landing, not a user action, so it never bumps
    *  {@link UiState.interactionEpoch}: a late bump would retire a newer action's continuation. */
   landSelectedCommit: (hash: string) => void;
+  /** Publish {@link UiState.historyDatesHold}. Written from an effect, so it
+   *  never bumps {@link UiState.interactionEpoch}. */
+  setHistoryDatesHold: (hold: HistoryDatesHold | null) => void;
   selectCompareCommit: (hash: string | null) => void;
   setCommitDraft: (title: string, body: string) => void;
   setCommitTitle: (title: string) => void;
@@ -1106,6 +1118,7 @@ export const useUiStore = create<UiState>()((set, get) => {
     selectedTodo: null,
     selectedFile: null,
     selectedCommitHash: null,
+    historyDatesHold: null,
     compareCommitHash: null,
     commitTitle: "",
     commitBody: "",
@@ -1480,6 +1493,9 @@ export const useUiStore = create<UiState>()((set, get) => {
       })),
     clearSelectedCommit: () => set({ selectedCommitHash: null }),
     landSelectedCommit: (hash) => set({ selectedCommitHash: hash }),
+    setHistoryDatesHold: (hold) => {
+      if (get().historyDatesHold !== hold) set({ historyDatesHold: hold });
+    },
     selectCompareCommit: (hash) =>
       set((s) => ({
         compareCommitHash: hash,

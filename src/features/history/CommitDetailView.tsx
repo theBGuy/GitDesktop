@@ -105,7 +105,7 @@ import { useAvailableActions } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
-import { useUiStore } from "@/lib/stores/ui";
+import { type HistoryDatesHold, useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -164,6 +164,19 @@ const EDIT_DATES_ELSEWHERE_HINT =
  *  History tab, while History holds the route: the commit's row there says
  *  why. */
 const EDIT_DATES_HISTORY_ROW_HINT = " (see its row in History)";
+
+/** Edit dates' reason in the History tab while History offers no single
+ *  commit, mirroring its palette action's gate. */
+const HISTORY_DATES_HOLD_HINT: Record<HistoryDatesHold, string> = {
+  "multi-select": " (select only this commit in History)",
+  search: " (clear History's search first)",
+};
+
+/** The same hold's sentence when a route reaches Edit dates anyway. */
+const HISTORY_DATES_HOLD_TOAST: Record<HistoryDatesHold, string> = {
+  "multi-select": "Select only this commit in History to edit its dates.",
+  search: "Clear History's search to edit this commit's dates.",
+};
 
 /** Unmerged entries with no operation stopped: Edit dates refuses. */
 const selectUnresolved = (s: RepoStatus) => s.entries.some(isConflictedEntry);
@@ -411,6 +424,10 @@ export function CommitDetailView({
   // Compare and a local pull request host this view too; there, History's
   // row isn't on screen to explain a held route.
   const inHistoryTab = useUiStore((s) => s.repoTab === "history");
+  // History's own multi-selection or search holds both routes there; other
+  // hosts have no History selection to defer to.
+  const historyHold = useUiStore((s) => s.historyDatesHold);
+  const selectionHold = inHistoryTab ? historyHold : null;
   // Edit dates holds through a merge/rebase/cherry-pick/revert, as History's
   // row does. Fetched only while the actions menu is open; otherwise it serves
   // whatever the cache holds. A pending or failed read holds nothing (the
@@ -484,6 +501,10 @@ export function CommitDetailView({
 
   function openEditDates() {
     if (datesHeld) return;
+    if (selectionHold !== null) {
+      toast.info(HISTORY_DATES_HOLD_TOAST[selectionHold]);
+      return;
+    }
     if (!isHead) {
       dispatchAction("edit-commit-dates");
       return;
@@ -886,18 +907,25 @@ export function CommitDetailView({
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       className={MENU_HELD_ROW_CLASS}
-                      disabled={datesHeld || (!isHead && !datesViaHistory)}
+                      disabled={
+                        datesHeld ||
+                        selectionHold !== null ||
+                        (!isHead && !datesViaHistory)
+                      }
                       onClick={openEditDates}
                     >
                       Edit dates…
                       {(() => {
                         // The operation first, as History orders it; then
-                        // Amend's own log and HEAD holds, then the route's.
+                        // History's selection, then Amend's own log and HEAD
+                        // holds, then the route's.
                         switch (true) {
                           case opInProgress:
                             return OP_IN_PROGRESS_HINT;
                           case unresolved:
                             return RESOLVE_CONFLICTS_HINT;
+                          case selectionHold !== null:
+                            return HISTORY_DATES_HOLD_HINT[selectionHold];
                           case isHead || datesViaHistory:
                             return null;
                           case log.data === undefined && refreshFailed(log):

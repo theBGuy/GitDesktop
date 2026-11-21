@@ -963,6 +963,16 @@ const UNDO_UNRESOLVED: &str = "Resolve the conflicts first; nothing was undone."
 /// under it. KEEP IN STEP with the family above.
 const UNDO_STATE_UNREAD: &str = "Couldn't read the repository's state; nothing was undone.";
 
+/// The GUI undo's refusal for a HEAD a remote already has, by the History menu's own
+/// test (`head_published`). KEEP IN STEP with the family above.
+// KEEP IN STEP: HistoryPanel.tsx's `UNDO_ALREADY_PUSHED` carries this exact sentence.
+const UNDO_ALREADY_PUSHED: &str = "The latest commit is already pushed — nothing was undone.";
+
+/// The GUI undo's refusal when a publication probe fails: a defaulted "not pushed"
+/// would undo a commit a remote may have. KEEP IN STEP with the family above.
+// KEEP IN STEP: HistoryPanel.tsx's `UNDO_PUSHED_UNCHECKED` carries this exact sentence.
+const UNDO_PUSHED_UNCHECKED: &str = "Couldn't check which commits are pushed; nothing was undone.";
+
 /// The refusal for an undo while a cherry-pick or revert is stopped: `reset --soft` would
 /// cancel it, clearing its sequencer only on the last pick. KEEP IN STEP with the family above.
 // KEEP IN STEP: HistoryPanel.tsx's `UNDO_MID_PICK` toasts this exact sentence on the
@@ -1005,6 +1015,78 @@ async fn records_parent(repo_path: &str, oid: &str) -> AppResult<bool> {
     Ok(header.any(|line| line.starts_with("parent ")))
 }
 
+/// Whether a remote already has `head_oid`, by the History menu's own test
+/// (`undoPushedHold`): a branch whose upstream resolves asks whether that upstream
+/// contains it (a local upstream included); detached, with no upstream, or with one gone,
+/// whether any remote-tracking ref does. Any failed probe is an Err, never a defaulted
+/// "not pushed".
+async fn head_published(repo_path: &str, head_oid: &str) -> AppResult<bool> {
+    let failed = |out: &GitOutput| AppError::Git {
+        code: out.code,
+        stderr: out.full_failure_text(),
+    };
+    let attached = run_git_raw(
+        Some(repo_path),
+        &["symbolic-ref", "-q", "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let upstream_oid = match attached.code {
+        0 => {
+            let branch_ref = attached.stdout_lossy().trim().to_string();
+            let listed = run_git_raw(
+                Some(repo_path),
+                &["for-each-ref", "--format=%(upstream)", &branch_ref],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            if listed.code != 0 {
+                return Err(failed(&listed));
+            }
+            let upstream_ref = listed.stdout_lossy().trim().to_string();
+            if upstream_ref.is_empty() {
+                None
+            } else {
+                let peeled = run_git_raw(
+                    Some(repo_path),
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "-q",
+                        &format!("{upstream_ref}^{{commit}}"),
+                    ],
+                    DEFAULT_TIMEOUT,
+                )
+                .await?;
+                // Exit 1 is an upstream that doesn't resolve: the menu's "gone".
+                match peeled.code {
+                    0 => Some(peeled.stdout_lossy().trim().to_string()),
+                    1 => None,
+                    _ => return Err(failed(&peeled)),
+                }
+            }
+        }
+        // `-q` exits 1 exactly when HEAD is detached.
+        1 => None,
+        _ => return Err(failed(&attached)),
+    };
+    let Some(upstream_oid) = upstream_oid else {
+        return crate::git::branches::commit_on_remote(repo_path.to_string(), head_oid.to_string())
+            .await;
+    };
+    let ancestor = run_git_raw(
+        Some(repo_path),
+        &["merge-base", "--is-ancestor", head_oid, &upstream_oid],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    match ancestor.code {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(failed(&ancestor)),
+    }
+}
+
 #[tauri::command]
 pub async fn git_commit_records_parent(repo_path: String, hash: String) -> AppResult<bool> {
     crate::git::history::validate_hash(&hash)?;
@@ -1019,7 +1101,18 @@ pub async fn git_undo_commit(
     expected_branch: String,
 ) -> AppResult<()> {
     let expected_ref = ExpectedRef::from_wire(Some(expected_branch))?;
-    git_undo_commit_core(&state, repo_path, Some(expected_head), expected_ref).await
+    undo_commit_inner(&state, repo_path, Some(expected_head), expected_ref, true).await
+}
+
+/// The MCP undo: `undo_commit_inner` without the publication check, so the tool keeps
+/// undoing whatever HEAD is, pushed or not.
+pub(crate) async fn git_undo_commit_core(
+    state: &AppState,
+    repo_path: String,
+    expected_head: Option<String>,
+    expected_ref: ExpectedRef,
+) -> AppResult<()> {
+    undo_commit_inner(state, repo_path, expected_head, expected_ref, false).await
 }
 
 /// Undoes the latest commit, keeping its changes staged (soft reset). A root commit
@@ -1035,13 +1128,18 @@ pub async fn git_undo_commit(
 /// that process's branch switch puts the branch back and refuses too. A switch landing
 /// after that re-read is unseen.
 ///
+/// With `refuse_published` (the GUI) a HEAD a remote already has refuses after the
+/// mid-operation refusals, which outrank it. A push landing after that check and before
+/// the ref move is unseen too.
+///
 /// `update-ref` skips both `reset --soft`'s mid-merge refusal and its cancelling of a
 /// stopped pick, so both arms refuse those states first.
-pub(crate) async fn git_undo_commit_core(
+async fn undo_commit_inner(
     state: &AppState,
     repo_path: String,
     expected_head: Option<String>,
     expected_ref: ExpectedRef,
+    refuse_published: bool,
 ) -> AppResult<()> {
     let moved = || AppError::Git {
         code: 1,
@@ -1080,6 +1178,13 @@ pub(crate) async fn git_undo_commit_core(
         }
         if crate::git::ops::has_unmerged(&repo_path).await? {
             return Err(refuse(UNDO_UNRESOLVED));
+        }
+        if let (true, Some(head_oid)) = (refuse_published, &head) {
+            match head_published(&repo_path, head_oid).await {
+                Ok(false) => {}
+                Ok(true) => return Err(refuse(UNDO_ALREADY_PUSHED)),
+                Err(_) => return Err(refuse(UNDO_PUSHED_UNCHECKED)),
+            }
         }
     }
     // The parent of the oid read above, never `HEAD~1` again: a switch between two
@@ -1743,6 +1848,12 @@ mod tests {
         git_undo_commit_core(&state, repo.to_string(), expected, on).await
     }
 
+    /// The GUI route (`git_undo_commit`), whose `State` a test can't build.
+    async fn undo_gui(repo: &str, expected: Option<String>, on: ExpectedRef) -> AppResult<()> {
+        let state = AppState::default();
+        undo_commit_inner(&state, repo.to_string(), expected, on, true).await
+    }
+
     /// HEAD's branch name, as the GUI's status read reports it.
     async fn branch_here(repo: &str) -> ExpectedRef {
         ExpectedRef::Branch(
@@ -2060,6 +2171,312 @@ mod tests {
             .await
             .expect("a detached HEAD undoes when the pin says detached");
         assert_eq!(head(&repo).await, a);
+    }
+
+    /// Adds a bare `origin` outside the working tree, alive while the guard is.
+    async fn bare_origin(repo: &str) -> tempfile::TempDir {
+        let remote = tempfile::Builder::new()
+            .prefix("gd-undo-remote-")
+            .tempdir()
+            .expect("create temp dir");
+        let bare = remote.path().to_string_lossy().into_owned();
+        run(&bare, &["init", "--bare", "-q", "-b", "main"]).await;
+        run(repo, &["remote", "add", "origin", &bare]).await;
+        remote
+    }
+
+    /// A repo on `main` with commits A then B (only A when `root`) and a bare `origin`.
+    async fn remote_fixture(
+        prefix: &str,
+        root: bool,
+    ) -> (tempfile::TempDir, tempfile::TempDir, String, String) {
+        let (dir, repo) = amend_fixture(prefix, &["-b", "main"]).await;
+        let remote = bare_origin(&repo).await;
+        let mut top = raw_commit(&dir, &repo, "a.txt", "A").await;
+        if !root {
+            top = raw_commit(&dir, &repo, "b.txt", "B").await;
+        }
+        (dir, remote, repo, top)
+    }
+
+    /// HEAD's oid, the ref it names (or "detached"), the index and the porcelain status.
+    async fn undo_snapshot(repo: &str) -> (String, String, String, String) {
+        let named = run_git_raw(
+            Some(repo),
+            &["symbolic-ref", "-q", "HEAD"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        let branch_ref = if named.code == 0 {
+            let name = named.stdout_lossy().trim().to_string();
+            format!("{name} {}", run(repo, &["rev-parse", &name]).await.trim())
+        } else {
+            "detached".to_string()
+        };
+        (
+            head(repo).await,
+            branch_ref,
+            run(repo, &["ls-files", "-s"]).await,
+            porcelain(repo).await,
+        )
+    }
+
+    /// What the menu reads as published, built three times over: the GUI undo refuses it
+    /// with nothing moved, and the MCP route still undoes it, pinned and unpinned.
+    async fn assert_gui_refuses_a_published_head(
+        prefix: &str,
+        root: bool,
+        publish: &[&[&str]],
+        on: fn(&str) -> ExpectedRef,
+    ) {
+        for mcp_pin in [None, Some(true), Some(false)] {
+            let (_dir, _remote, repo, top) = remote_fixture(prefix, root).await;
+            for step in publish {
+                run(&repo, step).await;
+            }
+            let pin = on(&run(&repo, &["branch", "--show-current"]).await);
+            match mcp_pin {
+                None => {
+                    let before = undo_snapshot(&repo).await;
+                    assert_undo_refused(
+                        undo_gui(&repo, Some(top.clone()), pin).await,
+                        UNDO_ALREADY_PUSHED,
+                    );
+                    assert_eq!(undo_snapshot(&repo).await, before, "nothing moved");
+                }
+                Some(pinned) => {
+                    let expected = pinned.then(|| top.clone());
+                    undo_on(&repo, expected, pin)
+                        .await
+                        .expect("the MCP route undoes a pushed commit");
+                    if root {
+                        assert!(!has_head(&repo).await, "the root arm ran");
+                    } else {
+                        assert_ne!(head(&repo).await, top, "the soft arm ran");
+                    }
+                }
+            }
+        }
+    }
+
+    fn on_branch(shown: &str) -> ExpectedRef {
+        ExpectedRef::Branch(shown.trim().to_string())
+    }
+
+    fn on_detached(_: &str) -> ExpectedRef {
+        ExpectedRef::Detached
+    }
+
+    #[tokio::test]
+    async fn gui_undo_refuses_a_head_pushed_under_another_name() {
+        assert_gui_refuses_a_published_head(
+            "gd-undo-pushed-other-",
+            false,
+            &[&["push", "-q", "origin", "HEAD:refs/heads/other"]],
+            on_branch,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gui_undo_refuses_a_head_its_upstream_has() {
+        assert_gui_refuses_a_published_head(
+            "gd-undo-pushed-upstream-",
+            false,
+            &[&["push", "-q", "-u", "origin", "HEAD"]],
+            on_branch,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gui_undo_refuses_a_detached_head_a_remote_has() {
+        assert_gui_refuses_a_published_head(
+            "gd-undo-pushed-detached-",
+            false,
+            &[
+                &["push", "-q", "-u", "origin", "HEAD"],
+                &["checkout", "-q", "--detach"],
+            ],
+            on_detached,
+        )
+        .await;
+    }
+
+    /// The refusal precedes the root arm, so the pushed branch's ref survives it.
+    #[tokio::test]
+    async fn gui_undo_refuses_a_pushed_root_commit() {
+        assert_gui_refuses_a_published_head(
+            "gd-undo-pushed-root-",
+            true,
+            &[&["push", "-q", "-u", "origin", "HEAD"]],
+            on_branch,
+        )
+        .await;
+    }
+
+    /// An upstream whose tracking ref is gone reads as no upstream, as the menu's
+    /// `isNoUpstream` does, so any remote ref holding HEAD refuses.
+    #[tokio::test]
+    async fn gui_undo_refuses_when_the_upstream_is_gone_and_another_remote_ref_has_head() {
+        assert_gui_refuses_a_published_head(
+            "gd-undo-pushed-gone-",
+            false,
+            &[
+                &["push", "-q", "-u", "origin", "HEAD"],
+                &["push", "-q", "origin", "HEAD:refs/heads/other"],
+                &["update-ref", "-d", "refs/remotes/origin/main"],
+            ],
+            on_branch,
+        )
+        .await;
+    }
+
+    /// Nothing the menu reads as published blocks the GUI undo: no remote, a remote that
+    /// lacks HEAD, and an upstream branch ahead by one while another remote ref has HEAD
+    /// (the menu reads the upstream alone there).
+    #[tokio::test]
+    async fn gui_undo_runs_when_no_remote_ref_the_menu_reads_has_head() {
+        let (dir, repo) = amend_fixture("gd-undo-unpushed-none-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        undo_gui(&repo, Some(b), branch_here(&repo).await)
+            .await
+            .expect("no remote at all");
+        assert_eq!(head(&repo).await, a);
+
+        let (_dir, _remote, repo, b) = remote_fixture("gd-undo-unpushed-lacks-", false).await;
+        let a = run(&repo, &["rev-parse", "HEAD~1"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo, &["push", "-q", "origin", "HEAD~1:refs/heads/other"]).await;
+        undo_gui(&repo, Some(b), branch_here(&repo).await)
+            .await
+            .expect("the remote lacks HEAD");
+        assert_eq!(head(&repo).await, a);
+
+        let (_dir, _remote, repo, b) = remote_fixture("gd-undo-unpushed-ahead-", false).await;
+        let a = run(&repo, &["rev-parse", "HEAD~1"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo, &["push", "-q", "origin", "HEAD~1:refs/heads/main"]).await;
+        run(&repo, &["config", "branch.main.remote", "origin"]).await;
+        run(&repo, &["config", "branch.main.merge", "refs/heads/main"]).await;
+        run(&repo, &["push", "-q", "origin", "HEAD:refs/heads/other"]).await;
+        assert_eq!(
+            run(&repo, &["rev-parse", "@{upstream}"]).await.trim(),
+            a,
+            "fixture: the upstream is one behind"
+        );
+        undo_gui(&repo, Some(b), branch_here(&repo).await)
+            .await
+            .expect("the upstream lacks HEAD, whatever another remote ref holds");
+        assert_eq!(head(&repo).await, a);
+    }
+
+    /// A publication probe that fails refuses rather than read as "not pushed": the
+    /// upstream's history misses an object, so `merge-base --is-ancestor` exits 128
+    /// (measured, git 2.51.1).
+    #[tokio::test]
+    async fn gui_undo_refuses_when_the_publication_probe_fails() {
+        let (dir, _remote, repo, b) = remote_fixture("gd-undo-probe-fails-", false).await;
+        let tree = run(&repo, &["rev-parse", "HEAD^{tree}"])
+            .await
+            .trim()
+            .to_string();
+        let lost = run(&repo, &["commit-tree", &tree, "-m", "lost"])
+            .await
+            .trim()
+            .to_string();
+        let tip = run(&repo, &["commit-tree", &tree, "-p", &lost, "-m", "tip"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo, &["update-ref", "refs/remotes/origin/main", &tip]).await;
+        run(&repo, &["config", "branch.main.remote", "origin"]).await;
+        run(&repo, &["config", "branch.main.merge", "refs/heads/main"]).await;
+        std::fs::remove_file(
+            dir.path()
+                .join(".git")
+                .join("objects")
+                .join(&lost[..2])
+                .join(&lost[2..]),
+        )
+        .unwrap();
+        let probe = run_git_raw(
+            Some(&repo),
+            &["merge-base", "--is-ancestor", &b, &tip],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        assert_eq!(probe.code, 128, "fixture: the walk fails: {}", probe.stderr);
+
+        let before = undo_snapshot(&repo).await;
+        assert_undo_refused(
+            undo_gui(&repo, Some(b.clone()), branch_here(&repo).await).await,
+            UNDO_PUSHED_UNCHECKED,
+        );
+        assert_eq!(undo_snapshot(&repo).await, before, "nothing moved");
+    }
+
+    /// A local upstream (`branch.main.remote = .`) is read like any other, as the menu's
+    /// `ahead` is: a `base` that contains HEAD refuses with no remote anywhere, and a
+    /// `base` one commit behind lets the undo run.
+    #[tokio::test]
+    async fn gui_undo_reads_a_local_upstream_like_a_remote_one() {
+        for contains_head in [true, false] {
+            let (dir, repo) = amend_fixture("gd-undo-local-upstream-", &["-b", "main"]).await;
+            let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+            let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+            let base_at = if contains_head { &b } else { &a };
+            run(&repo, &["branch", "base", base_at]).await;
+            run(&repo, &["config", "branch.main.remote", "."]).await;
+            run(&repo, &["config", "branch.main.merge", "refs/heads/base"]).await;
+            assert_eq!(
+                run(&repo, &["rev-parse", "--symbolic-full-name", "@{upstream}"])
+                    .await
+                    .trim(),
+                "refs/heads/base",
+                "fixture: the upstream is the local branch"
+            );
+
+            let before = undo_snapshot(&repo).await;
+            let result = undo_gui(&repo, Some(b.clone()), branch_here(&repo).await).await;
+            if contains_head {
+                assert_undo_refused(result, UNDO_ALREADY_PUSHED);
+                assert_eq!(undo_snapshot(&repo).await, before, "nothing moved");
+            } else {
+                result.expect("the local upstream lacks HEAD");
+                assert_eq!(head(&repo).await, a);
+            }
+        }
+    }
+
+    /// A stopped merge outranks a pushed HEAD, as the menu orders them.
+    #[tokio::test]
+    async fn gui_undo_of_a_pushed_head_mid_merge_refuses_the_merge_first() {
+        let (dir, repo) = amend_fixture("gd-undo-pushed-mid-merge-", &[]).await;
+        let _remote = bare_origin(&repo).await;
+        let (_, b) = diverged(&dir, &repo).await;
+        run(&repo, &["push", "-q", "-u", "origin", "HEAD"]).await;
+        let merge = run_git_raw(
+            Some(&repo),
+            &["merge", "--no-edit", "feature"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        assert_ne!(merge.code, 0, "fixture: the merge stops on its conflict");
+        resolve_ours(&repo).await;
+        assert_undo_refused(
+            undo_gui(&repo, Some(b.clone()), branch_here(&repo).await).await,
+            UNDO_MID_MERGE,
+        );
+        assert_eq!(head(&repo).await, b);
     }
 
     #[tokio::test]
