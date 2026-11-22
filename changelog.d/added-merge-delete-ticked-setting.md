@@ -1,7 +1,7 @@
 - **Start merges with the head branch set to be deleted.** A new **After
   merging** option in your personal *Branch rules* ticks **Delete … on the
-  remote after merging** when you start a merge in that repository, once its
-  branch rules and default branch have loaded. You can still untick it for
-  any merge, and it doesn't tick it for a pull request from a fork, the
-  default branch, a promotion branch, an agent session's branch, or a branch
-  a rule blocks from deletion.
+  remote after merging** when you open the merge dialog in that repository.
+  You can still untick it for any merge, and it doesn't tick it for a pull
+  request from a fork, the default branch, a promotion branch, an agent
+  session's branch, a branch a rule blocks from deletion, or a dialog opened
+  while the repository's branch rules or default branch are still loading.

@@ -906,9 +906,10 @@ the failed part's line when one shows.
   there are no commits ahead of the default branch; the latest commit is a merge; its
   parent isn't in a shallow clone; or there's no older commit to rebase onto),
   **Edit history** is held and the menu says which. If the editor is open when that
-  happens, its footer says so. Closing the editor with rewords, drops, reorders or dates
-  you haven't applied asks before discarding them, whether you press {{key:escape}},
-  click outside it, or use its close button or **Cancel**.
+  happens, its footer says so. Closing the editor with edits you haven't applied
+  (rewords, squashes, fixups, edit stops, drops, reorders or dates) asks before
+  discarding them, whether you press {{key:escape}}, click outside it, or use its close
+  button or **Cancel**.
 - **Create a branch** or **create a tag** at a commit, **check out** a commit (it asks
   first and explains the detached HEAD you land in), or copy
   its SHA.
@@ -1252,15 +1253,15 @@ re-reads your remotes and their branches each time it opens. From here you can j
 straight to opening a pull request.
 
 Picking a remote branch fetches that remote once, with a status line across the panel
-("Fetching origin…") while it runs. If the fetch fails, or you're offline, a branch still
-among your remote branches is compared against that remote's last fetch; the line says
-so, and offers **Retry** after a failed fetch. A picked branch that's no longer among
-your remote branches says so and offers
-to fetch its remote (**Fetch origin**, for a branch on \`origin\`) beside **Pick another
-branch**; once Compare's own fetch confirms it, the line says the branch was deleted on
-that remote. A branch whose remote was removed offers **Pick another branch**. Picking your own
-branch's copy on \`origin\` offers no pull request buttons, and when that copy is your branch's upstream, a
-line explains the counts: ahead is what you haven't pushed, behind is what you haven't
+("Fetching origin…") while it runs. If the fetch fails, or you're offline, a branch
+still among your remote branches is compared against that remote's last fetch; the line
+says so, and offers **Retry** after a failed fetch. A picked branch that's no longer
+among your remote branches says so and offers to fetch its remote (**Fetch origin**, for
+a branch on \`origin\`) beside **Pick another branch**; once Compare's own fetch
+confirms it, the line says the branch was deleted on that remote. A branch whose remote
+was removed offers **Pick another branch**. Picking your own branch's copy on \`origin\`
+offers no pull request buttons, and when that copy is your branch's upstream, a line
+explains the counts: ahead is what you haven't pushed, behind is what you haven't
 pulled.
 
 On a GitHub fork with an \`upstream\` remote, while you're signed in to GitHub, the pull
@@ -1604,11 +1605,12 @@ markers, giving you the chance to clean them up first. The command palette offer
 these as **Mark conflict resolved**. Staging a conflicted file any other way (its row's
 **+** button, the right-click menu, **Stage all**, or the palette) asks the same question
 while markers remain, checking files too large to show as well, and always asks for a
-binary file or one it can't check. The editor shows files up to 1 MB region by region. A
-larger file, or a binary one, offers **Mark resolved** in its pane once you've resolved it
-on disk: it stages the file exactly as it is on disk, asking first while a large file
-still has conflict markers or can't be checked, and always for a binary file.
-**Mark conflict resolved** in the command palette works there too.
+binary file or one it can't check. The editor shows files up to 1 MB region by region,
+in plain text once a file passes 400,000 characters. A larger file, or a binary one,
+offers **Mark resolved** in its pane once you've resolved it on disk: it stages the file
+exactly as it is on disk, asking first while a large file still has conflict markers or
+can't be checked, and always for a binary file. **Mark conflict resolved** in the
+command palette works there too.
 
 A conflicted submodule has no text to merge, so the editor shows its two commits instead:
 **Current (ours)** over **Incoming (theirs)**, each with its short ID, plus its subject
@@ -2551,15 +2553,15 @@ acting on the selected local PR.
 ## AI review
 
 On any PR (GitHub, or a GitLab MR), run a streamed **code review** or a focused
-**security audit** of its changes
-using your chosen review model, and optionally post the result as a comment. A general
-review builds on **soft context** where it exists: your prior review of the PR, findings
-other AI reviewers (Copilot, CodeRabbit) left, and **GitDesktop's own earlier comments on
-the PR**, replies GitDesktop itself posted inside review threads included, so on a re-review it treats a finding
-it already refuted or marked fixed as resolved instead of raising it cold. It also reads
-any **Notes for reviewers** the author left (deposited per branch by an agent through the
-GitDesktop MCP, or typed into the Create PR dialog and posted as the PR's first comment)
-as first-class grounding context, so a deliberate, documented decision isn't re-flagged.
+**security audit** of its changes using your chosen review model, and optionally post
+the result as a comment. A general review builds on **soft context** where it exists:
+your prior review of the PR, findings other AI reviewers (Copilot, CodeRabbit) left, and
+**GitDesktop's own earlier comments on the PR**, replies GitDesktop itself posted inside
+review threads included, so on a re-review it treats a finding it already refuted or
+marked fixed as resolved instead of raising it cold. It also reads any **Notes for
+reviewers** the author left (deposited per branch by an agent through the GitDesktop
+MCP, or typed into the Create PR dialog and posted as the PR's first comment) as
+first-class grounding context, so a deliberate, documented decision isn't re-flagged.
 Those notes reach **every** review of a GitHub or GitLab PR: the automated ones, and the
 code reviews and security audits you start yourself. Any of this context can also be **held
 back**: the panel offers *Ignore previous review*, *Ignore external reviews*, and *Ignore
@@ -2585,26 +2587,25 @@ reviews too (the global ones from Settings and the repo's own
 \`.gitdesktop/instructions.md\`, the same pair every generation gets), as conventions to
 judge the change against, never as instructions that can rewrite the review.
 See *AI & automations* to pick the review model. The **Review context** size there
-controls how much diff and prior-discussion context reviews send — **Auto** fits it to the
-reviewing model's context window (probing Ollama live), or pick Compact / Standard /
+controls how much diff and prior-discussion context reviews send — **Auto** fits it to
+the reviewing model's context window (probing Ollama live), or pick Compact / Standard /
 Expanded. **Review effort** (shown when Claude Code, GitHub Copilot, or opencode drives
 reviews or security audits) picks how hard the reviewer thinks: **Default** keeps the
 CLI's own setting, or choose **Low** through **Max** for a lighter or deeper pass. On
 opencode 2 the levels follow the reviewing model, and a level that model lacks is shown
-as unavailable with the reason. A deeper
-pass takes longer, so pair a high effort with a roomier **Review timeout**. Codex and the
-API providers always run at their own defaults. **Review timeout** (shown when an agent
-CLI drives reviews or security audits) caps how long such a review may run before it's
-stopped: **Auto** allows 5 minutes (20 when the review is agentic — always, for Codex), or
-pin a fixed limit that applies to every agent-CLI review. Whatever the reviewer already
-wrote is kept when the limit hits, for an automated pull-request review as much as one
-you started yourself: it stays on screen and is saved with the pull request, labelled
-**Timed out — partial output kept**, so it's still there after a restart. It also gets
-its own row under **Previous reviews**, where you can read, copy, post, or delete it like
-any other record (posting kept output asks first, since the text may be incomplete).
-Kept output is never treated as a finished review — it doesn't feed the next run's
-context and doesn't count as coverage for an automated review, so run it
-again for a full one.
+as unavailable with the reason. A deeper pass takes longer, so pair a high effort with a
+roomier **Review timeout**. Codex and the API providers always run at their own
+defaults. **Review timeout** (shown when an agent CLI drives reviews or security audits)
+caps how long such a review may run before it's stopped: **Auto** allows 5 minutes (20
+when the review is agentic — always, for Codex), or pin a fixed limit that applies to
+every agent-CLI review. Whatever the reviewer already wrote is kept when the limit hits,
+for an automated pull-request review as much as one you started yourself: it stays on
+screen and is saved with the pull request, labelled **Timed out — partial output kept**,
+so it's still there after a restart. It also gets its own row under **Previous
+reviews**, where you can read, copy, post, or delete it like any other record (posting
+kept output asks first, since the text may be incomplete). Kept output is never treated
+as a finished review — it doesn't feed the next run's context and doesn't count as
+coverage for an automated review, so run it again for a full one.
 
 **Critical** is the top severity an audit finding can carry — remote code execution,
 execution triggered by content you only clone or open, full compromise, or a mass data
@@ -4198,14 +4199,14 @@ GitDesktop checks readiness right there (Docker or Podman installed, the engine 
 agent image built) and keeps **Send** disabled until it is, naming what's missing (the
 composer says so outside the popover too, so a disabled **Send** is never a mystery). The
 states **Settings → AI** can fix (no container runtime, or the agent image not built yet)
-come with a jump straight there; a stopped engine you start yourself. Overriding *down* to
-**Worktree** when your default is a container says so plainly: that run happens on your host,
-where **Codex** still applies its own OS-enforced sandbox and the other agents stay inside
-the worktree by convention. The agent image installs opencode 2, so an image built
-earlier asks for a rebuild (about 1 GB more to download) before opencode runs in a
-container. When this computer runs opencode 2, a container session copies its opencode
-sign-ins in at the start, and the timeline says so when the copy couldn't be made or
-there was nothing to copy.
+come with a jump straight to its **Isolation** section; a stopped engine you start
+yourself. Overriding *down* to **Worktree** when your default is a container says so
+plainly: that run happens on your host, where **Codex** still applies its own
+OS-enforced sandbox and the other agents stay inside the worktree by convention. The
+agent image installs opencode 2, so an image built earlier asks for a rebuild (about 1
+GB more to download) before opencode runs in a container. When this computer runs
+opencode 2, a container session copies its opencode sign-ins in at the start, and the
+timeline says so when the copy couldn't be made or there was nothing to copy.
 
 A repo can also layer **extra tools** into the agent container: commit a
 \`.gitdesktop/agent.Dockerfile\` (it must start

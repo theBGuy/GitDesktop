@@ -1,2 +1,3 @@
-- **Edit history** asks before discarding rewords, drops, reorders or date
-  changes you haven't applied, however you close it.
+- **Edit history** asks before discarding edits you haven't applied
+  (rewords, squashes, fixups, edit stops, drops, reorders or dates), however
+  you close it.

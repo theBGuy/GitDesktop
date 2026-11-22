@@ -8,4 +8,6 @@
   Upstream** or **Open in Fork**) and always offers **Open on GitHub** as well.
   Clicking a card, or pressing `Enter` on a card or on a table or roadmap
   row's title, does what that first menu row says, and screen readers hear
-  when an open takes a moment.
+  when an open takes a moment. **Go back** returns you to the same
+  project, view and card, even when the item opened in another repository
+  or across the fork.

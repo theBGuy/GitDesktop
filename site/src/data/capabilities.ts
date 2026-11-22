@@ -281,6 +281,11 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Pull requests & review",
+    label:
+      "Merge dialog starts from a GitLab or Bitbucket request's own delete-source-branch choice",
+  },
+  {
+    group: "Pull requests & review",
     label: "Set labels & assignees when you open a PR/MR (GitHub & GitLab)",
   },
   {

@@ -4,5 +4,6 @@
   another branch while it ran. When a picked remote branch isn't among your
   remote branches and its remote is still set up, Compare offers to fetch that
   remote beside **Pick another branch**, and says the branch was deleted on
-  the remote once Compare's fetch confirms it. **Create pull request** waits
-  whenever the comparison with a remote branch couldn't be refreshed.
+  the remote once Compare's fetch confirms it. While the comparison with a
+  picked remote branch can't be read, **Create pull request** and **Create
+  local pull request** stay held and say why.

@@ -458,7 +458,9 @@ in one click.
   forge's own default or template; a GitLab merge that writes both a squash
   commit and a merge commit gets a row for each, GitLab auto-merge keeps
   your message until it lands, and a merge with no single commit to word
-  (rebase, fast-forward, a GitHub stack) says so. Labels and assignees on
+  (rebase, fast-forward, a GitHub stack) says so. On GitLab and Bitbucket,
+  the merge dialog's delete-branch box starts from the delete choice
+  already set on the merge request or pull request. Labels and assignees on
   GitHub & GitLab (set them when you open a PR/MR or any time after),
   request reviewers across GitHub, GitLab & Bitbucket, see, link, and
   unlink a PR's **GitHub Projects** in its header (open, closed, and merged
@@ -476,6 +478,9 @@ in one click.
   a comment, the comment box, reactions, and AI-review posting turn
   read-only and say why, with the reason on its own line above the open
   comment box (on an archived GitHub pull request, your draft is kept).
+  Review-thread replies are held the same way, and on an archived GitHub
+  pull request so are edits to your own comments; a reply or edit you had
+  open keeps its text.
 - **Check out to review**: Checkout switches to the request's branch, and
   **Check out in a worktree…** opens it in its own folder without touching
   your branch or uncommitted files (see [Worktree manager](#branches)).

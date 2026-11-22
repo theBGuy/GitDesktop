@@ -1,2 +1,3 @@
-- Shortcuts pressed while GitDesktop looks for Git leave nothing waiting to
-  appear: once it finds Git, the app opens where you expect.
+- Shortcuts pressed before GitDesktop has found Git, including on the **Git
+  not found** screen, leave nothing waiting to appear: once it finds Git, the
+  app opens where you expect.
