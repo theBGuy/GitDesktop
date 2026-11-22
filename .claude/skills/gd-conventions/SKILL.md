@@ -1013,12 +1013,14 @@ one grep away on the named symbol. Grows via Conventions-sync.
   which the window listener and `eventToBinding` both check). Then the
   focused control, for a fresh press of the unmodified key it natively means
   (Shift allowed) while no enabled action is bound to that key, or an exact
-  `eventToBinding` chord it owns. A text field or typeahead list keeps the
-  bare keys it types with, bound or not. Any other key bound to an enabled
-  action, and every key carrying Ctrl/Meta/Alt, belongs to the window
-  listener, which consumes a fresh press of a registered chord whether or not
-  anything runs (bare Space only when its action ran). The listener applies
-  the whole order, and `eventToBinding` answers null for an input-method key.
+  `eventToBinding` chord it owns. A text field keeps every key without
+  Ctrl/Meta/Alt, bound or not (F5 included), and the native editing chords;
+  a typeahead list keeps its bare character keys and Space. Every other key
+  bound to an enabled action, and every other key carrying Ctrl/Meta/Alt,
+  belongs to the window listener, which consumes a fresh press of a
+  registered chord whether or not anything runs (bare Space only when its
+  action ran). The listener applies the whole order, and `eventToBinding`
+  answers null for an input-method key.
   The palette, the shared Markdown editor and its mention list, the projects
   board and table, and Edit History apply the input-method tier; a local IME
   branch also stops propagation, since Base UI's document-level Escape

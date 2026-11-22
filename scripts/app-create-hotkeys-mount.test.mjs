@@ -16,10 +16,11 @@
 // both entries on other tabs. A source scan, since nothing mounts
 // RepositoryView in jsdom. Scans run on `maskNonCode`'s output, so comments and
 // string text never count; literals are read from the raw text at the masked
-// offsets. Every lookup that finds nothing fails, a `tier` that is not a plain
-// string literal fails, a call's options argument it cannot read (not an
-// object literal, a spread, a shorthand `tier`) fails, and a JSX spread in a
-// mount's tag fails it. Not covered: a registration whose id is not a string
+// offsets. A call's tier is read from its options argument alone (none means
+// no tier), and only registrations of the ids under inspection are read. Every
+// lookup that finds nothing fails, a `tier` that is not a plain string literal
+// fails, a call's options argument it cannot read (not an object literal, a
+// spread, a shorthand `tier`) fails, and a JSX spread in a mount's tag fails it. Not covered: a registration whose id is not a string
 // literal, an aliased import of useHotkeyAction or HotkeyAction, and a spread
 // on a `<HotkeyAction>` element.
 import assert from "node:assert/strict";
@@ -146,16 +147,18 @@ function optionsTier(rel, text, masked, [from, to]) {
   return tierIn(rel, text, masked, at, end + 1);
 }
 
-/** Every registration in `text` whose id is a literal, as { id, tier }:
- *  `useHotkeyAction(` calls (the id may sit on a later line) and
- *  `<HotkeyAction>` elements carrying an `id="…"` attribute. */
-function registrations(rel, text) {
+/** Every registration in `text` of one of `ids` whose id is a literal, as
+ *  { id, tier }: `useHotkeyAction(` calls (the id may sit on a later line) and
+ *  `<HotkeyAction>` elements carrying an `id="…"` attribute. Other ids are
+ *  skipped before their options are read, so their options never fail a pin;
+ *  a call's tier comes from its options argument alone, null when it has none. */
+function registrations(rel, text, ids) {
   if (!text.includes("HotkeyAction")) return [];
   const masked = mask(rel, text);
   const out = [];
   for (const m of masked.matchAll(/(?<![\w$.])useHotkeyAction\s*\(\s*/g)) {
     const id = literalAt(text, masked, m.index + m[0].length);
-    if (id === null) continue;
+    if (id === null || !ids.includes(id)) continue;
     const open = masked.indexOf("(", m.index);
     const close = matchBrace(masked, open);
     assert.ok(close > open, `${rel}: a useHotkeyAction call never closes`);
@@ -163,7 +166,7 @@ function registrations(rel, text) {
     const tier =
       args.length > OPTIONS_ARG
         ? optionsTier(rel, text, masked, args[OPTIONS_ARG])
-        : tierIn(rel, text, masked, open, close);
+        : null;
     out.push({ id, tier });
   }
   for (const m of masked.matchAll(/<HotkeyAction\b/g)) {
@@ -172,7 +175,7 @@ function registrations(rel, text) {
     const attr = /\sid=/.exec(masked.slice(m.index, end));
     if (attr === null) continue;
     const id = literalAt(text, masked, m.index + attr.index + attr[0].length);
-    if (id === null) continue;
+    if (id === null || !ids.includes(id)) continue;
     out.push({ id, tier: tierIn(rel, text, masked, m.index, end) });
   }
   return out;
@@ -181,9 +184,7 @@ function registrations(rel, text) {
 /** The files registering any of `ids`, sorted. */
 const registrars = (corpus, ids) =>
   [...corpus]
-    .filter(([rel, text]) =>
-      registrations(rel, text).some((r) => ids.includes(r.id)),
-    )
+    .filter(([rel, text]) => registrations(rel, text, ids).length > 0)
     .map(([rel]) => rel)
     .sort();
 
@@ -203,7 +204,7 @@ function checkTiers(corpus) {
     for (const [rel, pinned] of Object.entries(files)) {
       const text = corpus.get(rel);
       assert.ok(text, `${rel} is not in the walk`);
-      const own = registrations(rel, text).filter((r) => ids.includes(r.id));
+      const own = registrations(rel, text, ids);
       assert.deepEqual(
         own.map((r) => r.id).sort(),
         [...pinned].sort(),
@@ -220,7 +221,7 @@ function checkTierPins(corpus) {
   for (const { rel, ids, tier } of TIER_PINS) {
     const text = corpus.get(rel);
     assert.ok(text, `${rel} is not in the walk`);
-    const own = registrations(rel, text).filter((r) => ids.includes(r.id));
+    const own = registrations(rel, text, ids);
     assert.deepEqual(
       own.map((r) => r.id).sort(),
       [...ids].sort(),
@@ -394,9 +395,10 @@ test("control: a commented-out or string-only registration is not counted", () =
       [],
       text,
     );
-  assert.deepEqual(registrations(rel, "useHotkeyAction(`create-pr`, run);\n"), [
-    { id: "create-pr", tier: null },
-  ]);
+  assert.deepEqual(
+    registrations(rel, "useHotkeyAction(`create-pr`, run);\n", ["create-pr"]),
+    [{ id: "create-pr", tier: null }],
+  );
 });
 
 test("control: stripping the fallback tier from one app-level call fails", () => {
@@ -476,6 +478,41 @@ test("control: options whose tier the scan cannot read throw, never read as no t
     'useHotkeyAction("create-local-pr", () => requestCreate("local-pr"), true, { x: 1, tier: "fallback" });',
   );
   checkTiers(withFile(APP_CREATE, extra));
+});
+
+test("control: a call without options reads as untiered, whatever its callback holds", () => {
+  const call =
+    'useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr, {\n    tier: "fallback",\n  });';
+  const app = fileText(APP_CREATE);
+  assert.ok(app.includes(call), "the fallback call moved");
+  const logged = '() => {\n    console.info({ tier: "fallback" });\n  }';
+  for (const [label, to] of [
+    [
+      "three arguments",
+      `useHotkeyAction("create-pr", ${logged}, canCreatePr);`,
+    ],
+    ["two arguments", `useHotkeyAction("create-pr", ${logged});`],
+  ])
+    assert.throws(
+      () => checkTiers(withFile(APP_CREATE, once(app, call, to))),
+      /AppCreateHotkeys\.tsx's create-pr registration tier/,
+      label,
+    );
+});
+
+test("control: another action's options are never read", () => {
+  const rel = "src/features/pulls/PullRequestsPanel.tsx";
+  const other =
+    "\nfunction Other() {\n" +
+    '  useHotkeyAction("open-settings", run, true, opts);\n' +
+    '  useHotkeyAction("refresh", run, true, { ...opts, tier });\n' +
+    '  return <HotkeyAction id="go-back" run={run} tier={TIER} />;\n' +
+    "}\n";
+  const corpus = withFile(rel, fileText(rel) + other);
+  checkRegistrars(corpus);
+  checkTiers(corpus);
+  const list = REPO_LIST;
+  checkTierPins(withFile(list, fileText(list) + other));
 });
 
 test("control: a panel dropping one of its own create ids fails", () => {

@@ -456,6 +456,9 @@ describe("app zoom is exempt", () => {
         const close = await screen.findByRole("button", { name: "Close" });
         act(() => close.focus());
         if (focusAt === "blurred") blurToBody();
+        expect(document.activeElement).toBe(
+          focusAt === "inside" ? close : document.body,
+        );
         let ranZoom = false;
         let ranRoadmap = true;
         act(() => {
