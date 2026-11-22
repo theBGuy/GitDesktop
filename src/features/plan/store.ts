@@ -3,11 +3,13 @@ import { bumpNavVersion } from "@/features/sessions/navVersion";
 import { isWatchingAgentSurface } from "@/features/sessions/watching";
 import {
   type AgentKind,
+  appendTranscriptNote,
   appendTranscriptText,
   appendTranscriptTool,
   type ContextPack,
   cancelAgentSession,
   ensureTranscriptText,
+  noticeEffect,
   runAgentSession,
   type TranscriptSegment,
 } from "@/lib/ai/agent";
@@ -171,6 +173,9 @@ export const usePlanStore = create<PlanState>((set, get) => {
   /** The in-flight `hydrate()` attempt, so concurrent callers share one disk read
    *  (see `hydrate`). Lives in the factory closure, which runs exactly once. */
   let hydrating: Promise<void> | null = null;
+  /** Run id to the token of the turn that owns it, set when the turn is requested; only
+   *  the owner may start a process or write to the run. */
+  const turnOwners = new Map<string, object>();
 
   /** Patch one run by id — maps over the array, touching only that run, so
    *  concurrent runs streaming at once never clobber each other. */
@@ -178,15 +183,19 @@ export const usePlanStore = create<PlanState>((set, get) => {
     set({ runs: get().runs.map((r) => (r.id === id ? { ...r, ...p } : r)) });
 
   /** Stream one turn of run `id` (a read-only agent session turn), then parse the
-   *  result into a draft. `resume` continues the conversation (a refine). */
+   *  result into a draft. `resume` continues the conversation (a refine). A first
+   *  turn passes the token it minted at its request; other turns mint theirs here. */
   const runTurn = async (
     id: string,
     system: string,
     userPrompt: string,
     resume: boolean,
+    owner?: object,
   ) => {
     const run0 = get().runs.find((r) => r.id === id);
     if (!run0) return;
+    const token = owner ?? {};
+    turnOwners.set(id, token);
     patch(id, {
       generating: true,
       text: "",
@@ -197,19 +206,39 @@ export const usePlanStore = create<PlanState>((set, get) => {
       stopped: false,
       error: null,
     });
-    // True once this turn's result is stale: the user stopped it (`stopped`), or a
-    // restart issued a fresh session id. Either way its (killed/partial) output must
-    // not overwrite the run — guards every terminal patch below.
+    // True once this turn's output must stop: a cancel stopped it, or a restart, a
+    // removal or a newer turn of the same run took the run from it.
     const superseded = () => {
       const cur = get().runs.find((r) => r.id === id);
-      return !cur || cur.sessionId !== run0.sessionId || cur.stopped;
+      return (
+        turnOwners.get(id) !== token ||
+        !cur ||
+        cur.sessionId !== run0.sessionId ||
+        cur.stopped
+      );
+    };
+    // A turn a newer turn, a restart or a removal replaced writes nothing at all. A
+    // cancelled turn keeps its token until a newer turn takes the run, so it may still
+    // arm and record its conversation id.
+    const replaced = () => {
+      const cur = get().runs.find((r) => r.id === id);
+      return (
+        turnOwners.get(id) !== token || !cur || cur.sessionId !== run0.sessionId
+      );
     };
     const tracked = await gitListTracked(run0.repoPath).then(
       (rows) => rows.map((row) => row.path),
       () => [] as string[],
     );
+    // Last await before the process starts: a turn stopped or replaced during it starts
+    // nothing.
+    if (superseded()) return;
     let finalText = "";
     let errored = false;
+    // Set by a reset/re-key notice: this run's next `nativeSession` replaces the
+    // stored id. Run-local on purpose: a failed reset turn must not leave it armed
+    // for the next run, and another run's notice must never arm this one.
+    let replaceArmed = false;
     // Announce a finished plan run (success OR failure) the way agent sessions do.
     // A plan that finished WITH clarifying questions is a blocking handoff — it
     // idles until the user answers — so always nudge, even while they're watching
@@ -265,11 +294,25 @@ export const usePlanStore = create<PlanState>((set, get) => {
         isolation: "worktree",
         nativeSessionId: run0.nativeSessionId,
         onEvent: (ev) => {
+          if (replaced()) return;
           if (ev.kind === "nativeSession") {
-            // Capture once (turn 1) so a host resume targets this conversation.
+            // Capture once (turn 1, or the turn after a reset/re-key notice) so a
+            // host resume targets this conversation.
             const cur = get().runs.find((r) => r.id === id);
-            if (cur && !cur.nativeSessionId)
+            if (cur && (replaceArmed || !cur.nativeSessionId)) {
+              replaceArmed = false;
               patch(id, { nativeSessionId: ev.id });
+            }
+          } else if (ev.kind === "notice") {
+            const effect = noticeEffect(ev);
+            if (effect.replaceNativeSession) replaceArmed = true;
+            const cur = get().runs.find((r) => r.id === id);
+            if (effect.note && cur && !superseded())
+              patch(id, {
+                segments: appendTranscriptNote(cur.segments ?? [], effect.note),
+              });
+          } else if (superseded()) {
+            return;
           } else if (ev.kind === "delta") {
             finalText += ev.text;
             const cur = get().runs.find((r) => r.id === id);
@@ -293,7 +336,7 @@ export const usePlanStore = create<PlanState>((set, get) => {
           } else if (ev.kind === "done") {
             // The terminal event carries the authoritative full text; prefer it —
             // except on an errored Done, whose text is the failure reason and must
-            // not fold into the transcript (visible on the superseded path).
+            // not fold into the transcript.
             if (!ev.isError && ev.text.length > finalText.length)
               finalText = ev.text;
             if (ev.costUsd != null) patch(id, { costUsd: ev.costUsd });
@@ -305,27 +348,22 @@ export const usePlanStore = create<PlanState>((set, get) => {
             });
             if (ev.isError) {
               errored = true;
-              // Don't paint an error onto a run the user just stopped (or a turn a
-              // restart superseded) — a killed process may emit one on the way out.
-              if (!superseded())
-                patch(id, {
-                  // The terminal event's OWN text — never the delta accumulation,
-                  // whose narration could pass the error-shape net as the "reason".
-                  error: terminalErrorMessage(
-                    ev.text,
-                    "The planner reported an error.",
-                  ),
-                });
+              patch(id, {
+                // The terminal event's OWN text — never the delta accumulation,
+                // whose narration could pass the error-shape net as the "reason".
+                error: terminalErrorMessage(
+                  ev.text,
+                  "The planner reported an error.",
+                ),
+              });
             }
           } else if (ev.kind === "error") {
             errored = true;
             // Keep what a killed run wrote — a whole-message agent (codex) delivers it
             // only here, so adopt it when nothing streamed and fold it in exactly as the
             // done branch does. `errored` returns before `extractPlanDraft` below, so a
-            // truncated plan can still never become a draft. Superseded-guarded like the
-            // error patch: a stopped or restarted run's dying event must not write into
-            // the transcript that replaced it.
-            if (!superseded() && ev.partialText?.trim() && !finalText) {
+            // truncated plan can still never become a draft.
+            if (ev.partialText?.trim() && !finalText) {
               finalText = ev.partialText;
               const cur = get().runs.find((r) => r.id === id);
               patch(id, {
@@ -333,7 +371,7 @@ export const usePlanStore = create<PlanState>((set, get) => {
                 segments: ensureTranscriptText(cur?.segments ?? [], finalText),
               });
             }
-            if (!superseded()) patch(id, { error: ev.message });
+            patch(id, { error: ev.message });
           }
         },
       });
@@ -373,10 +411,18 @@ export const usePlanStore = create<PlanState>((set, get) => {
    *  then stream it. */
   const runFirstTurn = async (id: string, args: GenerateArgs) => {
     const { repoPath, goal = "", issueTitle, issueBody, contextPack } = args;
+    // Own the run before the awaited reads: whatever lands during them (Stop, Restart,
+    // Dismiss, a newer turn) must find this turn's token, re-checked below.
+    const token = {};
+    turnOwners.set(id, token);
     const [repoInstructions, settings] = await Promise.all([
       readRepoInstructions(repoPath).catch(() => null),
       loadSettings().catch(() => null),
     ]);
+    // A setup that never started a process has no conversation id to record, so a Stop
+    // during the reads starts nothing, unlike a started turn's Stop.
+    const cur = get().runs.find((r) => r.id === id);
+    if (turnOwners.get(id) !== token || !cur || cur.stopped) return;
     const { system, prompt } = buildPlanPrompt({
       goal,
       issueTitle,
@@ -386,7 +432,7 @@ export const usePlanStore = create<PlanState>((set, get) => {
       globalInstructions: settings?.globalInstructions ?? "",
       contextPack,
     });
-    await runTurn(id, system, prompt, false);
+    await runTurn(id, system, prompt, false, token);
   };
 
   return {
@@ -504,6 +550,7 @@ export const usePlanStore = create<PlanState>((set, get) => {
     restart: (id) => {
       const run = get().runs.find((r) => r.id === id);
       if (!run || run.generating) return;
+      turnOwners.delete(id);
       // Fresh conversation (the stopped one was killed): a new session id so the
       // old turn — if it's still resolving — is detected as stale and bails, then
       // re-run turn 1 from the original seed.
@@ -531,6 +578,7 @@ export const usePlanStore = create<PlanState>((set, get) => {
     remove: (id) => {
       const run = get().runs.find((r) => r.id === id);
       if (run?.generating) void cancelAgentSession(run.sessionId);
+      turnOwners.delete(id);
       set({
         runs: get().runs.filter((r) => r.id !== id),
         activePlanId: get().activePlanId === id ? null : get().activePlanId,

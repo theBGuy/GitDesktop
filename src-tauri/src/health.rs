@@ -41,6 +41,10 @@ pub struct ToolStatus {
     version: Option<String>,
     /// Login state for tools that have one (git is always `Unknown` = N/A).
     authed: AuthStatus,
+    /// Why GitDesktop will not run this binary, as the sentence a run would be refused
+    /// with. `None` when it is supported, is not opencode, or the `--version` check could
+    /// not run.
+    unsupported: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,6 +72,7 @@ fn undetected(id: &str) -> ToolStatus {
         path: None,
         version: None,
         authed: AuthStatus::Unknown,
+        unsupported: None,
     }
 }
 
@@ -171,13 +176,23 @@ async fn detect(id: &str, names: &[&str], auth: AuthProbe) -> ToolStatus {
         return undetected(id);
     };
 
-    let version = run_capture(&binary, &["--version"], DETECT_TIMEOUT)
-        .await
-        .ok()
-        .filter(|(code, _)| *code == 0)
+    // For opencode's row the version and the refusal a run would meet are one
+    // `--version` observation.
+    let (printed, unsupported) = if id == "opencode" {
+        let detection = Box::pin(crate::agent::opencode_detection(&binary)).await;
+        (detection.printed, detection.unsupported)
+    } else {
+        let printed = run_capture(&binary, &["--version"], DETECT_TIMEOUT)
+            .await
+            .ok()
+            .filter(|(code, _)| *code == 0)
+            .map(|(_, out)| out);
+        (printed, None)
+    };
+    let version = printed
         // `--version` is often multi-line (gh prints a release-notes URL); the
         // first line is the version we want.
-        .and_then(|(_, out)| out.lines().next().map(|l| l.trim().to_string()))
+        .and_then(|out| out.lines().next().map(|l| l.trim().to_string()))
         .filter(|s| !s.is_empty());
 
     let authed = match auth {
@@ -195,6 +210,7 @@ async fn detect(id: &str, names: &[&str], auth: AuthProbe) -> ToolStatus {
         path: Some(binary.to_string_lossy().into_owned()),
         version,
         authed,
+        unsupported,
     }
 }
 
@@ -224,8 +240,9 @@ static PROBES: [Probe; 7] = [
 
 /// OS/app info + the status of every external CLI, for Settings → About. The
 /// per-tool detections (each spawns subprocesses) run concurrently. `fresh` (About's
-/// Re-check) forgets the remembered login-shell misses and the short-lived CLI and
-/// container-runtime lookups before any detection starts.
+/// Re-check) forgets the remembered login-shell misses, the short-lived CLI and
+/// container-runtime lookups, and what GitDesktop remembered about each opencode binary,
+/// before any detection starts.
 #[tauri::command]
 pub async fn system_health(fresh: Option<bool>) -> AppResult<SystemHealth> {
     if fresh == Some(true) {
@@ -331,6 +348,20 @@ mod tests {
                 "the `{mark}` control: {bad:?}"
             );
         }
+    }
+
+    /// The About rows' wire shape: `unsupported` always ships, `null` when absent.
+    #[test]
+    fn tool_status_wire_shape_carries_unsupported() {
+        let status = serde_json::to_value(undetected("opencode")).expect("ToolStatus serializes");
+        let obj = status.as_object().expect("ToolStatus is a JSON object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["authed", "found", "id", "path", "unsupported", "version"]
+        );
+        assert_eq!(obj["unsupported"], serde_json::Value::Null);
     }
 
     #[test]

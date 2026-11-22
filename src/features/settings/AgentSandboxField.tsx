@@ -24,6 +24,7 @@ import {
   buildCustomImage,
   type ContainerStatus,
   customImageStatus,
+  OPENCODE_IMAGE_OUTDATED_DETAIL,
   prepareContainerSandbox,
   scaffoldCustomDockerfile,
 } from "@/lib/ai/sandbox";
@@ -181,6 +182,7 @@ export function AgentSandboxField({
           </div>
           <StatusLine
             status={status.data}
+            providers={providers}
             loading={status.isLoading}
             building={building}
             onBuild={buildImage}
@@ -199,11 +201,14 @@ export function AgentSandboxField({
 
 function StatusLine({
   status,
+  providers,
   loading,
   building,
   onBuild,
 }: {
   status: ContainerStatus | undefined;
+  /** The image agents selected in the Settings draft. */
+  providers: AgentId[];
   loading: boolean;
   building: boolean;
   onBuild: (force: boolean) => void;
@@ -253,6 +258,16 @@ function StatusLine({
       <Row tone="muted">
         {cap(status.runtime)} ready — build the agent image once.
         {buildBtn("Build image", false)}
+      </Row>
+    );
+  }
+  // Replaces the generic row while opencode is among the DRAFT's image agents: one
+  // rebuild fixes both, and the generic claim is false when the selection didn't change.
+  if (status.opencodeOutdated && providers.includes("opencode")) {
+    return (
+      <Row tone="warn">
+        {OPENCODE_IMAGE_OUTDATED_DETAIL}
+        {buildBtn("Rebuild", true)}
       </Row>
     );
   }

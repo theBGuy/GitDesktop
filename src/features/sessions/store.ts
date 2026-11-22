@@ -1,9 +1,11 @@
 import { toast } from "sonner";
 import { create } from "zustand";
 import {
+  appendTranscriptNote,
   appendTranscriptText,
   appendTranscriptTool,
   cancelAgentSession,
+  noticeEffect,
   runAgentSession,
   type TranscriptSegment,
 } from "@/lib/ai/agent";
@@ -391,6 +393,10 @@ async function runTurn(
     });
   };
 
+  // Set by a reset/re-key notice: this run's next `nativeSession` replaces the stored
+  // id. Run-local on purpose: a failed reset turn must not leave it armed for the next
+  // run, and another run's notice must never arm this one.
+  let replaceArmed = false;
   setSession((s) => ({ ...s, running: true }));
   try {
     await runAgentSession({
@@ -411,10 +417,12 @@ async function runTurn(
         const s = find();
         if (!s) return;
         if (ev.kind === "nativeSession") {
-          // Capture once (turn 1) + persist, so a host resume targets this session.
-          // Only the run still owning the last turn may capture: a stale run's late id
-          // would rebind later resumes to a dead conversation and block the live one.
-          if (ownsLastTurn(s) && !s.nativeSessionId) {
+          // Capture once (turn 1, or the turn after a reset/re-key notice) + persist,
+          // so a host resume targets this session. Only the run still owning the last
+          // turn may capture: a stale run's late id would rebind later resumes to a
+          // dead conversation and block the live one.
+          if (ownsLastTurn(s) && (replaceArmed || !s.nativeSessionId)) {
+            replaceArmed = false;
             setSession((x) => ({ ...x, nativeSessionId: ev.id }));
             persist(appendNativeSession(id, ev.id));
           }
@@ -422,6 +430,15 @@ async function runTurn(
         }
         const own = s.turns[turnIndex];
         if (!own) return;
+        if (ev.kind === "notice") {
+          const effect = noticeEffect(ev);
+          if (effect.replaceNativeSession) replaceArmed = true;
+          if (effect.note)
+            patchTurn({
+              segments: appendTranscriptNote(own.segments ?? [], effect.note),
+            });
+          return;
+        }
         if (ev.kind === "delta")
           patchTurn({
             narration: own.narration + ev.text,
@@ -591,15 +608,18 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         (s) => s.kept || live[s.repoPath]?.has(normPath(s.worktreePath)),
       );
       // A non-kept session whose repo WAS reachable but whose worktree is gone is confirmed
-      // dead — delete its transcript. Sessions in an unreachable repo are kept on disk and
-      // return when the repo is back, rather than being silently lost.
+      // dead — delete its transcript and a container session's sandbox. Sessions in an
+      // unreachable repo are kept on disk and return when the repo is back, rather than lost.
       for (const s of idled) {
         if (
           !s.kept &&
           live[s.repoPath] &&
           !live[s.repoPath].has(normPath(s.worktreePath))
-        )
+        ) {
           persist(removeTranscript(s.id));
+          if (s.isolation === "container")
+            persist(cleanupContainerSandbox(s.claudeSessionId));
+        }
       }
       // Merge under any sessions created before hydration finished (newest state
       // wins) — `start` isn't gated on hydration, so a replace would drop one.
@@ -879,13 +899,10 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     const s = get().sessions.find((x) => x.id === id);
     if (!s || s.kept || s.running || get().busyId) return;
     set({ busyId: id });
-    // The container home holds a credentials copy and is independent of the worktree, so clean
-    // it (idempotently) up front — a failed worktree removal shouldn't leave it. A running test
-    // container bind-mounts the worktree, so stop it (awaited) before removing the dir.
-    if (s.isolation === "container") {
-      persist(cleanupContainerSandbox(id));
+    // A running test container bind-mounts the worktree, so stop it (awaited) before
+    // removing the dir.
+    if (s.isolation === "container")
       await stopTestContainer(s.worktreePath).catch(() => undefined);
-    }
     try {
       const { branchCleanup } = await removeWorktree(
         s.repoPath,
@@ -894,6 +911,11 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         true,
       );
       persist(removeTranscript(id));
+      // The container home holds the agent's conversation and its sign-in copy, so it goes
+      // only once the worktree is gone: a failed removal leaves the session usable. It is
+      // keyed by the run's session id, not the record id.
+      if (s.isolation === "container")
+        persist(cleanupContainerSandbox(s.claudeSessionId));
       removeSession(get, set, id);
       const keptNote = KEPT_BRANCH_NOTES[branchCleanup];
       if (keptNote) toast.info(keptNote(s.branch));
@@ -909,7 +931,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     const s = get().sessions.find((x) => x.id === id);
     if (!s || !s.kept) return;
     persist(removeTranscript(id));
-    if (s.isolation === "container") persist(cleanupContainerSandbox(id));
+    if (s.isolation === "container")
+      persist(cleanupContainerSandbox(s.claudeSessionId));
     removeSession(get, set, id);
   },
 }));

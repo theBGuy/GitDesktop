@@ -11,9 +11,13 @@
 //! mounted read-write at the CLI's dotdir (`host_creds`/`agent_dotdir`) — the
 //! container authenticates with no API key, refreshes its own token, and never
 //! sees the host's real config. The home survives a session's turns (so
-//! `--resume` works) and is removed on discard. opencode needs no creds (free
-//! hosted models); Copilot has none to mount (OS keychain) and authenticates
-//! from a `COPILOT_GITHUB_TOKEN` passed by env.
+//! `--resume` works) and is removed on discard. The image's opencode (2.x) keeps
+//! sign-ins in its own database: a 2.x host's are exported and piped into the
+//! container on the session's first turn, unless an earlier copied `auth.json`
+//! could not be removed (it would stay the active sign-in); a 1.x host's `auth.json` is
+//! copied and imported when that database is created; without either it runs
+//! free models. Copilot has none to mount (OS keychain) and authenticates from a
+//! `COPILOT_GITHUB_TOKEN` passed by env.
 //!
 //! Every agent runs host or container; only Codex's **MCP** support is
 //! container-only (see `mcp.rs`). Details: docs/agent-sandbox-docker.md.
@@ -100,12 +104,13 @@ pub(crate) fn discard_script_on_err<T, E>(
 }
 
 /// npm package for a **container-capable** agent. `None` for an agent we can't run
-/// in the container.
+/// in the container. opencode is pinned to major 2 (`@opencode/cli`; `opencode-ai`
+/// is still 1.x): npm resolves the newest 2.x, and a new major needs its own label token.
 fn agent_npm_package(agent: &str) -> Option<&'static str> {
     match agent {
         "claude" => Some("@anthropic-ai/claude-code"),
         "codex" => Some("@openai/codex"),
-        "opencode" => Some("opencode-ai"),
+        "opencode" => Some("@opencode/cli@2"),
         // Copilot authenticates from an env token, not a mounted creds file.
         "copilot" => Some("@github/copilot"),
         _ => None,
@@ -113,8 +118,8 @@ fn agent_npm_package(agent: &str) -> Option<&'static str> {
 }
 
 /// The container dir an agent's seeded home mounts at — where it keeps its creds +
-/// session store. opencode uses an XDG data dir (its SQLite session db + optional
-/// auth.json live in `~/.local/share/opencode`), not a top-level dotdir.
+/// session store. opencode uses an XDG data dir, `~/.local/share/opencode`, not a
+/// top-level dotdir; on 2.x its database there also holds the credentials.
 fn agent_dotdir(agent: &str) -> &'static str {
     match agent {
         "codex" => "/home/node/.codex",
@@ -158,11 +163,25 @@ fn valid_node_version(v: &str) -> bool {
     !v.is_empty() && v.len() <= 3 && v.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// The `gdconfig` label token for opencode: names the installed major, so an image
+/// built with 1.x reads "rebuild needed" and fails the session gate.
+const OPENCODE_IMAGE_TOKEN: &str = "opencode@2";
+
+/// An agent's token in the `gdconfig` label. `@` never occurs in an agent name, so
+/// the part before it is always the agent.
+fn signature_token(agent: &str) -> &str {
+    if agent == "opencode" {
+        OPENCODE_IMAGE_TOKEN
+    } else {
+        agent
+    }
+}
+
 /// A deterministic signature of the image config, stored as the `gdconfig` image
 /// label — detect compares it to the current selection to decide "matches" vs
 /// "rebuild needed". Providers are sorted + de-duped so order doesn't matter.
 fn config_signature(node_version: &str, providers: &[String]) -> String {
-    let mut p: Vec<&str> = providers.iter().map(String::as_str).collect();
+    let mut p: Vec<&str> = providers.iter().map(|a| signature_token(a)).collect();
     p.sort_unstable();
     p.dedup();
     format!("node{node_version}-{}", p.join("-"))
@@ -200,7 +219,8 @@ fn render_dockerfile(node_version: &str, providers: &[String]) -> AppResult<Stri
     let dirs = dirs.join(" ");
     // `chown` the WHOLE home, not just `{dirs}`: opencode's dotdir is deep
     // (`~/.local/share/opencode`), so `mkdir -p` leaves `~/.local` root-owned and
-    // `node` then can't create its sibling XDG dirs (EACCES). Chowning /home/node
+    // `node` then can't create the sibling XDG dirs 2.x writes (`~/.config/opencode`,
+    // `~/.local/state/opencode`, `~/.cache/opencode`; EACCES). Chowning /home/node
     // is a harmless superset for the shallow dotdirs.
     Ok(format!(
         "FROM node:{node_version}-slim\nRUN apt-get update \\\n && apt-get install -y --no-install-recommends ca-certificates \\\n && rm -rf /var/lib/apt/lists/* \\\n && npm install -g {pkgs} \\\n && mkdir -p {dirs} \\\n && chown -R node:node /home/node\nUSER node\nWORKDIR /workspace\n"
@@ -219,6 +239,9 @@ pub struct ContainerStatus {
     /// The built image's `gdconfig` label matches the requested Node version +
     /// providers — `false` while `image_present` is true means "rebuild to apply".
     pub image_matches: bool,
+    /// The built image has opencode but not the generation this build installs, so
+    /// opencode sessions are refused until a rebuild. `false` when the label is unread.
+    pub opencode_outdated: bool,
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -229,7 +252,9 @@ fn home_dir() -> Option<PathBuf> {
 
 /// The host credentials file an agent's container home is seeded from. `None` for an
 /// agent with no mountable creds file — Copilot (login is in the OS keychain; it auths
-/// from an env token instead) and opencode when it has no `auth.json` (free models).
+/// from an env token instead). opencode's is the 1.x `auth.json`, which the container's
+/// 2.x imports only when it creates its database; a 2.x host may have none (its
+/// sign-ins are exported instead).
 fn host_creds(agent: &str) -> Option<PathBuf> {
     if agent == "copilot" {
         return None;
@@ -247,7 +272,8 @@ fn host_creds(agent: &str) -> Option<PathBuf> {
 
 /// Whether the agent CLI is logged in on the host (its creds file exists) — so a
 /// container session can fail early with a clear "log in first" message instead
-/// of a cryptic in-container auth error.
+/// of a cryptic in-container auth error. For opencode it means only that a legacy
+/// `auth.json` exists (the 1.x route); a 2.x host's sign-ins are read by the export.
 pub(crate) fn host_logged_in(agent: &str) -> bool {
     host_creds(agent).is_some_and(|p| p.is_file())
 }
@@ -614,14 +640,67 @@ async fn image_config_label(bin: &Path) -> Option<String> {
     }
 }
 
+/// Whether a `gdconfig` label token names `agent`: the token itself, or its part
+/// before the first `@` (the generation-tagged form, e.g. `opencode@2`).
+fn token_names_agent(token: &str, agent: &str) -> bool {
+    token == agent || token.split('@').next() == Some(agent)
+}
+
+/// Whether a `gdconfig` label lists `agent`. An empty label (an image built before
+/// labels existed) reads as "has it": don't block, the run will tell.
+fn label_has_agent(sig: &str, agent: &str) -> bool {
+    sig.is_empty() || sig.split('-').any(|t| token_names_agent(t, agent))
+}
+
 /// Whether the built image includes `agent` (per its `gdconfig` label) — lets a
 /// container session fail clearly if the user left that agent out of the image. An
-/// old image with no label is treated as "has it" (don't block; the run will tell).
+/// unreadable label is also treated as "has it".
 pub(crate) async fn image_has_agent(bin: &Path, agent: &str) -> bool {
     match image_config_label(bin).await {
-        Some(sig) if !sig.is_empty() => sig.split('-').any(|t| t == agent),
-        _ => true,
+        Some(sig) => label_has_agent(&sig, agent),
+        None => true,
     }
+}
+
+/// The opencode generation of the built image, as the session gate reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpencodeImage {
+    /// The label carries [`OPENCODE_IMAGE_TOKEN`].
+    Current,
+    /// Any other label, an empty or unlabelled image included: its opencode, if
+    /// any, predates the 2.x install.
+    Outdated,
+    /// The label couldn't be read. Never treated as `Current`.
+    Unreadable,
+}
+
+/// Classifies a `gdconfig` label read (`None` = the read failed). Only the exact
+/// token counts: a bare `opencode` is a 1.x image, `opencode@3` a future one.
+fn opencode_image_state(label: Option<&str>) -> OpencodeImage {
+    match label {
+        None => OpencodeImage::Unreadable,
+        Some(sig) if sig.split('-').any(|t| t == OPENCODE_IMAGE_TOKEN) => OpencodeImage::Current,
+        Some(_) => OpencodeImage::Outdated,
+    }
+}
+
+/// The session gate for an opencode container run: one `image inspect`. Read
+/// through the same label and token as [`agent_container_detect`], so Settings and
+/// the refusal agree. It reads the BASE image's label: a repository's derived image
+/// (`.gitdesktop/agent.Dockerfile`) can replace the opencode binary after it passed.
+pub(crate) async fn image_opencode_state(bin: &Path) -> OpencodeImage {
+    opencode_image_state(image_config_label(bin).await.as_deref())
+}
+
+/// Whether Settings should say the image's opencode needs a rebuild: the image is
+/// present, its label was read, names opencode, and isn't the current generation.
+fn opencode_outdated_from(image_present: bool, label: Option<&str>) -> bool {
+    let Some(sig) = label.filter(|_| image_present) else {
+        return false;
+    };
+    sig.split('-')
+        .any(|t| t.split('@').next() == Some("opencode"))
+        && opencode_image_state(label) != OpencodeImage::Current
 }
 
 /// Reports whether container isolation is usable on this machine and whether the
@@ -641,17 +720,24 @@ pub async fn agent_container_detect(
                 ready: false,
                 image_present: false,
                 image_matches: false,
+                opencode_outdated: false,
             });
         }
     };
+    let label = if image_present {
+        image_config_label(&bin).await
+    } else {
+        None
+    };
     let image_matches = image_present
-        && image_config_label(&bin).await.as_deref()
-            == Some(config_signature(&node_version, &providers).as_str());
+        && label.as_deref() == Some(config_signature(&node_version, &providers).as_str());
+    let opencode_outdated = opencode_outdated_from(image_present, label.as_deref());
     Ok(ContainerStatus {
         runtime: Some(name),
         ready,
         image_present,
         image_matches,
+        opencode_outdated,
     })
 }
 
@@ -1060,6 +1146,20 @@ fn session_home(app: &AppHandle, session_id: &str, agent: &str) -> AppResult<Pat
     Ok(agent_home_root(app)?.join(session_id).join(agent))
 }
 
+/// Ensures the per-session agent-home exists and returns the path to mount, copying
+/// nothing into it. The opencode export route uses it alone: a legacy `auth.json`
+/// beside the export would be imported first and stay the active sign-in.
+pub(crate) fn prepare_session_home(
+    app: &AppHandle,
+    session_id: &str,
+    agent: &str,
+) -> AppResult<PathBuf> {
+    crate::sessions::validate_id(session_id)?; // no path traversal into the home root
+    let home = session_home(app, session_id, agent)?;
+    std::fs::create_dir_all(&home)?;
+    Ok(home)
+}
+
 /// Ensures the per-session agent-home exists and (re-)seeds the host's current
 /// credentials for `agent` into it, so the container authenticates with the
 /// user's live subscription and a refreshed token each run. Returns the home path
@@ -1069,9 +1169,7 @@ pub(crate) fn seed_session_home(
     session_id: &str,
     agent: &str,
 ) -> AppResult<PathBuf> {
-    crate::sessions::validate_id(session_id)?; // no path traversal into the home root
-    let home = session_home(app, session_id, agent)?;
-    std::fs::create_dir_all(&home)?;
+    let home = prepare_session_home(app, session_id, agent)?;
     // Re-copy each run so an expired in-home token is refreshed.
     if let Some(src) = host_creds(agent) {
         if let (true, Some(name)) = (src.is_file(), src.file_name()) {
@@ -1081,22 +1179,52 @@ pub(crate) fn seed_session_home(
     Ok(home)
 }
 
+/// Removes from `home` the sign-in file [`seed_session_home`] copies for `agent`, and
+/// nothing else. A missing file, or an agent that seeds nothing, is not an error.
+pub(crate) fn remove_seeded_creds(home: &Path, agent: &str) -> std::io::Result<()> {
+    let Some(name) = host_creds(agent).and_then(|src| src.file_name().map(|n| n.to_owned())) else {
+        return Ok(());
+    };
+    match std::fs::remove_file(home.join(name)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 /// Removes a session's claude-home (on discard / kept-record delete) and force-
 /// removes any lingering container. Best-effort.
 #[tauri::command]
 pub async fn agent_sandbox_cleanup(app: AppHandle, session_id: String) -> AppResult<()> {
     // This deletes a directory by id, so reject any traversal before touching FS.
     crate::sessions::validate_id(&session_id)?;
-    if let Ok(dir) = agent_home_root(&app).map(|r| r.join(&session_id)) {
+    let home = agent_home_root(&app).map(|r| r.join(&session_id)).ok();
+    if let Some(dir) = &home {
         let _ = std::fs::remove_dir_all(dir);
     }
     // Drop the generated MCP config too (it may hold resolved secrets).
     crate::mcp::cleanup_host_config(&app, &session_id);
-    // Sweep every installed runtime: the container name is stable, so a session
+    // Sweep every installed runtime: the container names are stable, so a session
     // created under one engine must still be removed when another is preferred now.
-    let name = container_name(&session_id);
+    // The probe and auth-import containers are swept too: killing their runtime
+    // client does not stop them.
+    let names = [
+        container_name(&session_id),
+        probe_container_name(&session_id),
+        auth_import_container_name(&session_id),
+    ];
+    // One `rm -f` per name, run together: Podman's answer to a missing name in a
+    // multi-name `rm -f` is unmeasured, and one `DETECT_TIMEOUT` bounds each runtime.
+    let argvs = names.each_ref().map(|name| ["rm", "-f", name.as_str()]);
     for (bin, _) in runtime_candidates().await {
-        let _ = run_capture(&bin, &["rm", "-f", &name], DETECT_TIMEOUT).await;
+        let [run, probe, auth] = argvs
+            .each_ref()
+            .map(|argv| Box::pin(run_capture(&bin, argv, DETECT_TIMEOUT)));
+        let _ = tokio::join!(run, probe, auth);
+    }
+    // Again once the containers are gone: one that held files open in the home kept the
+    // first removal from finishing.
+    if let Some(dir) = home.filter(|dir| dir.exists()) {
+        let _ = std::fs::remove_dir_all(dir);
     }
     // Container state just changed under us; drop the settled pick so the next turn
     // re-walks rather than confirming a stale one.
@@ -1108,6 +1236,98 @@ pub async fn agent_sandbox_cleanup(app: AppHandle, session_id: String) -> AppRes
 
 pub(crate) fn container_name(session_id: &str) -> String {
     format!("gd-agent-{session_id}")
+}
+
+/// The session's read-back container: the run's container execs its command at
+/// start, so nothing can `exec` into it first, and a distinct name keeps the run's
+/// cancel target its own.
+pub(crate) fn probe_container_name(session_id: &str) -> String {
+    format!("{}-probe", container_name(session_id))
+}
+
+/// The session's one-shot credential-import container (receives secrets on stdin).
+pub(crate) fn auth_import_container_name(session_id: &str) -> String {
+    format!("{}-auth", container_name(session_id))
+}
+
+/// Whether `home` is a session home opencode has never run in: no regular file
+/// named `opencode*.db` (2.x names a channel's database `opencode-<channel>.db`).
+/// A directory that can't be listed reads as NOT fresh: the credential import runs
+/// once per home, and a home we can't list is not a first turn we can prove.
+pub(crate) fn opencode_home_is_fresh(home: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(home) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("opencode")
+            && name.ends_with(".db")
+            && entry.file_type().is_ok_and(|t| t.is_file())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// The import container's env: no project config (a repo's plugins would run in
+/// the process that receives the secrets) and no models fetch.
+fn auth_import_env() -> Vec<(&'static str, String)> {
+    crate::opencode2::project_disable_env()
+        .into_iter()
+        .chain([("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string())])
+        .collect()
+}
+
+/// The `run …` argv of the credential-import container: same image, home mount,
+/// user and cwd as the session's run, no skills, npm cache or MCP config. The
+/// exported sign-ins go on its stdin (`-i`), so no parameter here can carry them.
+pub(crate) fn auth_import_run_args(
+    runtime: &str,
+    worktree_path: &str,
+    home_path: &Path,
+    session_id: &str,
+    image: &str,
+) -> Vec<String> {
+    let env = auth_import_env();
+    build_run_args_full(
+        runtime,
+        "opencode",
+        worktree_path,
+        home_path,
+        &auth_import_container_name(session_id),
+        image,
+        None,
+        None,
+        &env,
+        &[],
+        &["auth".into(), "import".into(), "--standalone".into()],
+    )
+}
+
+/// Counts the entries of the host's `opencode auth export --standalone` output (a
+/// JSON array of objects with a string `integrationID`). The output holds secrets,
+/// so the error is fixed text that never echoes the input or the parser's message.
+pub(crate) fn credential_export_count(stdout: &[u8]) -> AppResult<usize> {
+    let malformed = || {
+        AppError::Command(
+            "opencode's sign-in export wasn't in the expected format, so no sign-ins were copied into the container.".into(),
+        )
+    };
+    let text = std::str::from_utf8(stdout).map_err(|_| malformed())?;
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| malformed())?;
+    let entries = value.as_array().ok_or_else(malformed)?;
+    if !entries.iter().all(|e| {
+        e.get("integrationID")
+            .is_some_and(serde_json::Value::is_string)
+    }) {
+        return Err(malformed());
+    }
+    Ok(entries.len())
 }
 
 /// Converts a host path to the `-v` source form the engine expects. The Windows
@@ -1477,8 +1697,42 @@ pub(crate) fn build_run_args(
     // Host path to the shared npm cache to mount at `~/.npm` (None = don't mount).
     npm_cache_src: Option<&str>,
     // Extra container env (`-e K=V`) — e.g. opencode's `OPENCODE_CONFIG`. Values are
-    // non-secret (paths, the permission pin, feature flags); secrets go by name.
+    // non-secret (paths, feature flags); secrets and large values go by name.
     container_env: &[(&str, String)],
+    inner: &[String],
+) -> Vec<String> {
+    build_run_args_full(
+        runtime,
+        agent,
+        worktree_path,
+        home_path,
+        container_name,
+        image,
+        skills_src,
+        npm_cache_src,
+        container_env,
+        &[],
+        inner,
+    )
+}
+
+/// [`build_run_args`] plus `env_by_name`: variables forwarded BY NAME (`-e NAME`,
+/// no `=value`), so the runtime client passes its own env value through. That keeps a
+/// value out of the client's argv (process listings) and a large document (opencode's
+/// lock) under Windows' 32,767-char command line. It does not keep the value out of
+/// `docker inspect`: the runtime stores it in the container's `Config.Env`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_run_args_full(
+    runtime: &str,
+    agent: &str,
+    worktree_path: &str,
+    home_path: &Path,
+    container_name: &str,
+    image: &str,
+    skills_src: Option<&str>,
+    npm_cache_src: Option<&str>,
+    container_env: &[(&str, String)],
+    env_by_name: &[&'static str],
     inner: &[String],
 ) -> Vec<String> {
     let workspace_mount = format!("{}:/workspace", to_mount_source(worktree_path, runtime));
@@ -1500,16 +1754,28 @@ pub(crate) fn build_run_args(
     // Copilot authenticates from a GitHub token instead of a mounted creds file. Pass
     // it through to the container BY NAME (no `=value`): the runtime client inherits
     // `COPILOT_GITHUB_TOKEN` from its own env (set in the `agent_session` container
-    // branch), so the token never appears in this argv / `docker inspect`.
+    // branch), so the token stays out of this argv and process listings. The runtime
+    // still stores it in the container's `Config.Env`, which `docker inspect` shows.
     if agent == "copilot" {
         args.push("-e".into());
         args.push("COPILOT_GITHUB_TOKEN".into());
     }
     // Extra container env (`-e K=V`), e.g. opencode's `OPENCODE_CONFIG`: non-secret
-    // values (paths, the permission pin, feature flags); secrets go by name, above.
+    // values (paths, feature flags); secrets and large values go by name.
     for (k, v) in container_env {
         args.push("-e".into());
         args.push(format!("{k}={v}"));
+    }
+    for name in env_by_name {
+        debug_assert!(
+            name.bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+            "env name must be [A-Za-z_][A-Za-z0-9_]*: {name}"
+        );
+        args.push("-e".into());
+        args.push((*name).to_string());
     }
     // Rootless Podman on Linux maps the container's `node` (uid 1000) to a host
     // subuid, so it can't write the host-user-owned worktree (EACCES) and anything
@@ -2053,7 +2319,12 @@ mod tests {
         // opencode is container-capable: its npm package + deep XDG dotdir, and the
         // whole-home chown that makes that deep dir usable by the `node` user.
         let oc = render_dockerfile("24", &["opencode".into()]).unwrap();
-        assert!(oc.contains("opencode-ai"));
+        assert!(oc.contains("npm install -g @opencode/cli@2 "));
+        assert!(!oc.contains("opencode-ai"));
+        // Mixed with others, the package list stays sorted and carries the 2.x pin.
+        let mixed = render_dockerfile("24", &["opencode".into(), "claude".into()]).unwrap();
+        assert!(mixed.contains("npm install -g @anthropic-ai/claude-code @opencode/cli@2 "));
+        assert!(!mixed.contains("opencode-ai"));
         assert!(oc.contains("/home/node/.local/share/opencode"));
         assert!(oc.contains("chown -R node:node /home/node"));
         // Copilot is now container-capable too (npm package + its dotdir); it auths
@@ -2076,6 +2347,366 @@ mod tests {
         assert_eq!(
             config_signature("24", &["claude".into(), "codex".into()]),
             "node24-claude-codex"
+        );
+    }
+
+    #[test]
+    fn config_signature_tags_opencode_with_its_generation() {
+        assert_eq!(
+            config_signature("24", &["opencode".into()]),
+            "node24-opencode@2"
+        );
+        assert_eq!(
+            config_signature("24", &["opencode".into(), "claude".into()]),
+            "node24-claude-opencode@2"
+        );
+        assert_eq!(
+            config_signature("24", &["claude".into(), "opencode".into()]),
+            "node24-claude-opencode@2"
+        );
+        assert_eq!(
+            config_signature("24", &["opencode".into(), "opencode".into()]),
+            "node24-opencode@2"
+        );
+    }
+
+    #[test]
+    fn opencode_image_state_classifies_labels() {
+        use OpencodeImage::*;
+        for (label, want) in [
+            (None, Unreadable),
+            (Some(""), Outdated),
+            (Some("<no value>"), Outdated),
+            (Some("node24-opencode"), Outdated),
+            (Some("node24-claude-opencode"), Outdated),
+            (Some("node24-opencode@3"), Outdated),
+            (Some("node24-claude"), Outdated),
+            (Some("node24-claude-opencode@2"), Current),
+            (Some("node24-opencode@2-codex"), Current),
+            (Some("opencode@2-node24"), Current),
+        ] {
+            assert_eq!(opencode_image_state(label), want, "label {label:?}");
+        }
+    }
+
+    #[test]
+    fn label_token_rule_reads_generation_tagged_agents() {
+        let sig = "node24-claude-opencode@2";
+        assert!(label_has_agent(sig, "opencode"));
+        assert!(label_has_agent(sig, "claude"));
+        assert!(!label_has_agent(sig, "codex"));
+        assert!(label_has_agent("node24-opencode", "opencode"));
+        assert!(!label_has_agent("node24-opencodex", "opencode"));
+        // An unlabelled image stays lenient for every agent.
+        assert!(label_has_agent("", "codex"));
+        assert!(label_has_agent("", "opencode"));
+    }
+
+    #[test]
+    fn opencode_outdated_needs_a_read_label_naming_old_opencode() {
+        assert!(!opencode_outdated_from(false, Some("node24-opencode")));
+        assert!(!opencode_outdated_from(true, Some("node24-claude")));
+        assert!(opencode_outdated_from(true, Some("node24-opencode")));
+        assert!(opencode_outdated_from(
+            true,
+            Some("node24-claude-opencode@3")
+        ));
+        assert!(!opencode_outdated_from(true, Some("node24-opencode@2")));
+        assert!(!opencode_outdated_from(true, Some("")));
+        assert!(!opencode_outdated_from(true, None));
+    }
+
+    #[test]
+    fn container_status_wire_keys_are_camel_case() {
+        let status = ContainerStatus {
+            runtime: Some("docker".into()),
+            ready: true,
+            image_present: true,
+            image_matches: false,
+            opencode_outdated: true,
+        };
+        let v = serde_json::to_value(&status).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "imageMatches",
+                "imagePresent",
+                "opencodeOutdated",
+                "ready",
+                "runtime"
+            ]
+        );
+        assert_eq!(v["opencodeOutdated"], serde_json::Value::Bool(true));
+        assert!(v.get("opencode_outdated").is_none());
+        assert!(v.get("image_present").is_none());
+    }
+
+    #[test]
+    fn run_args_full_forwards_env_by_name_after_valued_env() {
+        let home = PathBuf::from("/data/agent-home/s1/opencode");
+        let inner = vec!["run".to_string()];
+        let env = [
+            ("OPENCODE_CONFIG", "/x/opencode-mcp.json".to_string()),
+            ("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string()),
+        ];
+        for runtime in ["docker", "podman"] {
+            for env in [&env[..], &[]] {
+                let plain = build_run_args(
+                    runtime,
+                    "opencode",
+                    "/repos/wt",
+                    &home,
+                    "n",
+                    IMAGE,
+                    None,
+                    None,
+                    env,
+                    &inner,
+                );
+                let none = build_run_args_full(
+                    runtime,
+                    "opencode",
+                    "/repos/wt",
+                    &home,
+                    "n",
+                    IMAGE,
+                    None,
+                    None,
+                    env,
+                    &[],
+                    &inner,
+                );
+                let mut want: Vec<&str> = vec!["run", "--rm", "-i", "--name", "n"];
+                if !env.is_empty() {
+                    want.extend([
+                        "-e",
+                        "OPENCODE_CONFIG=/x/opencode-mcp.json",
+                        "-e",
+                        "OPENCODE_DISABLE_MODELS_FETCH=1",
+                    ]);
+                }
+                if cfg!(target_os = "linux") && runtime == "podman" {
+                    want.push("--userns=keep-id");
+                }
+                want.extend([
+                    "--user",
+                    "node",
+                    "-w",
+                    "/workspace",
+                    "-v",
+                    "/repos/wt:/workspace",
+                    "-v",
+                    "/data/agent-home/s1/opencode:/home/node/.local/share/opencode",
+                    "--cap-drop",
+                    "ALL",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--memory",
+                    "4g",
+                    "--pids-limit",
+                    "1024",
+                    "gitdesktop-agent:latest",
+                    "opencode",
+                    "run",
+                ]);
+                assert_eq!(plain, want, "{runtime}");
+                assert_eq!(none, want, "an empty by-name list adds nothing");
+                let a = build_run_args_full(
+                    runtime,
+                    "opencode",
+                    "/repos/wt",
+                    &home,
+                    "n",
+                    IMAGE,
+                    None,
+                    None,
+                    env,
+                    &["OPENCODE_CONFIG_CONTENT"],
+                    &inner,
+                );
+                let at: Vec<usize> = a
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, x)| *x == "OPENCODE_CONFIG_CONTENT")
+                    .map(|(i, _)| i)
+                    .collect();
+                assert_eq!(at.len(), 1, "forwarded exactly once");
+                let i = at[0];
+                assert_eq!(a[i - 1], "-e");
+                assert!(!a.iter().any(|x| x.contains("OPENCODE_CONFIG_CONTENT=")));
+                for (k, v) in env {
+                    let kv = a.iter().position(|x| *x == format!("{k}={v}")).unwrap();
+                    assert!(kv < i, "after every K=V pair");
+                }
+                let user = a.iter().position(|x| x == "--user").unwrap();
+                assert!(i < user, "before --user");
+                if let Some(keep) = a.iter().position(|x| x == "--userns=keep-id") {
+                    assert!(i < keep, "before the keep-id flag");
+                }
+                // Removing the pair gives back the plain argv.
+                let mut stripped = a.clone();
+                stripped.drain(i - 1..=i);
+                assert_eq!(stripped, plain);
+            }
+        }
+    }
+
+    #[test]
+    fn session_side_container_names_are_distinct() {
+        assert_eq!(probe_container_name("abc"), "gd-agent-abc-probe");
+        assert_eq!(auth_import_container_name("abc"), "gd-agent-abc-auth");
+        let names = [
+            container_name("abc"),
+            probe_container_name("abc"),
+            auth_import_container_name("abc"),
+        ];
+        assert_ne!(names[0], names[1]);
+        assert_ne!(names[0], names[2]);
+        assert_ne!(names[1], names[2]);
+    }
+
+    #[test]
+    fn auth_import_run_args_runs_the_import_in_the_session_setup() {
+        let home = PathBuf::from(if cfg!(windows) {
+            "C:\\data\\agent-home\\abc\\opencode"
+        } else {
+            "/data/agent-home/abc/opencode"
+        });
+        let a = auth_import_run_args("docker", "/repos/wt", &home, "abc", IMAGE);
+        let has_pair = |x: &str, y: &str| a.windows(2).any(|w| w[0] == x && w[1] == y);
+        assert!(has_pair("--name", "gd-agent-abc-auth"));
+        assert!(a.iter().any(|x| x == "-i"));
+        assert!(has_pair("--user", "node"));
+        assert!(has_pair("-w", "/workspace"));
+        assert!(a
+            .iter()
+            .any(|x| x.ends_with(":/home/node/.local/share/opencode")));
+        let env = auth_import_env();
+        assert_eq!(env[..2], crate::opencode2::project_disable_env());
+        assert_eq!(
+            env[2..],
+            [("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string())]
+        );
+        let pairs: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let given: Vec<&str> = a
+            .windows(2)
+            .filter(|w| w[0] == "-e")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert_eq!(given, pairs);
+        assert!(!a.iter().any(|x| x.starts_with("OPENCODE_CONFIG=")));
+        assert!(!a.iter().any(|x| x.contains("/skills:ro")));
+        assert!(!a.iter().any(|x| x.ends_with(":/home/node/.npm")));
+        let tail: Vec<&str> = a[a.len() - 5..].iter().map(String::as_str).collect();
+        assert_eq!(tail, [IMAGE, "opencode", "auth", "import", "--standalone"]);
+    }
+
+    const SENTINEL: &str = "GD-SENTINEL-NOT-A-KEY";
+
+    #[test]
+    fn credential_export_count_counts_well_formed_exports() {
+        let one = format!(
+            r#"[{{"id":"a","integrationID":"anthropic","label":"x","active":true,"value":{{"type":"key","key":"{SENTINEL}"}}}}]"#
+        );
+        assert_eq!(credential_export_count(one.as_bytes()).unwrap(), 1);
+        let two = format!(
+            r#"[{{"id":"a","integrationID":"anthropic","label":"x","active":true,"value":{{"type":"key","key":"{SENTINEL}"}}}},
+               {{"id":"b","integrationID":"openai","label":"y","active":false,"value":{{"type":"oauth","access":"{SENTINEL}","refresh":"{SENTINEL}","expires":0}}}}]"#
+        );
+        assert_eq!(credential_export_count(two.as_bytes()).unwrap(), 2);
+        assert_eq!(credential_export_count(b"[]").unwrap(), 0);
+        assert_eq!(credential_export_count(b"  []\n").unwrap(), 0);
+    }
+
+    #[test]
+    fn credential_export_count_errors_never_echo_the_payload() {
+        let mut invalid_utf8 = vec![0xff, 0xfe, b'['];
+        invalid_utf8.extend_from_slice(SENTINEL.as_bytes());
+        let inputs: Vec<Vec<u8>> = vec![
+            format!(r#"[{{"id":"a","integrationID":"x","value":"{SENTINEL}""#).into_bytes(),
+            format!(r#"{{"id":"a","integrationID":"x","value":"{SENTINEL}"}}"#).into_bytes(),
+            format!(r#"["{SENTINEL}"]"#).into_bytes(),
+            invalid_utf8,
+            format!(r#"[{{"id":"a","label":"x","value":"{SENTINEL}"}}]"#).into_bytes(),
+            format!(r#"[{{"id":"a","integrationID":7,"value":"{SENTINEL}"}}]"#).into_bytes(),
+            Vec::new(),
+        ];
+        for input in inputs {
+            // Control: every non-empty row carries the sentinel, so an error that
+            // echoed its input would fail the assertion below.
+            if !input.is_empty() {
+                assert!(String::from_utf8_lossy(&input).contains(SENTINEL));
+            }
+            let err = credential_export_count(&input).expect_err("malformed export");
+            assert!(matches!(err, AppError::Command(_)));
+            let text = err.to_string();
+            assert!(!text.contains(SENTINEL), "error echoed the payload: {text}");
+            assert!(text.contains("wasn't in the expected format"));
+        }
+    }
+
+    #[test]
+    fn remove_seeded_creds_removes_only_the_seeded_file() {
+        let dir = private_temp_dir("gd-test-oc-home-").unwrap();
+        let home = dir.path();
+        let seeded = home.join("auth.json");
+        // The file seed_session_home writes for opencode.
+        assert_eq!(
+            host_creds("opencode").as_deref().and_then(Path::file_name),
+            seeded.file_name()
+        );
+        std::fs::write(&seeded, "{}").unwrap();
+        std::fs::write(home.join("opencode-mcp.json"), "{}").unwrap();
+        std::fs::create_dir(home.join("nested")).unwrap();
+        std::fs::write(home.join("nested").join("auth.json"), "{}").unwrap();
+        assert!(opencode_home_is_fresh(home));
+        assert!(remove_seeded_creds(home, "opencode").is_ok());
+        assert!(!seeded.exists(), "the seeded file is gone");
+        assert!(home.join("opencode-mcp.json").is_file());
+        assert!(home.join("nested").join("auth.json").is_file());
+        // A missing file is no error.
+        assert!(remove_seeded_creds(home, "opencode").is_ok());
+        // Copilot seeds nothing, so nothing is removed.
+        std::fs::write(&seeded, "{}").unwrap();
+        assert!(remove_seeded_creds(home, "copilot").is_ok());
+        assert!(seeded.is_file());
+        // A removal that fails for another reason reports it and leaves the entry.
+        std::fs::remove_file(&seeded).unwrap();
+        std::fs::create_dir(&seeded).unwrap();
+        let err = remove_seeded_creds(home, "opencode").unwrap_err();
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(seeded.is_dir());
+    }
+
+    #[test]
+    fn opencode_home_is_fresh_until_a_database_file_exists() {
+        let dir = private_temp_dir("gd-test-oc-home-").unwrap();
+        let home = dir.path();
+        assert!(opencode_home_is_fresh(home), "empty home");
+        std::fs::write(home.join("auth.json"), "{}").unwrap();
+        std::fs::write(home.join("opencode-mcp.json"), "{}").unwrap();
+        assert!(
+            opencode_home_is_fresh(home),
+            "seeded files are not a database"
+        );
+        std::fs::create_dir(home.join("opencode.db")).unwrap();
+        assert!(
+            opencode_home_is_fresh(home),
+            "a directory is not a database"
+        );
+        std::fs::write(home.join("opencode-beta.db"), "").unwrap();
+        assert!(!opencode_home_is_fresh(home), "a channel database");
+
+        let dir2 = private_temp_dir("gd-test-oc-home-").unwrap();
+        std::fs::write(dir2.path().join("opencode.db"), "").unwrap();
+        assert!(!opencode_home_is_fresh(dir2.path()), "the default database");
+
+        let missing = dir2.path().join("missing");
+        assert!(
+            !opencode_home_is_fresh(&missing),
+            "an unlistable home is not fresh"
         );
     }
 

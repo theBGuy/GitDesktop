@@ -1,17 +1,20 @@
 import { Popover } from "@base-ui/react/popover";
 import { PlayIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import {
   AgentPicker,
+  EffortNote,
   EffortPicker,
   ModelPicker,
 } from "@/features/sessions/AgentPickers";
 import { clearAgentSelection } from "@/features/sessions/agentSelect";
 import { useSessionsStore } from "@/features/sessions/store";
 import { type AgentKind, extractContextPack } from "@/lib/ai/agent";
+import { useEffortControl } from "@/lib/ai/effort-levels";
 import { buildImplementPrompt } from "@/lib/ai/prompt";
+import { useSettings } from "@/lib/settings/queries";
 import { type PlanRun, usePlanStore } from "./store";
 
 /**
@@ -66,17 +69,17 @@ export function ImplementPlanButton({ run }: { run: PlanRun }) {
               Starts a write-capable session in an isolated worktree — your
               working tree is never touched.
             </p>
-            <div className="mt-2.5 flex items-center gap-1.5 border-y py-2">
-              <AgentPicker
-                value={agent}
-                onChange={(a) => {
-                  setAgent(a);
-                  setModel(""); // model lists differ between agents
-                }}
-              />
-              <ModelPicker value={model} onChange={setModel} agent={agent} />
-              <EffortPicker value={effort} onChange={setEffort} />
-            </div>
+            <ImplementPickers
+              agent={agent}
+              model={model}
+              effort={effort}
+              onAgent={(a) => {
+                setAgent(a);
+                setModel(""); // model lists differ between agents
+              }}
+              onModel={setModel}
+              onEffort={setEffort}
+            />
             <Button size="sm" className="mt-2.5 w-full" onClick={onStart}>
               Start session
             </Button>
@@ -84,5 +87,57 @@ export function ImplementPlanButton({ run }: { run: PlanRun }) {
         </Popover.Positioner>
       </Popover.Portal>
     </Popover.Root>
+  );
+}
+
+/** The popup's pickers. Mounts with the popup, so the effort query (which
+ *  spawns the CLI for opencode) runs only while it shows; the picks themselves
+ *  live in the button so they survive the popup closing. */
+function ImplementPickers({
+  agent,
+  model,
+  effort,
+  onAgent,
+  onModel,
+  onEffort,
+}: {
+  agent: AgentKind;
+  model: string;
+  effort: string;
+  onAgent: (a: AgentKind) => void;
+  onModel: (m: string) => void;
+  onEffort: (e: string) => void;
+}) {
+  const settings = useSettings();
+  // The session starts with no isolation override, so it follows Settings;
+  // nothing is asked before they resolve.
+  const isolation = settings.data
+    ? (settings.data.agentIsolation ?? "worktree")
+    : null;
+  const control = useEffortControl(
+    isolation === null
+      ? null
+      : { kind: agent, binPath: null, model, isolation },
+    effort,
+  );
+  const noteId = useId();
+  return (
+    <>
+      <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-y py-2">
+        <AgentPicker value={agent} onChange={onAgent} />
+        <ModelPicker value={model} onChange={onModel} agent={agent} />
+        <EffortPicker
+          value={effort}
+          onChange={onEffort}
+          control={control}
+          describedBy={control.line ? noteId : undefined}
+        />
+      </div>
+      {control.line && (
+        <div className="mt-2">
+          <EffortNote id={noteId} line={control.line} />
+        </div>
+      )}
+    </>
   );
 }

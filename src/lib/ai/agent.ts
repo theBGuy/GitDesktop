@@ -29,6 +29,10 @@ export interface AgentInfo {
   path: string | null;
   version: string | null;
   authed: AuthStatus;
+  /** The backend's standing sentence for a found binary it will not run (an opencode
+   *  outside the supported range), else null. Rendered verbatim; only its presence
+   *  is ever tested. Optional: older literals omit it. */
+  unsupported?: string | null;
 }
 
 /** A normalized tool category for the activity timeline (mirrors the Rust
@@ -46,11 +50,13 @@ export type AgentToolKind =
   | "other";
 
 /** One piece of an agent turn's rendered transcript, in the order it happened: a run of
- *  streamed prose, or a tool step interleaved between prose. Built live from `delta` +
- *  `tool` events so the UI reads as one chronological log (text → tool → text). */
+ *  streamed prose, a tool step interleaved between prose, or a note from GitDesktop
+ *  itself (a `notice` event: never the agent's output). Built live from the stream
+ *  events so the UI reads as one chronological log (text → tool → text). */
 export type TranscriptSegment =
   | { type: "text"; text: string }
-  | { type: "tool"; tool: AgentToolKind; target: string | null };
+  | { type: "tool"; tool: AgentToolKind; target: string | null }
+  | { type: "note"; text: string };
 
 /** The deduped, structured record of what a pipeline stage already examined —
  *  distilled from its transcript's tool steps so the next stage (research → plan →
@@ -136,6 +142,43 @@ export function ensureTranscriptText(
   return appendTranscriptText(segments, text);
 }
 
+/** Append a note, which ends the current text run like a tool step. Returns
+ *  `segments` unchanged for an empty or whitespace-only text. */
+export function appendTranscriptNote(
+  segments: TranscriptSegment[],
+  text: string,
+): TranscriptSegment[] {
+  if (!text.trim()) return segments;
+  return [...segments, { type: "note", text }];
+}
+
+/** The notice codes after which the run's next `nativeSession` replaces the stored
+ *  conversation id (mirrors the Rust `NOTICE_SESSION_RESET` / `NOTICE_SESSION_REKEY`). */
+const NOTICE_REPLACES_NATIVE_SESSION: ReadonlySet<string> = new Set([
+  "nativeSessionReset",
+  "nativeSessionRekey",
+]);
+/** Notices that show nothing: a successful sign-in copy is the expected case. */
+const NOTICE_SILENT: ReadonlySet<string> = new Set(["signInsCopied"]);
+
+/** What a store does with one notice. `note` is the text to show, or null.
+ *  `replaceNativeSession`: the next `nativeSession` of the SAME run replaces the
+ *  stored id; the notice alone never drops it, so a turn that ends without one
+ *  leaves the stored id as it was. Unknown codes show their text and change nothing. */
+export function noticeEffect(ev: { code: string; text: string }): {
+  note: string | null;
+  replaceNativeSession: boolean;
+} {
+  const shown =
+    !NOTICE_SILENT.has(ev.code) &&
+    typeof ev.text === "string" &&
+    ev.text.trim() !== "";
+  return {
+    note: shown ? ev.text : null,
+    replaceNativeSession: NOTICE_REPLACES_NATIVE_SESSION.has(ev.code),
+  };
+}
+
 /** Streaming events from `agent_review`, mirroring the Rust `ReviewEvent`. */
 export type ReviewEvent =
   | { kind: "delta"; text: string }
@@ -157,7 +200,11 @@ export type ReviewEvent =
   /** The CLI's own resume id captured on turn 1 (Codex thread / opencode session)
    *  — persisted so a host session resumes the right conversation. Only sessions
    *  care; reviews ignore it. */
-  | { kind: "nativeSession"; id: string };
+  | { kind: "nativeSession"; id: string }
+  /** A one-line note for the turn's timeline that is not the agent's output; `code`
+   *  says what a store does with it (`noticeEffect`), `text` is the finished sentence
+   *  or empty. Only `agent_session` turns send it. */
+  | { kind: "notice"; code: string; text: string };
 
 /** The provider id each agent kind belongs to — a total map, so a new kind can't
  *  silently lose its provider. Both directions read it, so the relation has a
@@ -207,6 +254,42 @@ export const detectAgentCli = (kind: AgentKind, path?: string) =>
  *  Empty for the kinds whose CLI exposes no catalog. */
 export const listAgentModels = (kind: AgentKind, path?: string) =>
   invoke<string[]>("agent_models", { kind, binPath: path?.trim() || null });
+
+/** One effort level as the backend judges it for a model: selectable exactly
+ *  when `variant` is non-null, else `reason` says why not. */
+interface EffortLevelState {
+  level: string;
+  variant: string | null;
+  reason: string | null;
+}
+
+/** Which effort levels a model offers. `perModel: false` = the agent takes any
+ *  level (not opencode, or opencode 1.x on the host). */
+export interface EffortSupport {
+  perModel: boolean;
+  levels: EffortLevelState[];
+  reason: string | null;
+}
+
+/** Asks the agent CLI which effort levels `model` offers, with the binary and
+ *  isolation its run will use. Spawns the host CLI for opencode. */
+export const listAgentEffortLevels = ({
+  kind,
+  binPath,
+  model,
+  isolation,
+}: {
+  kind: AgentKind;
+  binPath: string | null;
+  model: string;
+  isolation: string | null;
+}) =>
+  invoke<EffortSupport>("agent_effort_levels", {
+    kind,
+    binPath,
+    model,
+    isolation,
+  });
 
 export interface AgentReviewArgs {
   kind: AgentKind;

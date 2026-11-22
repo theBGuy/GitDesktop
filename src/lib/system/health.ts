@@ -12,6 +12,10 @@ export interface ToolStatus {
   version: string | null;
   /** Login state for tools that have one; `unknown` doubles as "N/A" (git). */
   authed: AuthStatus;
+  /** The backend's standing sentence for a found binary GitDesktop will not run
+   *  (opencode only), else null. Rendered verbatim; only its presence is tested.
+   *  Optional: older literals omit it. */
+  unsupported?: string | null;
 }
 
 export interface SystemInfo {

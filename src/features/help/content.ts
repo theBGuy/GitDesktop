@@ -2553,10 +2553,10 @@ On any PR (GitHub, or a GitLab MR), run a streamed **code review** or a focused
 using your chosen review model, and optionally post the result as a comment. A general
 review builds on **soft context** where it exists: your prior review of the PR, findings
 other AI reviewers (Copilot, CodeRabbit) left, and **GitDesktop's own earlier comments on
-the PR** — replies GitDesktop itself posted inside review threads included — so on a re-review it treats a finding
+the PR**, replies GitDesktop itself posted inside review threads included, so on a re-review it treats a finding
 it already refuted or marked fixed as resolved instead of raising it cold. It also reads
-any **Notes for reviewers** the author left — deposited per branch by an agent through the
-GitDesktop MCP, or typed into the Create PR dialog and posted as the PR's first comment —
+any **Notes for reviewers** the author left (deposited per branch by an agent through the
+GitDesktop MCP, or typed into the Create PR dialog and posted as the PR's first comment)
 as first-class grounding context, so a deliberate, documented decision isn't re-flagged.
 Those notes reach **every** review of a GitHub or GitLab PR: the automated ones, and the
 code reviews and security audits you start yourself. Any of this context can also be **held
@@ -2565,29 +2565,31 @@ author notes*, each shown only when there's something to ignore and each one cli
 from being restored — nothing is deleted, the next review simply leaves it out.
 When rounds accumulate well past the prompt budget, the full history is **distilled
 into a compact decision ledger** (via your generation model) rather than cut off; a
-marginal overflow is simply trimmed — every comment stays, and each cut says how much
-it left out — and if the budget leaves no room for the comments at all, the review is
+marginal overflow is simply trimmed (every comment stays, and each cut says how much
+it left out), and if the budget leaves no room for the comments at all, the review is
 told they were **omitted**, so it never reads their absence as nothing on record. If
-the ledger can't be produced — no generation model configured, or the attempt fails —
+the ledger can't be produced (no generation model configured, or the attempt fails),
 the section keeps the opening comment and the newest follow-ups, drops the middle, and
 says so. On a **general** re-review, polish noticed late on code that hasn't changed is
 listed separately as **non-blocking leftovers** — batch it with your next push or defer
-it. Any re-review — review or security audit — wraps up in a line once nothing
+it. Any re-review (review or security audit) wraps up in a line once nothing
 substantive is left, instead of holding the round open, and ends with an explicit
-**verdict line** — *blocking issues remain*, or *no blocking issues … merge when ready* —
+**verdict line** (*blocking issues remain*, or *no blocking issues … merge when ready*),
 so a round that fixed everything but raised a nit reads as done rather than as another
 round. A general review is also told which **documentation surfaces** the repository
 keeps (its README, changelog, and docs directories, by path), so it can name every stale
 one in a single finding instead of one per round. Your **custom instructions** reach
-reviews too — the global ones from Settings and the repo's own
-\`.gitdesktop/instructions.md\`, the same pair every generation gets — as conventions to
+reviews too (the global ones from Settings and the repo's own
+\`.gitdesktop/instructions.md\`, the same pair every generation gets), as conventions to
 judge the change against, never as instructions that can rewrite the review.
 See *AI & automations* to pick the review model. The **Review context** size there
 controls how much diff and prior-discussion context reviews send — **Auto** fits it to the
 reviewing model's context window (probing Ollama live), or pick Compact / Standard /
 Expanded. **Review effort** (shown when Claude Code, GitHub Copilot, or opencode drives
 reviews or security audits) picks how hard the reviewer thinks: **Default** keeps the
-CLI's own setting, or choose **Low** through **Max** for a lighter or deeper pass. A deeper
+CLI's own setting, or choose **Low** through **Max** for a lighter or deeper pass. On
+opencode 2 the levels follow the reviewing model, and a level that model lacks is shown
+as unavailable with the reason. A deeper
 pass takes longer, so pair a high effort with a roomier **Review timeout**. Codex and the
 API providers always run at their own defaults. **Review timeout** (shown when an agent
 CLI drives reviews or security audits) caps how long such a review may run before it's
@@ -3958,7 +3960,7 @@ file (written to \`.gitdesktop/research/\` for you to review and commit — neve
 you). It searches and reads, and outside opencode it never changes your code. Pick any agent
 (**Claude**, **Codex**, **GitHub Copilot**, or **opencode**; the picker opens on your
 **Settings → AI** default agent), and each uses its own native web search and fetch.
-(opencode's web *search* needs its Exa integration enabled — web *fetch* always works.)
+(On opencode 1.x, web *search* needs its Exa integration enabled — web *fetch* always works.)
 On opencode, the session also loads the repository's own opencode config and plugins, which
 can widen what it does, so use another agent for a repository you don't trust.
 
@@ -3978,7 +3980,9 @@ repository you don't trust.
 
 **Delegate** starts a write-capable session. Describe the task, pick the **agent** (it
 opens on your **Settings → AI** default agent), **model**, and **reasoning effort**
-(Low / Medium / High / Max), and send. The model box (the same one on research and plan
+(Low / Medium / High / Max; on opencode 2 the levels follow the chosen model, and levels
+it lacks show as unavailable with the reason), and send.
+The model box (the same one on research and plan
 runs) filters its suggestions as you type and takes any model id you type, so a custom
 provider's models work without being on the list; for opencode, Codex, and Copilot it
 lists the models your CLI reports (opencode's custom providers included). Leave it
@@ -3986,7 +3990,9 @@ empty for your account's default. The agent works in an **isolated git worktree*
 throwaway branch (\`gd/session/…\`) that never touches your working tree, and commits a
 **checkpoint** each turn. It works in the open: the conversation shows a **step-by-step
 transcript** of each file it reads, edits, searches, and command it runs, interleaved
-with its narration. **Expand any edit step** to see that file's diff inline, watch its
+with its narration. When GitDesktop can tell an opencode conversation can't be
+continued, the turn starts a fresh one and the timeline says so.
+**Expand any edit step** to see that file's diff inline, watch its
 **live changes** mid-turn, or read the cumulative diff under **Changes**. If a step's diff
 fails to refresh, the last one stays with a line saying it couldn't refresh and a
 **Retry**, and its live changes pause until a refresh succeeds, such as after **Retry** or
@@ -4163,7 +4169,9 @@ others.
 ## Run several ways at once (Best-of-N)
 
 **Best-of-N** runs the same task across 2–5 arms, each with its own agent, model, and
-effort — so different providers attack the problem from different angles. Each arm runs in
+effort — so different providers attack the problem from different angles. On
+opencode 2 an arm's effort levels follow its model, and levels it lacks show as unavailable
+with the reason. Each arm runs in
 its own worktree; review them side by side and **keep the best one** (it discards the
 rest). Because fanning out costs real money, you get an upfront cost estimate first. For a
 container run, an arm whose agent isn't in the built image gets a warning right in the
@@ -4178,20 +4186,24 @@ stronger sandbox — with a built-in **terminal** ({{kbd:agent-toggle-terminal}}
 starts. Set the default in **Settings → AI**.
 
 **Per session.** You don't have to take that default. The composer's **Options** popover
-carries an **Isolation** control — **Worktree** or **Container** — for the session you're
+carries an **Isolation** control (**Worktree** or **Container**) for the session you're
 about to start. It opens on your Settings default, and picking the other one overrides it
 for that session alone (the Options badge counts it only when it differs from your default;
 in Best-of-N every arm shares the pick). Isolation is settled when the session starts, so it
 never changes under a running agent — start a new session to switch; a running session shows
 the mode it got as a chip beside its branch in the header. Choose **Container** and
-GitDesktop checks readiness right there — Docker or Podman installed, the engine running, the
-agent image built — and keeps **Send** disabled until it is, naming what's missing (the
+GitDesktop checks readiness right there (Docker or Podman installed, the engine running, the
+agent image built) and keeps **Send** disabled until it is, naming what's missing (the
 composer says so outside the popover too, so a disabled **Send** is never a mystery). The
-states **Settings → AI** can fix — no container runtime, or the agent image not built yet —
+states **Settings → AI** can fix (no container runtime, or the agent image not built yet)
 come with a jump straight there; a stopped engine you start yourself. Overriding *down* to
 **Worktree** when your default is a container says so plainly: that run happens on your host,
 where **Codex** still applies its own OS-enforced sandbox and the other agents stay inside
-the worktree by convention.
+the worktree by convention. The agent image installs opencode 2, so an image built
+earlier asks for a rebuild (about 1 GB more to download) before opencode runs in a
+container. When this computer runs opencode 2, a container session copies its opencode
+sign-ins in at the start, and the timeline says so when the copy couldn't be made or
+there was nothing to copy.
 
 A repo can also layer **extra tools** into the agent container: commit a
 \`.gitdesktop/agent.Dockerfile\` (it must start
@@ -4241,6 +4253,10 @@ Bring your own model:
   Settings. Generation runs the CLI per request, so it's noticeably slower than an
   HTTP provider and draws on your plan's quota; the agent only completes the prepared
   prompt and never explores the repo on the generation path.
+  GitDesktop runs opencode 1.x and 2.x (2.x from 2.2.0,
+  tested with opencode 2.2.0 to 2.3.2), and an opencode it can't run is named, with the
+  version it reports, in **Settings → AI**, the PR review panel, and **Settings → About**
+  before any run.
 
 You can set **separate models** for generation (commit/PR messages) versus review. Toggle
 **Use a different model for security audits** under the review model to give audits their own

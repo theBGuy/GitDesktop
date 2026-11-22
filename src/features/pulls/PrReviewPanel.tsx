@@ -35,7 +35,7 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { detectAgentCli, providerKind } from "@/lib/ai/agent";
+import { type AgentInfo, detectAgentCli, providerKind } from "@/lib/ai/agent";
 import { LOGIN_COMMAND } from "@/lib/ai/cli-client";
 import {
   buildAiCommentBody,
@@ -109,6 +109,10 @@ const DELTA_NOTE: Partial<Record<string, string>> = {
 };
 
 const PROVIDER_IDS = Object.keys(PROVIDER_LABELS) as AiProviderId[];
+
+/** The detected CLI is one GitDesktop won't run. A presence test only: the
+ *  backend's sentence is rendered as sent, never read. */
+const hasNote = (info: AgentInfo) => Boolean(info.unsupported?.trim());
 
 /** A live run that stopped early keeps whatever streamed before it stopped. */
 const LIVE_INCOMPLETE: Partial<Record<ReviewPhase, ReviewIncomplete>> = {
@@ -656,6 +660,9 @@ export function PrReviewPanel({
               terminal.
             </p>
           )}
+        {cliKind && cliDetect.data?.found && hasNote(cliDetect.data) && (
+          <p className="text-xs text-warning">{cliDetect.data.unsupported}</p>
+        )}
         {providerDiffers && secNeedsKey && !secKeyPreview.data && (
           <p className="text-xs text-warning">
             No {PROVIDER_LABELS[secProvider]} API key saved — add one in
@@ -679,6 +686,14 @@ export function PrReviewPanel({
               {PROVIDER_LABELS[secProvider]} is installed but not signed in —
               run <code className="font-mono">{LOGIN_COMMAND[secCliKind]}</code>{" "}
               in a terminal to run a security audit.
+            </p>
+          )}
+        {(providerDiffers || cliPathDiffers) &&
+          secCliKind &&
+          secCliDetect.data?.found &&
+          hasNote(secCliDetect.data) && (
+            <p className="text-xs text-warning">
+              {secCliDetect.data.unsupported} Security audits use this opencode.
             </p>
           )}
         <div className="flex flex-wrap items-center gap-2">

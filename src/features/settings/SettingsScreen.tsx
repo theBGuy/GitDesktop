@@ -42,7 +42,7 @@ import {
   useSettings,
 } from "@/lib/settings/queries";
 import { type ConfirmRequest, useConfirm } from "@/lib/stores/confirm";
-import { useUiStore } from "@/lib/stores/ui";
+import { SETTINGS_ANCHOR_PANEL, useUiStore } from "@/lib/stores/ui";
 import { toastComposedError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useToastClearance } from "@/lib/use-toast-clearance";
@@ -147,6 +147,8 @@ export function SettingsScreen() {
   const setSettingsLeaveGuard = useUiStore((s) => s.setSettingsLeaveGuard);
   const settingsTarget = useUiStore((s) => s.settingsTarget);
   const clearSettingsTarget = useUiStore((s) => s.clearSettingsTarget);
+  const settingsAnchor = useUiStore((s) => s.settingsAnchor);
+  const clearSettingsAnchor = useUiStore((s) => s.clearSettingsAnchor);
   const repoPath = useUiStore((s) => s.repoPath);
   const settings = useSettings();
   const saveSettings = useSaveSettings();
@@ -266,6 +268,17 @@ export function SettingsScreen() {
   );
   // Read late (a deep link can move the panel while a prompt is open).
   const activePanelRef = useLatestRef(activePanel);
+  // The anchor's host consumes it on mount; once its target has landed and the
+  // active panel isn't the anchor's (the user moved on, or the panel is hidden),
+  // drop it unapplied so a later visit to that panel can't re-scroll.
+  useEffect(() => {
+    if (
+      settingsAnchor &&
+      !settingsTarget &&
+      activePanel !== SETTINGS_ANCHOR_PANEL[settingsAnchor]
+    )
+      clearSettingsAnchor();
+  }, [settingsAnchor, settingsTarget, activePanel, clearSettingsAnchor]);
 
   const form = useAppForm({
     ...settingsFormOpts,
@@ -390,9 +403,13 @@ export function SettingsScreen() {
   // Seed the form once settings arrive; afterwards the form is the source
   // of truth until Save or Discard.
   const seeded = useRef(false);
+  // The same flip as render state: a panel that measures its layout (the AI
+  // panel's deep-link landing) waits for the saved values, not the defaults.
+  const [formSeeded, setFormSeeded] = useState(false);
   useEffect(() => {
     if (settings.data && !seeded.current) {
       seeded.current = true;
+      setFormSeeded(true);
       mcpBaseline.current = settings.data.mcpServers;
       form.reset(toDraft(settings.data), { keepDefaultValues: true });
     }
@@ -798,7 +815,7 @@ export function SettingsScreen() {
               {activePanel === "appearance" && <AppearanceSection />}
               {activePanel === "ai" && (
                 <>
-                  <AiProviderSection form={form} />
+                  <AiProviderSection form={form} seeded={formSeeded} />
                   <InstructionsSection form={form} />
                 </>
               )}

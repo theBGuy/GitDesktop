@@ -111,33 +111,64 @@ function AuthState({ authed }: { authed: AuthStatus }) {
   );
 }
 
+type ToolState = "missing" | "unsupported" | "installed";
+
+const TOOL_STATE: Record<ToolState, { word: string; icon: ReactNode }> = {
+  missing: {
+    word: "Not found",
+    icon: (
+      <WarningCircleIcon
+        weight="fill"
+        className="size-3.5 shrink-0 text-warning"
+      />
+    ),
+  },
+  unsupported: {
+    word: "Not supported",
+    icon: (
+      <WarningCircleIcon
+        weight="fill"
+        className="size-3.5 shrink-0 text-warning"
+      />
+    ),
+  },
+  installed: {
+    word: "Installed",
+    icon: (
+      <CheckCircleIcon
+        weight="fill"
+        className="size-3.5 shrink-0 text-success"
+      />
+    ),
+  },
+};
+
+function toolState(tool: ToolStatus, unsupported: string | null): ToolState {
+  if (!tool.found) return "missing";
+  if (unsupported) return "unsupported";
+  return "installed";
+}
+
 function ToolRow({ tool }: { tool: ToolStatus }) {
   const meta = TOOL_META[tool.id];
   if (!meta) return null;
+  // The backend's sentence for a binary it won't run, shown as sent (presence test
+  // only). It carries its own remedy, so the row offers no Install/Update link.
+  const unsupported =
+    tool.found && tool.unsupported?.trim() ? tool.unsupported : null;
   // An installed-but-too-old tool gets the same install link as a missing one,
   // since the fix is the same download.
-  const floorWarning = tool.found
-    ? cliFloorWarning(tool.id, tool.version)
-    : null;
+  const floorWarning =
+    tool.found && !unsupported ? cliFloorWarning(tool.id, tool.version) : null;
+  const state = TOOL_STATE[toolState(tool, unsupported)];
+  const warning = unsupported ?? floorWarning;
   return (
     <li className="flex items-start justify-between gap-3 py-2">
       <div className="min-w-0 space-y-0.5">
         <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
-          {tool.found ? (
-            <CheckCircleIcon
-              weight="fill"
-              className="size-3.5 shrink-0 text-success"
-            />
-          ) : (
-            <WarningCircleIcon
-              weight="fill"
-              className="size-3.5 shrink-0 text-warning"
-            />
-          )}
+          {state.icon}
           <span className="font-medium">{meta.name}</span>
-          <span className="text-muted-foreground">
-            {tool.found ? "Installed" : "Not found"}
-          </span>
+          <span className="text-muted-foreground">{state.word}</span>
           {meta.auth && tool.found && <AuthState authed={tool.authed} />}
         </p>
         {tool.found ? (
@@ -162,9 +193,7 @@ function ToolRow({ tool }: { tool: ToolStatus }) {
             {meta.role}
           </p>
         )}
-        {floorWarning ? (
-          <p className="text-[11px] text-warning">{floorWarning}</p>
-        ) : null}
+        {warning ? <p className="text-[11px] text-warning">{warning}</p> : null}
       </div>
       {!tool.found || floorWarning ? (
         <Button
