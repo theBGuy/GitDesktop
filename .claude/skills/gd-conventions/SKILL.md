@@ -738,6 +738,10 @@ reference).
   via `isPipelineProvider`, and the re-run offers, titles, and cancel wording
   via `rerunOffers`/`RERUN_TITLES`/`cancelLabel` — shared so the runs list and
   the run detail view can't drift.
+- Per-repo/per-item labels name the DETECTED provider ("View on GitLab"),
+  derived from the item's own host, which is persisted on `RecentRepo` so the
+  first frame is right; unrecognized hosts label as GitHub; the static
+  command-palette registry entry is the one sanctioned combined label.
 - Header meta fields (the PR header's label/value grid: labels, assignees,
   projects, reviewers) render through `MetaValueCell` / `MetaFieldLabel`
   (`src/components/meta-field-cells.tsx`) — never a hand-rolled `role="group"`
@@ -1919,7 +1923,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `<name>-<pid>` dir (concurrent runs and nextest's per-test processes never
   share a store file) and, on its first use per store name in a process,
   removes a dead predecessor's same-pid dir and, outside nextest, sweeps that
-  store's day-old leftovers.
+  store's day-old leftovers. The app also removes EMPTY `<temp>/gd-review-*`
+  dirs at startup, so never name a test folder `gd-review-…`; before picking a
+  temp name, ask what else sweeps that dir by prefix.
   Concurrency: the MCP server is a second writing process, so both stores'
   read→modify→writes take the cross-process file lock in `store_lock.rs` (a
   `create_new` lock file beside the store, stale-evicted, fail-open) on top of
@@ -2038,6 +2044,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   PR's checks at 15/30/60 s, then parks. A row seen executing pauses it and
   its next finish starts one fresh episode; collapsing the rollup or hiding
   its tab pauses it without resolving it.
+- **Polls keep running while the window is unfocused** (owner ruling: the user
+  works in an editor with GitDesktop on another screen): never pause a poll on
+  blur, cut each poll's cost instead; a minimized-only pause is an open owner
+  call.
 
 ## Code comments
 
@@ -2070,7 +2080,13 @@ fragment (its body is the finished Keep-a-Changelog bullet). **Never hand-edit
 release time; one file per change keeps parallel branches conflict-free. The
 `fragment` check is **required** on master and keys on paths — any `src/` or
 `src-tauri/` change needs a fragment, the `no-changelog` label, or
-`skip-changelog` in the PR title.
+`skip-changelog` in the PR title. A `fixed-` fragment needs the bug to be
+OBSERVABLE in a released build: check ancestry
+(`git merge-base --is-ancestor <bug-sha> <release-tag>`), then manifestation
+(dep/lockfile defects can be dev-only; a stale-cache bug means tracing every
+refresh path of the key). A bug minted and fixed inside one unreleased window
+gets no fragment. `changed-` fragments likewise name only surfaces a release
+has shipped.
 
 **Skills ship in TWO trees — edit both.** `.claude/skills/<name>` (the Claude
 store) and `.agents/skills/<name>` (the vendor-neutral store the codex and
