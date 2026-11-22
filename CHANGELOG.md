@@ -12,6 +12,294 @@ under `changelog.d/` (see its README); those are assembled here at release time 
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-22
+
+### Added
+
+- **Filter the file list beside a diff.** A field above the list narrows it to
+  the paths that contain what you type, with a count of how many match. The
+  open diff stays put while you type; press `Enter` to open the first match, or
+  the down arrow to move into the list. **Focus the filter** (`Ctrl`+`F`, or
+  `⌘`+`F` on macOS) reaches the field while focus is in the list or the diff,
+  and from anywhere on the Compare tab while it lists files. Your text stays
+  from one commit or pull request to the next (from stash to stash while the
+  stashes dialog is open), and a collapsed list shows a funnel while a filter
+  is applied. On a commit's files, in Compare, on a pull request's Files and
+  Commits tabs, on local pull requests, in View stashes, in Recover lost work
+  and in an agent session's changes.
+- **Edit the commit message when you merge a pull request.** The merge dialog
+  shows the message the merge will write: a **Commit message** row with the
+  forge's default title (Bitbucket, which doesn't report one, shows
+  **Bitbucket's default message**) and an **Edit** button that opens
+  **Title** and **Description** fields in place, plus **Reset to default**
+  once you've changed them. It covers merge commits and squashes on GitHub,
+  GitLab and Bitbucket, and GitLab auto-merge; a GitLab merge that writes both
+  a squash commit and a merge commit (a squash in a project that also writes a
+  merge commit, or **Create a merge commit** in a project that requires
+  squashing) gets a **Squash commit** row and a **Merge commit** row. Leave
+  the message alone and the forge applies its own default or template. Local
+  pull requests merge through the same dialog, starting from the pull
+  request's title and description. Rebase, fast-forward and stacked GitHub
+  merges have no single message to edit, and the dialog says so.
+  `Ctrl`/`⌘`+`Enter` merges from a field, a merge that fails keeps what you
+  typed, and the MCP `merge_pull_request` tool takes the message too, tied on
+  GitHub and GitLab to the head commit it was written for.
+- **Start merges with the head branch set to be deleted.** A new **After
+  merging** option in your personal *Branch rules* ticks **Delete … on the
+  remote after merging** when you open the merge dialog in that repository.
+  You can still untick it for any merge, and it doesn't tick it for a pull
+  request from a fork, the default branch, a promotion branch, an agent
+  session's branch, a branch a rule blocks from deletion, or a dialog opened
+  while the repository's branch rules or default branch are still loading.
+- **Project cards open in the app across repositories.** An issue or pull
+  request card from another repository opens right in GitDesktop when a clone
+  of that repository is among your repositories: the app switches to it and
+  lands on the item, a pull request in the worktree that has its branch checked
+  out when there is one. A card from the other side of a fork switches between
+  **Fork** and **Upstream** and opens there. The card menu names where the item
+  will open (**Open**, **Open in** and the repository's name, **Open in
+  Upstream** or **Open in Fork**) and always offers **Open on GitHub** as well.
+  Clicking a card, or pressing `Enter` on a card or on a table or roadmap
+  row's title, does what that first menu row says, and screen readers hear
+  when an open takes a moment. **Go back** returns you to the same
+  project, view and card, even when the item opened in another repository
+  or across the fork.
+
+### Changed
+
+- **Go back** and **Go forward** now cross repositories. When a notification
+  opens an item in another repository, or on the other side of a fork,
+  `Alt`+`←` (`⌘`+`[` on macOS) or your mouse's back button switches back and
+  returns you to where you were. Opening a repository any other way still
+  starts the trail over. If a repository on the trail can no longer be opened,
+  the app says so once and drops its stops.
+- Conflicted files up to 1 MB open region by region, and **Mark resolved** and
+  staging check even larger files for conflict markers, so they ask first only
+  when markers remain or the file can't be checked.
+- **The merge dialog starts from the delete-branch choice set on GitLab or
+  Bitbucket.** A merge request or pull request already set to delete its
+  source branch on merge now opens with the delete checkbox ticked, so merging
+  from GitDesktop does what was chosen on the forge's website. This doesn't
+  apply to the default branch, an agent session's branch or a branch a rule
+  blocks from deletion.
+- **Re-check** under **Settings → About** now also has the app reload the data
+  it had cached, so after installing a tool you no longer wait out each
+  screen's own refresh or restart the app. On macOS and Linux, fetches, pulls
+  and pushes to GitHub or GitLab over HTTPS also start sooner when `gh` or
+  `glab` isn't installed: GitDesktop remembers that your login shell couldn't
+  find it, and **Re-check** (or a restart) has it look again after you install
+  one that only your shell's startup files add to your PATH.
+
+### Fixed
+
+- The agent composer keeps the task you were writing, with its model, effort,
+  isolation and run mode, when you open Settings or another session and come
+  back, and when a new session fails to start while that repository's composer
+  is still open.
+- On Windows, stopping a running agent session also stops the helper processes
+  started during that turn, and an AI review or other one-shot AI run ends with
+  none of them left running.
+- On a branch with no upstream, **Amend** asks first when a remote branch
+  already has the commit, as **Edit dates…** does, and says so when it
+  couldn't check.
+- **Go back** returns to the pull request or issue you had open when a
+  notification, **My work** or a branch's pull request chip opens another one
+  in the folder you have open, if that repository is a fork that can show only
+  its own side (the `upstream` remote is gone, or GitHub is signed out).
+- Going back to a project card, or a table or roadmap row, that sits
+  beyond the loaded part of a large board tells a screen reader to load
+  more to look for it.
+- Screen readers read each row of the Compare picker and the **New branch**
+  dialog's base picker as separate parts (the branch, whether it is the current
+  or the default branch, its worktree and when it was last committed to, plus
+  how far ahead or behind it is in Compare) and announce each list by name.
+- The Compare picker and the **New branch** dialog's base picker put
+  branches in the right order when their last commits were made in different
+  time zones. Compare's automatic pick follows suit when it isn't your
+  default branch.
+- While History has several commits selected or is running a **Search all
+  history** search, **Edit dates…** in a commit's detail pane says which to
+  clear, and the command palette leaves it out.
+- The **Create pull request** and **Create local pull request** shortcuts use
+  Compare's branches only while a comparison is on screen, and otherwise work
+  as they do on other tabs. They pick up Compare's branches whichever loads
+  first, the comparison or your Git host's status. A commit's menu and the
+  dialogs opened from it in Compare (**Create branch from commit**, **Create
+  tag**, and the mainline-parent choice for a merge commit) close when you
+  switch repositories, as does the branch picker, and a dialog you open while
+  an earlier create is still finishing stays open.
+- Tags that arrive when Compare fetches a remote branch show in the Tags list
+  right away. The fetch that follows **Add upstream remote** in the Compare
+  picker runs when you reconnect if it failed offline, even if you picked
+  another branch while it ran. When a picked remote branch isn't among your
+  remote branches and its remote is still set up, Compare offers to fetch that
+  remote beside **Pick another branch**, and says the branch was deleted on
+  the remote once Compare's fetch confirms it. While the comparison with a
+  picked remote branch can't be read, **Create pull request** and **Create
+  local pull request** stay held and say why.
+- The Compare picker re-reads your remotes and remote branches each time it
+  opens. A local branch named like a remote branch (such as `origin/x`) and that
+  remote branch both list, each in its own group, and the closed picker tells
+  the two apart with a `remote` or `local` mark. A local branch whose name
+  starts with `refs/remotes/` stays listed with a line saying why it can't be
+  picked there.
+- **Resolve with AI** sends a file to the model only when every version of it
+  fits whole, so a proposal always covers the entire file. A file too large to
+  send whole says so and points you to the other ways to resolve it.
+- Discarding a container agent session, or deleting a kept one, removes its
+  copied sign-ins, its MCP config and any container it left behind.
+- A container agent session's next turn starts even when GitDesktop had to
+  force-stop the turn before it.
+- On a fork, a newly created issue opens only while you're still on the
+  **Fork** or **Upstream** view you created it from.
+- A double click on a project card, a project table or roadmap title, or a
+  **My work** row opens it once, and so does holding `Enter` on any of them.
+- In **Edit history**, Tab from an open date editor moves on to the next
+  commit. In Edit history and **Edit dates**, the calendar button opens the
+  date picker on every press.
+- **Edit history** asks before discarding edits you haven't applied
+  (rewords, squashes, fixups, edit stops, drops, reorders or dates), however
+  you close it.
+- In **Explore**, the arrow keys move through already-loaded results straight
+  away after you reopen it or switch back to a tab, search or sort.
+- When a GitHub or GitLab action times out, the `gh` or `glab` command and the
+  helper processes it started on your machine are stopped together.
+- With no filter on, the GitHub **Closed** tab lists archived pull requests
+  too, and so do the branch menu's pull request lookups and `#` reference
+  suggestions.
+- With **Delete … on the remote after merging** ticked, a GitHub pull request
+  in a merge queue keeps its branch: GitDesktop deletes it only after GitHub
+  reports the pull request merged, so it stays in the queue and shows
+  **Queued to merge**.
+- A GitLab issue list that reaches its 500-issue limit says so and points
+  to **Filters** for older issues.
+- On GitLab, more of the Pull Requests tab says "merge request": the refresh
+  button, the name screen readers give the group of Open, Merged and Closed
+  tabs, the **New** menu's reason while GitLab is being checked or can't be
+  reached, the **All** scope's tooltip and the empty detail pane.
+- Opening a GitLab merge request from a notification or a link while GitLab
+  is still merging it waits a few seconds for the merge to finish, then
+  shows the list on the tab that holds it.
+- Merging a GitLab merge request in a project that requires squashing works
+  from **Create a merge commit** too: GitLab squashes the commits as the
+  project requires.
+- Keys you press while typing with an input method (Japanese, Chinese or
+  Korean) stay with the input method, so confirming a candidate or
+  converting text changes only your text.
+- **Set up in Settings…** under the agent composer's isolation note opens
+  Settings → AI at the **Isolation** section, with keyboard focus on it.
+- Opening a pull request, merge request or issue from a project card, **My
+  work** or a tab shortcut puts keyboard focus on it, and when it closes,
+  including when the **Upstream** view goes away, focus returns to its list. A
+  discussion's tab shortcut puts focus on the open discussion too. Focus
+  already on something still on screen stays where it is.
+- While a local pull request's merge or branch update is finishing, a
+  **Discard** or **Abort** pressed from another checkout of the repository
+  is turned away with a note to try again in a moment, and an update that
+  already landed is reported as updated.
+- A local pull request merge that paused for conflicts and was interrupted
+  right after **Finish merge** landed it (for example by quitting the app)
+  can be completed by choosing **Finish merge** again, which marks it merged.
+- Finishing or aborting a paused local pull request merge from another
+  checkout of the repository closes its entry in **Operation history** where
+  the merge started, and a finish refuses a base branch that was moved back
+  in the meantime.
+- A paused local **Rebase and merge** that is turned away at its last step
+  (for example while another operation holds the base branch) can be
+  finished with another try.
+- On macOS and Linux, background jobs your shell startup files start while
+  GitDesktop reads your login shell's PATH, or asks it where a tool is
+  installed, now end when that read does. Jobs that detach themselves, or that
+  a startup file starts with job control turned on, still carry on.
+- On macOS and Linux, the MCP config GitDesktop writes for an AI review or a
+  host agent session is readable only by you.
+- When you merge a pull request or merge request from an agent session's
+  branch in GitDesktop's merge dialog, the branch stays in place, so the
+  session can still be resumed.
+- **Merge** checks that a pull request or merge request is still open before
+  merging it. GitDesktop reads its state from GitHub, GitLab or Bitbucket
+  first, so one that was closed, declined or already merged in the meantime
+  is left as it is and the app says why. When the state check itself fails,
+  nothing is merged and you can try again. Merges sent through the MCP server
+  get the same check.
+- After you merge a pull request or merge request, its page shows it as
+  merged right away. A GitLab merge request that is still being merged shows
+  as merging. A draft that was merged, closed or is being merged shows that
+  state instead of Draft, and **Ready for review** is offered only while the
+  draft is still open.
+- In **My work**, choosing **Open on GitHub** (GitLab, Bitbucket) from a row's
+  menu while a row is still opening keeps you on **My work**.
+- In **My work**, an item whose clone sits on a folder that doesn't answer
+  opens in your browser within a moment, and a slow open is announced to
+  screen readers.
+- In a repository with no remote, the **New** menus on the Pull Requests and
+  Issues tabs show **Remote pull request…** and **Remote issue…** as
+  disabled items, each with a reason that says which remote to add.
+- A notification whose folder has since become part of another repository opens
+  only in its own repository, never in the one that now contains that folder.
+- opencode 2.x works alongside 1.x from 2.2.0 (tested with opencode 2.2.0 to
+  2.3.2): reviews, generation and agent sessions run on it, and effort levels
+  follow the model you pick. opencode container sessions need a one-time
+  rebuild of the agent image in Settings → AI.
+- When you make project views in quick succession (**New view…**,
+  **Duplicate**), only the last one you asked for can switch the board to its
+  view, whichever finishes first.
+- A path in plain ASCII that is too long for its row keeps the ellipsis
+  tight against the file name, and screen readers read every path as one
+  unbroken name.
+- A project's number field says under the box when a number is beyond what
+  GitHub stores (more than 2,147,483,647 either way), and saves nothing until
+  the entry fits.
+- The Projects MCP tools leave an item's built-in Title out of its field values
+  (`list_project_items` gives it as the item's title), and `list_project_items`
+  reads a very large `limit` as 500, its documented maximum.
+- A pull request conversation that is read-only for you (archived, or locked
+  to you) holds more than the comment box. Review-thread replies are held
+  with the reason shown, and on an archived pull request so are edits to
+  your own comments; a reply or edit you had open keeps its text. A reaction
+  GitHub refuses says the pull request may be archived or that you may not
+  have permission. If the conversation turns read-only while you confirm a
+  close that posts your draft, the pull request stays open and the draft is
+  kept (if a lock caused it, closing again closes it without the comment),
+  and **Request changes** goes ahead without the draft and keeps it.
+- A remote URL ending in `.git/` is recognized as its repository: its
+  name shows correctly, and project cards for its issues and pull
+  requests open in the app.
+- Opening the repository switcher in the header leaves the app's layout
+  untouched, even with a long list of recent repositories.
+- In **My work** and **Explore**, Tab moves from the filter or search box
+  straight to the next control, the arrow keys keep moving through the
+  rows, and clicking an empty part of the list or its scrollbar leaves you
+  typing in the box.
+- A pull request or issue opened from a notification, **My work** or
+  **Automation history** keeps the **Fork** or **Upstream** lens it opened
+  under while you visit Settings, Help, Explore or **My work**, however long
+  you stay.
+- Keyboard shortcuts stay with the dialog you're in. While a dialog or a
+  confirmation prompt is open, only its own shortcuts respond, and zoom keeps
+  working; app shortcuts, the command palette, the switchers, **Go back** and
+  **Go forward** (keys and mouse buttons) and the app's own commands in the
+  macOS menu bar respond again once it closes. The repository switcher's filter
+  keeps its shortcut while the switcher is open.
+- Shortcuts pressed before GitDesktop has found Git, including on the **Git
+  not found** screen, leave nothing waiting to appear: once it finds Git, the
+  app opens where you expect.
+- In **My work** and **Explore**, rows from repositories whose names differ
+  only by `.` and `_` stay distinct, so a screen reader follows the right row.
+  In **My work**, the Menu key opens only the highlighted row's menu.
+- The **New release**, **Edit release** and **Repository files** dialogs, the
+  Projects board's view switcher and the Jira labels list show a scrollbar only
+  when their content needs one.
+- Forms and comment boxes that submit with `Ctrl`+`Enter` (`⌘`+`Enter` on
+  macOS) respond to exactly that shortcut, leaving `Ctrl`+`Shift`+`Enter` and
+  other `Shift` or `Alt` combinations to their own shortcuts. The command
+  palette likewise picks an entry only on a plain `Enter`.
+- **Undo** in History checks your remote branches once more just before it
+  runs, so a commit you pushed from a terminal moments earlier stays in place
+  and the app tells you it's already pushed.
+- With a GitHub pull request or issue open under the **Upstream** lens, removing
+  the `upstream` remote outside the app now returns you to the fork's list.
+
 ## [0.15.0] - 2026-11-17
 
 ### Added
@@ -6189,7 +6477,8 @@ built on Tauri 2; every GitHub feature runs through the GitHub CLI (`gh`).
 - Diff-renderer exceptions are caught by an error boundary instead of taking
   down the whole app.
 
-[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/theBGuy/GitDesktop/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/theBGuy/GitDesktop/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/theBGuy/GitDesktop/compare/v0.13.8...v0.14.0
 [0.13.8]: https://github.com/theBGuy/GitDesktop/compare/v0.13.7...v0.13.8
