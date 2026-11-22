@@ -230,9 +230,13 @@ function App() {
   useHotkeyAction(
     "open-mcp-servers-settings",
     () => openSettings("mcp-servers"),
-    !settings.data?.hideAi,
+    !settings.data?.hideAi && gitInstalled.isSuccess,
   );
-  useHotkeyAction("browse-mcp-registry", openMcpBrowse, !settings.data?.hideAi);
+  useHotkeyAction(
+    "browse-mcp-registry",
+    openMcpBrowse,
+    !settings.data?.hideAi && gitInstalled.isSuccess,
+  );
   useHotkeyAction(
     "open-notifications-settings",
     () => openSettings("notifications"),
@@ -258,13 +262,22 @@ function App() {
     },
     Boolean(repoPath) && !notificationsDraftHeld,
   );
-  useHotkeyAction("show-help", openHelp);
-  useHotkeyAction("open-explore", openExplore);
-  useHotkeyAction("open-my-work", openMyWork);
-  useHotkeyAction("toggle-notifications", toggleActivity);
-  useHotkeyAction("show-shortcuts", () => setShortcutsOpen(true));
-  // The palette renders below the git-missing early return: a press there would
-  // stash a stale `open` that pops after Retry.
+  // These surfaces render below the git-pending and git-missing early returns,
+  // so each waits for git: a press on those screens would stash state that
+  // pops after Retry.
+  useHotkeyAction("show-help", openHelp, gitInstalled.isSuccess);
+  useHotkeyAction("open-explore", openExplore, gitInstalled.isSuccess);
+  useHotkeyAction("open-my-work", openMyWork, gitInstalled.isSuccess);
+  useHotkeyAction(
+    "toggle-notifications",
+    toggleActivity,
+    gitInstalled.isSuccess,
+  );
+  useHotkeyAction(
+    "show-shortcuts",
+    () => setShortcutsOpen(true),
+    gitInstalled.isSuccess,
+  );
   useHotkeyAction(
     "command-palette",
     () => setPaletteOpen(true),

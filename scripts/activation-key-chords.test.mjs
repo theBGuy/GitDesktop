@@ -776,6 +776,10 @@ const OWNER_EXEMPT = new Map([
     "compares the Back/Forward bindings only to leave them unprevented for the listener",
   ],
   [
+    "src/features/shortcuts/CommandPalette.tsx",
+    "its pick compares the fixed key `enter`, and it reads bindings only to show each row's shortcut",
+  ],
+  [
     "src/lib/zoom/zoom.ts",
     "the zoom alias keys follow a rule of their own beside the app zoom bindings",
   ],

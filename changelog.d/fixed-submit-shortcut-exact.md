@@ -1,2 +1,3 @@
 - Forms and comment boxes that submit with Ctrl+Enter (⌘Enter on macOS)
-  no longer also submit when Shift or Alt is added, as in Ctrl+Shift+Enter.
+  respond to exactly that shortcut, leaving Ctrl+Shift+Enter and other
+  Shift or Alt combinations to their own shortcuts.

@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
+  eventToBinding,
   formatBinding,
-  hasChordModifier,
   isImeKeydown,
 } from "@/lib/hotkeys/binding";
 import {
@@ -71,9 +71,10 @@ export function CommandPalette({
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
-    // A modified Enter is a chord: it reaches the listener, which under the
-    // palette's own modal runs only the palette's registrations.
-    const pick = e.key === "Enter" && !hasChordModifier(e) && !e.shiftKey;
+    // Only an exact Enter picks: any modifier, AltGraph included, makes it a
+    // chord, which reaches the listener and under the palette's own modal runs
+    // only the palette's registrations.
+    const pick = eventToBinding(e) === "enter";
     // A key the input method owns is left to it: its Enter confirms a
     // candidate rather than picking a row, and its arrows move the candidate
     // list rather than the highlight. It stops here too, or the dialog's

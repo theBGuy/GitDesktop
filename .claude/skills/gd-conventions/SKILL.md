@@ -1018,7 +1018,7 @@ one grep away on the named symbol. Grows via Conventions-sync.
   a typeahead list keeps its bare character keys and Space. Every other key
   bound to an enabled action, and every other key carrying Ctrl/Meta/Alt,
   belongs to the window listener, which consumes a fresh press of a
-  registered chord whether or not anything runs (bare Space only when its
+  registered chord even when nothing runs (bare Space only when its
   action ran). The listener applies the whole order, and `eventToBinding`
   answers null for an input-method key.
   The palette, the shared Markdown editor and its mention list, the projects

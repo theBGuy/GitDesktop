@@ -1,0 +1,1 @@
+- Shortcuts that open a screen or dialog work once GitDesktop has found Git.

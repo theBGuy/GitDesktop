@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
+  createEvent,
   fireEvent,
   render,
   screen,
@@ -147,6 +148,37 @@ describe("the command palette picks on plain Enter only", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(fireEvent.keyDown(search, { key: "Enter" })).toBe(false);
     await waitFor(() => expect(openSettings).toHaveBeenCalledTimes(1));
+  });
+
+  it("an AltGraph Enter picks nothing; a plain one picks once", async () => {
+    const openSettings = vi.fn();
+    render(
+      <Providers>
+        <Listener />
+        <SettingsAction run={openSettings} />
+        <PaletteHost />
+      </Providers>,
+    );
+    const search = await screen.findByRole("textbox", {
+      name: "Search commands",
+    });
+    act(() => search.focus());
+    await userEvent.keyboard("Open settings");
+    await screen.findByRole("button", { name: /Open settings/ });
+    // jsdom's getModifierState never answers AltGraph, so the event answers it.
+    const altGr = createEvent.keyDown(search, { key: "Enter", altKey: true });
+    Object.defineProperty(altGr, "getModifierState", {
+      value: (key: string) => key === "AltGraph",
+    });
+    fireEvent(search, altGr);
+    expect(altGr.defaultPrevented).toBe(false);
+    await act(() => new Promise((r) => setTimeout(r, 10)));
+    expect(openSettings).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(fireEvent.keyDown(search, { key: "Enter" })).toBe(false);
+    await waitFor(() => expect(openSettings).toHaveBeenCalledTimes(1));
+    await act(() => new Promise((r) => setTimeout(r, 10)));
+    expect(openSettings).toHaveBeenCalledTimes(1);
   });
 });
 

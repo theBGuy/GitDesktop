@@ -20,9 +20,10 @@
 // no tier), and only registrations of the ids under inspection are read. Every
 // lookup that finds nothing fails, a `tier` that is not a plain string literal
 // fails, a call's options argument it cannot read (not an object literal, a
-// spread, a shorthand `tier`) fails, and a JSX spread in a mount's tag fails it. Not covered: a registration whose id is not a string
-// literal, an aliased import of useHotkeyAction or HotkeyAction, and a spread
-// on a `<HotkeyAction>` element.
+// spread, a shorthand `tier`) fails, and a JSX spread in a mount's tag fails
+// it. Not covered: a registration whose id is not a string literal, an aliased
+// import of useHotkeyAction or HotkeyAction, and a spread on a `<HotkeyAction>`
+// element.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -151,7 +152,8 @@ function optionsTier(rel, text, masked, [from, to]) {
  *  { id, tier }: `useHotkeyAction(` calls (the id may sit on a later line) and
  *  `<HotkeyAction>` elements carrying an `id="…"` attribute. Other ids are
  *  skipped before their options are read, so their options never fail a pin;
- *  a call's tier comes from its options argument alone, null when it has none. */
+ *  a call's tier comes from its options argument alone, null when it has
+ *  none. */
 function registrations(rel, text, ids) {
   if (!text.includes("HotkeyAction")) return [];
   const masked = mask(rel, text);

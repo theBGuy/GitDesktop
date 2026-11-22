@@ -2100,14 +2100,13 @@ export function ProjectsBoardPanel({
           };
     const entry = from === null ? undefined : tableEntries[from.rowIndex];
     if (from === null || entry === undefined) return;
-    // The board's reposition chords, ahead of the plain keys they share, and on
-    // an item row only — a header is no card. An input-method key is the input
-    // method's, so neither these nor the Alt swallow below apply to it, and it
-    // stops here so no ancestor acts on it either.
+    // An IME key is the input method's: stop it, so nothing here or above acts.
     if (isImeKeydown(e)) {
       e.stopPropagation();
       return;
     }
+    // The board's reposition chords, ahead of the plain keys they share, and on
+    // an item row only — a header is no card.
     const chord = eventToBinding(e);
     const direction = chord === null ? undefined : REORDER_CHORDS[chord];
     if (direction !== undefined) {
@@ -2249,18 +2248,18 @@ export function ProjectsBoardPanel({
     if (from === null) return;
     const column = columns[from.col];
     if (column === undefined || column.items.length === 0) return;
+    // An IME key is the input method's: stop it, so nothing here or above acts.
+    if (isImeKeydown(e)) {
+      e.stopPropagation();
+      return;
+    }
     // The reposition chords BEFORE the bare-key switch below, which tests `e.key`
     // alone: the same four keys move the CURSOR unmodified and the CARD with Alt
     // held, so a chord must never fall through to the plain key's arm. Matched on
     // the canonical binding rather than the raw flags, which is what makes Ctrl,
     // Cmd and Shift exclude themselves and AltGraph read as the character input it
     // is (`eventToBinding` answers null there). Everything else falls through
-    // untouched. An input-method key is the input method's, so none of it
-    // applies, and it stops here so no ancestor acts on it either.
-    if (isImeKeydown(e)) {
-      e.stopPropagation();
-      return;
-    }
+    // untouched.
     const chord = eventToBinding(e);
     const direction = chord === null ? undefined : REORDER_CHORDS[chord];
     if (direction !== undefined) {
