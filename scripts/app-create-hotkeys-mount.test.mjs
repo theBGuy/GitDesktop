@@ -17,9 +17,11 @@
 // RepositoryView in jsdom. Scans run on `maskNonCode`'s output, so comments and
 // string text never count; literals are read from the raw text at the masked
 // offsets. Every lookup that finds nothing fails, a `tier` that is not a plain
-// string literal fails, and a JSX spread in a mount's tag fails it. Not
-// covered: a registration whose id is not a string literal, an aliased import
-// of useHotkeyAction or HotkeyAction, and options passed through a variable.
+// string literal fails, a call's options argument it cannot read (not an
+// object literal, a spread, a shorthand `tier`) fails, and a JSX spread in a
+// mount's tag fails it. Not covered: a registration whose id is not a string
+// literal, an aliased import of useHotkeyAction or HotkeyAction, and a spread
+// on a `<HotkeyAction>` element.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -40,21 +42,32 @@ const MOUNT = "AppCreateHotkeys";
 const APP_CREATE = "src/features/repository/AppCreateHotkeys.tsx";
 const REPO_LIST = "src/features/repository/RepoList.tsx";
 
-// Each group: its ids, every file registering one of them, and the one
-// app-level registrar whose registrations are fallbacks.
+// Each group: its ids, every file registering one of them with the exact ids
+// it registers (each once), and the one app-level registrar whose
+// registrations are fallbacks. A panel that drops one of its own ids leaves
+// only the fallback serving it on that surface.
 const GROUPS = [
   {
     ids: ["create-pr", "create-local-pr"],
-    registrars: [
-      "src/features/compare/ComparePanel.tsx",
-      "src/features/pulls/PullRequestsPanel.tsx",
-      APP_CREATE,
-    ],
+    registrars: {
+      "src/features/compare/ComparePanel.tsx": ["create-pr", "create-local-pr"],
+      "src/features/pulls/PullRequestsPanel.tsx": [
+        "create-pr",
+        "create-local-pr",
+      ],
+      [APP_CREATE]: ["create-pr", "create-local-pr"],
+    },
     fallback: APP_CREATE,
   },
   {
     ids: ["create-issue", "create-jira-issue"],
-    registrars: ["src/features/issues/IssuesPanel.tsx", HOST],
+    registrars: {
+      "src/features/issues/IssuesPanel.tsx": [
+        "create-issue",
+        "create-jira-issue",
+      ],
+      [HOST]: ["create-issue", "create-jira-issue"],
+    },
     fallback: HOST,
   },
 ];
@@ -96,6 +109,43 @@ function tierIn(rel, text, masked, from, to) {
   return values[0];
 }
 
+/** The [from, to) ranges of the top-level arguments between masked offsets
+ *  `open` (the call's `(`) and `close` (its `)`). */
+function topLevelArgs(masked, open, close) {
+  const args = [];
+  let depth = 0;
+  let start = open + 1;
+  for (let i = open + 1; i < close; i++) {
+    const c = masked[i];
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === "," && depth === 0) {
+      args.push([start, i]);
+      start = i + 1;
+    }
+  }
+  if (masked.slice(start, close).trim() !== "") args.push([start, close]);
+  return args;
+}
+
+// useHotkeyAction(id, run, enabled, options): the options argument's index.
+const OPTIONS_ARG = 3;
+
+/** The tier a call's options argument names, read like `tierIn`, and a throw
+ *  for options this scan cannot read: not an object literal, a spread, or a
+ *  shorthand `tier`. */
+function optionsTier(rel, text, masked, [from, to]) {
+  const lead = masked.slice(from, to).search(/\S/);
+  const at = from + lead;
+  const end = masked[at] === "{" ? matchBrace(masked, at) : -1;
+  if (end === -1 || masked.slice(end + 1, to).trim() !== "")
+    throw new Error(`${rel}: hotkey options this scan cannot read`);
+  const body = masked.slice(at + 1, end);
+  if (/\.\.\./.test(body) || /(?<![\w$.])tier\s*(?=[,}]|$)/.test(body))
+    throw new Error(`${rel}: hotkey options this scan cannot read`);
+  return tierIn(rel, text, masked, at, end + 1);
+}
+
 /** Every registration in `text` whose id is a literal, as { id, tier }:
  *  `useHotkeyAction(` calls (the id may sit on a later line) and
  *  `<HotkeyAction>` elements carrying an `id="…"` attribute. */
@@ -109,7 +159,12 @@ function registrations(rel, text) {
     const open = masked.indexOf("(", m.index);
     const close = matchBrace(masked, open);
     assert.ok(close > open, `${rel}: a useHotkeyAction call never closes`);
-    out.push({ id, tier: tierIn(rel, text, masked, open, close) });
+    const args = topLevelArgs(masked, open, close);
+    const tier =
+      args.length > OPTIONS_ARG
+        ? optionsTier(rel, text, masked, args[OPTIONS_ARG])
+        : tierIn(rel, text, masked, open, close);
+    out.push({ id, tier });
   }
   for (const m of masked.matchAll(/<HotkeyAction\b/g)) {
     const end = tagEnd(masked, m.index);
@@ -136,25 +191,24 @@ function checkRegistrars(corpus) {
   for (const { ids, registrars: expected } of GROUPS)
     assert.deepEqual(
       registrars(corpus, ids),
-      [...expected].sort(),
+      Object.keys(expected).sort(),
       `the registrar set of ${ids.join(", ")} moved`,
     );
 }
 
-/** The app-level registrar registers every id of its group as a fallback;
- *  no other registrar of a group id carries a tier. */
+/** Each registrar registers exactly its pinned ids, once each; the app-level
+ *  one registers them as fallbacks and no other registrar carries a tier. */
 function checkTiers(corpus) {
   for (const { ids, registrars: files, fallback } of GROUPS)
-    for (const rel of files) {
+    for (const [rel, pinned] of Object.entries(files)) {
       const text = corpus.get(rel);
       assert.ok(text, `${rel} is not in the walk`);
       const own = registrations(rel, text).filter((r) => ids.includes(r.id));
-      if (rel === fallback)
-        assert.deepEqual(
-          own.map((r) => r.id).sort(),
-          [...ids].sort(),
-          `${rel} does not register ${ids.join(", ")} once each`,
-        );
+      assert.deepEqual(
+        own.map((r) => r.id).sort(),
+        [...pinned].sort(),
+        `${rel} does not register ${pinned.join(", ")} once each`,
+      );
       const want = rel === fallback ? "fallback" : null;
       for (const r of own)
         assert.equal(r.tier, want, `${rel}'s ${r.id} registration tier`);
@@ -257,7 +311,7 @@ const hostText = () => fileText(HOST);
 test("the walk reads every source file outside src/test", () => {
   assert.ok(CORPUS.size > 100, `the walk read ${CORPUS.size} files`);
   for (const rel of [
-    ...GROUPS.flatMap((g) => g.registrars),
+    ...GROUPS.flatMap((g) => Object.keys(g.registrars)),
     ...TIER_PINS.map((p) => p.rel),
   ])
     assert.ok(CORPUS.has(rel), `${rel} is not in the walk`);
@@ -385,6 +439,67 @@ test("control: a tier on a panel's call fails, and an unreadable tier throws", (
   assert.throws(
     () => checkTiers(withFile(rel, unreadable)),
     /a tier this scan cannot read/,
+  );
+});
+
+test("control: options whose tier the scan cannot read throw, never read as no tier", () => {
+  const call =
+    'useHotkeyAction("create-local-pr", () => requestCreate("local-pr"), true, {\n    tier: "fallback",\n  });';
+  const app = fileText(APP_CREATE);
+  assert.ok(app.includes(call), "the fallback call moved");
+  for (const [label, options, lead] of [
+    ["a shorthand tier", "{ tier }", 'const tier = "fallback" as const;\n'],
+    [
+      "a spread",
+      "{ ...opts }",
+      'const opts = { tier: "fallback" } as const;\n',
+    ],
+    ["a variable", "opts", 'const opts = { tier: "fallback" } as const;\n'],
+  ]) {
+    const mutant =
+      lead +
+      once(
+        app,
+        call,
+        `useHotkeyAction("create-local-pr", () => requestCreate("local-pr"), true, ${options});`,
+      );
+    assert.throws(
+      () => checkTiers(withFile(APP_CREATE, mutant)),
+      /hotkey options this scan cannot read/,
+      label,
+    );
+  }
+  // A literal tier among other options still reads.
+  const extra = once(
+    app,
+    call,
+    'useHotkeyAction("create-local-pr", () => requestCreate("local-pr"), true, { x: 1, tier: "fallback" });',
+  );
+  checkTiers(withFile(APP_CREATE, extra));
+});
+
+test("control: a panel dropping one of its own create ids fails", () => {
+  const rel = "src/features/pulls/PullRequestsPanel.tsx";
+  const dropped = once(
+    fileText(rel),
+    'useHotkeyAction("create-pr", () => setGhCreateOpen(true), canCreateGhPr);',
+    "",
+  );
+  // The panel still registers create-local-pr, so the registrar set holds.
+  checkRegistrars(withFile(rel, dropped));
+  assert.throws(
+    () => checkTiers(withFile(rel, dropped)),
+    /PullRequestsPanel\.tsx does not register create-pr, create-local-pr once each/,
+  );
+  const rel2 = "src/features/issues/IssuesPanel.tsx";
+  const doubled = onceRe(
+    rel2,
+    /useHotkeyAction\("create-issue"/,
+    'useHotkeyAction("create-issue", run);\n  useHotkeyAction("create-issue"',
+  );
+  assert.throws(
+    () => checkTiers(withFile(rel2, doubled)),
+    /IssuesPanel\.tsx does not register create-issue, create-jira-issue once each/,
   );
 });
 

@@ -59,7 +59,11 @@ import {
 } from "@/lib/attachments/use-draft-attachments";
 import { clipTitle } from "@/lib/clip-title";
 import { formatBytes } from "@/lib/format-bytes";
-import { formatBinding, hasChordModifier } from "@/lib/hotkeys/binding";
+import {
+  formatBinding,
+  hasChordModifier,
+  isImeKeydown,
+} from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { isActivationKey } from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
@@ -575,6 +579,14 @@ export function MarkdownEditor({
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // A key the input method owns reaches no formatting chord, suggestion or
+    // consumer handler: it confirms or moves a candidate. It also stops here, or
+    // an ancestor's handler (a dialog's Escape dismissal) would act on it.
+    if (isImeKeydown(e)) {
+      e.stopPropagation();
+      mention.onKeyDown(e);
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
       const key = e.key.toLowerCase();
       if (key === "b") {

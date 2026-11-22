@@ -353,6 +353,7 @@ const preparingSlotHide = scanner("preparing-slot-hide");
 const bareGroupLabel = scanner("bare-group-label");
 const unnamedRadioGroup = scanner("unnamed-radio-group");
 const unguardedDispatcher = scanner("unguarded-binding-dispatcher");
+const looseSubmitChord = scanner("loose-submit-chord");
 const rawDefaultBinding = scanner("raw-default-binding-read");
 const chordedArrow = scanner("chorded-arrow-handler");
 const titledDisabledTrigger = scanner("titled-disabled-trigger");
@@ -3035,6 +3036,152 @@ test("unguarded-binding-dispatcher flags a HALF-guarded dispatcher", () => {
     "}",
   ].join("\n");
   assert.deepEqual(unguardedDispatcher(targetsOnly), [4]);
+});
+
+test("unguarded-binding-dispatcher skips a direct string-literal compare only", () => {
+  // A hardcoded chord tested in place is no user binding, in either operand
+  // order, quote style or equality form.
+  for (const line of [
+    'if (eventToBinding(e) === "mod+enter") e.preventDefault();',
+    "if ('mod+enter' == eventToBinding(e)) e.preventDefault();",
+    'if (eventToBinding(e) !== "mod+enter") return; e.preventDefault();',
+  ])
+    assert.deepEqual(unguardedDispatcher(line), [], line);
+  // One literal compare beside a variable compare still dispatches a binding.
+  const mixed = [
+    "function onKeyDown(e) {",
+    '  if (eventToBinding(e) === "mod+enter") e.preventDefault();',
+    "  if (eventToBinding(e) === binding) e.preventDefault();",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unguardedDispatcher(mixed), [3]);
+  // A stored result loses the literal at the call; so does a lookup.
+  const stored = [
+    "function onKeyDown(e) {",
+    "  const b = eventToBinding(e);",
+    '  if (b === "mod+enter") e.preventDefault();',
+    "}",
+  ].join("\n");
+  assert.deepEqual(unguardedDispatcher(stored), [2]);
+  assert.deepEqual(
+    unguardedDispatcher(
+      "if (CHORDS.has(eventToBinding(e) ?? '')) e.preventDefault();",
+    ),
+    [1],
+  );
+});
+
+test("unguarded-binding-dispatcher skips a literal only when it is the whole operand", () => {
+  // A literal joined to more builds a chord at runtime, on either side; a
+  // literal compare beside a variable compare on one line still dispatches.
+  for (const line of [
+    'if (eventToBinding(e) === "mod+" + key) e.preventDefault();',
+    'if (prefix + "enter" === eventToBinding(e)) e.preventDefault();',
+    'if (eventToBinding(e) === "a" || eventToBinding(e) === binding) e.preventDefault();',
+  ])
+    assert.deepEqual(unguardedDispatcher(line), [1], line);
+  // A bounded literal, at each boundary the rule names.
+  for (const line of [
+    'if (eventToBinding(e) === "x") e.preventDefault();',
+    'if (("x" === eventToBinding(e))) e.preventDefault();',
+    'e.preventDefault(); return eventToBinding(e) === "x";',
+    'e.preventDefault(); const r = eventToBinding(e) === "x" ? a : b;',
+    "if (eventToBinding(e) !== 'x') e.preventDefault();",
+  ])
+    assert.deepEqual(unguardedDispatcher(line), [], line);
+});
+
+test("unguarded-binding-dispatcher reads a wrapped literal's neighbouring line", () => {
+  // A literal that ends or starts its line and is joined to more across the
+  // wrap (a blank line between included) still builds a chord at runtime.
+  for (const [lines, hit] of [
+    [['if (eventToBinding(e) === "mod+"', "  + key) e.preventDefault();"], 1],
+    [
+      ['if (eventToBinding(e) === "mod+"', "", "  + key) e.preventDefault();"],
+      1,
+    ],
+    [
+      ["if (prefix +", '  "enter" === eventToBinding(e)) e.preventDefault();'],
+      2,
+    ],
+  ]) {
+    const source = lines.join("\n");
+    assert.deepEqual(unguardedDispatcher(source), [hit], source);
+  }
+  // Wrapped literals closed by a boundary on the neighbouring line.
+  for (const lines of [
+    [
+      'if (eventToBinding(e) === "mod+enter"',
+      ") {",
+      "  e.preventDefault();",
+      "}",
+    ],
+    ['if (eventToBinding(e) === "mod+enter"', "  && x) e.preventDefault();"],
+    ["if (", '  "x" === eventToBinding(e)) e.preventDefault();'],
+  ]) {
+    const source = lines.join("\n");
+    assert.deepEqual(unguardedDispatcher(source), [], source);
+  }
+});
+
+test("unguarded-binding-dispatcher reads `?.` after a literal as more of it", () => {
+  // Optional chaining continues the operand; a ternary's `?` still bounds it.
+  for (const [lines, hit] of [
+    [
+      [
+        'if (eventToBinding(e) === "mod+KEY"?.replace("KEY", k)) e.preventDefault();',
+      ],
+      1,
+    ],
+    [
+      [
+        'if (eventToBinding(e) === "mod+KEY"',
+        '  ?.replace("KEY", k)) e.preventDefault();',
+      ],
+      1,
+    ],
+    [['if (eventToBinding(e) === "mod+KEY" ?.at(0)) e.preventDefault();'], 1],
+  ]) {
+    const source = lines.join("\n");
+    assert.deepEqual(unguardedDispatcher(source), [hit], source);
+  }
+  for (const lines of [
+    ['e.preventDefault(); const r = eventToBinding(e) === "x" ? a : b;'],
+    [
+      'e.preventDefault(); const r = eventToBinding(e) === "x"',
+      "  ? a",
+      "  : b;",
+    ],
+  ]) {
+    const source = lines.join("\n");
+    assert.deepEqual(unguardedDispatcher(source), [], source);
+  }
+});
+
+test("loose-submit-chord flags either-flag-plus-Enter in every spelling", () => {
+  for (const source of [
+    'if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {}',
+    'if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {}',
+    'if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {}',
+    "if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {}",
+  ])
+    assert.deepEqual(looseSubmitChord(source), [1], source);
+  // Wrapped over lines, a different name and `.code`: reported where it starts.
+  assert.deepEqual(
+    looseSubmitChord(
+      'if (\n  (event.ctrlKey ||\n    event.metaKey) &&\n  event.code === "Enter"\n) {}',
+    ),
+    [2],
+  );
+});
+
+test("loose-submit-chord passes the exact chord, a comment and a bare-Enter test", () => {
+  for (const source of [
+    'if (eventToBinding(e) === "mod+enter") {}',
+    '// (e.ctrlKey || e.metaKey) && e.key === "Enter"',
+    'if (e.key === "Enter" && !e.ctrlKey) {}',
+  ])
+    assert.deepEqual(looseSubmitChord(source), [], source);
 });
 
 test("unguarded-binding-dispatcher allowlists the non-rebindable dispatchers", () => {

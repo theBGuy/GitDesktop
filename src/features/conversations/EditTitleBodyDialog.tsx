@@ -56,7 +56,8 @@ import {
 import type { DraftAttachmentsHandle } from "@/lib/attachments/use-draft-attachments";
 import { mayHaveLanded, otherChangesSaved } from "@/lib/error-summary";
 import { required, useAppForm, withForm } from "@/lib/form";
-import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { fromOtherModal } from "@/lib/hotkeys/open-modal";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import {
   ACT_PENDING_REASON,
@@ -775,7 +776,8 @@ export const EditTitleBodyDialog = withForm({
           // without `onGenerate` (the issue views) lets the generate chord through;
           // under this modal the listener reaches only the modal's own entries.
           onKeyDown={(e) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+            if (eventToBinding(e) === "mod+enter") {
+              if (fromOtherModal(e.target, e.currentTarget)) return;
               e.preventDefault();
               // While generating, swallow but don't submit — matches the create
               // dialogs. Field validators still gate an invalid submit. A held

@@ -56,8 +56,9 @@ function racedAmendMessage(
  * The inline box registers the `commit` / `generate-commit-message` actions while
  * `active`. The dialog (`inDialog`) registers its open-state pair inside its
  * own content, where the modal scope makes them its own; here it keeps both
- * registered at page level, enabled only for the closed-state fallback, so the
- * chords stay consumed on every tab.
+ * registered at page level, `commit` enabled only for the closed-state fallback
+ * and `generate-commit-message` never, so the chords stay consumed on every
+ * tab.
  */
 export function useCommitSubmit(
   repoPath: string,

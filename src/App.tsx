@@ -263,7 +263,13 @@ function App() {
   useHotkeyAction("open-my-work", openMyWork);
   useHotkeyAction("toggle-notifications", toggleActivity);
   useHotkeyAction("show-shortcuts", () => setShortcutsOpen(true));
-  useHotkeyAction("command-palette", () => setPaletteOpen(true));
+  // The palette renders below the git-missing early return: a press there would
+  // stash a stale `open` that pops after Retry.
+  useHotkeyAction(
+    "command-palette",
+    () => setPaletteOpen(true),
+    gitInstalled.isSuccess,
+  );
   useHotkeyAction("cycle-theme", () => {
     const current = settingsRef.current;
     if (!current) return;

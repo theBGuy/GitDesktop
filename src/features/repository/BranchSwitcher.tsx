@@ -5071,7 +5071,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     WorktreesDialog instance and the one "worktrees" handler, so
                     a second mount here would stack a duplicate dialog on top of
                     it, and a second registration would shadow the ⋮ menu's
-                    handler (dispatch runs the newest enabled one). Direct call
+                    handler (dispatch runs the newest enabled entry within its
+                    tier). Direct call
                     in the same tick, as RepoSwitcher's rows do — the palette's
                     setTimeout exists for closing a MODAL, which a popover
                     isn't. */}

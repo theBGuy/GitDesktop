@@ -27,6 +27,7 @@ import type {
   ProjectViewLayout,
 } from "@/lib/git/types";
 import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { fromOtherModal } from "@/lib/hotkeys/open-modal";
 import { pendingWriteReason } from "@/lib/offline-writes";
 import {
   ARIA_DISABLED_CLASS,
@@ -121,6 +122,7 @@ function heldSubmitHandlers(
 ) {
   return {
     onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
+      if (fromOtherModal(e.target, e.currentTarget)) return;
       if (eventToBinding(e) !== "mod+enter") return;
       e.preventDefault();
       if (heldReason === null) form.handleSubmit();

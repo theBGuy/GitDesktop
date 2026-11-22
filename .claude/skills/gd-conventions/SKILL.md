@@ -317,17 +317,17 @@ activates a focused row, card or chip, or a list's marked row from its filter
 input, returns on `hasChordModifier(e)` (binding.ts) before any preventDefault,
 so bound chords reach the window listener, except inside a modal that owns no
 chord of its own, whose sites keep their swallow under an `OWNS_CHORD` entry
-(app chords are inert under a modal anyway).
+(app chords other than app zoom are inert under a modal anyway).
 The `scripts/activation-key-chords.test.mjs` scan is the ratchet.
 A handler that acts on a bare ArrowLeft or ArrowRight and can run outside
 a modal dialog returns on `hasChordModifier(e)` first, so Go back's
 Alt+arrow reaches the window listener. One that renders only inside a modal
 keeps its swallow under an allowlist entry: under a modal, Go back and every
-other app chord are inert anyway (guard `chorded-arrow-handler`; its message
-names what it can't see, such as a second handler in a file that already holds
-a guard token). A surface that swallows chords it does not own lets the
-effective `go-back` and `go-forward` bindings through after its own chords,
-without preventing them (the Projects board card and table row are the
+other app chord but app zoom are inert anyway (guard `chorded-arrow-handler`;
+its message names what it can't see, such as a second handler in a file that
+already holds a guard token). A surface that swallows chords it does not own
+lets the effective `go-back` and `go-forward` bindings through after its own
+chords, without preventing them (the Projects board card and table row are the
 reference).
 
 **Patterns the user has ruled on:**
@@ -986,15 +986,46 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `scripts/hotkey-registry.test.mjs` is the tripwire, and T2 there fails a
   `keepMounted` dialog outside the vendored primitives, whose mounted scope
   would outrank the dialog actually open). A drawer opens no scope, so under
-  one every entry is inert, its own included. Precedence is a tier per entry: an
-  app-level fallback takes `tier: "fallback"` (AppCreateHotkeys, RepositoryView's
-  create-issue pair), a popup's content takes `tier: "popup"` (RepoList), and
-  registration order decides only inside one tier
+  one every entry but app zoom is inert, its own included. Precedence is a tier
+  per entry: an app-level fallback takes `tier: "fallback"` (AppCreateHotkeys,
+  RepositoryView's create-issue pair), a popup's content takes `tier: "popup"`
+  (RepoList), and registration order decides only inside one tier
   (`scripts/app-create-hotkeys-mount.test.mjs` pins the tiers). A local matcher
   comparing `eventToBinding` against an effective binding swallows only a chord
   its action owns, asked through `useOwnsChord` (the listener's first-holder map,
   from `chordOwners` in binding.ts); the roster in
   `scripts/activation-key-chords.test.mjs` fails a new matcher that skips it.
+  The topmost modal is the scope created last, not a DOM lookup, with two
+  accepted edges: while a newer dialog plays its exit over an older one, the
+  older one's shortcuts stay inert until the newer unmounts, and a tab-panel
+  dialog opening by itself after a still-open app-level modal answers though
+  that modal paints above it. A native-menu route carrying no action id (File >
+  Open Recent) gates on `anyOpenModal()` itself. A dialog-local chord handler
+  on a container ignores events from a nested modal through `fromOtherModal`
+  (`src/lib/hotkeys/open-modal.ts`), because React bubbles synthetic events
+  across portals; T3 in `scripts/hotkey-registry.test.mjs` is its tripwire.
+  A hard-coded submit chord tests `eventToBinding(e) === "mod+enter"`, never
+  `(e.ctrlKey || e.metaKey) && e.key === "Enter"`, which also takes Enter
+  with Shift or Alt added (check-banned-patterns fails it).
+- **Keydown ownership** — a keydown has one owner, decided in this order, and
+  nothing below the owner acts on it or prevents it. First the input method:
+  any keydown with `isComposing` or keyCode 229 (`isImeKeydown` in binding.ts,
+  which the window listener and `eventToBinding` both check). Then the
+  focused control, for a fresh press of the unmodified key it natively means
+  (Shift allowed) while no enabled action is bound to that key, or an exact
+  `eventToBinding` chord it owns. A text field or typeahead list keeps the
+  bare keys it types with, bound or not. Any other key bound to an enabled
+  action, and every key carrying Ctrl/Meta/Alt, belongs to the window
+  listener, which consumes a fresh press of a registered chord whether or not
+  anything runs (bare Space only when its action ran). The listener applies
+  the whole order, and `eventToBinding` answers null for an input-method key.
+  The palette, the shared Markdown editor and its mention list, the projects
+  board and table, and Edit History apply the input-method tier; a local IME
+  branch also stops propagation, since Base UI's document-level Escape
+  dismissal sits above it. The local submit matchers apply the exact-chord
+  rule. Older handlers predate it and still break it (text-field Enter
+  submits that act with Ctrl or Alt held, the mention list's Enter arm, the
+  Escape handlers of full-screen surfaces, the shortcut recorder).
 - **Back/Forward history** — the recorder (the ui store subscriber at the
   end of `src/lib/stores/ui.ts`, whose rules are `recordNavigation` in
   `src/lib/stores/nav-history.ts`) observes committed location changes,

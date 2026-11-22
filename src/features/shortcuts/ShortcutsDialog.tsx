@@ -41,7 +41,8 @@ export function ShortcutsDialog({
           <DialogDescription>
             Every action is rebindable in Settings → Keyboard. Unbound actions (
             — ) are still reachable from the command palette
-            {paletteBinding ? ` (${formatBinding(paletteBinding)})` : ""}.
+            {paletteBinding ? ` (${formatBinding(paletteBinding)})` : ""}, which
+            opens when no dialog is open.
           </DialogDescription>
         </DialogHeader>
         <div

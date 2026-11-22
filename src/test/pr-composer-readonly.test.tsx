@@ -236,6 +236,18 @@ function blurUnseenByReact() {
     window.removeEventListener("focusout", block, true);
   }
 }
+describe("CommentComposer submit chord", () => {
+  it("posts on Ctrl+Enter only, never on Ctrl+Shift+Enter", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer({ value: "a draft" });
+    await user.click(editor());
+    await user.keyboard("{Control>}{Shift>}{Enter}{/Shift}{/Control}");
+    expect(onSubmit).not.toHaveBeenCalled();
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("CommentComposer hold engaging under focus", () => {
   it("moves focus from the editor to the held submit after a keyboard submit's archived refusal", async () => {
     const user = userEvent.setup();

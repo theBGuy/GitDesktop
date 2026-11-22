@@ -560,7 +560,7 @@ describe("merge dialog: Ctrl/Cmd+Enter", () => {
     }
   });
 
-  it("an IME's committing Enter (keyCode 229) neither merges nor reaches the app listener", async () => {
+  it("an IME's committing Enter (composing or keyCode 229) merges nothing and keeps its native default", async () => {
     vi.mocked(loadSettings).mockImplementation(async () =>
       structuredClone(DEFAULT_SETTINGS),
     );
@@ -614,7 +614,14 @@ describe("merge dialog: Ctrl/Cmd+Enter", () => {
           Object.assign(init, { [flag]: chord[flag as keyof KeyboardEvent] });
       const composing = new KeyboardEvent("keydown", init);
       expect(composing.keyCode).toBe(13);
-      expect(eventToBinding(composing)).toBe("mod+enter");
+      // The input method owns it, so the converter reads no chord; the same
+      // keys outside a composition are the chord.
+      expect(eventToBinding(composing)).toBeNull();
+      expect(
+        eventToBinding(
+          new KeyboardEvent("keydown", { ...init, isComposing: false }),
+        ),
+      ).toBe("mod+enter");
       fireEvent(titleBox(), composing);
       expect(onConfirm).not.toHaveBeenCalled();
       expect(onCommit).not.toHaveBeenCalled();

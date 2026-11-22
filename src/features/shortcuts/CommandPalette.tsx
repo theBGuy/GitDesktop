@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { formatBinding } from "@/lib/hotkeys/binding";
+import {
+  formatBinding,
+  hasChordModifier,
+  isImeKeydown,
+} from "@/lib/hotkeys/binding";
 import {
   dispatchShortcut,
   useAvailableActions,
@@ -67,15 +71,27 @@ export function CommandPalette({
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
+    // A modified Enter is a chord: it reaches the listener, which under the
+    // palette's own modal runs only the palette's registrations.
+    const pick = e.key === "Enter" && !hasChordModifier(e) && !e.shiftKey;
+    // A key the input method owns is left to it: its Enter confirms a
+    // candidate rather than picking a row, and its arrows move the candidate
+    // list rather than the highlight. It stops here too, or the dialog's
+    // document-level Escape dismissal would close the palette on it.
+    if (isImeKeydown(e)) {
+      e.stopPropagation();
+      return;
+    }
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setHighlight(stepHighlight(highlight, items.length, 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setHighlight(stepHighlight(highlight, items.length, -1));
-    } else if (e.key === "Enter") {
+    } else if (pick) {
+      // A held Enter neither picks again nor does anything native.
       e.preventDefault();
-      if (highlighted) run(highlighted.id);
+      if (highlighted && !e.repeat) run(highlighted.id);
     }
   }
 

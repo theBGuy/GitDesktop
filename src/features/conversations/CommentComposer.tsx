@@ -15,7 +15,7 @@ import {
 import { partialCommentNotice } from "@/lib/attachments/comment-post";
 import { ATTACHING_REASON } from "@/lib/attachments/references";
 import type { DraftAttachmentsHandle } from "@/lib/attachments/use-draft-attachments";
-import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useToastClearance } from "@/lib/use-toast-clearance";
 import { useComposerCollapsed } from "./useComposerCollapsed";
@@ -367,7 +367,7 @@ export function CommentComposer({
           value={value}
           onChange={onChange}
           onKeyDown={(e) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+            if (eventToBinding(e) === "mod+enter") {
               // preventDefault unconditionally: `commit` is bound to mod+enter and
               // fires inside editable targets, so a chord this handler declines to
               // submit would otherwise reach the global action.

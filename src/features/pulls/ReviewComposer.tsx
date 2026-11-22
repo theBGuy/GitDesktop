@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { useCreateReviewThread } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
-import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useAddReviewDraft } from "@/lib/pulls/review-drafts";
 import { toastError } from "@/lib/toast";
 import { buildSuggestionFence, extractNewSideLines } from "./suggestion-utils";
@@ -142,7 +142,7 @@ export function ReviewComposer({
   // mod+Enter: add-to-review when a review is already in progress, else the
   // single-comment path (mirrors the primary button's meaning below).
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+    if (eventToBinding(e) === "mod+enter") {
       e.preventDefault();
       if (draftCount > 0) addToReview();
       else if (canCreateThread) addSingleComment();

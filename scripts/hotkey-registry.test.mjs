@@ -10,9 +10,12 @@
 // DialogContent and SheetContent render `<PanelPortalReset` (S2). The scans
 // cannot see a call through an alias or a re-export, or a dispatch spelled in a
 // string; dispatch-shortcut.ts and modal-scope.ts import react, so neither is
-// loaded here. Two tripwires over dialog files: no `useHotkeyAction(` in a
-// dialog owner's body gates on that dialog's `open` (T1), and nothing outside
-// the vendored primitives keeps a dialog mounted (T2); each states its reach.
+// loaded here. Three tripwires: no `useHotkeyAction(` in a dialog owner's body,
+// direct or one hook level down, gates on that dialog's `open` (T1), nothing
+// outside the vendored primitives keeps a dialog mounted (T2), and every
+// mod+enter handler ignores a nested modal's keys or is listed as a leaf (T3);
+// each states its reach. open-modal.ts is pinned import-free and its selector
+// strings are pinned, since this file is its only loader.
 //
 // Not testable here: WHEN `useHotkeyAction` registers relative to React's commit
 // (layout vs passive effects). That timing is a property of React's scheduler and
@@ -22,6 +25,8 @@
 // stripping (>= 23.6), which resolves no bundler aliases, so those modules must
 // stay free of runtime imports.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { posix } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -34,8 +39,9 @@ import {
   subscribe,
   unregisterHandler,
 } from "../src/lib/hotkeys/handler-registry.ts";
-import { hasOpenModal } from "../src/lib/hotkeys/open-modal.ts";
+import { fromOtherModal, hasOpenModal } from "../src/lib/hotkeys/open-modal.ts";
 import {
+  lineOf,
   loadCorpus,
   maskNonCode,
   matchBrace,
@@ -290,6 +296,52 @@ test("hasOpenModal counts open, rendered modal contents only", () => {
   assert.equal(hasOpenModal(stubRoot([concealed, shown]), rendered), true);
 });
 
+test("fromOtherModal compares the nearest modal portals of target and container", () => {
+  const PORTAL =
+    '[data-slot="dialog-portal"],[data-slot="sheet-portal"],[data-slot="drawer-content"]';
+  const inPortal = (portal) => ({
+    closest: (sel) => {
+      assert.equal(sel, PORTAL);
+      return portal;
+    },
+  });
+  const a = {};
+  assert.equal(fromOtherModal(inPortal(a), inPortal(a)), false, "same");
+  assert.equal(fromOtherModal(inPortal({}), inPortal(a)), true, "other");
+  assert.equal(fromOtherModal(inPortal(a), inPortal(null)), true, "page");
+  assert.equal(fromOtherModal(null, inPortal(a)), false, "null target");
+});
+
+const OPEN_MODAL = "src/lib/hotkeys/open-modal.ts";
+const readSrc = (rel) =>
+  readFileSync(new URL(`../${rel}`, import.meta.url), "utf8");
+const IMPORT_RE =
+  /(?<![\w$.])(?:import\b|require\s*\()|\bexport\b[^;]*\bfrom\b/;
+
+test("open-modal.ts stays import-free", () => {
+  assert.doesNotMatch(maskNonCode(readSrc(OPEN_MODAL), false), IMPORT_RE);
+  for (const line of [
+    'import { x } from "./x";',
+    'import "./side-effect";',
+    'export { y } from "./y";',
+    'const z = await import("./z");',
+  ])
+    assert.match(maskNonCode(line, false), IMPORT_RE, line);
+  assert.doesNotMatch(maskNonCode('// import x from "y"', false), IMPORT_RE);
+});
+
+test("open-modal selector strings name every modal content and portal slot", () => {
+  const src = readSrc(OPEN_MODAL);
+  for (const s of [
+    '[data-slot="dialog-content"][data-open]',
+    '[data-slot="sheet-content"][data-open]',
+    '[data-slot="drawer-content"][data-state="open"]',
+    '[data-slot="dialog-portal"],[data-slot="sheet-portal"],[data-slot="drawer-content"]',
+  ])
+    assert.ok(src.includes(s), s);
+  assert.doesNotMatch(src, /\[role=/);
+});
+
 test("chordOwners gives a shared chord to its first holder and skips nulls", () => {
   const owners = chordOwners(
     new Map([
@@ -492,15 +544,65 @@ function openStateNames(masked) {
 // (`!open`) is the shape that may join.
 const OPEN_GATE_ALLOWED = new Map();
 
+// T1 hook-level allowlist: `<file>|<hook>` -> the reason, and a check over the
+// file's masked text and the call's arguments that the reason still holds.
+const HOOK_GATE_ALLOWED = new Map([
+  [
+    "src/features/commit/CommitDialog.tsx|useCommitSubmit",
+    {
+      reason:
+        "`inDialog: true` keeps the hook's commit registration a closed-state fallback; the open-state pair registers inside the content through <HotkeyAction>",
+      holds: (masked, args) =>
+        /(?<![\w$])inDialog:\s*true(?![\w$])/.test(args.join(",")) &&
+        /<HotkeyAction(?![\w$.])/.test(masked),
+    },
+  ],
+]);
+
+/** The local names a file imports by name, mapped to the corpus path of the
+ *  module (no extension) for `@/` and relative specifiers. */
+function importedModules(rel, text) {
+  const map = new Map();
+  for (const m of text.matchAll(
+    /import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*"([^"]+)"/g,
+  )) {
+    const spec = m[2];
+    let base;
+    if (spec.startsWith("@/")) base = `src/${spec.slice(2)}`;
+    else if (spec.startsWith("."))
+      base = posix.normalize(posix.join(posix.dirname(rel), spec));
+    else continue;
+    for (const part of m[1].split(",")) {
+      const local = part
+        .trim()
+        .split(/\s+as\s+/)
+        .pop();
+      if (local) map.set(local, base);
+    }
+  }
+  return map;
+}
+
+const moduleText = (corpus, base) => {
+  for (const ext of [".ts", ".tsx", "/index.ts", "/index.tsx", ""])
+    if (corpus.has(base + ext)) return [base + ext, corpus.get(base + ext)];
+  return undefined;
+};
+
+const IDENT_RE = /(?<![\w$.])[A-Za-z_$][\w$]*/g;
+
 /** T1: in a file rendering DialogContent or SheetContent, no
  *  `useHotkeyAction(` call's `enabled` argument names an identifier the file
  *  passes as a Dialog/Sheet root's `open`. Such a registration sits in the
  *  owner's body, outside the content, so the modal rule makes it inert in the
  *  very dialog it waits for; register it inside the content (HotkeyAction)
- *  instead. Out of reach: registrations made inside custom hooks (the owner
- *  passes `open` to the hook), a compound `open={a && b}`, a dialog rendered
- *  through a wrapper component whose DialogContent lives in another file, and
- *  open state read through an object. */
+ *  instead. One hook level down: a call of a hook imported by name from a
+ *  module that calls `useHotkeyAction(`, with an argument naming that open
+ *  state, fails unless HOOK_GATE_ALLOWED lists it. Out of reach: hooks deeper
+ *  than one level, hooks imported by default or through a re-export, a
+ *  compound `open={a && b}`, a dialog rendered through a wrapper component
+ *  whose DialogContent lives in another file, open state read through an
+ *  object, and an alias or derived local of the open state. */
 function openGateProblems(corpus) {
   if (corpus.size === 0) return ["empty corpus"];
   const problems = [];
@@ -523,6 +625,27 @@ function openGateProblems(corpus) {
           problems.push(
             `${rel}: useHotkeyAction("${id}") is gated on the dialog's open state \`${name[0]}\``,
           );
+    }
+    const imports = importedModules(rel, text);
+    for (const m of masked.matchAll(/(?<![\w$.])(use[A-Z][\w$]*)\s*\(/g)) {
+      const hook = m[1];
+      if (hook === "useHotkeyAction" || !imports.has(hook)) continue;
+      const mod = moduleText(corpus, imports.get(hook));
+      if (mod === undefined) continue;
+      const registers = /(?<![\w$.])useHotkeyAction\s*\(/.test(
+        maskNonCode(mod[1], mod[0].endsWith(".tsx")),
+      );
+      if (!registers) continue;
+      const args = callArgs(masked, m.index + m[0].length - 1);
+      const named = [...args.join(",").matchAll(IDENT_RE)].find((n) =>
+        open.has(n[0]),
+      );
+      if (named === undefined) continue;
+      const allowed = HOOK_GATE_ALLOWED.get(`${rel}|${hook}`);
+      if (allowed?.holds(masked, args)) continue;
+      problems.push(
+        `${rel}: ${hook}(…) hands the dialog's open state \`${named[0]}\` to a hook that registers shortcuts`,
+      );
     }
   }
   return problems;
@@ -561,7 +684,19 @@ test("T1 no dialog owner registers its dialog's own shortcut from its body", () 
   assert.deepEqual(openGateProblems(CORPUS), []);
 });
 
-test("T1 controls: the pre-move CommitDialog shape, an empty corpus", () => {
+test("T1 controls: CommitDialog's pre-move hook call without its in-content pair", () => {
+  const rel = "src/features/commit/CommitDialog.tsx";
+  const text = CORPUS.get(rel);
+  const preMove = text
+    .replace(/\n\s*inDialog: true,/, "")
+    .replaceAll("<HotkeyAction", "<Fragment");
+  assert.notEqual(preMove, text);
+  assert.deepEqual(openGateProblems(withFile(rel, preMove)), [
+    `${rel}: useCommitSubmit(…) hands the dialog's open state \`open\` to a hook that registers shortcuts`,
+  ]);
+});
+
+test("T1 controls: a direct open-gated useHotkeyAction call, an empty corpus", () => {
   const rel = "src/features/x/OwnerDialog.tsx";
   const owner = (gate) =>
     withFile(
@@ -603,4 +738,144 @@ test("T2 controls: a kept-mounted portal, an empty corpus", () => {
     [`${rel}: <DialogPortal is kept mounted`],
   );
   assert.deepEqual(keepMountedProblems(new Map()), ["empty corpus"]);
+});
+
+// --- T3: nested-modal chords --------------------------------------------------
+
+// The mod+enter spellings, matched over raw text and kept only where the match
+// starts in code (so a comment quoting one is no hit).
+const MOD_ENTER_RE =
+  /\(e\.(?:ctrlKey|metaKey) \|\| e\.(?:ctrlKey|metaKey)\) && e\.key === "Enter"|e\.key === "Enter" && \(e\.(?:ctrlKey|metaKey) \|\| e\.(?:ctrlKey|metaKey)\)|eventToBinding\(e\) [!=]== "mod\+enter"/g;
+const FROM_OTHER_MODAL_RE = /(?<![\w$.])fromOtherModal\s*\(/;
+
+// Leaf handlers: `<file>` -> [unguarded hit count, reason]. A handler on a
+// textarea hears only keys pressed in it, since its subtree renders nothing.
+const MARKDOWN_LEAF =
+  "MarkdownEditor forwards onKeyDown to its textarea's own handler (markdown-editor.tsx handleKeyDown); its lightbox is the textarea's sibling";
+const NESTED_MODAL_LEAVES = new Map([
+  ["src/features/conversations/CommentComposer.tsx", [1, MARKDOWN_LEAF]],
+  ["src/features/conversations/CommentEditor.tsx", [1, MARKDOWN_LEAF]],
+  ["src/features/discussions/DiscussionView.tsx", [1, MARKDOWN_LEAF]],
+  ["src/features/pulls/CommitComments.tsx", [1, MARKDOWN_LEAF]],
+  ["src/features/pulls/ReviewComposer.tsx", [1, MARKDOWN_LEAF]],
+  ["src/features/pulls/ReviewThreads.tsx", [1, MARKDOWN_LEAF]],
+  ["src/features/plan/PlanView.tsx", [1, "on a raw <textarea>"]],
+  ["src/features/research/ResearchView.tsx", [1, "on a raw <textarea>"]],
+  [
+    "src/features/pulls/MergePrDialog.tsx",
+    [
+      1,
+      "merges only when the target carries the dialog's own message-field attribute",
+    ],
+  ],
+]);
+const GENERATE_CHORD = "src/lib/hotkeys/useGenerateChord.ts";
+
+/** T3: every mod+enter check in src (outside src/test and the vendored
+ *  primitives) sits in an onKeyDown handler that calls `fromOtherModal(`
+ *  between its opener and two lines past the check, unless its file is a listed
+ *  leaf with exactly that many unguarded checks; and the generate chord calls
+ *  it before matching. React bubbles a nested modal's keys through a
+ *  container's handlers across portals. Out of reach: other spellings of the
+ *  chord (a stored binding compared to a variable, `e.key == "Enter"`), a
+ *  handler whose opener is not spelled `onKeyDown`, and whether the guard is on
+ *  the path that acts. */
+function nestedModalProblems(corpus) {
+  if (corpus.size === 0) return ["empty corpus"];
+  const problems = [];
+  let hits = 0;
+  for (const [rel, text] of corpus) {
+    if (!/\.tsx?$/.test(rel) || rel.startsWith("src/components/ui/")) continue;
+    if (rel.startsWith("src/test/")) continue;
+    const masked = maskNonCode(text, rel.endsWith(".tsx"));
+    const unguarded = [];
+    for (const m of text.matchAll(MOD_ENTER_RE)) {
+      if (masked[m.index] !== text[m.index]) continue;
+      hits++;
+      const opener = masked.lastIndexOf("onKeyDown", m.index);
+      let end = m.index;
+      for (let n = 0; n < 3 && end >= 0; n++) end = text.indexOf("\n", end + 1);
+      if (
+        opener < 0 ||
+        !FROM_OTHER_MODAL_RE.test(
+          masked.slice(opener, end < 0 ? undefined : end),
+        )
+      )
+        unguarded.push(lineOf(text, m.index));
+    }
+    const leaf = NESTED_MODAL_LEAVES.get(rel);
+    if (leaf !== undefined && unguarded.length !== leaf[0])
+      problems.push(
+        `${rel}: ${unguarded.length} unguarded mod+enter checks, the leaf list expects ${leaf[0]}`,
+      );
+    if (leaf === undefined)
+      for (const line of unguarded)
+        problems.push(
+          `${rel}:${line}: a mod+enter handler that does not ignore a nested modal's keys (fromOtherModal)`,
+        );
+  }
+  for (const rel of NESTED_MODAL_LEAVES.keys())
+    if (!corpus.has(rel)) problems.push(`${rel}: listed leaf is gone`);
+  if (hits === 0) problems.push("no mod+enter check found");
+  const gen = corpus.get(GENERATE_CHORD);
+  const genMasked = gen === undefined ? "" : maskNonCode(gen, false);
+  const guard = genMasked.search(
+    /fromOtherModal\(e\.target, e\.currentTarget\)/,
+  );
+  const match = genMasked.search(/eventToBinding\(e\)/);
+  if (guard < 0 || match < 0 || guard > match)
+    problems.push(
+      `${GENERATE_CHORD}: the chord must ask fromOtherModal before it matches`,
+    );
+  return problems;
+}
+
+test("T3 every mod+enter handler ignores a nested modal's keys or is a listed leaf", () => {
+  assert.deepEqual(nestedModalProblems(CORPUS), []);
+});
+
+test("T3 controls: a stripped guard, an unlisted handler, the generate chord, an empty corpus", () => {
+  const strip = (rel) =>
+    withFile(
+      rel,
+      CORPUS.get(rel).replace(
+        "if (fromOtherModal(e.target, e.currentTarget)) return;",
+        "",
+      ),
+    );
+  assert.equal(
+    nestedModalProblems(strip("src/features/pulls/CreatePrDialog.tsx")).length,
+    1,
+  );
+  assert.deepEqual(
+    nestedModalProblems(
+      withFile(
+        "src/features/x/Extra.tsx",
+        [
+          "export const X = () => (",
+          "  <DialogContent",
+          "    onKeyDown={(e) => {",
+          '      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") submit();',
+          "    }}",
+          "  />",
+          ");",
+        ].join("\n"),
+      ),
+    ),
+    [
+      "src/features/x/Extra.tsx:4: a mod+enter handler that does not ignore a nested modal's keys (fromOtherModal)",
+    ],
+  );
+  assert.equal(
+    nestedModalProblems(
+      withFile(
+        "src/features/x/Quoted.tsx",
+        '// if ((e.ctrlKey || e.metaKey) && e.key === "Enter") submit();\n',
+      ),
+    ).length,
+    0,
+    "a comment quoting the check is no hit",
+  );
+  assert.equal(nestedModalProblems(strip(GENERATE_CHORD)).length, 1);
+  assert.deepEqual(nestedModalProblems(new Map()), ["empty corpus"]);
 });

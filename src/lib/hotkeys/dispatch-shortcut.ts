@@ -1,6 +1,6 @@
 import { dispatchAction } from "./handler-registry";
 import { topModalScope } from "./modal-scope";
-import { anyOpenModal } from "./open-modal";
+import { anyOpenDrawer, anyOpenModal } from "./open-modal";
 import type { ActionId } from "./registry";
 
 // App zoom acts on nothing behind a dialog and is an accessibility control, so
@@ -12,14 +12,18 @@ const MODAL_EXEMPT: ReadonlySet<ActionId> = new Set<ActionId>([
 ]);
 
 /**
- * The one dispatch for every route that is not a press on a visible control
- * (the key listener, a palette pick, the macOS menu, the mouse side buttons).
+ * The one dispatch for every route that is not a pointer click, or the
+ * control's unmodified activation key, on a visible control (the key listener,
+ * a palette pick, the macOS menu, the mouse side buttons): a key held with
+ * Ctrl/Meta/Alt is never a control press.
  * While a modal is open and on screen only registrations made inside the
- * topmost one answer; an open modal with no registered scope (a drawer) makes
- * every action inert. A control press inside a dialog keeps raw dispatchAction.
+ * topmost one answer. A drawer opens no scope, so while one is up every action
+ * but app zoom is inert, even over a scoped dialog beneath it. A control press
+ * inside a dialog keeps raw dispatchAction.
  */
 export function dispatchShortcut(id: ActionId): boolean {
   if (MODAL_EXEMPT.has(id) || !anyOpenModal()) return dispatchAction(id);
+  if (anyOpenDrawer()) return false;
   const top = topModalScope();
   if (top === null) return false;
   return dispatchAction(id, (entry) => entry.scope === top);

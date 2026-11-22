@@ -3,7 +3,7 @@
 // branch's rebases, pull-drop, the stash-reapply reruns, a local PR's update,
 // merge and resolve finish, undo, reset to commit, amend, squash, Edit history,
 // Edit dates, Cherry-pick to branch) or delete branches in bulk (Clean up),
-// the one shared helper they call (sync.ts), every HEAD push recording the
+// the one shared helper they call (sync.ts), and every HEAD push recording the
 // branch it starts on. A dialog opened before a push started still submits
 // after it, so each submit reads the pending pushes live; render state alone
 // predates them.
@@ -777,10 +777,7 @@ const escapeId = (name) => name.replace(/\$/g, () => "\\$");
 // module it loads from src/ would fail; this pin bans every import so none can
 // slip in, re-exports and dynamic imports included. Matched over `lex`'s bare
 // view, so neither a comment nor text inside a string hides or fakes one.
-const IMPORT_FREE = [
-  `${R}branch-sync-state.ts`,
-  "src/lib/hotkeys/open-modal.ts",
-];
+const IMPORT_FREE = [`${R}branch-sync-state.ts`];
 const IMPORT_SHAPES = [
   new RegExp(
     String.raw`(^|[^\w$.])import\s*(type\s+)?(?:${ID_PART}|[\\{*])`,
@@ -1438,18 +1435,4 @@ test("fails closed on a missing file or anchor", () => {
     checkPins([{ ...pin, anchor: "no such anchor" }], sources),
     [],
   );
-});
-
-test("open-modal selector strings name every modal content slot", () => {
-  const src = readFileSync(
-    new URL("../src/lib/hotkeys/open-modal.ts", import.meta.url),
-    "utf8",
-  );
-  for (const s of [
-    '[data-slot="dialog-content"][data-open]',
-    '[data-slot="sheet-content"][data-open]',
-    '[data-slot="drawer-content"][data-state="open"]',
-  ])
-    assert.ok(src.includes(s), s);
-  assert.doesNotMatch(src, /\[role=/);
 });

@@ -21,7 +21,7 @@ import { type AgentKind, defaultAgentKind } from "@/lib/ai/agent";
 import { formatUsd } from "@/lib/ai/cost";
 import { extractPlanQuestions } from "@/lib/ai/prompt";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
-import { formatBinding } from "@/lib/hotkeys/binding";
+import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { useToastClearance } from "@/lib/use-toast-clearance";
@@ -178,7 +178,7 @@ export function PlanComposer({
             autoFocus
             rows={3}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              if (eventToBinding(e) === "mod+enter") {
                 e.preventDefault();
                 submit();
               }

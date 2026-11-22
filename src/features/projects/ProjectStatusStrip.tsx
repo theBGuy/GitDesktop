@@ -65,6 +65,7 @@ import type {
   ProjectStatusValue,
 } from "@/lib/git/types";
 import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { fromOtherModal } from "@/lib/hotkeys/open-modal";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { pendingWriteReason } from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -749,6 +750,7 @@ export function ProjectStatusUpdateDialog({
         // DialogContent rather than the <form>: the X close is the form's
         // SIBLING, so a form-level handler would miss the chord pressed there.
         onKeyDown={(e) => {
+          if (fromOtherModal(e.target, e.currentTarget)) return;
           if (eventToBinding(e) === "mod+enter") {
             e.preventDefault();
             if (heldReason === null) form.handleSubmit();

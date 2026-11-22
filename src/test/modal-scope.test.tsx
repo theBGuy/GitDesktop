@@ -83,7 +83,7 @@ describe("modal scope ranking", () => {
   // Control: a fresh number per setup reds the re-show leg. StrictMode's
   // doubled mount setup alone stays green under it, since both scopes re-mint
   // in tree order; no mutation found reds that leg by itself.
-  it("under StrictMode one mount yields one number: mount order still ranks", () => {
+  it("under StrictMode the later scope ranks above the earlier one, across a hide and re-show of the earlier", () => {
     const scopes: Scopes = new Map();
     const { rerender } = render(
       <StrictMode>

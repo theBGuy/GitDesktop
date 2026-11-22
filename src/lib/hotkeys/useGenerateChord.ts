@@ -16,6 +16,7 @@ import {
   isTypeaheadTarget,
 } from "./binding";
 import { useEffectiveBindings, useOwnsChord } from "./hotkeys";
+import { fromOtherModal } from "./open-modal";
 
 /** What a surface does when the generate chord fires there. */
 export interface GenerateAction {
@@ -86,6 +87,7 @@ export function useGenerateChord({
   const ownsChord = useOwnsChord();
   return {
     onKeyDown: (e) => {
+      if (fromOtherModal(e.target, e.currentTarget)) return;
       if (binding === null || run === undefined || e.repeat) return;
       if (eventToBinding(e) !== binding) return;
       if (!ownsChord("generate-commit-message", binding)) return;

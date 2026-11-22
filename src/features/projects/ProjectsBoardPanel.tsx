@@ -151,6 +151,7 @@ import {
   eventToBinding,
   formatBinding,
   hasChordModifier,
+  isImeKeydown,
   isMac,
 } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -2100,7 +2101,13 @@ export function ProjectsBoardPanel({
     const entry = from === null ? undefined : tableEntries[from.rowIndex];
     if (from === null || entry === undefined) return;
     // The board's reposition chords, ahead of the plain keys they share, and on
-    // an item row only — a header is no card.
+    // an item row only — a header is no card. An input-method key is the input
+    // method's, so neither these nor the Alt swallow below apply to it, and it
+    // stops here so no ancestor acts on it either.
+    if (isImeKeydown(e)) {
+      e.stopPropagation();
+      return;
+    }
     const chord = eventToBinding(e);
     const direction = chord === null ? undefined : REORDER_CHORDS[chord];
     if (direction !== undefined) {
@@ -2248,7 +2255,12 @@ export function ProjectsBoardPanel({
     // the canonical binding rather than the raw flags, which is what makes Ctrl,
     // Cmd and Shift exclude themselves and AltGraph read as the character input it
     // is (`eventToBinding` answers null there). Everything else falls through
-    // untouched.
+    // untouched. An input-method key is the input method's, so none of it
+    // applies, and it stops here so no ancestor acts on it either.
+    if (isImeKeydown(e)) {
+      e.stopPropagation();
+      return;
+    }
     const chord = eventToBinding(e);
     const direction = chord === null ? undefined : REORDER_CHORDS[chord];
     if (direction !== undefined) {

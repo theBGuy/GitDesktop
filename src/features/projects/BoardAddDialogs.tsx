@@ -19,7 +19,8 @@ import { presentError } from "@/lib/error-summary";
 import { required, useAppForm } from "@/lib/form";
 import { useBoardCandidates } from "@/lib/git/queries";
 import type { BoardCandidate, RemoteLens } from "@/lib/git/types";
-import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { fromOtherModal } from "@/lib/hotkeys/open-modal";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { prPill } from "@/lib/pulls/pr-state";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
@@ -483,7 +484,8 @@ export function NewDraftDialog({
         // global mod+enter action. ALWAYS swallow the chord here; submit only under
         // the gate the button takes.
         onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+          if (fromOtherModal(e.target, e.currentTarget)) return;
+          if (eventToBinding(e) === "mod+enter") {
             e.preventDefault();
             if (!pending) form.handleSubmit();
           }

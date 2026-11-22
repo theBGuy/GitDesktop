@@ -24,7 +24,7 @@
 //
 // CONTRACT. These are source-shape pins. Green means each pinned shape is
 // present, the stated number of times, at the named site, in the stated textual
-// order. P2's surface compares, P4b, P10, P11, P12, P14, P14b, P15 and P16 read
+// order. P2's surface compares, P4b, P4c, P10, P11, P12, P14, P14b, P15 and P16 read
 // code with comments stripped; the other reads are of raw text, where a shape
 // left in a comment can count (P1 fails on a name in a comment by design). No
 // panel code is run (P12 alone models the two outcomes of the lens ternary it
@@ -66,7 +66,10 @@
 // in the `if` beside its title test, not what `detail` a real click carries
 // (the card's and the table's guards are exercised in
 // src/test/board-card-chord-space.test.tsx and
-// src/test/board-table-title-click.test.tsx). P16 reads the counter by name and
+// src/test/board-table-title-click.test.tsx). P4c reads the input-method
+// stop-and-return's text order in each key handler, not its depth, so one
+// nested in a block ahead of the chord read (inside an `if (x) { … }`) reads as
+// guarding. P16 reads the counter by name and
 // its bump and compare by their spelled text, and counts every use of that name
 // in each view create (its bump and its compare, nothing else), and holds each
 // create to one use of the name `setPendingViewPick`, so it cannot see a write
@@ -249,6 +252,32 @@ function checkP4(panel) {
       !new RegExp(`if\\s*\\(\\s*!e\\.repeat\\s*\\)\\s*${name}\\(`).test(body)
     )
       errors.push(`onTableKeyDown's ${name}( is not skipped on e.repeat`);
+  }
+  return errors;
+}
+
+const IME_RETURN =
+  /if\s*\(\s*isImeKeydown\(\s*e\s*\)\s*\)\s*\{\s*e\.stopPropagation\(\)\s*;\s*return\s*;\s*\}/;
+const KEY_HANDLERS = ["onTableKeyDown", "onBoardKeyDown"];
+const P4C_ERROR = (name) =>
+  `${name} doesn't stop and return on isImeKeydown(e) before eventToBinding(`;
+
+/** P4c: each grid key handler stops and returns on an input-method key before
+ *  its first `eventToBinding(` read, so none of its chords or swallows act on
+ *  one and no ancestor (a dialog's Escape dismissal) hears it. */
+function checkP4c(panel) {
+  const code = uncommented(panel);
+  const errors = [];
+  for (const name of KEY_HANDLERS) {
+    const body = functionBody(code, name);
+    if (body === null) {
+      errors.push(`no balanced function ${name}(`);
+      continue;
+    }
+    const chord = body.indexOf("eventToBinding(");
+    const ime = body.search(IME_RETURN);
+    if (chord === -1) errors.push(`${name} reads no eventToBinding(`);
+    else if (ime === -1 || ime > chord) errors.push(P4C_ERROR(name));
   }
   return errors;
 }
@@ -1105,6 +1134,40 @@ test("P4: onTableKeyDown skips the open and the header toggle on a repeated key"
     assert.notEqual(bare, panel, `${name}: no change`);
     assert.notDeepEqual(checkP4(bare), [], `${name} unguarded`);
   }
+});
+
+test("P4c: the grid key handlers leave an input-method key alone", () => {
+  assert.deepEqual(checkP4c(panel), []);
+  for (const name of KEY_HANDLERS) {
+    const body = functionBody(panel, name);
+    assert.notEqual(body, null, name);
+    const mutants = {
+      "the return dropped": body.replace(IME_RETURN, ""),
+      "the return moved after the chord read": body
+        .replace(IME_RETURN, "")
+        .replace(
+          /const chord = eventToBinding\(e\);/,
+          (m) =>
+            `${m}\n    if (isImeKeydown(e)) {\n      e.stopPropagation();\n      return;\n    }`,
+        ),
+      "the return kept without the stop": body.replace(
+        IME_RETURN,
+        "if (isImeKeydown(e)) return;",
+      ),
+      "the return left only in a comment": body.replace(IME_RETURN, (m) =>
+        m.replace(/^/gm, "// "),
+      ),
+    };
+    for (const [label, b] of Object.entries(mutants)) {
+      assert.notEqual(b, body, `${name}: ${label}: no change`);
+      assert.deepEqual(
+        checkP4c(panel.replace(body, () => b)),
+        [P4C_ERROR(name)],
+        `${name}: ${label}`,
+      );
+    }
+  }
+  assert.deepEqual(checkP4c(panel.replace(/\n/g, "\r\n")), []);
 });
 
 test("P4b: the roadmap's title click opens once per multi-click gesture", () => {

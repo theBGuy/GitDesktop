@@ -240,6 +240,38 @@ describe("page shortcuts under an open modal", () => {
     expect(openSettings).not.toHaveBeenCalled();
   });
 
+  // Control: decide at pick time and dispatch the raw action in the timer;
+  // Settings opens over the prompt.
+  it("M2d a pick whose deferred dispatch lands after a prompt opened runs nothing", async () => {
+    const openSettings = vi.fn();
+    render(
+      <Providers>
+        <Listener />
+        <PageAction id="open-settings" run={openSettings} />
+        <PaletteHost />
+        <ConfirmDialogHost />
+      </Providers>,
+    );
+    await modK();
+    const input = await screen.findByRole("textbox");
+    fireEvent.change(input, { target: { value: "open settings" } });
+    // The pick and the prompt land in one synchronous act, so the prompt is
+    // up before the pick's 0-ms deferred dispatch can run.
+    act(() => {
+      fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+      void useConfirm.getState().ask({
+        title: "Discard changes?",
+        body: "Gone for good.",
+        confirmLabel: "Discard",
+        scope: "app",
+      });
+    });
+    expect(screen.getByText("Discard changes?")).toBeInTheDocument();
+    expect(openSettings).not.toHaveBeenCalled();
+    await settle();
+    expect(openSettings).not.toHaveBeenCalled();
+  });
+
   it("M3 a palette pick with no other modal open still runs (its own closing popup does not count)", async () => {
     const openSettings = vi.fn();
     render(
@@ -399,15 +431,21 @@ describe("the consume axis under a modal", () => {
 describe("app zoom is exempt", () => {
   // roadmap-zoom-in has no default binding, so both ids go through
   // dispatchShortcut directly rather than a chord.
-  it.each(["inside", "blurred"] as const)(
-    "Z1 app zoom runs under an open dialog and the roadmap zoom does not, focus %s",
-    async (focusAt) => {
+  // Every MODAL_EXEMPT id (dispatch-shortcut.ts), each focus placement.
+  const ZOOM_IDS = ["app-zoom-in", "app-zoom-out", "app-zoom-reset"] as const;
+  it.each(
+    ZOOM_IDS.flatMap((id) =>
+      (["inside", "blurred"] as const).map((focusAt) => [id, focusAt] as const),
+    ),
+  )(
+    "Z1 %s runs under an open dialog and the roadmap zoom does not, focus %s",
+    async (id, focusAt) => {
       const zoom = vi.fn();
       const roadmap = vi.fn();
       // Registered the way src/lib/zoom/zoom.ts registers: a raw literal.
       const zoomEntry = { run: zoom, enabled: true };
       const roadmapEntry = { run: roadmap, enabled: true };
-      registerHandler("app-zoom-in", zoomEntry);
+      registerHandler(id, zoomEntry);
       registerHandler("roadmap-zoom-in", roadmapEntry);
       try {
         render(
@@ -421,7 +459,7 @@ describe("app zoom is exempt", () => {
         let ranZoom = false;
         let ranRoadmap = true;
         act(() => {
-          ranZoom = dispatchShortcut("app-zoom-in");
+          ranZoom = dispatchShortcut(id);
           ranRoadmap = dispatchShortcut("roadmap-zoom-in");
         });
         expect(ranZoom).toBe(true);
@@ -429,7 +467,7 @@ describe("app zoom is exempt", () => {
         expect(ranRoadmap).toBe(false);
         expect(roadmap).not.toHaveBeenCalled();
       } finally {
-        unregisterHandler("app-zoom-in", zoomEntry);
+        unregisterHandler(id, zoomEntry);
         unregisterHandler("roadmap-zoom-in", roadmapEntry);
       }
     },

@@ -94,7 +94,8 @@ import {
   providerLabel,
   type RemoteLens,
 } from "@/lib/git/types";
-import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { fromOtherModal } from "@/lib/hotkeys/open-modal";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraLink } from "@/lib/jira/queries";
 import {
@@ -1551,29 +1552,26 @@ export function CreatePrDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="flex max-h-[85vh] flex-col sm:max-w-2xl"
-        // mod+enter submits from anywhere in the dialog. Captured on DialogContent
-        // (the Popup), not the <form>: the X close button renders as a SIBLING of
-        // the form inside the Popup, so a chord pressed with focus on X would bypass
-        // a form-level handler and reach the global mod+enter action. ALWAYS swallow
-        // the chord here; submit only under the same gates as the SubmitButton
-        // (handleSubmit then enforces the field validators). The held look is
-        // retained through the close fade, so the live gates add `open`.
+        // mod+enter submits from anywhere in the dialog, the X close included:
+        // it's captured on DialogContent (the Popup), since the X renders as a
+        // sibling of the <form>. A nested modal's keys (the attachment
+        // lightbox), which React bubbles here across portals, are ignored.
+        // Submit only under the SubmitButton's gates (handleSubmit then enforces
+        // the field validators); the held look is retained through the close
+        // fade, so the live gates add `open`.
         onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+          if (fromOtherModal(e.target, e.currentTarget)) return;
+          if (eventToBinding(e) === "mod+enter") {
             e.preventDefault();
             if (open && !submitBlocked) form.handleSubmit();
             else if (open) draftAttachments.noteSubmitHeld();
             return;
           }
-          // The generate chord runs this dialog's own Generate while it's open.
-          // While that Generate exists the chord is swallowed whenever it may
-          // fire, enabled or not (the hook mirrors the global listener's own
-          // guards), so no commit message is written behind the dialog. With
-          // Hide-AI on there's no Generate here at all and the chord falls
-          // through instead — harmless, because the same flag leaves
-          // CommitBox's global handler DISABLED (the listener only ever runs an
-          // enabled one), and off the Changes tab CommitBox is unmounted and
-          // registers nothing.
+          // The generate chord runs this dialog's own Generate while it's open,
+          // swallowed whenever it may fire, enabled or not. With Hide-AI on
+          // there's no Generate here and the chord falls through to the
+          // listener, where the page-level generate-commit-message can't
+          // answer under an open dialog.
           generateChord.onKeyDown(e);
         }}
       >

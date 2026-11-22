@@ -11,7 +11,8 @@ import {
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { required, useAppForm } from "@/lib/form";
 import type { ForgeUserRef, RemoteLens } from "@/lib/git/types";
-import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { fromOtherModal } from "@/lib/hotkeys/open-modal";
 import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
@@ -151,7 +152,8 @@ export function BoardDraftEditDialog({
         // global mod+enter action. ALWAYS swallow the chord here; submit only under
         // the gate the button takes.
         onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+          if (fromOtherModal(e.target, e.currentTarget)) return;
+          if (eventToBinding(e) === "mod+enter") {
             e.preventDefault();
             if (!pending) form.handleSubmit();
           }

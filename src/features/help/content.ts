@@ -58,7 +58,7 @@ A few things worth knowing up front:
   read and act on pull requests and Pipelines. (See **Bitbucket repositories** below.)
 - **Make it yours.** Pick a theme — **System**, **Light**, **Dark**, or a softer
   **Slate** that's easier on the eyes — in **Settings → Appearance**, or cycle
-  themes anytime from the command palette ({{kbd:command-palette}}).
+  themes from the command palette ({{kbd:command-palette}}).
 {{ai}}- **AI is optional.** Commit messages, PR descriptions, reviews, CI debugging, and
   agent sessions can use Anthropic, OpenAI, Google AI Studio, OpenRouter, Ollama
   (local or cloud), an OpenAI-compatible endpoint, or the Claude Code / Codex /
@@ -68,7 +68,8 @@ A few things worth knowing up front:
 ## Open your first repository
 
 Use the welcome screen's buttons, the repo switcher in the header, or the command
-palette — wherever you are in the app, these actions and their shortcuts are available:
+palette. Once GitDesktop has found Git, these actions and their shortcuts work
+wherever you are in the app, except while a dialog is open:
 
 - **Open repository** ({{kbd:add-local-repository}}) — point at a folder that's already
   a Git repo.
@@ -78,8 +79,9 @@ palette — wherever you are in the app, these actions and their shortcuts are a
   README, \`.gitignore\`, and license.
 
 On macOS, the menu bar mirrors these: **File → New / Open / Clone Repository…** plus
-an **Open Recent** list of your last ten repos, with **Settings…** in the
-**GitDesktop** menu. Menu items work from any screen.
+an **Open Recent** list of your last ten repos, with **Settings…** in the **GitDesktop**
+menu. Once GitDesktop has found Git, menu items work from any screen except while a
+dialog is open.
 
 ## Finding your way around
 
@@ -1888,10 +1890,10 @@ On **GitHub** and **GitLab**, images go in the comment box of a pull request, me
 request or issue, in the description of a new pull request or issue (a sub-issue created
 from an issue's relations included), and in the **Edit** dialog for an issue's, pull
 request's or merge request's title and description. Paste one from the clipboard, or pick
-files with **Attach image**, the image button at the end of the formatting toolbar (the
-command palette's **Attach image** opens the same picker). PNG, JPEG, GIF and WebP work,
-up to 10 MB and 40 megapixels each, 10 per draft; when a draft is full, attaching another
-discards the images whose reference you deleted, to make room.
+files with **Attach image**, the image button at the end of the formatting toolbar (in a
+comment box, the command palette's **Attach image** opens the same picker). PNG, JPEG,
+GIF and WebP work, up to 10 MB and 40 megapixels each, 10 per draft; when a draft is
+full, attaching another discards the images whose reference you deleted, to make room.
 Each image adds a Markdown reference at the cursor (\`![image](image-1.png)\` for a paste;
 a picked file's name, minus its extension, becomes the alt text), so you edit the alt text
 in the text itself. A chip under the editor shows each image's thumbnail, name and size:

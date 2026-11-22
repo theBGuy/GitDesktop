@@ -13,6 +13,7 @@ import {
   firesInEditable,
   hasModifier,
   isEditableTarget,
+  isImeKeydown,
   isTypeaheadKey,
   isTypeaheadTarget,
 } from "./binding";
@@ -100,10 +101,14 @@ export function useHotkeysListener() {
   const owners = useChordOwners();
 
   const onKeyDown = useEffectEvent((e: KeyboardEvent) => {
+    // A key the input method owns is neither consumed nor dispatched, F7
+    // included: its default is the composition's.
+    if (isImeKeydown(e)) return;
     // Bare F7 would open WebView2's "Turn on caret browsing?" prompt (measured,
-    // WebView2 156): consume it app-wide, text fields and repeats included;
-    // dispatch below is unchanged and propagation never stops. The consumed
-    // flag is read first: after the guard it would be this guard's own mark.
+    // WebView2 156): consume it app-wide outside a composition, text fields and
+    // repeats included; dispatch below is unchanged and propagation never
+    // stops. The consumed flag is read first: after the guard it would be this
+    // guard's own mark.
     const consumed = e.defaultPrevented;
     if (
       e.key === "F7" &&

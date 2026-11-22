@@ -28,7 +28,11 @@ import type {
   ForgeProvider,
   ReviewThreadOut,
 } from "@/lib/git/types";
-import { hasChordModifier, SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import {
+  eventToBinding,
+  hasChordModifier,
+  SUBMIT_HINT,
+} from "@/lib/hotkeys/binding";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { pendingWriteReason } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
@@ -804,7 +808,7 @@ export function ReviewThreadCard({
                   value={replyBody}
                   onChange={setReplyBody}
                   onKeyDown={(e) => {
-                    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                    if (eventToBinding(e) === "mod+enter") {
                       // preventDefault unconditionally: `commit` is bound to
                       // mod+enter and fires inside editable targets, so a chord
                       // this handler declines to submit would otherwise reach

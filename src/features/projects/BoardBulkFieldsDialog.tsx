@@ -31,7 +31,8 @@ import type {
   ProjectFieldValue,
   ProjectFieldValueUpdate,
 } from "@/lib/git/types";
-import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { fromOtherModal } from "@/lib/hotkeys/open-modal";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cardCount, type ItemNoun, valueBelongsTo } from "./board-model";
 import {
@@ -266,7 +267,8 @@ export function BoardBulkFieldsDialog({
         // reach the global mod+enter action. ALWAYS swallow it here; apply only
         // under the gate the button takes. (BoardDraftEditDialog's own shape.)
         onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+          if (fromOtherModal(e.target, e.currentTarget)) return;
+          if (eventToBinding(e) === "mod+enter") {
             e.preventDefault();
             void apply();
           }

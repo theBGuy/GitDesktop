@@ -270,8 +270,8 @@ export const KeyboardSection = withForm({
           <h2 className="text-sm font-medium">Keyboard</h2>
           <p className="text-xs text-muted-foreground">
             Click a shortcut to record a new one — Esc cancels, Backspace
-            unbinds. Unbound actions stay available in the command palette.
-            Changes apply when you save.
+            unbinds. Unbound actions stay available in the command palette,
+            which opens when no dialog is open. Changes apply when you save.
           </p>
           {visibleNote && (
             <p className="mt-1 text-xs text-warning">{visibleNote}</p>

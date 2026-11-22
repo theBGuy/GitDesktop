@@ -92,8 +92,8 @@ export function hasLiveHandler(id: ActionId): boolean {
 
 /** Runs, among the enabled entries `eligible` accepts (all when omitted), the
  *  one in the highest tier, newest within it. True when one ran. The filter
- *  narrows only who runs: hasLiveHandler and the snapshot still count every
- *  entry. */
+ *  narrows only who runs: whatever it says, hasLiveHandler counts every entry
+ *  and the availability snapshot every enabled one. */
 export function dispatchAction(
   id: ActionId,
   eligible?: (entry: HandlerEntry) => boolean,

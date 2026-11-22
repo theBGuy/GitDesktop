@@ -2,7 +2,14 @@
 // press, and the busy refusals of the row keys and selection gestures. Each
 // case's negative control is named beside it.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   afterEach,
@@ -316,6 +323,44 @@ describe("the calendar button", () => {
     for (let i = 0; i < 3; i++)
       await new Promise((r) => requestAnimationFrame(r));
     expect(showPicker).not.toHaveBeenCalled();
+  });
+});
+
+type Init = KeyboardEventInit & { keyCode?: number };
+describe("an input-method key on a row", () => {
+  // Control: drop the row handler's isImeKeydown return; the Alt swallow
+  // prevents the key's default.
+  it.each<[string, Init]>([
+    ["composing", { isComposing: true }],
+    ["keyCode 229", { keyCode: 229 }],
+  ])("a %s Alt+Down moves nothing and keeps its default", async (_, ime) => {
+    renderDialog();
+    await loaded();
+    const order = shownOrder();
+    act(() => rowOf(C).focus());
+    const altDown = { key: "ArrowDown", code: "ArrowDown", altKey: true };
+    expect(fireEvent.keyDown(rowOf(C), { ...altDown, ...ime })).toBe(true);
+    expect(shownOrder()).toEqual(order);
+    // Positive control: the plain chord moves the row.
+    expect(fireEvent.keyDown(rowOf(C), altDown)).toBe(false);
+    expect(shownOrder()).not.toEqual(order);
+  });
+
+  // Control: drop the row handler's stopPropagation; the dialog's
+  // document-level Escape dismissal closes it.
+  it("a keyCode 229 Escape keeps the dialog open; a plain one dismisses it", async () => {
+    const { onOpenChange } = renderDialog();
+    await loaded();
+    act(() => rowOf(C).focus());
+    expect(fireEvent.keyDown(rowOf(C), { key: "Escape", keyCode: 229 })).toBe(
+      true,
+    );
+    await act(() => new Promise((r) => setTimeout(r, 10)));
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.keyDown(rowOf(C), { key: "Escape" });
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalled());
+    expect(onOpenChange.mock.calls[0][0]).toBe(false);
   });
 });
 

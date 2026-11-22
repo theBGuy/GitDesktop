@@ -34,7 +34,8 @@ import {
   useForgeStatus,
   useRepoStatus,
 } from "@/lib/git/queries";
-import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { fromOtherModal } from "@/lib/hotkeys/open-modal";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import { updateLocalPr } from "@/lib/pulls/local";
@@ -530,18 +531,16 @@ export function CreateLocalPrDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="flex max-h-[85vh] flex-col sm:max-w-2xl"
-        // mod+enter submits from anywhere in the dialog. It's captured on
-        // DialogContent (the Popup), not the <form>: this dialog is hoisted in
-        // RepositoryView and can sit open over the Changes tab, where the global
-        // `commit` action (also mod+enter) has a live handler, and the X close
-        // button renders as a SIBLING of the form inside the Popup — a chord
-        // pressed with focus on the X would otherwise bypass a form-level
-        // handler and commit behind the dialog. Capturing on the Popup covers
-        // the X and every field, so the UNCONDITIONAL preventDefault here is
-        // what actually contains the chord. Submit only when the SubmitButton
-        // would be enabled (handleSubmit still enforces the field validators).
+        // mod+enter submits from anywhere in the dialog, the X close included:
+        // it's captured on DialogContent (the Popup), since the X renders as a
+        // sibling of the <form>. The page-level `commit` action can't answer
+        // while the dialog is open (dispatchShortcut's modal scope), and a
+        // nested modal's keys, which React bubbles here across portals, are
+        // ignored. Submit only when the SubmitButton would be enabled
+        // (handleSubmit still enforces the field validators).
         onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+          if (fromOtherModal(e.target, e.currentTarget)) return;
+          if (eventToBinding(e) === "mod+enter") {
             e.preventDefault();
             // Form-core doesn't refuse a submit while one runs, and the render-time
             // flag lags a fast second press, so the hold's live read decides.
@@ -549,15 +548,11 @@ export function CreateLocalPrDialog({
               form.handleSubmit();
             return;
           }
-          // The generate chord runs this dialog's own Generate while it's open.
-          // This dialog is hoisted over the Changes tab, where the global
-          // generate-commit-message action has a live handler — so while that
-          // Generate exists the chord is swallowed whenever it may fire,
-          // enabled or not (the hook mirrors the global listener's own guards).
-          // With Hide-AI on there's no Generate here at all and the chord falls
-          // through instead, which is still safe: the same flag leaves
-          // CommitBox's handler DISABLED and the listener only ever runs an
-          // enabled one, and off the Changes tab CommitBox registers nothing.
+          // The generate chord runs this dialog's own Generate while it's open,
+          // swallowed whenever it may fire, enabled or not. With Hide-AI on
+          // there's no Generate here and the chord falls through to the
+          // listener, where the page-level generate-commit-message can't
+          // answer under an open dialog.
           generateChord.onKeyDown(e);
         }}
       >
