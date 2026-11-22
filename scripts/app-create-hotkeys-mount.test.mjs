@@ -1,20 +1,29 @@
-// Pins where RepositoryView mounts AppCreateHotkeys, the app-level `create-pr`
-// and `create-local-pr` entries. Dispatch runs the newest enabled entry and
-// layout effects register in tree order, so the `{repoPath}` mount sits before
-// every ComparePanel and PullRequestsPanel element (the two panels that
-// register the same actions): in a shared commit a panel's entry registers
-// last, and its enabled entry takes the action. It also sits outside every
-// TabPanel and Activity element, whose hidden state tears its effects down
-// and would drop both entries on other tabs. The `{null}` mount is the
-// no-repository return, which keeps both chords registered without a
-// repository. A closure over every .ts/.tsx under src/ (src/test/ excluded)
-// keeps a fourth registrar from joining without its own order decision.
-// A source scan, since nothing mounts RepositoryView in jsdom. Scans run on
-// `maskNonCode`'s output, so comments and string text never count; literals
-// are read from the raw text at the masked offsets. Every lookup that finds
-// nothing fails, and a JSX spread in a mount's tag fails it (it could carry
-// or override `repoPath`). Not covered: a registration whose first argument
-// is not a string literal, and an aliased import of useHotkeyAction.
+// Pins the app-level create entries and the repository switcher's tier. Two
+// groups of actions have an app-level registrar beside the panels that own
+// them: AppCreateHotkeys (`create-pr`, `create-local-pr`; the Compare and Pull
+// requests panels) and RepositoryView (`create-issue`, `create-jira-issue`;
+// the Issues panel). Dispatch runs the highest tier among enabled entries, so
+// every app-level registration of those ids carries `tier: "fallback"` and no
+// panel registration carries a tier: a panel's enabled entry then takes the
+// action whatever the registration order. RepoList's two registrations carry
+// `tier: "popup"`, so the open switcher keeps its chords over any surface
+// entry that re-registers. A closure over every .ts/.tsx under src/ (src/test/
+// excluded), counting `useHotkeyAction("<id>"` calls and `<HotkeyAction
+// id="<id>"` elements, keeps a new registrar from joining without its own tier
+// decision. RepositoryView mounts AppCreateHotkeys twice: on `{null}` as the
+// no-repository return, and on `{repoPath}` outside every TabPanel and
+// Activity element, whose hidden state tears its effects down and would drop
+// both entries on other tabs. A source scan, since nothing mounts
+// RepositoryView in jsdom. Scans run on `maskNonCode`'s output, so comments and
+// string text never count; literals are read from the raw text at the masked
+// offsets. A call's tier is read from its options argument alone (none means
+// no tier), and only registrations of the ids under inspection are read. Every
+// lookup that finds nothing fails, a `tier` that is not a plain string literal
+// fails, a call's options argument it cannot read (not an object literal, a
+// spread, a shorthand `tier`) fails, and a JSX spread in a mount's tag fails
+// it. Not covered: a registration whose id is not a string literal, an aliased
+// import of useHotkeyAction or HotkeyAction, and a spread on a `<HotkeyAction>`
+// element.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -30,15 +39,45 @@ import {
 } from "./lib/ts-mask.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const ACTIONS = ["create-pr", "create-local-pr"];
-const REGISTRARS = [
-  "src/features/compare/ComparePanel.tsx",
-  "src/features/pulls/PullRequestsPanel.tsx",
-  "src/features/repository/AppCreateHotkeys.tsx",
-];
 const HOST = "src/features/repository/RepositoryView.tsx";
 const MOUNT = "AppCreateHotkeys";
-const PANELS = ["ComparePanel", "PullRequestsPanel"];
+const APP_CREATE = "src/features/repository/AppCreateHotkeys.tsx";
+const REPO_LIST = "src/features/repository/RepoList.tsx";
+
+// Each group: its ids, every file registering one of them with the exact ids
+// it registers (each once), and the one app-level registrar whose
+// registrations are fallbacks. A panel that drops one of its own ids leaves
+// only the fallback serving it on that surface.
+const GROUPS = [
+  {
+    ids: ["create-pr", "create-local-pr"],
+    registrars: {
+      "src/features/compare/ComparePanel.tsx": ["create-pr", "create-local-pr"],
+      "src/features/pulls/PullRequestsPanel.tsx": [
+        "create-pr",
+        "create-local-pr",
+      ],
+      [APP_CREATE]: ["create-pr", "create-local-pr"],
+    },
+    fallback: APP_CREATE,
+  },
+  {
+    ids: ["create-issue", "create-jira-issue"],
+    registrars: {
+      "src/features/issues/IssuesPanel.tsx": [
+        "create-issue",
+        "create-jira-issue",
+      ],
+      [HOST]: ["create-issue", "create-jira-issue"],
+    },
+    fallback: HOST,
+  },
+];
+
+// Files whose registrations of the listed ids all carry one tier.
+const TIER_PINS = [
+  { rel: REPO_LIST, ids: ["show-repositories", "focus-filter"], tier: "popup" },
+];
 
 const squash = (s) => s.replace(/\s+/g, "");
 const mask = (rel, text) => maskNonCode(text, rel.endsWith(".tsx"));
@@ -56,27 +95,143 @@ function literalAt(text, masked, at) {
   return q === "`" && value.includes("${") ? null : value;
 }
 
-/** Whether `text` holds a `useHotkeyAction(` call whose first argument is a
- *  literal naming one of ACTIONS; the argument may sit on a later line. */
-function registersCreate(rel, text) {
-  if (!text.includes("useHotkeyAction")) return false;
-  const masked = mask(rel, text);
-  for (const m of masked.matchAll(/(?<![\w$.])useHotkeyAction\s*\(\s*/g)) {
-    const id = literalAt(text, masked, m.index + m[0].length);
-    if (id !== null && ACTIONS.includes(id)) return true;
-  }
-  return false;
+/** The tier a [from, to) range names: null when it names none, the literal
+ *  when exactly one `tier: "x"` (a call's options) or `tier="x"` (a JSX
+ *  attribute) appears, and a throw when a tier is not a plain literal. */
+function tierIn(rel, text, masked, from, to) {
+  const hits = [
+    ...masked.slice(from, to).matchAll(/(?<![\w$.])tier\s*[:=]\s*/g),
+  ];
+  if (hits.length === 0) return null;
+  const values = hits.map((m) =>
+    literalAt(text, masked, from + m.index + m[0].length),
+  );
+  if (values.length !== 1 || values[0] === null)
+    throw new Error(`${rel}: a tier this scan cannot read`);
+  return values[0];
 }
 
-/** The files registering either action, sorted. */
-const registrars = (corpus) =>
+/** The [from, to) ranges of the top-level arguments between masked offsets
+ *  `open` (the call's `(`) and `close` (its `)`). */
+function topLevelArgs(masked, open, close) {
+  const args = [];
+  let depth = 0;
+  let start = open + 1;
+  for (let i = open + 1; i < close; i++) {
+    const c = masked[i];
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === "," && depth === 0) {
+      args.push([start, i]);
+      start = i + 1;
+    }
+  }
+  if (masked.slice(start, close).trim() !== "") args.push([start, close]);
+  return args;
+}
+
+// useHotkeyAction(id, run, enabled, options): the options argument's index.
+const OPTIONS_ARG = 3;
+
+/** The tier a call's options argument names, read like `tierIn`, and a throw
+ *  for options this scan cannot read: not an object literal, a spread, or a
+ *  shorthand `tier`. */
+function optionsTier(rel, text, masked, [from, to]) {
+  const lead = masked.slice(from, to).search(/\S/);
+  const at = from + lead;
+  const end = masked[at] === "{" ? matchBrace(masked, at) : -1;
+  if (end === -1 || masked.slice(end + 1, to).trim() !== "")
+    throw new Error(`${rel}: hotkey options this scan cannot read`);
+  const body = masked.slice(at + 1, end);
+  if (/\.\.\./.test(body) || /(?<![\w$.])tier\s*(?=[,}]|$)/.test(body))
+    throw new Error(`${rel}: hotkey options this scan cannot read`);
+  return tierIn(rel, text, masked, at, end + 1);
+}
+
+/** Every registration in `text` of one of `ids` whose id is a literal, as
+ *  { id, tier }: `useHotkeyAction(` calls (the id may sit on a later line) and
+ *  `<HotkeyAction>` elements carrying an `id="…"` attribute. Other ids are
+ *  skipped before their options are read, so their options never fail a pin;
+ *  a call's tier comes from its options argument alone, null when it has
+ *  none. */
+function registrations(rel, text, ids) {
+  if (!text.includes("HotkeyAction")) return [];
+  const masked = mask(rel, text);
+  const out = [];
+  for (const m of masked.matchAll(/(?<![\w$.])useHotkeyAction\s*\(\s*/g)) {
+    const id = literalAt(text, masked, m.index + m[0].length);
+    if (id === null || !ids.includes(id)) continue;
+    const open = masked.indexOf("(", m.index);
+    const close = matchBrace(masked, open);
+    assert.ok(close > open, `${rel}: a useHotkeyAction call never closes`);
+    const args = topLevelArgs(masked, open, close);
+    const tier =
+      args.length > OPTIONS_ARG
+        ? optionsTier(rel, text, masked, args[OPTIONS_ARG])
+        : null;
+    out.push({ id, tier });
+  }
+  for (const m of masked.matchAll(/<HotkeyAction\b/g)) {
+    const end = tagEnd(masked, m.index);
+    assert.ok(end > m.index, `${rel}: a <HotkeyAction> tag never ends`);
+    const attr = /\sid=/.exec(masked.slice(m.index, end));
+    if (attr === null) continue;
+    const id = literalAt(text, masked, m.index + attr.index + attr[0].length);
+    if (id === null || !ids.includes(id)) continue;
+    out.push({ id, tier: tierIn(rel, text, masked, m.index, end) });
+  }
+  return out;
+}
+
+/** The files registering any of `ids`, sorted. */
+const registrars = (corpus, ids) =>
   [...corpus]
-    .filter(([rel, text]) => registersCreate(rel, text))
+    .filter(([rel, text]) => registrations(rel, text, ids).length > 0)
     .map(([rel]) => rel)
     .sort();
 
 function checkRegistrars(corpus) {
-  assert.deepEqual(registrars(corpus), REGISTRARS, "the registrar set moved");
+  for (const { ids, registrars: expected } of GROUPS)
+    assert.deepEqual(
+      registrars(corpus, ids),
+      Object.keys(expected).sort(),
+      `the registrar set of ${ids.join(", ")} moved`,
+    );
+}
+
+/** Each registrar registers exactly its pinned ids, once each; the app-level
+ *  one registers them as fallbacks and no other registrar carries a tier. */
+function checkTiers(corpus) {
+  for (const { ids, registrars: files, fallback } of GROUPS)
+    for (const [rel, pinned] of Object.entries(files)) {
+      const text = corpus.get(rel);
+      assert.ok(text, `${rel} is not in the walk`);
+      const own = registrations(rel, text, ids);
+      assert.deepEqual(
+        own.map((r) => r.id).sort(),
+        [...pinned].sort(),
+        `${rel} does not register ${pinned.join(", ")} once each`,
+      );
+      const want = rel === fallback ? "fallback" : null;
+      for (const r of own)
+        assert.equal(r.tier, want, `${rel}'s ${r.id} registration tier`);
+    }
+}
+
+/** Each pinned file registers each listed id once, under its tier. */
+function checkTierPins(corpus) {
+  for (const { rel, ids, tier } of TIER_PINS) {
+    const text = corpus.get(rel);
+    assert.ok(text, `${rel} is not in the walk`);
+    const own = registrations(rel, text, ids);
+    assert.deepEqual(
+      own.map((r) => r.id).sort(),
+      [...ids].sort(),
+      `${rel} does not register ${ids.join(", ")} once each`,
+    );
+    for (const r of own)
+      assert.equal(r.tier, tier, `${rel}'s ${r.id} registration tier`);
+  }
 }
 
 /** Every AppCreateHotkeys mount in source order, as { from, end, repoPath }:
@@ -120,22 +275,6 @@ function checkMounts(text, masked = mask(HOST, text)) {
   );
 }
 
-/** The `{repoPath}` mount ends before the start of every panel mount, and
- *  each panel has one. */
-function checkOrder(text, masked = mask(HOST, text)) {
-  const live = mounts(text, masked).filter((m) => m.repoPath === "repoPath");
-  assert.equal(live.length, 1, `${live.length} {repoPath} mounts`);
-  for (const panel of PANELS) {
-    const ranges = elementRanges(HOST, text, masked, panel);
-    assert.ok(ranges.length > 0, `${HOST} mounts no <${panel}>`);
-    for (const [start] of ranges)
-      assert.ok(
-        live[0].end <= start,
-        `the {repoPath} ${MOUNT} mount does not end before a <${panel}> starts`,
-      );
-  }
-}
-
 /** The `{null}` mount is the no-repository guard's return value. */
 function checkGuard(text, masked = mask(HOST, text)) {
   const guard = mounts(text, masked).filter((m) => m.repoPath === "null");
@@ -165,29 +304,37 @@ function checkOutsideTabs(text, masked = mask(HOST, text)) {
       );
 }
 
-const hostText = () => {
-  const text = CORPUS.get(HOST);
-  assert.ok(text, `${HOST} is not in the walk`);
+const fileText = (rel) => {
+  const text = CORPUS.get(rel);
+  assert.ok(text, `${rel} is not in the walk`);
   return text;
 };
+const hostText = () => fileText(HOST);
 
 test("the walk reads every source file outside src/test", () => {
   assert.ok(CORPUS.size > 100, `the walk read ${CORPUS.size} files`);
-  for (const rel of [...REGISTRARS, HOST])
+  for (const rel of [
+    ...GROUPS.flatMap((g) => Object.keys(g.registrars)),
+    ...TIER_PINS.map((p) => p.rel),
+  ])
     assert.ok(CORPUS.has(rel), `${rel} is not in the walk`);
   assert.ok(![...CORPUS.keys()].some((rel) => rel.startsWith("src/test/")));
 });
 
-test("only AppCreateHotkeys and the two panels register the create actions", () => {
+test("only the listed files register the create actions", () => {
   checkRegistrars(CORPUS);
+});
+
+test("the app-level create registrations are fallbacks and the panels' carry no tier", () => {
+  checkTiers(CORPUS);
+});
+
+test("RepoList's two registrations carry the popup tier", () => {
+  checkTierPins(CORPUS);
 });
 
 test("RepositoryView imports AppCreateHotkeys and mounts it on {null} and {repoPath}", () => {
   checkMounts(hostText());
-});
-
-test("the {repoPath} mount comes before every ComparePanel and PullRequestsPanel", () => {
-  checkOrder(hostText());
 });
 
 test("the {null} mount is the no-repository return", () => {
@@ -203,20 +350,37 @@ const once = (text, from, to) => {
   assert.equal(text.split(from).length, 2, `expected one ${from}`);
   return text.replace(from, () => to);
 };
+/** `rel`'s text with one regex match replaced; the regex must match once. */
+const onceRe = (rel, re, to) => {
+  const text = fileText(rel);
+  assert.equal([...text.matchAll(new RegExp(re, "g"))].length, 1, String(re));
+  return text.replace(re, typeof to === "function" ? to : () => to);
+};
+const withFile = (rel, text) => new Map([...CORPUS, [rel, text]]);
 const LIVE = `<${MOUNT} repoPath={repoPath} />`;
 const GUARD = `return <${MOUNT} repoPath={null} />`;
 
-test("control: a fourth registrar fails the closure, a multi-line CRLF call included", () => {
-  const extra = loadCorpus([
+test("control: a new registrar fails the closure, a multi-line CRLF call and a JSX element included", () => {
+  for (const [id, body] of [
     [
-      "src/features/x/Other.tsx",
-      'export function Other() {\r\n  useHotkeyAction(\r\n    "create-local-pr",\r\n    () => undefined,\r\n  );\r\n  return null;\r\n}\r\n',
+      "create-local-pr",
+      '  useHotkeyAction(\r\n    "create-local-pr",\r\n    () => undefined,\r\n  );\r\n  return null;\r\n',
     ],
-  ]);
-  assert.throws(
-    () => checkRegistrars(new Map([...CORPUS, ...extra])),
-    /registrar set moved/,
-  );
+    ["create-pr", '  return <HotkeyAction id="create-pr" run={run} />;\n'],
+    [
+      "create-jira-issue",
+      "  return <HotkeyAction run={run} id='create-jira-issue' />;\n",
+    ],
+  ]) {
+    const extra = loadCorpus([
+      ["src/features/x/Other.tsx", `export function Other() {\n${body}}\n`],
+    ]);
+    assert.throws(
+      () => checkRegistrars(new Map([...CORPUS, ...extra])),
+      /registrar set of .* moved/,
+      id,
+    );
+  }
 });
 
 test("control: a commented-out or string-only registration is not counted", () => {
@@ -226,11 +390,167 @@ test("control: a commented-out or string-only registration is not counted", () =
     '/* useHotkeyAction(\n  "create-pr", run); */\n',
     "const s = 'useHotkeyAction(\"create-pr\", run)';\n",
     'useHotkeyAction("create-prs", run);\n',
+    '{/* <HotkeyAction id="create-pr" run={run} /> */}\n',
   ])
-    assert.equal(registersCreate(rel, text), false, text);
-  assert.equal(
-    registersCreate(rel, "useHotkeyAction(`create-pr`, run);\n"),
-    true,
+    assert.deepEqual(
+      registrars(new Map([[rel, text]]), ["create-pr"]),
+      [],
+      text,
+    );
+  assert.deepEqual(
+    registrations(rel, "useHotkeyAction(`create-pr`, run);\n", ["create-pr"]),
+    [{ id: "create-pr", tier: null }],
+  );
+});
+
+test("control: stripping the fallback tier from one app-level call fails", () => {
+  const app = onceRe(
+    APP_CREATE,
+    /,\s*true,\s*\{\s*tier:\s*"fallback",?\s*\}/,
+    "",
+  );
+  assert.throws(
+    () => checkTiers(withFile(APP_CREATE, app)),
+    /AppCreateHotkeys\.tsx's create-local-pr registration tier/,
+  );
+  const host = onceRe(
+    HOST,
+    /,\s*\{\s*tier:\s*"fallback"\s*\},?(\s*\);\s*useHotkeyAction\(\s*"create-discussion")/,
+    (_, tail) => tail,
+  );
+  assert.throws(
+    () => checkTiers(withFile(HOST, host)),
+    /RepositoryView\.tsx's create-jira-issue registration tier/,
+  );
+});
+
+test("control: a tier on a panel's call fails, and an unreadable tier throws", () => {
+  const rel = "src/features/pulls/PullRequestsPanel.tsx";
+  const tiered = once(
+    fileText(rel),
+    'useHotkeyAction("create-local-pr", () => openLocalPrCreate());',
+    'useHotkeyAction("create-local-pr", () => openLocalPrCreate(), true, { tier: "fallback" });',
+  );
+  assert.throws(
+    () => checkTiers(withFile(rel, tiered)),
+    /PullRequestsPanel\.tsx's create-local-pr registration tier/,
+  );
+  const unreadable = once(
+    fileText(rel),
+    'useHotkeyAction("create-local-pr", () => openLocalPrCreate());',
+    'useHotkeyAction("create-local-pr", () => openLocalPrCreate(), true, { tier: TIER });',
+  );
+  assert.throws(
+    () => checkTiers(withFile(rel, unreadable)),
+    /a tier this scan cannot read/,
+  );
+});
+
+test("control: options whose tier the scan cannot read throw, never read as no tier", () => {
+  const call =
+    'useHotkeyAction("create-local-pr", () => requestCreate("local-pr"), true, {\n    tier: "fallback",\n  });';
+  const app = fileText(APP_CREATE);
+  assert.ok(app.includes(call), "the fallback call moved");
+  for (const [label, options, lead] of [
+    ["a shorthand tier", "{ tier }", 'const tier = "fallback" as const;\n'],
+    [
+      "a spread",
+      "{ ...opts }",
+      'const opts = { tier: "fallback" } as const;\n',
+    ],
+    ["a variable", "opts", 'const opts = { tier: "fallback" } as const;\n'],
+  ]) {
+    const mutant =
+      lead +
+      once(
+        app,
+        call,
+        `useHotkeyAction("create-local-pr", () => requestCreate("local-pr"), true, ${options});`,
+      );
+    assert.throws(
+      () => checkTiers(withFile(APP_CREATE, mutant)),
+      /hotkey options this scan cannot read/,
+      label,
+    );
+  }
+  // A literal tier among other options still reads.
+  const extra = once(
+    app,
+    call,
+    'useHotkeyAction("create-local-pr", () => requestCreate("local-pr"), true, { x: 1, tier: "fallback" });',
+  );
+  checkTiers(withFile(APP_CREATE, extra));
+});
+
+test("control: a call without options reads as untiered, whatever its callback holds", () => {
+  const call =
+    'useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr, {\n    tier: "fallback",\n  });';
+  const app = fileText(APP_CREATE);
+  assert.ok(app.includes(call), "the fallback call moved");
+  const logged = '() => {\n    console.info({ tier: "fallback" });\n  }';
+  for (const [label, to] of [
+    [
+      "three arguments",
+      `useHotkeyAction("create-pr", ${logged}, canCreatePr);`,
+    ],
+    ["two arguments", `useHotkeyAction("create-pr", ${logged});`],
+  ])
+    assert.throws(
+      () => checkTiers(withFile(APP_CREATE, once(app, call, to))),
+      /AppCreateHotkeys\.tsx's create-pr registration tier/,
+      label,
+    );
+});
+
+test("control: another action's options are never read", () => {
+  const rel = "src/features/pulls/PullRequestsPanel.tsx";
+  const other =
+    "\nfunction Other() {\n" +
+    '  useHotkeyAction("open-settings", run, true, opts);\n' +
+    '  useHotkeyAction("refresh", run, true, { ...opts, tier });\n' +
+    '  return <HotkeyAction id="go-back" run={run} tier={TIER} />;\n' +
+    "}\n";
+  const corpus = withFile(rel, fileText(rel) + other);
+  checkRegistrars(corpus);
+  checkTiers(corpus);
+  const list = REPO_LIST;
+  checkTierPins(withFile(list, fileText(list) + other));
+});
+
+test("control: a panel dropping one of its own create ids fails", () => {
+  const rel = "src/features/pulls/PullRequestsPanel.tsx";
+  const dropped = once(
+    fileText(rel),
+    'useHotkeyAction("create-pr", () => setGhCreateOpen(true), canCreateGhPr);',
+    "",
+  );
+  // The panel still registers create-local-pr, so the registrar set holds.
+  checkRegistrars(withFile(rel, dropped));
+  assert.throws(
+    () => checkTiers(withFile(rel, dropped)),
+    /PullRequestsPanel\.tsx does not register create-pr, create-local-pr once each/,
+  );
+  const rel2 = "src/features/issues/IssuesPanel.tsx";
+  const doubled = onceRe(
+    rel2,
+    /useHotkeyAction\("create-issue"/,
+    'useHotkeyAction("create-issue", run);\n  useHotkeyAction("create-issue"',
+  );
+  assert.throws(
+    () => checkTiers(withFile(rel2, doubled)),
+    /IssuesPanel\.tsx does not register create-issue, create-jira-issue once each/,
+  );
+});
+
+test("control: dropping the popup tier from RepoList's focus-filter fails", () => {
+  const text = onceRe(
+    REPO_LIST,
+    /,\s*true,\s*\{\s*tier:\s*"popup",?\s*\}(\s*\);\s*\r?\n\s*\r?\n\s*const ownerByPath)/,
+    (_, tail) => tail,
+  );
+  assert.throws(
+    () => checkTierPins(withFile(REPO_LIST, text)),
+    /RepoList\.tsx's focus-filter registration tier/,
   );
 });
 
@@ -248,16 +568,6 @@ test("control: a guard mount on {repoPath} fails", () => {
   assert.throws(() => checkMounts(text), /AppCreateHotkeys mounts/);
 });
 
-test("control: a {repoPath} mount after </main> fails the order, the live text passes", () => {
-  checkOrder(hostText());
-  const text = once(once(hostText(), LIVE, ""), "</main>", `</main>\n${LIVE}`);
-  checkMounts(text);
-  assert.throws(
-    () => checkOrder(text),
-    /does not end before a <ComparePanel> starts/,
-  );
-});
-
 test("control: a {repoPath} mount inside the first TabPanel fails, the live text passes", () => {
   checkOutsideTabs(hostText());
   const removed = once(hostText(), LIVE, "");
@@ -266,7 +576,6 @@ test("control: a {repoPath} mount inside the first TabPanel fails, the live text
   const at = tagEnd(masked, start) + 1;
   const text = `${removed.slice(0, at)}\n${LIVE}${removed.slice(at)}`;
   checkMounts(text);
-  checkOrder(text);
   assert.throws(() => checkOutsideTabs(text), /mount sits inside a <TabPanel>/);
 });
 

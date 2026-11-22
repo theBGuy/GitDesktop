@@ -5,8 +5,9 @@ import type { ConversationScrollHandle } from "./ConversationScrollArea";
 /**
  * The palette's jump-to-top/bottom commands for one conversation view. Pass the
  * returned ref to that view's `ConversationScrollArea`. `enabled` is the view's
- * surface-active gate: dispatch runs the newest ENABLED handler, so a gate that
- * stays true on a hidden view would steal the jump from the visible one.
+ * surface-active gate: dispatch runs the newest ENABLED entry within its tier,
+ * so a gate that stays true on a hidden view would steal the jump from the
+ * visible one.
  */
 export function useThreadJumpHotkeys(
   enabled: boolean,

@@ -22,7 +22,7 @@ import type {
   MentionTrigger,
 } from "@/features/conversations/useMentionCandidates";
 import { clipTitleFromText } from "@/lib/clip-title";
-import { eventToBinding } from "@/lib/hotkeys/binding";
+import { eventToBinding, isImeKeydown } from "@/lib/hotkeys/binding";
 import { type PrNoun, prPill } from "@/lib/pulls/pr-state";
 import { getCaretCoordinates } from "@/lib/textarea-caret";
 import { cn } from "@/lib/utils";
@@ -175,6 +175,10 @@ export function useMentionAutocomplete({
   // Which keys the popover consumed, each read and cleared by its own keyup —
   // one shared flag would let a second key's keydown clear the first key's mark.
   const consumedKeys = useRef(new Set<string>());
+  // Keys the input method owned at keydown, by physical key: a composing keydown
+  // can name `Process` where its keyup names the key, and that keyup can arrive
+  // after the composition ended.
+  const imeKeys = useRef(new Set<string>());
   // A token the user dismissed at this index, so a caret move inside it doesn't
   // reopen what they just closed.
   const dismissed = useRef<{ start: number; trigger: MentionTrigger } | null>(
@@ -405,8 +409,16 @@ export function useMentionAutocomplete({
     return false;
   }
 
-  /** Returns true when the popover consumed the key. */
+  /** Returns true when the popover consumed the key. An input-method key is
+   *  only marked, never consumed: the caller owns its propagation. Marks are
+   *  taken only while wired, where the keyup and blur that clear them exist,
+   *  and a fresh keydown of the same physical key drops a stale one. */
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>): boolean {
+    if (isImeKeydown(e)) {
+      if (wired) imeKeys.current.add(e.code || e.key);
+      return false;
+    }
+    imeKeys.current.delete(e.code || e.key);
     const consumed = handleKey(e);
     if (consumed) consumedKeys.current.add(e.key);
     else consumedKeys.current.delete(e.key);
@@ -427,15 +439,18 @@ export function useMentionAutocomplete({
           open && items.length > 0 ? `${listId}-${activeIndex}` : undefined,
         onBlur: () => {
           consumedKeys.current.clear();
+          imeKeys.current.clear();
           dismissed.current = null;
           setToken(null);
         },
         onMouseDown: () => setToken(null),
         onKeyUp: (e: KeyboardEvent<HTMLTextAreaElement>) => {
-          // Only a key the popover declined moved the caret; re-syncing after one
-          // it consumed would reset the row that arrow just highlighted.
+          // Only a key the popover declined and the input method didn't own
+          // moved the caret; re-syncing after either would reset the row that
+          // arrow just highlighted.
+          const ime = imeKeys.current.delete(e.code || e.key);
           const consumed = consumedKeys.current.delete(e.key);
-          if (!consumed && RESYNC_KEYS.has(e.key)) resync();
+          if (!ime && !consumed && RESYNC_KEYS.has(e.key)) resync();
         },
       }
     : undefined;

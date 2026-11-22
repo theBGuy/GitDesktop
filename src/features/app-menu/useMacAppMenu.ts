@@ -2,7 +2,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useEffectEvent } from "react";
 import { useOpenRepoByPath } from "@/features/repository/useOpenRepoByPath";
 import { isMac } from "@/lib/hotkeys/binding";
-import { dispatchAction } from "@/lib/hotkeys/hotkeys";
+import { dispatchShortcut } from "@/lib/hotkeys/hotkeys";
+import { anyOpenModal } from "@/lib/hotkeys/open-modal";
 import type { ActionId } from "@/lib/hotkeys/registry";
 import { type RecentRepo, repoDisplayName } from "@/lib/settings/api";
 import { useSettings } from "@/lib/settings/queries";
@@ -64,12 +65,14 @@ export function useMacAppMenu() {
   const onAction = useEffectEvent((payload: unknown) => {
     if (!isMenuAction(payload)) return;
     // A `false` return is acceptable silence: the owning surface may not be
-    // mounted, exactly as when the action is missing from the palette.
-    dispatchAction(payload);
+    // mounted, or an open dialog makes the action inert, exactly as in the palette.
+    dispatchShortcut(payload);
   });
 
   const onOpenRecent = useEffectEvent((payload: unknown) => {
-    if (typeof payload !== "string") return;
+    // The native menu sits outside the webview's modal overlay, so an open
+    // dialog refuses it here, as dispatchShortcut refuses the menu's actions.
+    if (typeof payload !== "string" || anyOpenModal()) return;
     void openByPath(payload, "recent");
   });
 

@@ -107,7 +107,8 @@ publish to GitHub, GitLab, or Bitbucket, and fork.
   history, automations, and MCP server settings follow along.
 - **macOS menu bar**: **File** carries **New / Open / Clone Repository…** and
   an **Open Recent** list of your last ten repos; **Settings…** sits in the
-  GitDesktop menu. Items work from any screen.
+  GitDesktop menu. Once GitDesktop has found Git, items work from any screen
+  except while a dialog is open.
 - **Manage files git tracks or ignores** (beyond pending changes): untrack a
   file committed by mistake (it stays on disk), or surface every ignored
   file with the rule responsible and force-add it or remove that rule. With

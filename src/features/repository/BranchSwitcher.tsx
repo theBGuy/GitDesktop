@@ -157,7 +157,6 @@ import type {
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
 import { secondaryClickLabel } from "@/lib/hotkeys/binding";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
-import { focusInOpenModal } from "@/lib/hotkeys/open-modal";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   OFFLINE_ITEM_REASON,
@@ -3272,8 +3271,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "show-branches",
     () => {
-      // Silent: a toast over the modal would be noise, and focus stays put.
-      if (focusInOpenModal()) return;
       if (!open) snapshotOrder();
       setOpen(true);
     },
@@ -5074,7 +5071,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     WorktreesDialog instance and the one "worktrees" handler, so
                     a second mount here would stack a duplicate dialog on top of
                     it, and a second registration would shadow the ⋮ menu's
-                    handler (dispatch runs the newest enabled one). Direct call
+                    handler (dispatch runs the newest enabled entry within its
+                    tier). Direct call
                     in the same tick, as RepoSwitcher's rows do — the palette's
                     setTimeout exists for closing a MODAL, which a popover
                     isn't. */}

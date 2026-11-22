@@ -61,6 +61,7 @@ import {
   eventToBinding,
   formatBinding,
   hasChordModifier,
+  isImeKeydown,
 } from "@/lib/hotkeys/binding";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
 import {
@@ -1310,6 +1311,12 @@ export function EditHistoryDialog({
     if (!(row instanceof HTMLElement)) return;
     const hash = row.getAttribute("data-row");
     if (hash === null) return;
+    // An input-method key is the input method's: no move, swallow or menu key,
+    // and no dialog Escape dismissal above the row either.
+    if (isImeKeydown(e)) {
+      e.stopPropagation();
+      return;
+    }
     const chord = eventToBinding(e);
     const direction = chord === null ? undefined : MOVE_CHORDS[chord];
     const swallowed = e.altKey && ALT_SWALLOWED_KEYS.has(e.key);
@@ -1321,8 +1328,8 @@ export function EditHistoryDialog({
     const menuKey = chord === "enter" || chord === "space";
     const extend = chord === "shift+up" || chord === "shift+down";
 
-    // Every consumed press is default-prevented, so a user binding of the same
-    // key can't also fire behind the dialog.
+    // Every consumed press is default-prevented, so the window listener skips
+    // it and no binding of the same key, the dialog's own included, also fires.
     if (chord === "d") {
       e.preventDefault();
       if (e.repeat) return;

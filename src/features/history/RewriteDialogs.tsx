@@ -296,9 +296,8 @@ export function SquashDialog({
   // The generate chord writes the squashed message while this dialog is open.
   // Mounted on DialogContent so it also covers the X close button (a form
   // SIBLING inside the Popup). It is swallowed here whenever it may fire (the
-  // hook mirrors the global listener's own guards), so the global
-  // generate-commit-message action can't run behind the dialog; while
-  // generating it swallows but DOESN'T cancel. A running squash holds it like
+  // hook mirrors the global listener's own guards); while generating it
+  // swallows but DOESN'T cancel. A running squash holds it like
   // the button: the message it would revise has already been sent.
   const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const generateChord = useGenerateChord({

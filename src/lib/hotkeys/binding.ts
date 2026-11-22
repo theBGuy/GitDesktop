@@ -44,8 +44,19 @@ export const platform: Platform = isWindows
 export const secondaryClickLabel = isMac ? "Control-click" : "right-click";
 
 /**
+ * True for a keydown the input method owns: one inside an IME composition, or
+ * keyCode 229, which WebKit still reports after it already ended the
+ * composition. Such a key confirms or moves a candidate and is no chord.
+ */
+export function isImeKeydown(e: KeyboardEvent | React.KeyboardEvent): boolean {
+  const composing =
+    "nativeEvent" in e ? e.nativeEvent.isComposing : e.isComposing;
+  return composing || e.keyCode === 229;
+}
+
+/**
  * The canonical binding a keyboard event represents, or null when the event
- * is a bare modifier or carries no usable key.
+ * is a bare modifier, an input-method key, or carries no usable key.
  */
 export function eventToBinding(
   e: KeyboardEvent | React.KeyboardEvent,
@@ -55,6 +66,7 @@ export function eventToBinding(
   // binding and swallow the character being typed. Left-Ctrl+Alt still works —
   // only the AltGraph composition path is excluded.
   if (e.getModifierState?.("AltGraph")) return null;
+  if (isImeKeydown(e)) return null;
   const raw = e.key.toLowerCase();
   if (MODIFIER_KEYS.has(raw)) return null;
   // Option/Alt composes a glyph on macOS (Option+P → "π"), so `e.key` is the
@@ -224,6 +236,19 @@ export function isModWheel(e: WheelEvent): boolean {
  *  the browser-accelerator guard (F5/Ctrl+R reload, Ctrl+P print). */
 export function consumeRequiresDispatch(binding: string): boolean {
   return binding === "space";
+}
+
+/** Which action owns each chord: the first holder in the map's order, null
+ *  bindings skipped. The one place first-holder is computed, shared by the
+ *  listener and the local chord matchers so they can't disagree. */
+export function chordOwners<Id extends string>(
+  bindings: ReadonlyMap<Id, string | null>,
+): Map<string, Id> {
+  const owners = new Map<string, Id>();
+  for (const [id, binding] of bindings) {
+    if (binding !== null && !owners.has(binding)) owners.set(binding, id);
+  }
+  return owners;
 }
 
 /** The key token of a canonical binding — whatever follows the fixed

@@ -53,25 +53,32 @@ function racedAmendMessage(
  * draft rather than local state, so the two stay in sync by construction and a
  * generation streams into whichever is on screen.
  *
- * Both surfaces register the `commit` / `generate-commit-message` actions while
- * `active`: the dispatcher runs the newest ENABLED handler, and with one store
- * behind them either registration does the same thing.
+ * The inline box registers the `commit` / `generate-commit-message` actions while
+ * `active`. The dialog (`inDialog`) registers its open-state pair inside its
+ * own content, where the modal scope makes them its own; here it keeps both
+ * registered at page level, `commit` enabled only for the closed-state fallback
+ * and `generate-commit-message` never, so the chords stay consumed on every
+ * tab.
  */
 export function useCommitSubmit(
   repoPath: string,
   {
     active = true,
     commitHotkeyFallback = false,
+    inDialog = false,
     onCommitted,
   }: {
-    /** Whether this surface's hotkey registrations are live. The dialog passes
-     *  its open state so a closed-but-mounted instance registers nothing
-     *  enabled; the inline box is live for as long as it's mounted. */
+    /** Whether this surface is on screen: the inline box for as long as it's
+     *  mounted, the dialog while open. For the dialog it only decides the
+     *  closed-state fallback below. */
     active?: boolean;
     /** Keeps the `commit` chord alone live while this surface is closed, for
      *  the state where NO commit surface is mounted to hold it. Commit-only by
      *  design: a generation streams into a field, so it needs one on screen. */
     commitHotkeyFallback?: boolean;
+    /** The dialog's instance: its open-state registrations live in its content
+     *  (a page-level entry is inert under the dialog's own modal). */
+    inDialog?: boolean;
     /** Runs when a commit lands — the dialog closes itself on it. */
     onCommitted?: () => void;
   } = {},
@@ -190,15 +197,18 @@ export function useCommitSubmit(
   // The commit hotkey (Ctrl+Enter by default) fires through the global
   // dispatcher even from the title/body fields — modifier combos are
   // allowed in text fields — so rebinding it in Settings works everywhere.
+  const commitSurfaceLive = inDialog
+    ? !active && commitHotkeyFallback
+    : active || commitHotkeyFallback;
   useHotkeyAction(
     "commit",
     doCommit,
-    (active || commitHotkeyFallback) && canCommit && !generating,
+    commitSurfaceLive && canCommit && !generating,
   );
   useHotkeyAction(
     "generate-commit-message",
     generate,
-    active && canGenerate && !generating,
+    !inDialog && active && canGenerate && !generating,
   );
 
   // Held, HEAD moved or switched without the user choosing to stop, so only amend

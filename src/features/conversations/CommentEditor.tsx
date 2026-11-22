@@ -5,7 +5,7 @@ import {
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
-import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import type { MentionSource } from "./useMentionCandidates";
 
 /**
@@ -64,7 +64,7 @@ export function CommentEditor({
         value={value}
         onChange={onChange}
         onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+          if (eventToBinding(e) === "mod+enter") {
             // preventDefault unconditionally: `commit` is bound to mod+enter and
             // fires inside editable targets, so a chord this handler declines to
             // submit would otherwise reach the global action.

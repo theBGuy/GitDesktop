@@ -7,11 +7,14 @@ export function AppCreateHotkeys({ repoPath }: { repoPath: string | null }) {
   const requestCreate = useUiStore((s) => s.requestCreate);
   const gh = useForgeStatus(repoPath ?? "");
   const canCreatePr = forgeFeatureReady(gh.data, "mrCreate");
-  // App-level fallbacks that open the Pull requests tab's own create dialogs: a
-  // panel's own registration, registered later, takes the action while enabled.
-  // The gate reads the same forge-status value as the panels' gates, so a flip
-  // re-registers both in one commit and the panel still registers last.
-  useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr);
-  useHotkeyAction("create-local-pr", () => requestCreate("local-pr"));
+  // App-level fallbacks that open the Pull requests tab's own create dialogs:
+  // the fallback tier lets a panel's own enabled entry take the action whatever
+  // the registration order.
+  useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr, {
+    tier: "fallback",
+  });
+  useHotkeyAction("create-local-pr", () => requestCreate("local-pr"), true, {
+    tier: "fallback",
+  });
   return null;
 }

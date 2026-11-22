@@ -366,8 +366,8 @@ export function CreateIssueDialog({
           : undefined;
         const action = view && { label: view.label, onClick: view.onClick };
         /** Open the new issue — but only if the app is still where it was created.
-         *  Every path below sits after at least one await, and this dialog doesn't
-         *  register the modal gate, so a chord can switch repos inside that window.
+         *  Every path below sits after at least one await, which can outlive this
+         *  dialog (closed mid-create), so a chord can switch repos inside that window.
          *  `selectIssue` carries NO repo identity, so it would select this NUMBER in
          *  whatever repo is active now — somewhere else that is an unrelated issue,
          *  or a missing-issue view. The guard is the continuation rule's own shape,
@@ -683,8 +683,7 @@ export function CreateIssueDialog({
   // on DialogContent, not the <form>: the X close button is a form SIBLING
   // inside the Popup, so a form-level handler would miss a chord pressed with
   // focus on X. It is swallowed here whenever it may fire (the hook mirrors the
-  // global listener's own guards), so the global generate-commit-message action
-  // can't run behind the dialog; while generating it swallows but DOESN'T
+  // global listener's own guards); while generating it swallows but DOESN'T
   // cancel. A running create holds it like the button: the draft it would
   // revise has already been sent.
   const isSubmitting = createHold.running;

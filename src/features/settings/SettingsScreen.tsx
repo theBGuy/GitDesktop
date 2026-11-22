@@ -231,9 +231,10 @@ export function SettingsScreen() {
       mounted.current = false;
     };
   }, []);
-  // This screen's own open Discard prompt. The prompt is app-scoped and global
-  // hotkeys still navigate under a modal, so leaving Settings dismisses it here
-  // rather than orphan a prompt for a form that no longer exists.
+  // This screen's own open Discard prompt. The prompt is app-scoped and a landing
+  // that is not a shortcut (one that bypasses the leave guard) can still leave
+  // under it, so leaving Settings dismisses it here rather than orphan a prompt
+  // for a form that no longer exists.
   const promptRef = useRef<ConfirmRequest | null>(null);
   useEffect(
     () => () => {

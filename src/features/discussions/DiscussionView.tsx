@@ -95,7 +95,7 @@ import {
   useUpdateDiscussionComment,
 } from "@/lib/git/queries";
 import type { PrThreadOut } from "@/lib/git/types";
-import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   ACT_PENDING_REASON,
@@ -1270,7 +1270,7 @@ export function DiscussionView({
                           reply.set((prev) => ({ ...prev, body: v }))
                         }
                         onKeyDown={(e) => {
-                          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                          if (eventToBinding(e) === "mod+enter") {
                             // preventDefault unconditionally: `commit` is bound to
                             // mod+enter and fires inside editable targets, so a chord
                             // this handler declines to submit would otherwise reach

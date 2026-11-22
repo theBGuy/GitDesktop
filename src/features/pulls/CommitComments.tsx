@@ -57,7 +57,7 @@ import type {
   PrThreadOut,
   RemoteLens,
 } from "@/lib/git/types";
-import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import {
   COMMENT_DELETE_PENDING_REASON,
   COMMENT_POST_PENDING_REASON,
@@ -1180,7 +1180,7 @@ export function CommitLineComposer({
         value={body}
         onChange={setBody}
         onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+          if (eventToBinding(e) === "mod+enter") {
             // preventDefault unconditionally: `commit` is bound to mod+enter and
             // fires inside editable targets, so a chord this handler declines to
             // submit would otherwise reach the global action.

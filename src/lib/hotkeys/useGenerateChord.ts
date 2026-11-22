@@ -15,7 +15,8 @@ import {
   isTypeaheadKey,
   isTypeaheadTarget,
 } from "./binding";
-import { useEffectiveBindings } from "./hotkeys";
+import { useEffectiveBindings, useOwnsChord } from "./hotkeys";
+import { fromOtherModal } from "./open-modal";
 
 /** What a surface does when the generate chord fires there. */
 export interface GenerateAction {
@@ -60,11 +61,12 @@ export interface GenerateAction {
  *
  * `run` undefined means the surface has no generator at all — Hide-AI
  * removed it, or a shared dialog's host passes none — and the chord falls
- * through untouched instead. Nothing generates behind a dialog in that arm
- * either, because the global handlers are the two commit surfaces' (the box and
- * the hoisted commit dialog, both via useCommitSubmit): Hide-AI leaves them
- * registered but DISABLED, and the listener runs the newest ENABLED handler or
- * none; the box unregisters off the Changes tab and the dialog while closed.
+ * through untouched instead; nothing behind the dialog answers it, since under
+ * an open modal the listener reaches only that modal's own registrations.
+ *
+ * The chord is this hook's only while `generate-commit-message` is its first
+ * holder ({@link useOwnsChord}); a binding an earlier action also holds falls
+ * through untouched, neither run nor swallowed, to the listener's owner.
  *
  * Auto-repeat is dropped without swallowing, matching that global listener —
  * holding the chord must not re-fire before the generating flag lands.
@@ -82,10 +84,13 @@ export function useGenerateChord({
   binding: string | null;
 } {
   const binding = useEffectiveBindings().get("generate-commit-message") ?? null;
+  const ownsChord = useOwnsChord();
   return {
     onKeyDown: (e) => {
+      if (fromOtherModal(e.target, e.currentTarget)) return;
       if (binding === null || run === undefined || e.repeat) return;
       if (eventToBinding(e) !== binding) return;
+      if (!ownsChord("generate-commit-message", binding)) return;
       if (e.defaultPrevented && !hasModifier(binding)) return;
       if (isEditableTarget(e.target) && !firesInEditable(binding)) return;
       if (

@@ -19,6 +19,7 @@ import { KIND_BADGE } from "@/lib/git/change-kind-badge";
 import { useWorkingLineStats } from "@/lib/git/queries";
 import type { FileEntry } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
+import { HotkeyAction } from "@/lib/hotkeys/HotkeyAction";
 import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
 import { useSettings } from "@/lib/settings/queries";
@@ -65,6 +66,7 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
     stagedEntries,
     stagedCount,
     canCommit,
+    canGenerate,
     commitDisabledReason,
     commitLabel,
     committing,
@@ -77,6 +79,7 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
   } = useCommitSubmit(repoPath, {
     active: open,
     commitHotkeyFallback: noCommitSurface,
+    inDialog: true,
     onCommitted: closeCommitDialog,
   });
   // Same query (and cache entry) the Changes panel's rows read, so a file's
@@ -110,6 +113,18 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
       }}
     >
       <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
+        {/* Inside the content, so the modal scope makes these the open dialog's
+            own; registered from the body above they'd be inert under it. */}
+        <HotkeyAction
+          id="commit"
+          run={doCommit}
+          enabled={open && canCommit && !generating}
+        />
+        <HotkeyAction
+          id="generate-commit-message"
+          run={generate}
+          enabled={open && canGenerate && !generating}
+        />
         <DialogHeader>
           <DialogTitle>Commit</DialogTitle>
           <DialogDescription>

@@ -33,7 +33,6 @@ import {
   useForgeSearchRepos,
 } from "@/lib/git/queries";
 import type { ForgeProvider, ForgeSearchRepo } from "@/lib/git/types";
-import { useModalGateRegistration } from "@/lib/hotkeys/modal-gate";
 import {
   keepNonRowPressOffList,
   listKeyboardNav,
@@ -91,11 +90,6 @@ export function ExploreScreen() {
   const [flatRepos, setFlatRepos] = useState<ForgeSearchRepo[]>([]);
   const detailRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-
-  // App's repo/settings actions stay reachable from the macOS menu bar, which
-  // sits outside this dialog's modal overlay — register so they refuse while
-  // the clone dialog owns the screen.
-  useModalGateRegistration(cloneTarget !== null);
 
   // 400ms sized against GitHub code search's ~30 req/min bucket — a
   // keystroke-per-request would burn it.

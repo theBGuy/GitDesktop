@@ -3554,11 +3554,92 @@ const unnamedRadioGroups = ({ text, starts }) => {
 // right path — so it can report a file that guards one handler and not the one
 // added next to it. It is a ratchet, not a proof: its job is to make a NEW
 // dispatch path stop a reader at the allowlist rather than merge unnoticed.
-const EVENT_TO_BINDING_RE = /\beventToBinding\s*\(/;
+// A call compared directly to a string literal that is the WHOLE other operand
+// (`eventToBinding(e) === "x"`, either side, ==/!=/===/!==) tests a hardcoded
+// chord, never a user binding, so it is no dispatcher line. The literal is
+// bounded: after the call, by line end, `)`, `&&`, `||`, `?` (never `?.`), `:`,
+// `;`, `,`, `}` or `]`; before it, by line start, `(`, `!`, `&&`, `||`, `?`, `:`, `,`,
+// `=`, `{` or `return`. A literal that ends its line holds only when the next
+// non-blank line starts with an after-boundary, and one that starts its line
+// only when the previous non-blank line ends with a before-boundary (a file
+// edge counts). A literal joined to more (`=== "mod+" + key`, on one line or
+// across a wrap) counts, as does any other use of the call (a variable or
+// lookup compare, a stored result, a call whose parens leave the line).
+const EVENT_TO_BINDING_RE = /\beventToBinding\s*\(/g;
+const LITERAL_AFTER_RE =
+  /^\s*[!=]==?\s*(?:"[^"]*"|'[^']*')\s*(?:$|[):;,}\]]|\?(?!\.)|&&|\|\|)/;
+const LITERAL_AFTER_EOL_RE = /^\s*[!=]==?\s*(?:"[^"]*"|'[^']*')\s*$/;
+const STARTS_AFTER_BOUNDARY_RE = /^\s*(?:[):;,}\]]|\?(?!\.)|&&|\|\|)/;
+const LITERAL_BEFORE_RE =
+  /(?:^|[(!?:,={]|&&|\|\||\breturn)\s*(?:"[^"]*"|'[^']*')\s*[!=]==?\s*$/;
+const LITERAL_BEFORE_BOL_RE = /^\s*(?:"[^"]*"|'[^']*')\s*[!=]==?\s*$/;
+const ENDS_BEFORE_BOUNDARY_RE = /(?:[(!?:,={]|&&|\|\||\breturn)\s*$/;
+
+/** Whether one comment-stripped line uses `eventToBinding(` other than in a
+ *  direct comparison to a string literal. `prev` / `next` are the nearest
+ *  non-blank lines around it, or null at a file edge. */
+function dispatchesBinding(line, prev = null, next = null) {
+  for (const m of line.matchAll(EVENT_TO_BINDING_RE)) {
+    let depth = 0;
+    let close = -1;
+    for (let i = m.index + m[0].length - 1; i < line.length; i++) {
+      if (line[i] === "(") depth++;
+      else if (line[i] === ")" && --depth === 0) {
+        close = i;
+        break;
+      }
+    }
+    if (close < 0) return true;
+    const after = line.slice(close + 1);
+    const before = line.slice(0, m.index);
+    const literal =
+      (LITERAL_AFTER_RE.test(after) &&
+        (!LITERAL_AFTER_EOL_RE.test(after) ||
+          next === null ||
+          STARTS_AFTER_BOUNDARY_RE.test(next))) ||
+      (LITERAL_BEFORE_RE.test(before) &&
+        (!LITERAL_BEFORE_BOL_RE.test(before) ||
+          prev === null ||
+          ENDS_BEFORE_BOUNDARY_RE.test(prev)));
+    if (!literal) return true;
+  }
+  return false;
+}
+
+/** The nearest non-blank line from `i` stepping by `step`, or null. */
+function nonBlankFrom(lines, i, step) {
+  for (let j = i; j >= 0 && j < lines.length; j += step)
+    if (lines[j].trim() !== "") return lines[j];
+  return null;
+}
+
+/** Scanner: every line that uses `eventToBinding(` as a binding dispatch. */
+const bindingDispatchLines = ({ lines }) =>
+  lines.flatMap((line, i) =>
+    dispatchesBinding(
+      line,
+      nonBlankFrom(lines, i - 1, -1),
+      nonBlankFrom(lines, i + 1, 1),
+    )
+      ? [i + 1]
+      : [],
+  );
 const PREVENT_DEFAULT_RE = /\.preventDefault\s*\(/;
 const EDITABLE_GUARD_RE = /\bisEditableTarget\s*\(/;
 const TYPEAHEAD_GUARD_RE = /\bisTypeaheadTarget\s*\(/;
 const TYPEAHEAD_KEY_RE = /\bisTypeaheadKey\s*\(/;
+
+// A submit chord tested as "either platform flag plus Enter", either operand
+// order: it also fires on Ctrl+Shift+Enter (a bound chord) and any other
+// modifier added on top. Matched over the normalized text, so a wrapped
+// condition still counts.
+const MOD_FLAG = String.raw`[\w$]+\??\.(?:ctrlKey|metaKey)`;
+const EITHER_MOD = String.raw`\(\s*${MOD_FLAG}\s*\|\|\s*${MOD_FLAG}\s*\)`;
+const ENTER_KEY = String.raw`[\w$]+\??\.(?:key|code)\s*===?\s*["']Enter["']`;
+const LOOSE_SUBMIT_CHORD_RE = new RegExp(
+  String.raw`${EITHER_MOD}\s*&&\s*${ENTER_KEY}|${ENTER_KEY}\s*&&\s*${EITHER_MOD}`,
+  "g",
+);
 
 // A member read of an ACTIONS row's `defaultBinding` (`.x`, `?.x`, the dot
 // wrapped onto either line), which skips the per-platform default. A spread
@@ -5481,7 +5562,7 @@ export const CHECKS = [
     // form (a hardcoded platform modifier), and a wrapped pair must not read as
     // clean either.
     scan: perLine(/\b(?:ctrlKey|metaKey)\b/),
-    // FROZEN: the mod+Enter submit policy files (PR #202), the three MULTI-SELECT
+    // FROZEN: the markdown editor's formatting keys, the three MULTI-SELECT
     // modifier readers (the file row, HistoryPanel's commit list, and the
     // Projects selection module shared by the board and table layouts — each
     // answers "did the pointer hold mod or Shift", which is a property of the
@@ -5496,24 +5577,10 @@ export const CHECKS = [
       // only on an unmodified press — every modifier excluded symmetrically,
       // not a platform-modifier read the registry could own.
       "src/features/activity/ActivityDock.tsx",
-      "src/features/conversations/CommentComposer.tsx",
-      "src/features/conversations/CommentEditor.tsx",
-      "src/features/conversations/EditTitleBodyDialog.tsx",
       "src/features/diff/DiffViewer.tsx",
-      "src/features/discussions/DiscussionView.tsx",
       "src/features/history/HistoryPanel.tsx",
-      "src/features/plan/PlanView.tsx",
-      "src/features/projects/BoardAddDialogs.tsx",
-      "src/features/projects/BoardBulkFieldsDialog.tsx",
-      "src/features/projects/BoardDraftEditDialog.tsx",
       "src/features/projects/board-selection.ts",
-      "src/features/pulls/CommitComments.tsx",
-      "src/features/pulls/CreateLocalPrDialog.tsx",
-      "src/features/pulls/CreatePrDialog.tsx",
-      "src/features/pulls/ReviewComposer.tsx",
-      "src/features/pulls/ReviewThreads.tsx",
       "src/features/repository/FileRow.tsx",
-      "src/features/research/ResearchView.tsx",
       // tabAdvances excludes every modified Tab symmetrically — not a
       // platform-modifier read, so isMac derivation would be wrong here.
       "src/lib/list-keyboard-nav.ts",
@@ -5691,8 +5758,6 @@ export const CHECKS = [
       // And the open list's order-freeze seed on the rows' first arrival,
       // idempotent behind its no-snapshot-yet gate.
       "src/features/repository/BranchSwitcher.tsx",
-      // Registers the open dialog with the native-menu gate; add/remove pair.
-      "src/lib/hotkeys/modal-gate.ts",
       // Scroll/resize-close listeners for the open hovercard; add/remove pair,
       // and re-subscribing after an Activity re-show is the wanted behavior.
       "src/features/repository/insights/DependenciesCard.tsx",
@@ -5988,7 +6053,7 @@ export const CHECKS = [
     appliesTo: notVendoredUi,
     scan: unlessAllPresent(
       [EDITABLE_GUARD_RE, TYPEAHEAD_GUARD_RE, TYPEAHEAD_KEY_RE],
-      onlyWhen(PREVENT_DEFAULT_RE, perLine(EVENT_TO_BINDING_RE)),
+      onlyWhen(PREVENT_DEFAULT_RE, bindingDispatchLines),
     ),
     // No entry here dispatches a REBINDABLE binding, which is what the guards
     // protect; each is keyed per file, like every other entry here.
@@ -5997,17 +6062,10 @@ export const CHECKS = [
       // included, is precisely its contract — a guard would make keys
       // unbindable.
       "src/features/settings/KeyboardSection.tsx",
-      // Its `eventToBinding` call tests a HARDCODED mod+enter submit chord, not
-      // a user binding, so there is no rebindable dispatch to guard.
+      // Its `eventToBinding` call tests a hardcoded "mod+" prefix on Enter
+      // (`?.startsWith`, no literal compare), not a user binding, so there is no
+      // rebindable dispatch to guard.
       "src/components/mention-autocomplete.tsx",
-      // Same shape: a HARDCODED mod+enter submit chord on the status-update
-      // dialog, not a user binding.
-      "src/features/projects/ProjectStatusStrip.tsx",
-      // Same shape again: the project and view dialogs' mod+enter submit chord.
-      "src/features/projects/ProjectLifecycleDialogs.tsx",
-      // Same shape: a HARDCODED mod+enter submit chord on the merge dialog,
-      // not a user binding.
-      "src/features/pulls/MergePrDialog.tsx",
       // Its two `eventToBinding` calls (the board's handler and the
       // table/roadmap grid's) prevent only on fixed tables: the hardcoded Alt
       // chords (four reorder, four date-shift) and the grid's own cursor and
@@ -6026,7 +6084,15 @@ export const CHECKS = [
       "src/features/history/EditHistoryDialog.tsx",
     ],
     message:
-      "a path that matches eventToBinding(e) against a user binding and preventDefaults it must apply the same clause the global listener does — isEditableTarget, isTypeaheadTarget, and isTypeaheadKey (src/lib/hotkeys/binding.ts) — or a single-key binding steals keystrokes from text fields or typeahead lists, and named keys stop reaching the surfaces that should still get them; any subset leaves the case the missing predicate covers, and a file that dispatches no rebindable binding needs an allowlist entry with rationale",
+      "a path that matches eventToBinding(e) against a user binding and preventDefaults it must apply the same clause the global listener does — isEditableTarget, isTypeaheadTarget, and isTypeaheadKey (src/lib/hotkeys/binding.ts) — or a single-key binding steals keystrokes from text fields or typeahead lists, and named keys stop reaching the surfaces that should still get them; any subset leaves the case the missing predicate covers; a call compared directly to a string literal is a hardcoded chord and does not count, and any other file that dispatches no rebindable binding needs an allowlist entry with rationale",
+  },
+  {
+    name: "loose-submit-chord",
+    appliesTo: notVendoredUi,
+    scan: perFile(LOOSE_SUBMIT_CHORD_RE),
+    allowlist: [],
+    message:
+      'a mod+Enter submit tests `eventToBinding(e) === "mod+enter"` (src/lib/hotkeys/binding.ts), never `(e.ctrlKey || e.metaKey) && e.key === "Enter"`: the loose form also fires with Shift or Alt added (Ctrl+Shift+Enter, Ctrl+Alt+Enter), so a dialog submits or a comment posts on a chord another action owns',
   },
   {
     name: "raw-default-binding-read",
@@ -6051,9 +6117,9 @@ export const CHECKS = [
     allowlist: [
       // Its arrow arm runs only on a `plain` key: no Alt, Ctrl, Meta or Shift.
       "src/features/activity/ActivityDock.tsx",
-      // The next three render only inside a modal dialog: Go back stands down
-      // under a modal, and a chord let through would reach the app bindings
-      // behind the dialog. The image viewer's own DialogContent handler.
+      // The next three render only inside a modal dialog, where Go back and
+      // every page binding but app zoom are inert (dispatchShortcut). The
+      // image viewer's own DialogContent handler.
       "src/components/image-lightbox.tsx",
       // The create-issue dialog's Projects chips.
       "src/features/issues/CreateIssueDialog.tsx",
@@ -6063,7 +6129,7 @@ export const CHECKS = [
     ],
     expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
     message:
-      "Go back and Go forward default to Alt+Left and Alt+Right, and the window listener skips an event a component already consumed, so a handler that takes every ArrowLeft/ArrowRight as its own swallows the chord: return on `hasChordModifier(e)` (src/lib/hotkeys/binding.ts) before acting on or preventing a horizontal arrow. A handler that renders only inside a modal dialog may keep swallowing chords (Go back stands down there, and a chord let through would reach app bindings behind the dialog) with an allowlist entry giving that reason. The check is per file and reads only that the file names the key, consumes some event (`preventDefault` or `stopPropagation`) and calls neither `hasChordModifier(` nor `eventToBinding(`. It cannot see: a second, unguarded handler in a file that already holds a guard token (LinkedIssuesField.tsx's modal-only Jira chip handler), or the loss of a guarded handler's bail in such a file (ChangesPanel.tsx's tree handler, which scripts/changes-tree-chord-bail.test.mjs pins instead), or an arm of a guarded handler that swallows chords on purpose (ProjectsBoardPanel.tsx's roadmap rows keep the Alt arrows for their own reorder and date-shift chords); files that pass only because they call `eventToBinding(` for another purpose (mention-autocomplete.tsx); arrow keys matched other than by name (`e.keyCode`, a key read from a table built elsewhere); a consume spelled as an optional call (`e.preventDefault?.()`) or as a keymap entry that returns true; a guard token that appears only inside a string literal; and handlers in vendored UI or inside libraries. Those stay review concerns",
+      "Go back and Go forward default to Alt+Left and Alt+Right, and the window listener skips an event a component already consumed, so a handler that takes every ArrowLeft/ArrowRight as its own swallows the chord: return on `hasChordModifier(e)` (src/lib/hotkeys/binding.ts) before acting on or preventing a horizontal arrow. A handler that renders only inside a modal dialog may keep swallowing chords (Go back and every page binding but app zoom are inert under a modal) with an allowlist entry giving that reason. The check is per file and reads only that the file names the key, consumes some event (`preventDefault` or `stopPropagation`) and calls neither `hasChordModifier(` nor `eventToBinding(`. It cannot see: a second, unguarded handler in a file that already holds a guard token (LinkedIssuesField.tsx's modal-only Jira chip handler), or the loss of a guarded handler's bail in such a file (ChangesPanel.tsx's tree handler, which scripts/changes-tree-chord-bail.test.mjs pins instead), or an arm of a guarded handler that swallows chords on purpose (ProjectsBoardPanel.tsx's roadmap rows keep the Alt arrows for their own reorder and date-shift chords); files that pass only because they call `eventToBinding(` for another purpose (mention-autocomplete.tsx); arrow keys matched other than by name (`e.keyCode`, a key read from a table built elsewhere); a consume spelled as an optional call (`e.preventDefault?.()`) or as a keymap entry that returns true; a guard token that appears only inside a string literal; and handlers in vendored UI or inside libraries. Those stay review concerns",
   },
   {
     name: "titled-disabled-trigger",

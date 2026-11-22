@@ -6,15 +6,31 @@
  */
 import type { ActionId } from "./registry";
 
+/** Precedence band of a registration: an app-level default is a `fallback`, a
+ *  panel or view is a `surface`, an open popup's own content is a `popup`. */
+export type HandlerTier = "fallback" | "surface" | "popup";
+
 export interface HandlerEntry {
   run: () => void;
   enabled: boolean;
+  /** Absent means "surface". */
+  tier?: HandlerTier;
+  /** The modal scope it registered inside; absent or null means page level. */
+  scope?: object | null;
 }
+
+const TIER_RANK: Record<HandlerTier, number> = {
+  fallback: 0,
+  surface: 1,
+  popup: 2,
+};
 
 /**
  * Live handlers, registered by whichever components are currently mounted.
  * Hidden <Activity> tabs unmount their effects, so per-tab actions are only
- * live on the visible tab. The newest enabled registration wins.
+ * live on the visible tab. Among enabled entries the highest tier answers, and
+ * registration order decides only inside one tier, so an `enabled` flip that
+ * re-registers an entry can't take an action from a higher tier.
  */
 const liveHandlers = new Map<ActionId, HandlerEntry[]>();
 
@@ -74,14 +90,29 @@ export function hasLiveHandler(id: ActionId): boolean {
   return (liveHandlers.get(id)?.length ?? 0) > 0;
 }
 
-/** Runs the newest enabled handler for an action. True when one ran. */
-export function dispatchAction(id: ActionId): boolean {
+/** Runs, among the enabled entries `eligible` accepts (all when omitted), the
+ *  one in the highest tier, newest within it. True when one ran. The filter
+ *  narrows only who runs: whatever it says, hasLiveHandler counts every entry
+ *  and the availability snapshot every enabled one. */
+export function dispatchAction(
+  id: ActionId,
+  eligible?: (entry: HandlerEntry) => boolean,
+): boolean {
   const entries = liveHandlers.get(id) ?? [];
+  let best: HandlerEntry | null = null;
+  let bestRank = -1;
+  // Newest first, so a later entry of the same tier is never displaced.
   for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].enabled) {
-      entries[i].run();
-      return true;
+    const entry = entries[i];
+    if (!entry.enabled || (eligible !== undefined && !eligible(entry)))
+      continue;
+    const rank = TIER_RANK[entry.tier ?? "surface"];
+    if (rank > bestRank) {
+      best = entry;
+      bestRank = rank;
     }
   }
-  return false;
+  if (best === null) return false;
+  best.run();
+  return true;
 }

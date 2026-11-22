@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { formatBinding } from "@/lib/hotkeys/binding";
 import {
-  dispatchAction,
+  eventToBinding,
+  formatBinding,
+  isImeKeydown,
+} from "@/lib/hotkeys/binding";
+import {
+  dispatchShortcut,
   useAvailableActions,
   useEffectiveBindings,
 } from "@/lib/hotkeys/hotkeys";
@@ -60,20 +64,35 @@ export function CommandPalette({
   function run(id: ActionId) {
     onOpenChange(false);
     // Let the dialog finish closing first so focus restoration can't fight
-    // with whatever the action opens (popovers, dialogs, focused inputs).
-    setTimeout(() => dispatchAction(id), 0);
+    // with whatever the action opens (popovers, dialogs, focused inputs). The
+    // modal rule is read when the timeout fires, so a prompt that opened after
+    // the pick refuses it.
+    setTimeout(() => dispatchShortcut(id), 0);
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
+    // Only an exact Enter picks. A modified Enter is a chord the listener
+    // answers (under the palette's own modal, only the palette's
+    // registrations); an AltGraph Enter is character input nothing acts on.
+    const pick = eventToBinding(e) === "enter";
+    // A key the input method owns is left to it: its Enter confirms a
+    // candidate rather than picking a row, and its arrows move the candidate
+    // list rather than the highlight. It stops here too, or the dialog's
+    // document-level Escape dismissal would close the palette on it.
+    if (isImeKeydown(e)) {
+      e.stopPropagation();
+      return;
+    }
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setHighlight(stepHighlight(highlight, items.length, 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setHighlight(stepHighlight(highlight, items.length, -1));
-    } else if (e.key === "Enter") {
+    } else if (pick) {
+      // A held Enter neither picks again nor does anything native.
       e.preventDefault();
-      if (highlighted) run(highlighted.id);
+      if (highlighted && !e.repeat) run(highlighted.id);
     }
   }
 

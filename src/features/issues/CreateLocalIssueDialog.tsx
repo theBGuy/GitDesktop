@@ -166,8 +166,7 @@ export function CreateLocalIssueDialog({
   // on DialogContent, not the <form>: the X close button is a form SIBLING
   // inside the Popup, so a form-level handler would miss a chord pressed with
   // focus on X. It is swallowed here whenever it may fire (the hook mirrors the
-  // global listener's own guards), so the global generate-commit-message action
-  // can't run behind the dialog; while generating it swallows but DOESN'T
+  // global listener's own guards); while generating it swallows but DOESN'T
   // cancel. A running create holds it like the button: the draft it would
   // revise has already been sent.
   const isSubmitting = createHold.running;

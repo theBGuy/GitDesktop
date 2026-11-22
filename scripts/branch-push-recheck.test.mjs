@@ -2,11 +2,11 @@
 // ref (rename, local delete, archive, reset to upstream, update, the current
 // branch's rebases, pull-drop, the stash-reapply reruns, a local PR's update,
 // merge and resolve finish, undo, reset to commit, amend, squash, Edit history,
-// Edit dates, Cherry-pick to branch) or delete branches in bulk (Clean up), the one
-// shared helper they call (sync.ts), every HEAD push
-// recording the branch it starts on, and the Ctrl+B modal gate. A dialog
-// opened before a push started still submits after it, so each submit reads
-// the pending pushes live; render state alone predates them.
+// Edit dates, Cherry-pick to branch) or delete branches in bulk (Clean up),
+// the one shared helper they call (sync.ts), and every HEAD push recording the
+// branch it starts on. A dialog opened before a push started still submits
+// after it, so each submit reads the pending pushes live; render state alone
+// predates them.
 //
 // The source checker is a pure function over file text, so the suite feeds it
 // the real files (must pass) and in-memory mutants with a check removed (must
@@ -16,7 +16,6 @@ import { readdirSync, readFileSync } from "node:fs";
 import { posix } from "node:path";
 import { test } from "node:test";
 import { pushesBranch } from "../src/lib/git/queries/push-writes.ts";
-import { elementInOpenModal } from "../src/lib/hotkeys/open-modal.ts";
 
 const R = "src/features/repository/";
 const SYNC = "src/lib/git/queries/sync.ts";
@@ -186,13 +185,6 @@ const PINS = [
     anchor: "async function runRebaseOnto(",
     seq: ["refuseWhileCurrentPushes()", "await rebaseOnto.mutateAsync("],
     mutate: ["refuseWhileCurrentPushes()"],
-  },
-  {
-    name: "show-branches modal gate",
-    file: `${R}BranchSwitcher.tsx`,
-    anchor: '"show-branches",',
-    seq: ["if (focusInOpenModal()) return;", "setOpen(true)"],
-    mutate: ["if (focusInOpenModal()) return;"],
   },
   {
     name: "sync reset to upstream",
@@ -785,10 +777,7 @@ const escapeId = (name) => name.replace(/\$/g, () => "\\$");
 // module it loads from src/ would fail; this pin bans every import so none can
 // slip in, re-exports and dynamic imports included. Matched over `lex`'s bare
 // view, so neither a comment nor text inside a string hides or fakes one.
-const IMPORT_FREE = [
-  `${R}branch-sync-state.ts`,
-  "src/lib/hotkeys/open-modal.ts",
-];
+const IMPORT_FREE = [`${R}branch-sync-state.ts`];
 const IMPORT_SHAPES = [
   new RegExp(
     String.raw`(^|[^\w$.])import\s*(type\s+)?(?:${ID_PART}|[\\{*])`,
@@ -1446,114 +1435,4 @@ test("fails closed on a missing file or anchor", () => {
     checkPins([{ ...pin, anchor: "no such anchor" }], sources),
     [],
   );
-});
-
-// A minimal element tree: attribute-compound selector lists, `closest` from
-// the node itself up, `querySelector` over descendants.
-function matches(node, sel) {
-  return sel.split(",").some((compound) => {
-    const parts = [...compound.trim().matchAll(/\[([\w-]+)(?:="([^"]*)")?\]/g)];
-    if (parts.length === 0) throw new Error(`unparsed selector: ${compound}`);
-    return parts.every(([, k, v]) =>
-      v === undefined ? k in node.attrs : node.attrs[k] === v,
-    );
-  });
-}
-function el(attrs, ...children) {
-  const node = {
-    attrs,
-    parent: null,
-    children,
-    closest(sel) {
-      for (let n = node; n; n = n.parent) if (matches(n, sel)) return n;
-      return null;
-    },
-    querySelector(sel) {
-      const stack = [...node.children];
-      while (stack.length) {
-        const n = stack.shift();
-        if (matches(n, sel)) return n;
-        stack.push(...n.children);
-      }
-      return null;
-    },
-  };
-  for (const c of children) c.parent = node;
-  return node;
-}
-
-test("elementInOpenModal: open slots, nested portaled popups, closed and other slots", () => {
-  const input = el({});
-  el(
-    { "data-slot": "dialog-portal" },
-    el({ "data-slot": "dialog-content", "data-open": "" }, input),
-  );
-  assert.equal(elementInOpenModal(input), true);
-
-  // A picker's search input inside a modal: portaled beside the content.
-  const search = el({});
-  el(
-    { "data-slot": "dialog-portal" },
-    el({ "data-slot": "dialog-content", "data-open": "" }),
-    el({}, el({ "data-slot": "popover-content", "data-open": "" }, search)),
-  );
-  assert.equal(elementInOpenModal(search), true);
-
-  // The command palette is itself a dialog-content.
-  const paletteInput = el({});
-  el(
-    { "data-slot": "dialog-portal" },
-    el({ "data-slot": "dialog-content", "data-open": "" }, paletteInput),
-  );
-  assert.equal(elementInOpenModal(paletteInput), true);
-
-  const closedInput = el({});
-  el(
-    { "data-slot": "dialog-portal" },
-    el({ "data-slot": "dialog-content", "data-closed": "" }, closedInput),
-  );
-  assert.equal(elementInOpenModal(closedInput), false);
-
-  // The switcher's own popover sets role="dialog" but is no matched slot.
-  const popoverInput = el({});
-  el(
-    { "data-slot": "popover-content", role: "dialog", "data-open": "" },
-    popoverInput,
-  );
-  assert.equal(elementInOpenModal(popoverInput), false);
-
-  assert.equal(elementInOpenModal(null), false);
-
-  const sheetInput = el({});
-  el({ "data-slot": "sheet-content", "data-open": "" }, sheetInput);
-  assert.equal(elementInOpenModal(sheetInput), true);
-
-  const drawerInput = el({});
-  el({ "data-slot": "drawer-content", "data-state": "open" }, drawerInput);
-  assert.equal(elementInOpenModal(drawerInput), true);
-
-  // Vaul spells open as data-state; a bare data-open is not its open state.
-  const drawerClosed = el({});
-  el(
-    { "data-slot": "drawer-content", "data-state": "closed", "data-open": "" },
-    drawerClosed,
-  );
-  assert.equal(elementInOpenModal(drawerClosed), false);
-});
-
-test("open-modal selector strings name every slot and portal", () => {
-  const src = readFileSync(
-    new URL("../src/lib/hotkeys/open-modal.ts", import.meta.url),
-    "utf8",
-  );
-  for (const s of [
-    '[data-slot="dialog-content"][data-open]',
-    '[data-slot="sheet-content"][data-open]',
-    '[data-slot="drawer-content"][data-state="open"]',
-    '[data-slot="dialog-portal"]',
-    '[data-slot="sheet-portal"]',
-    '[data-slot="drawer-portal"]',
-  ])
-    assert.ok(src.includes(s), s);
-  assert.doesNotMatch(src, /\[role=/);
 });

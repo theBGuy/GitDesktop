@@ -24,18 +24,29 @@ grep -l "@/components/panel-portal" src/components/ui/<file>.tsx
 No match means the customization is gone. Restore it from git history
 rather than rewriting it from scratch. The marker imports are
 `usePanelPortalContainer`, `usePanelActive`, `isUserDismissal`, and
-`PanelPortalReset`.
+`PanelPortalReset`. The hotkey modal scope (`src/lib/hotkeys/modal-scope.ts`)
+also depends on `DialogContent` and `SheetContent` rendering
+`PanelPortalReset`: a re-vendor that drops it leaves inert every shortcut a
+dialog registers through the hotkey registry (key handlers a dialog attaches
+itself, such as a form's `mod+enter` submit, still run). `drawer.tsx`
+renders no `PanelPortalReset`, so under an open drawer every shortcut but
+app zoom is inert, the drawer's own included.
 
 Coverage is partial and indirect. `pnpm run checks` runs
 `lone-activity-boundary`, which pins the `<Activity>` side of the contract
 (no JSX `<Activity` outside `TabPanel.tsx`; a second one inside that file
-goes uncaught) but cannot see a missing `container` prop here. Nothing
-else guards this folder, so a live smoke is the remaining check. Two things
-decide whether one tests anything:
+goes uncaught) but cannot see a missing `container` prop here. It also runs
+scan S2 in `scripts/hotkey-registry.test.mjs`, which fails when `dialog.tsx`
+or `sheet.tsx` stops rendering `PanelPortalReset`. Nothing else guards this
+folder, so a live smoke is the remaining check. Two things decide whether
+one tests anything:
 
-- **Switch tabs by hotkey, not by clicking a tab.** An outside click
-  dismisses an open modal before it is ever concealed, so the click path
-  never reaches the behavior under test.
+- **Switch tabs without clicking a tab.** An outside click dismisses an
+  open modal before it is ever concealed, so the click path never reaches
+  the behavior under test. For a popup, switch by hotkey. Under an open
+  dialog or sheet every tab hotkey is inert, so leave through navigation
+  that is not a shortcut, such as a toast's action button (clicking a toast
+  leaves the modal open).
 - **Pick a trigger that sits inside a panel.** Several obvious ones do not:
   `CommitDialog`, the commit box and its Co-authors popover all render above
   `TabPanel`, so they never enter a concealed subtree. A changed-file row's

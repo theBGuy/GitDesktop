@@ -20,7 +20,6 @@ import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { useHotkeyAction } from "./hotkeys";
-import { focusInOpenModal } from "./open-modal";
 
 /** The toast for a press whose check answered "gone". */
 const DEAD_TARGET_COPY: Record<-1 | 1, (name: string) => string> = {
@@ -128,12 +127,12 @@ function restoreOptions(queryClient: QueryClient): NavRestoreOptions {
 
 /** Registers Go back and Go forward for the whole app. Mounted once, by App.
  *  An empty direction keeps its registration, disabled, so the chord is still
- *  consumed rather than reaching the webview's native back. A modal holding focus
- *  stands both down at fire time; App's own dialogs and the gated ones come in as
- *  `dialogOpen`. Also registers the history's lens reader (a lens only once no
- *  missing input could change it), here because App mounts this in every view, so a
- *  landing made under an overlay still has one. */
-export function useNavHistoryActions(dialogOpen: boolean): void {
+ *  consumed rather than reaching the webview's native back. Under an open modal
+ *  both are inert through dispatchShortcut, focus on <body> included. Also
+ *  registers the history's lens reader (a lens only once no missing input could
+ *  change it), here because App mounts this in every view, so a landing made
+ *  under an overlay still has one. */
+export function useNavHistoryActions(): void {
   const queryClient = useQueryClient();
   // Only a lens no missing input could change: a provisional one would read as real
   // and start or skip a segment wrongly. A cached Fork choice is such a lens, since no
@@ -149,18 +148,12 @@ export function useNavHistoryActions(dialogOpen: boolean): void {
   const canForward = useUiStore(canGoForward);
   useHotkeyAction(
     "go-back",
-    () => {
-      if (focusInOpenModal()) return;
-      useUiStore.getState().goBack(restoreOptions(queryClient));
-    },
-    canBack && !dialogOpen,
+    () => useUiStore.getState().goBack(restoreOptions(queryClient)),
+    canBack,
   );
   useHotkeyAction(
     "go-forward",
-    () => {
-      if (focusInOpenModal()) return;
-      useUiStore.getState().goForward(restoreOptions(queryClient));
-    },
-    canForward && !dialogOpen,
+    () => useUiStore.getState().goForward(restoreOptions(queryClient)),
+    canForward,
   );
 }

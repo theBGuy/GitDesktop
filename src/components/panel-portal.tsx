@@ -5,6 +5,10 @@ import {
   useContext,
   useState,
 } from "react";
+import {
+  ModalScopeContext,
+  useMintedModalScope,
+} from "@/lib/hotkeys/modal-scope";
 
 /**
  * Portal target for floating UI (popovers, menus, selects, comboboxes) rendered
@@ -86,14 +90,22 @@ export function PanelPortalBoundary({
 }
 
 /**
- * Clears the panel container for a subtree. Used inside modal popups: their
- * floating UI must not land in a panel the modal covers. Base UI chains it onto
- * the popup's own portal node instead, so pickers still stack above the modal.
+ * Clears the panel container for a subtree and opens its hotkey modal scope.
+ * Rendered by DialogContent and SheetContent only. Their floating UI must not
+ * land in a panel the modal covers (Base UI chains it onto the popup's own portal
+ * node, so pickers still stack above the modal), and hotkeys registered inside
+ * are the modal's own for dispatchShortcut. Renders no element: DialogContent is
+ * a grid, and an extra child would shift its child selectors.
  */
 export function PanelPortalReset({
   children,
 }: {
   children: ReactNode;
 }): ReactNode {
-  return <PanelPortalContext value={undefined}>{children}</PanelPortalContext>;
+  const scope = useMintedModalScope();
+  return (
+    <PanelPortalContext value={undefined}>
+      <ModalScopeContext value={scope}>{children}</ModalScopeContext>
+    </PanelPortalContext>
+  );
 }

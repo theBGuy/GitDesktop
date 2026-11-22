@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { dispatchAction } from "./handler-registry";
+import { dispatchShortcut } from "./dispatch-shortcut";
 import type { ActionId } from "./registry";
 
 type SideButton = 3 | 4;
@@ -19,11 +19,11 @@ const vetoed: Record<SideButton, boolean> = { 3: false, 4: false };
 const vetoedPresses = new WeakSet<MouseEvent>();
 
 /** The one dispatch path a side button takes: 3 runs "go-back", 4 runs "go-forward",
- *  through dispatchAction, so every gate on the key registrations applies. True when
- *  a handler ran. */
+ *  through dispatchShortcut, so the modal rule and every gate on the key
+ *  registrations apply. True when a handler ran. */
 export function navigateBySideButton(button: number): boolean {
   if (!isSideButton(button)) return false;
-  return dispatchAction(SIDE_BUTTON_ACTIONS[button]);
+  return dispatchShortcut(SIDE_BUTTON_ACTIONS[button]);
 }
 
 /** Called during a side-button mousedown that some surface spent on something else (a

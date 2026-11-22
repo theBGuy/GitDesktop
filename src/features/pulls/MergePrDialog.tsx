@@ -305,15 +305,10 @@ export function MergePrDialog(props: MergePrDialogProps) {
         // The chord merges only from a message field and is swallowed everywhere
         // else in the dialog, so it never reaches the commit action behind it. On
         // DialogContent: the X close is a sibling of the fields. An IME's
-        // committing Enter is the composition's, not the chord's (WebKit may end
-        // the composition first, so keyCode 229 is checked too): it keeps its
-        // native default and is stopped here, before the app listener would
-        // prevent it.
+        // committing Enter is the composition's, not the chord's: the converter
+        // answers null for it, so it keeps its native default here and in the
+        // app listener.
         onKeyDown={(e) => {
-          if (e.nativeEvent.isComposing || e.keyCode === 229) {
-            if (eventToBinding(e) === "mod+enter") e.stopPropagation();
-            return;
-          }
           if (eventToBinding(e) !== "mod+enter") return;
           e.preventDefault();
           if (e.repeat || held) return;

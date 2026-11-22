@@ -246,7 +246,7 @@ export const AutomationsSection = withForm({
     }
 
     // This panel's own open Discard prompt, dismissed if the panel hides or
-    // unmounts under it (a hotkey can navigate away past the modal).
+    // unmounts under it (a landing that is not a shortcut can still navigate away).
     const promptRef = useRef<ConfirmRequest | null>(null);
     useEffect(
       () => () => {

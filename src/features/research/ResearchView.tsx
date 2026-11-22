@@ -34,7 +34,7 @@ import {
 import { type AgentKind, defaultAgentKind } from "@/lib/ai/agent";
 import { formatUsd } from "@/lib/ai/cost";
 import { copyText } from "@/lib/clipboard";
-import { formatBinding } from "@/lib/hotkeys/binding";
+import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
 import { useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import { useToastClearance } from "@/lib/use-toast-clearance";
@@ -271,7 +271,7 @@ export function ResearchComposer({
             autoFocus
             rows={3}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              if (eventToBinding(e) === "mod+enter") {
                 e.preventDefault();
                 submit();
               }
