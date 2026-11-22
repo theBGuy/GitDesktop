@@ -38,7 +38,9 @@
 // The N-series pins the opencode version gate in front of every opencode 2
 // path. agent_review and agent_session reach an opencode2_* entry function only
 // through one dispatch statement each, compared as whitespace-collapsed code
-// (comments blanked, literals kept, so a comment inside one never fails it)
+// within the enclosing fn's body (comments and string literals blanked, so a
+// reworded string never fails it, nor a comment where the code already has
+// whitespace; one between tokens the pinned text joins, `::/*x*/`, does)
 // around the entry call (its argument list is the implementer's): the review's
 // after its binary resolve and before self_mcp_wanted, the host session's after
 // mcp_names and before mcp_config_path, the container's after the
@@ -46,13 +48,16 @@
 // The two host dispatches read their Cli from opencode_cli(..).await?, whose `?`
 // is the refusal. The host session's 1.x branch runs the binary its dispatch
 // classified (agent_session resolves twice: the dispatch's lookup and the other
-// CLIs' host lookup in the `None` arm); classify_version is called once, in
-// opencode_verdict_with; the container entry's first call is its image gate;
-// agent.rs names core items only as crate::opencode2::… (no use, no alias, no
-// other path). Only that spelling (crate::opencode2::review_env) is core's and
-// never counts as the 1.x call; any other path (self::, super::) counts as the
-// bare name. Out of reach, besides the shapes above: what the opencode2_* bodies
-// do with their inputs, which N4-N11 and N13 take over.
+// CLIs' host lookup in the `None` arm, a statement pinned whole, literals
+// blanked) and spawns it as &binary, with nothing naming opencode_v1_binary
+// between the dispatch and that lookup or binary between the lookup and the
+// spawn; classify_version is called once, in opencode_verdict_with; the
+// container entry's first call is its image gate; agent.rs names core items
+// only as crate::opencode2::… (no use, no alias, no other path). Only that
+// spelling (crate::opencode2::review_env) is core's and never counts as the 1.x
+// call; any other path (self::, super::) counts as the bare name. Out of reach,
+// besides the shapes above: what the opencode2_* bodies do with their inputs,
+// which N4-N11 and N13 take over.
 //
 // N4-N11 hold the lock of every wired opencode 2 run: core's three lock producers
 // (probe_document, read_back, lock_document) are called once each, in
@@ -98,6 +103,19 @@
 // builder of both reads, sets the project-disable pair (N16). agent_session's 1.x
 // restart rebinding is pinned in text, once, before its opencode_session_args(
 // call (N17). Out of reach: a closure, macro or callee that changes them.
+//
+// N18 reads src-tauri/src/health.rs too, and holds each detect row to one
+// version observation: agent_detect and health::detect each hold one opencode
+// arm, which calls opencode_detection( once and no run_capture*(
+// (run_capture_parts included), the bodies of opencode_detection,
+// opencode_detection_with and opencode_verdict_with call no run_capture*(, and
+// production calls opencode_verdict_probe( only in opencode_verdict and
+// opencode_detection, once each, in either order. Counted on the masked view,
+// so a comment or literal spelling a call never counts. Out of reach: a probe
+// through another callee than opencode_verdict_probe or run_capture* (such as
+// capture_tree or a raw Command); a probe added in agent_detect or
+// health::detect outside the opencode arm; and what opencode_verdict_with does
+// with the probe it is handed.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -109,6 +127,7 @@ import {
 } from "./check-rust-invariants.mjs";
 
 const FILE = "src-tauri/src/agent.rs";
+const HEALTH_FILE = "src-tauri/src/health.rs";
 
 /** Top-level comma-split, whitespace-collapsed arguments of the call whose `(`
  *  sits at `open` in the masked view, or null when the parens never close. */
@@ -470,6 +489,11 @@ function checkPinCallSites(text) {
     problems.push(
       `agent_session's host branch must spawn stream_agent with &host_extra_env, got ${hostSpawn[0]?.[11] ?? "nothing"}`,
     );
+  // stream_agent's 3rd parameter is the program it runs.
+  if (hostSpawn.length === 1 && hostSpawn[0]?.[2] !== "&binary")
+    problems.push(
+      `agent_session's host branch must spawn stream_agent with &binary, got ${hostSpawn[0]?.[2] ?? "nothing"}`,
+    );
   // build_run_args' 9th parameter becomes the container's `-e` environment.
   const runArgs =
     container.at >= 0 && host.at > container.at
@@ -544,7 +568,6 @@ function checkPinCallSites(text) {
       );
   }
   checkVersionGate(
-    code,
     masked,
     inTest,
     lines,
@@ -603,15 +626,19 @@ const DISPATCHES = [
   },
 ];
 
-/** The host session's own lookup: the 1.x branch takes the binary its dispatch
- *  classified, and only the other CLIs resolve again. */
+/** A DISPATCHES text as the masked view reads it: string literals blanked. */
+const asMasked = (text) => collapse(text.replace(/"(?:[^"\\]|\\.)*"/g, " "));
+
+/** The host session's own lookup, whole: the 1.x branch takes the binary its
+ *  dispatch classified, and only the other CLIs resolve again. */
 const HOST_BINARY =
-  "let binary = match opencode_v1_binary { Some(binary) => binary, None => resolve(";
+  'let binary = match opencode_v1_binary { Some(binary) => binary, None => resolve(kind, bin_path.as_deref()).await.ok_or_else(|| { AppError::Command(format!("{} CLI not found. Install it or set its path in Settings.", kind.label())) })?, };';
 
 
 /** N1, N2, N3, N12: the version gate in front of every opencode 2 path (N13 is
- *  checkSignInExport). Dispatch text is read from `code`, so comments never count. */
-function checkVersionGate(code, masked, inTest, lines, lineAt, bodies, problems) {
+ *  checkSignInExport). Dispatch text is read from `masked` within the enclosing fn's
+ *  body, so neither comments nor string literals count. */
+function checkVersionGate(masked, inTest, lines, lineAt, bodies, problems) {
   const production = (re) =>
     [...masked.matchAll(re)].filter(
       (m) =>
@@ -638,9 +665,12 @@ function checkVersionGate(code, masked, inTest, lines, lineAt, bodies, problems)
     }
     const open = masked.indexOf("(", at);
     const close = callClose(masked, open);
-    const head = collapse(code.slice(Math.max(body[0], at - 2000), open + 1));
-    const tail = close < 0 ? "" : collapse(code.slice(close, close + 400));
-    if (!` ${head}`.endsWith(` ${d.head}`) || !tail.startsWith(d.tail))
+    const head = collapse(masked.slice(body[0], open + 1));
+    const tail = close < 0 ? "" : collapse(masked.slice(close, body[1]));
+    if (
+      !` ${head}`.endsWith(` ${asMasked(d.head)}`) ||
+      !tail.startsWith(asMasked(d.tail))
+    )
       problems.push(
         `${d.id}: ${d.fn} must dispatch with: ${d.head}..${d.tail}`,
       );
@@ -665,11 +695,38 @@ function checkVersionGate(code, masked, inTest, lines, lineAt, bodies, problems)
   const hostEnd = hostAt < 0 ? -1 : statementEnd(masked, hostAt);
   if (
     hostEnd < 0 ||
-    !collapse(code.slice(hostAt, hostEnd)).startsWith(HOST_BINARY)
+    collapse(masked.slice(hostAt, hostEnd)) !== asMasked(HOST_BINARY)
   )
     problems.push(
-      `N2 host: the 1.x host branch must run its classified binary: ${HOST_BINARY}..`,
+      `N2 host: the 1.x host branch must run its classified binary: ${HOST_BINARY}`,
     );
+  if (hostEnd >= 0) {
+    const spawn = /\bstream_agent\s*\(/.exec(masked.slice(hostEnd, session[1]));
+    const named = spawn
+      ? [...masked.slice(hostEnd, hostEnd + spawn.index).matchAll(/\bbinary\b/g)]
+          .length
+      : 0;
+    if (named !== 0)
+      problems.push(
+        `N2 host: nothing may bind or name binary between the 1.x host lookup and its spawn, saw ${named}`,
+      );
+  }
+  const dispatch =
+    /\blet\s*\(\s*opencode_v1_restart\s*,\s*opencode_v1_binary\s*\)\s*=/.exec(
+      masked.slice(...session),
+    );
+  const dispatchEnd = dispatch
+    ? statementEnd(masked, session[0] + dispatch.index)
+    : -1;
+  if (dispatchEnd >= 0 && hostAt >= 0) {
+    const named = [
+      ...masked.slice(dispatchEnd, hostAt).matchAll(/\bopencode_v1_binary\b/g),
+    ].length;
+    if (named !== 0)
+      problems.push(
+        `N2 host: nothing may bind or name opencode_v1_binary between its dispatch and the host lookup, saw ${named}`,
+      );
+  }
   const gate = fnBody(masked, "opencode2_container_session");
   if (!gate) problems.push("missing anchor: fn opencode2_container_session");
   else {
@@ -1335,10 +1392,121 @@ function checkLockGate(code, masked, inTest, lines, lineAt, problems) {
   }
 }
 
-function readSource() {
+/** N18's detect rows: each `fn`'s opencode arm, found by `arm` in the `code` view
+ *  (health.rs's anchor is a string literal, which `masked` blanks). */
+const DETECT_ROWS = [
+  {
+    file: FILE,
+    fn: "agent_detect",
+    label: "agent_detect",
+    arm: /\bif\s+kind\s*==\s*AgentKind::Opencode\s*\{/,
+  },
+  {
+    file: HEALTH_FILE,
+    fn: "detect",
+    label: "health::detect",
+    arm: /\bif\s+id\s*==\s*"opencode"\s*\{/,
+  },
+];
+const DETECTION_FNS = [
+  "opencode_detection",
+  "opencode_detection_with",
+  "opencode_verdict_with",
+];
+
+/** N18: each detect fn holds one opencode arm, which reads its version through one
+ *  opencode_detection( call and never probes run_capture* itself; the bodies of
+ *  opencode_detection, opencode_detection_with and opencode_verdict_with probe no
+ *  run_capture*; opencode_verdict_probe( is called in production once in
+ *  opencode_verdict and once in opencode_detection, in either order. `texts` maps a
+ *  path to its text; counts read the masked view, so comments and literals never
+ *  count. */
+function checkDetectRows(texts) {
+  const problems = [];
+  const views = {};
+  for (const file of [FILE, HEALTH_FILE]) {
+    const text = texts[file];
+    if (typeof text !== "string" || text.length === 0) {
+      problems.push(`could not read ${file}`);
+      continue;
+    }
+    const { code, masked, unterminated } = lexRust(text);
+    if (unterminated >= 0) problems.push(`could not scan ${file}`);
+    else views[file] = { code, masked };
+  }
+  const runCaptures = (masked, [from, to]) =>
+    [...masked.slice(from, to).matchAll(/\brun_capture\w*\s*\(/g)].length;
+  for (const row of DETECT_ROWS) {
+    const view = views[row.file];
+    if (!view) continue;
+    const { code, masked } = view;
+    const body = fnBody(masked, row.fn);
+    if (!body) {
+      problems.push(`missing anchor: ${row.file} fn ${row.fn}`);
+      continue;
+    }
+    const anchors = [
+      ...code.slice(...body).matchAll(new RegExp(row.arm.source, "g")),
+    ];
+    const m = anchors[0];
+    if (!m) {
+      problems.push(`missing anchor: ${row.label}'s opencode arm`);
+      continue;
+    }
+    if (anchors.length !== 1)
+      problems.push(
+        `N18: ${row.label} must hold one opencode arm, saw ${anchors.length}`,
+      );
+    const braceAt = body[0] + m.index + m[0].length - 1;
+    const arm = [braceAt + 1, braceAt + 1 + braceBody(masked, braceAt).length];
+    const detections = callsIn(masked, arm, "opencode_detection").length;
+    if (detections !== 1)
+      problems.push(
+        `N18: ${row.label}'s opencode arm must call opencode_detection( once, saw ${detections}`,
+      );
+    const probes = runCaptures(masked, arm);
+    if (probes !== 0)
+      problems.push(
+        `N18: ${row.label}'s opencode arm must not call run_capture, saw ${probes}`,
+      );
+  }
+  const agent = views[FILE];
+  if (!agent) return problems;
+  const { masked } = agent;
+  for (const name of DETECTION_FNS) {
+    const body = fnBody(masked, name);
+    if (!body) {
+      problems.push(`missing anchor: ${FILE} fn ${name}`);
+      continue;
+    }
+    const probes = runCaptures(masked, body);
+    if (probes !== 0)
+      problems.push(`N18: ${name} must not call run_capture, saw ${probes}`);
+  }
+  const spans = testModuleSpans(masked);
+  const inTest = (index) =>
+    spans.some(([start, end]) => index >= start && index <= end);
+  const lines = masked.split("\n");
+  const lineAt = (index) => masked.slice(0, index).split("\n").length;
+  const sites = [...masked.matchAll(/\bopencode_verdict_probe\s*\(/g)]
+    .filter(
+      (m) =>
+        !inTest(m.index) &&
+        !/\bfn\s+$/.test(masked.slice(Math.max(0, m.index - 8), m.index)),
+    )
+    .map((m) => enclosingFn(lines, lineAt(m.index) - 1))
+    .sort();
+  if (sites.join(", ") !== "opencode_detection, opencode_verdict")
+    problems.push(
+      `N18: opencode_verdict_probe( must be called in production only in opencode_verdict and opencode_detection, once each, saw ${sites.join(", ") || "none"}`,
+    );
+  return problems;
+}
+
+function readSource(path = FILE) {
   try {
     return new TextDecoder("utf-8", { fatal: true })
-      .decode(readFileSync(new URL(`../${FILE}`, import.meta.url)))
+      .decode(readFileSync(new URL(`../${path}`, import.meta.url)))
       .replaceAll("\r\n", "\n");
   } catch {
     return null;
@@ -1346,10 +1514,11 @@ function readSource() {
 }
 
 const source = readSource();
+const healthSource = readSource(HEALTH_FILE);
 
-function mutate(edit) {
-  const next = edit(source);
-  assert.notEqual(next, source, "mutant changed nothing");
+function mutate(edit, from = source) {
+  const next = edit(from);
+  assert.notEqual(next, from, "mutant changed nothing");
   return next;
 }
 
@@ -2083,6 +2252,8 @@ const uniqueSwap = (from, to) => (t) => {
   return t.replace(from, () => to);
 };
 const plant = (body) => (t) => `${t}\n${body}\n`;
+/** `text` inserted right before the one occurrence of `line`. */
+const insertBefore = (line, text) => uniqueSwap(line, `${text}${line}`);
 /** uniqueSwap inside `fn name` only: the session entry functions share text. */
 const fnSwap = (name, from, to) => (t) => {
   const head = t.indexOf(`\nasync fn ${name}(`);
@@ -2240,7 +2411,11 @@ test("N2: agent_session's dispatches are pinned in text and place", () => {
 test("N2: the 1.x host branch runs the binary it classified", () => {
   const resolves =
     "N2 host: agent_session must call resolve( 2 times (the dispatch's and the other CLIs' host lookup), saw 3";
-  const statement = `N2 host: the 1.x host branch must run its classified binary: ${HOST_BINARY}..`;
+  const statement = `N2 host: the 1.x host branch must run its classified binary: ${HOST_BINARY}`;
+  const rebound =
+    "N2 host: nothing may bind or name binary between the 1.x host lookup and its spawn, saw 1";
+  const HOST_EXTRA_ENV =
+    "    let host_extra_env: Vec<(&str, String)> = if kind == AgentKind::Opencode {";
   for (const [id, edit, refused] of [
     [
       "a second lookup",
@@ -2258,11 +2433,94 @@ test("N2: the 1.x host branch runs the binary it classified", () => {
       ),
       [statement],
     ],
+    [
+      "a suffix after the lookup",
+      uniqueSwap(
+        HOST_LOOKUP,
+        HOST_LOOKUP.replace(
+          /\n {4}\};\n$/,
+          () => '\n    }.with_file_name("opencode1");\n',
+        ),
+      ),
+      [statement],
+    ],
+    [
+      "the spawn runs a name",
+      uniqueSwap(
+        "        &binary,\n        inner,",
+        '        Path::new("opencode"),\n        inner,',
+      ),
+      [
+        "agent_session's host branch must spawn stream_agent with &binary, got Path::new( )",
+      ],
+    ],
+    [
+      "a tuple rebind",
+      insertBefore(HOST_EXTRA_ENV, '    let (binary, _) = (PathBuf::from("opencode"), ());\n'),
+      [rebound],
+    ],
+    [
+      "a let-else rebind",
+      insertBefore(
+        HOST_EXTRA_ENV,
+        '    let Some(binary) = Some(PathBuf::from("opencode")) else { unreachable!() };\n',
+      ),
+      [rebound],
+    ],
+    [
+      "a shadowed dispatch binary",
+      insertBefore(
+        "    let binary = match opencode_v1_binary {\n",
+        '    let opencode_v1_binary = Some(PathBuf::from("opencode"));\n',
+      ),
+      [
+        "N2 host: nothing may bind or name opencode_v1_binary between its dispatch and the host lookup, saw 1",
+      ],
+    ],
+    [
+      "a comment naming binary",
+      insertBefore(HOST_EXTRA_ENV, "    // binary is the classified one\n"),
+      [],
+    ],
   ])
     assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
 });
 
+test("N2: the host lookup's sentence is not pinned, its refusal is", () => {
+  const sentence =
+    '"{} CLI not found. Install it or set its path in Settings.",\n                kind.label()\n            ))\n        })?;\n        match opencode_cli(&binary).await? {';
+  assert.deepEqual(
+    checkPinCallSites(
+      mutate(
+        uniqueSwap(
+          sentence,
+          sentence.replace(
+            "{} CLI not found. Install it or set its path in Settings.",
+            () => "{} is not installed here. Set its path in Settings.",
+          ),
+        ),
+      ),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    checkPinCallSites(
+      mutate(
+        uniqueSwap(
+          '        let binary = resolve(kind, bin_path.as_deref()).await.ok_or_else(|| {\n            AppError::Command(format!(\n                "{} CLI not found. Install it or set its path in Settings.",\n                kind.label()\n            ))\n        })?;\n        match',
+          "        let binary = resolve(kind, bin_path.as_deref()).await.unwrap_or_default();\n        match",
+        ),
+      ),
+    ),
+    [
+      `N2 host: agent_session must dispatch with: ${DISPATCHES[1].head}..${DISPATCHES[1].tail}`,
+    ],
+  );
+});
+
 test("N1-N2: a comment inside a dispatch statement passes", () => {
+  const notes = (indent, n) =>
+    `${indent}// ${"x".repeat(72)}\n`.repeat(n);
   for (const [id, edit] of [
     [
       "inside the review's head",
@@ -2278,8 +2536,177 @@ test("N1-N2: a comment inside a dispatch statement passes", () => {
         "                .await;\n                // a note\n            }\n            (crate::opencode2::Cli::V1(_), _) => (",
       ),
     ],
+    [
+      "long notes inside the host dispatch's tail",
+      uniqueSwap(
+        "                .await;\n            }\n            (crate::opencode2::Cli::V1(_), _) => (",
+        `                .await;\n${notes("                ", 3)}            }\n            (crate::opencode2::Cli::V1(_), _) => (`,
+      ),
+    ],
+    ...[3, 30].map((n) => [
+      `${n} long notes inside the review's head`,
+      uniqueSwap(
+        "opencode_cli(&binary).await? {\n            return Box::pin(opencode2_review(",
+        `opencode_cli(&binary).await? {\n${notes("            ", n)}            return Box::pin(opencode2_review(`,
+      ),
+    ]),
   ])
     assert.deepEqual(checkPinCallSites(mutate(edit)), [], id);
+});
+
+test("N18: each detect row's opencode arm reads one observation", () => {
+  assert.ok(healthSource);
+  const rows = (agent, health) => ({ [FILE]: agent, [HEALTH_FILE]: health });
+  assert.deepEqual(checkDetectRows(rows(source, healthSource)), []);
+  const AGENT_ARM =
+    "        let detection = Box::pin(opencode_detection(&binary)).await;\n";
+  const HEALTH_ARM =
+    "        let detection = Box::pin(crate::agent::opencode_detection(&binary)).await;\n";
+  const probe =
+    '        let _ = run_capture(&binary, &["--version"], DETECT_TIMEOUT).await;\n';
+  const bodyProbe =
+    '    let _ = run_capture(binary, &["--version"], DETECT_TIMEOUT).await;\n';
+  const spelled =
+    '        // run_capture(&binary, &["--version"])\n        let _ = "run_capture(";\n';
+  /** `line` inserted as the first line of the body opening after `header`. */
+  const firstInBody = (header, line) => (t) => {
+    const at = t.indexOf(header);
+    assert.ok(at >= 0 && t.indexOf(header, at + 1) < 0, `not unique: ${header}`);
+    const open = t.indexOf("{\n", at) + 2;
+    return t.slice(0, open) + line + t.slice(open);
+  };
+  const DETECTION =
+    "pub(crate) async fn opencode_detection(binary: &Path) -> OpencodeDetection {\n";
+  const sites =
+    "N18: opencode_verdict_probe( must be called in production only in opencode_verdict and opencode_detection, once each, saw ";
+  for (const [id, file, edit, refused] of [
+    [
+      "agent arm probe",
+      FILE,
+      insertBefore(AGENT_ARM, probe),
+      ["N18: agent_detect's opencode arm must not call run_capture, saw 1"],
+    ],
+    [
+      "health arm probe",
+      HEALTH_FILE,
+      insertBefore(HEALTH_ARM, probe),
+      ["N18: health::detect's opencode arm must not call run_capture, saw 1"],
+    ],
+    [
+      "agent arm second detection",
+      FILE,
+      insertBefore(AGENT_ARM, "        let _ = opencode_detection(&binary).await;\n"),
+      [
+        "N18: agent_detect's opencode arm must call opencode_detection( once, saw 2",
+      ],
+    ],
+    [
+      "health arm second detection",
+      HEALTH_FILE,
+      insertBefore(
+        HEALTH_ARM,
+        "        let _ = crate::agent::opencode_detection(&binary).await;\n",
+      ),
+      [
+        "N18: health::detect's opencode arm must call opencode_detection( once, saw 2",
+      ],
+    ],
+    [
+      "a second probe site",
+      FILE,
+      firstInBody(DETECTION, "    let _ = opencode_verdict_probe(binary).await;\n"),
+      [`${sites}opencode_detection, opencode_detection, opencode_verdict`],
+    ],
+    [
+      "the probe sites in the other order",
+      FILE,
+      (t) => {
+        const start = t.indexOf("/// Detect paths: never an error");
+        const end = t.indexOf("\n}\n", t.indexOf(DETECTION, start)) + 3;
+        const rest = t.slice(0, start) + t.slice(end);
+        const at = rest.indexOf("\nasync fn opencode_verdict(") + 1;
+        const moved = rest.slice(0, at) + t.slice(start, end) + rest.slice(at);
+        assert.ok(
+          moved.indexOf(DETECTION) < moved.indexOf("\nasync fn opencode_verdict("),
+          "opencode_detection moved above opencode_verdict",
+        );
+        return moved;
+      },
+      [],
+    ],
+    [
+      "a second agent arm",
+      FILE,
+      insertBefore(
+        "    let version = printed\n",
+        '    let _ = if kind == AgentKind::Opencode {\n        run_capture(&binary, &["--version"], DETECT_TIMEOUT).await.ok()\n    } else {\n        None\n    };\n',
+      ),
+      ["N18: agent_detect must hold one opencode arm, saw 2"],
+    ],
+    [
+      "a second health arm",
+      HEALTH_FILE,
+      insertBefore(
+        "    let version = printed\n",
+        '    let _ = if id == "opencode" {\n        run_capture(&binary, &["--version"], DETECT_TIMEOUT).await.ok()\n    } else {\n        None\n    };\n',
+      ),
+      ["N18: health::detect must hold one opencode arm, saw 2"],
+    ],
+    [
+      "the verdict's probe site gone",
+      FILE,
+      fnSwap(
+        "opencode_verdict",
+        "opencode_verdict_probe(binary)",
+        "async { VersionProbe::Failed(String::new()) }",
+      ),
+      [`${sites}opencode_detection`],
+    ],
+    [
+      "a probe in opencode_detection",
+      FILE,
+      firstInBody(DETECTION, bodyProbe),
+      ["N18: opencode_detection must not call run_capture, saw 1"],
+    ],
+    [
+      "a probe in opencode_detection_with",
+      FILE,
+      firstInBody(
+        "async fn opencode_detection_with<",
+        '    let _ = run_capture_parts(binary, &["--version"], DETECT_TIMEOUT).await;\n',
+      ),
+      ["N18: opencode_detection_with must not call run_capture, saw 1"],
+    ],
+    [
+      "a probe in opencode_verdict_with",
+      FILE,
+      firstInBody("async fn opencode_verdict_with<", bodyProbe),
+      ["N18: opencode_verdict_with must not call run_capture, saw 1"],
+    ],
+    ["a spelling in the agent arm", FILE, insertBefore(AGENT_ARM, spelled), []],
+    ["a spelling in the health arm", HEALTH_FILE, insertBefore(HEALTH_ARM, spelled), []],
+  ]) {
+    const texts =
+      file === FILE
+        ? rows(mutate(edit), healthSource)
+        : rows(source, mutate(edit, healthSource));
+    assert.deepEqual(checkDetectRows(texts), refused, id);
+  }
+  const unread = checkDetectRows(rows(source, null));
+  assert.ok(unread.includes(`could not read ${HEALTH_FILE}`), unread.join("\n"));
+  const renamed = checkDetectRows(
+    rows(
+      source,
+      mutate(
+        uniqueSwap('if id == "opencode" {', 'if id.eq("opencode") {'),
+        healthSource,
+      ),
+    ),
+  );
+  assert.ok(
+    renamed.includes("missing anchor: health::detect's opencode arm"),
+    renamed.join("\n"),
+  );
 });
 
 test("N3: one version classifier, and each host dispatch reads opencode_cli", () => {

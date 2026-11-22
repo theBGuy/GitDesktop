@@ -1,10 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { type PlanRun, usePlanStore } from "@/features/plan/store";
+import {
+  type GenerateArgs,
+  type PlanRun,
+  usePlanStore,
+} from "@/features/plan/store";
 import {
   type AgentSessionArgs,
   type ReviewEvent,
   runAgentSession,
 } from "@/lib/ai/agent";
+import { gitListTracked, readRepoInstructions } from "@/lib/git/api";
 
 vi.mock("@/lib/ai/agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/ai/agent")>()),
@@ -15,6 +20,10 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   gitListTracked: vi.fn(async () => []),
   readRepoInstructions: vi.fn(async () => null),
+}));
+vi.mock("@/lib/settings/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/settings/api")>()),
+  loadSettings: vi.fn(async () => ({ globalInstructions: "" })),
 }));
 vi.mock("@/features/plan/persistence", () => ({
   loadPersistedPlans: vi.fn(async () => []),
@@ -114,8 +123,31 @@ beforeEach(() => {
         runs.push({ args, emit: args.onEvent, settle: () => resolve(null) });
       }),
   );
+  // Reset, so a held read a failed test queued never leaks into the next.
+  vi.mocked(readRepoInstructions).mockReset();
+  vi.mocked(readRepoInstructions).mockResolvedValue(null);
+  vi.mocked(gitListTracked).mockReset();
+  vi.mocked(gitListTracked).mockResolvedValue([]);
   usePlanStore.setState({ runs: [], hydrated: true, activePlanId: null });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+const flush = () => new Promise<void>((r) => setTimeout(r, 0));
+
+const ARGS: GenerateArgs = {
+  repoPath: "C:/repo",
+  agent: "opencode",
+  model: "",
+  effort: "",
+  goal: "Goal",
+};
 
 const notice = (code: string, text: string): ReviewEvent => ({
   kind: "notice",
@@ -388,4 +420,164 @@ describe("plan store: notices and the stored conversation id", () => {
     await a.settleStale();
     expect(stored("a")).toBe("ses_B");
   });
+
+  it.each(["old", "new"] as const)(
+    "(17) Stop then Restart during turn-1 setup starts one turn, on the restart's session id (%s setup settles first)",
+    async (first) => {
+      const one = deferred<string | null>();
+      const two = deferred<string | null>();
+      vi.mocked(readRepoInstructions)
+        .mockImplementationOnce(() => one.promise)
+        .mockImplementationOnce(() => two.promise);
+      const id = usePlanStore.getState().start(ARGS);
+      const s1 = find(id)?.sessionId;
+      usePlanStore.getState().cancel(id);
+      usePlanStore.getState().restart(id);
+      const s2 = find(id)?.sessionId;
+      expect(s2).not.toBe(s1);
+      for (const held of first === "old" ? [one, two] : [two, one]) {
+        held.resolve(null);
+        await flush();
+      }
+      expect(runs).toHaveLength(1);
+      expect(runs[0].args.sessionId).toBe(s2);
+      expect(runs[0].args.resume).toBe(false);
+      runs[0].emit({ kind: "delta", text: BODY });
+      expect(find(id)?.text).toBe(BODY);
+      expect(find(id)?.generating).toBe(true);
+      expect(find(id)?.stopped).toBe(false);
+      runs[0].emit({ kind: "done", text: BODY, costUsd: 0.1, isError: false });
+      runs[0].settle();
+      await vi.waitFor(() => expect(find(id)?.generating).toBe(false));
+      expect(find(id)?.draft).not.toBeNull();
+    },
+  );
+
+  const PARTIAL = {
+    text: "Partial.",
+    segments: [{ type: "text", text: "Partial." }],
+    costUsd: 0.2,
+  } satisfies Partial<PlanRun>;
+  it.each([
+    {
+      route: "start",
+      begin: () => usePlanStore.getState().start(ARGS),
+      kept: { text: "" },
+    },
+    {
+      route: "restart",
+      begin: () => {
+        usePlanStore.setState({
+          runs: [{ ...plan("a"), stopped: true, ...PARTIAL }],
+        });
+        usePlanStore.getState().restart("a");
+        return "a";
+      },
+      kept: PARTIAL,
+    },
+  ])(
+    "(18) a Stop during a turn's setup starts nothing and stays stopped ($route route)",
+    async ({ begin, kept }) => {
+      const held = deferred<string | null>();
+      vi.mocked(readRepoInstructions).mockImplementationOnce(
+        () => held.promise,
+      );
+      const id = begin();
+      expect(find(id)?.generating).toBe(true);
+      usePlanStore.getState().cancel(id);
+      held.resolve(null);
+      await flush();
+      expect(runs).toEqual([]);
+      expect(find(id)).toMatchObject({
+        stopped: true,
+        generating: false,
+        error: null,
+        ...kept,
+      });
+    },
+  );
+
+  it("(19) a follow-up sent after a Stop during setup keeps its turn", async () => {
+    const held = deferred<string | null>();
+    vi.mocked(readRepoInstructions).mockImplementationOnce(() => held.promise);
+    const id = usePlanStore.getState().start(ARGS);
+    usePlanStore.getState().cancel(id);
+    usePlanStore.getState().sendFollowUp(id, "Tighten step 2");
+    await vi.waitFor(() => expect(runs).toHaveLength(1));
+    expect(runs[0].args.resume).toBe(true);
+    held.resolve(null);
+    await flush();
+    expect(runs).toHaveLength(1);
+    runs[0].emit({ kind: "delta", text: "B1" });
+    expect(find(id)?.text).toBe("B1");
+    expect(find(id)?.generating).toBe(true);
+  });
+
+  it("(20) a run dismissed during setup and re-added under its id starts nothing", async () => {
+    const held = deferred<string | null>();
+    vi.mocked(readRepoInstructions).mockImplementationOnce(() => held.promise);
+    const id = usePlanStore.getState().start(ARGS);
+    usePlanStore.getState().remove(id);
+    usePlanStore.setState({ runs: [plan(id)] });
+    held.resolve(null);
+    await flush();
+    expect(runs).toEqual([]);
+    expect(find(id)?.generating).toBe(false);
+  });
+
+  it.each([
+    {
+      how: "Stop",
+      leave: (id: string): string[] => {
+        usePlanStore.getState().cancel(id);
+        return [];
+      },
+      row: expect.objectContaining({
+        stopped: true,
+        generating: false,
+        error: null,
+      }),
+    },
+    {
+      how: "Dismiss",
+      leave: (id: string): string[] => {
+        usePlanStore.getState().remove(id);
+        return [];
+      },
+      row: undefined,
+    },
+    {
+      how: "Stop then Restart",
+      leave: (id: string): string[] => {
+        usePlanStore.getState().cancel(id);
+        usePlanStore.getState().restart(id);
+        return [find(id)?.sessionId ?? ""];
+      },
+      row: expect.objectContaining({ generating: true, stopped: false }),
+    },
+    {
+      how: "Stop then follow-up",
+      leave: (id: string): string[] => {
+        usePlanStore.getState().cancel(id);
+        usePlanStore.getState().sendFollowUp(id, "Tighten step 3");
+        return [`sid-${id}`];
+      },
+      row: expect.objectContaining({ generating: true, stopped: false }),
+    },
+  ])(
+    "(21) a turn stopped during its tracked-files read starts nothing ($how)",
+    async ({ leave, row }) => {
+      usePlanStore.setState({ runs: [plan("a")] });
+      const held = deferred<Awaited<ReturnType<typeof gitListTracked>>>();
+      vi.mocked(gitListTracked).mockImplementationOnce(() => held.promise);
+      usePlanStore.getState().sendFollowUp("a", "Tighten step 2");
+      expect(find("a")?.generating).toBe(true);
+      // The session ids of the turns that may start: only a newer turn's.
+      const spawned = leave("a");
+      held.resolve([]);
+      await flush();
+      expect(runs.map((r) => r.args.sessionId)).toEqual(spawned);
+      expect(find("a")).toEqual(row);
+    },
+  );
 });

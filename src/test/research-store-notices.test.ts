@@ -1,10 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { type ResearchRun, useResearchStore } from "@/features/research/store";
+import {
+  type ResearchGenerateArgs,
+  type ResearchRun,
+  useResearchStore,
+} from "@/features/research/store";
 import {
   type AgentSessionArgs,
   type ReviewEvent,
   runAgentSession,
 } from "@/lib/ai/agent";
+import { readRepoInstructions } from "@/lib/git/api";
 
 vi.mock("@/lib/ai/agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/ai/agent")>()),
@@ -14,6 +19,10 @@ vi.mock("@/lib/ai/agent", async (importOriginal) => ({
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   readRepoInstructions: vi.fn(async () => null),
+}));
+vi.mock("@/lib/settings/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/settings/api")>()),
+  loadSettings: vi.fn(async () => ({ globalInstructions: "" })),
 }));
 vi.mock("@/features/research/persistence", () => ({
   loadPersistedResearch: vi.fn(async () => []),
@@ -117,12 +126,34 @@ beforeEach(() => {
         runs.push({ args, emit: args.onEvent, settle: () => resolve(null) });
       }),
   );
+  // Reset, so a held read a failed test queued never leaks into the next.
+  vi.mocked(readRepoInstructions).mockReset();
+  vi.mocked(readRepoInstructions).mockResolvedValue(null);
   useResearchStore.setState({
     runs: [],
     hydrated: true,
     activeResearchId: null,
   });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+const flush = () => new Promise<void>((r) => setTimeout(r, 0));
+
+const ARGS: ResearchGenerateArgs = {
+  repoPath: "C:/repo",
+  agent: "opencode",
+  model: "",
+  effort: "",
+  topic: "Topic",
+  depth: "deep",
+};
 
 const notice = (code: string, text: string): ReviewEvent => ({
   kind: "notice",
@@ -396,5 +427,109 @@ describe("research store: notices and the stored conversation id", () => {
     await b.settleStale();
     await a.settleStale();
     expect(stored("a")).toBe("ses_B");
+  });
+
+  it.each(["old", "new"] as const)(
+    "(17) Stop then Restart during turn-1 setup starts one turn, on the restart's session id (%s setup settles first)",
+    async (first) => {
+      const one = deferred<string | null>();
+      const two = deferred<string | null>();
+      vi.mocked(readRepoInstructions)
+        .mockImplementationOnce(() => one.promise)
+        .mockImplementationOnce(() => two.promise);
+      const id = useResearchStore.getState().start(ARGS);
+      const s1 = find(id)?.sessionId;
+      useResearchStore.getState().cancel(id);
+      useResearchStore.getState().restart(id);
+      const s2 = find(id)?.sessionId;
+      expect(s2).not.toBe(s1);
+      for (const held of first === "old" ? [one, two] : [two, one]) {
+        held.resolve(null);
+        await flush();
+      }
+      expect(runs).toHaveLength(1);
+      expect(runs[0].args.sessionId).toBe(s2);
+      expect(runs[0].args.resume).toBe(false);
+      runs[0].emit({ kind: "delta", text: BODY });
+      expect(find(id)?.text).toBe(BODY);
+      expect(find(id)?.generating).toBe(true);
+      expect(find(id)?.stopped).toBe(false);
+      runs[0].emit({ kind: "done", text: BODY, costUsd: 0.1, isError: false });
+      runs[0].settle();
+      await vi.waitFor(() => expect(find(id)?.generating).toBe(false));
+      expect(find(id)?.report).not.toBeNull();
+    },
+  );
+
+  const PARTIAL = {
+    text: "Partial.",
+    segments: [{ type: "text", text: "Partial." }],
+    costUsd: 0.2,
+  } satisfies Partial<ResearchRun>;
+  it.each([
+    {
+      route: "start",
+      begin: () => useResearchStore.getState().start(ARGS),
+      kept: { text: "" },
+    },
+    {
+      route: "restart",
+      begin: () => {
+        useResearchStore.setState({
+          runs: [{ ...research("a"), stopped: true, ...PARTIAL }],
+        });
+        useResearchStore.getState().restart("a");
+        return "a";
+      },
+      kept: PARTIAL,
+    },
+  ])(
+    "(18) a Stop during a turn's setup starts nothing and stays stopped ($route route)",
+    async ({ begin, kept }) => {
+      const held = deferred<string | null>();
+      vi.mocked(readRepoInstructions).mockImplementationOnce(
+        () => held.promise,
+      );
+      const id = begin();
+      expect(find(id)?.generating).toBe(true);
+      useResearchStore.getState().cancel(id);
+      held.resolve(null);
+      await flush();
+      expect(runs).toEqual([]);
+      expect(find(id)).toMatchObject({
+        stopped: true,
+        generating: false,
+        error: null,
+        ...kept,
+      });
+    },
+  );
+
+  it("(19) a follow-up sent after a Stop during setup keeps its turn", async () => {
+    const held = deferred<string | null>();
+    vi.mocked(readRepoInstructions).mockImplementationOnce(() => held.promise);
+    const id = useResearchStore.getState().start(ARGS);
+    useResearchStore.getState().cancel(id);
+    useResearchStore.getState().sendFollowUp(id, "Go deeper", "deep", "");
+    await vi.waitFor(() => expect(runs).toHaveLength(1));
+    expect(runs[0].args.resume).toBe(true);
+    held.resolve(null);
+    await flush();
+    expect(runs).toHaveLength(1);
+    runs[0].emit({ kind: "delta", text: "B1" });
+    expect(find(id)?.text).toBe("B1");
+    expect(find(id)?.generating).toBe(true);
+  });
+
+  it("(20) a run dismissed during setup and re-added under its id starts nothing", async () => {
+    const held = deferred<string | null>();
+    vi.mocked(readRepoInstructions).mockImplementationOnce(() => held.promise);
+    const id = useResearchStore.getState().start(ARGS);
+    useResearchStore.getState().remove(id);
+    useResearchStore.setState({ runs: [research(id)] });
+    held.resolve(null);
+    await flush();
+    expect(runs).toEqual([]);
+    expect(find(id)?.generating).toBe(false);
   });
 });

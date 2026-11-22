@@ -1,12 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { loadPersistedSessions } from "@/features/sessions/persistence";
+import {
+  loadPersistedSessions,
+  removeTranscript,
+} from "@/features/sessions/persistence";
 import { type AgentSession, useSessionsStore } from "@/features/sessions/store";
 import {
   type AgentSessionArgs,
   type ReviewEvent,
   runAgentSession,
 } from "@/lib/ai/agent";
-import { cleanupContainerSandbox } from "@/lib/ai/sandbox";
+import { cleanupContainerSandbox, stopTestContainer } from "@/lib/ai/sandbox";
+import { removeWorktree, type WorktreeRemoveOutcome } from "@/lib/git/worktree";
+import { toastError } from "@/lib/toast";
 
 vi.mock("@/lib/ai/agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/ai/agent")>()),
@@ -43,6 +48,10 @@ vi.mock("@/lib/git/worktree", async (importOriginal) => ({
   // "deleted" has no KEPT_BRANCH_NOTES entry, so the discard raises no toast.
   removeWorktree: vi.fn(async () => ({ branchCleanup: "deleted" })),
 }));
+vi.mock("@/lib/toast", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/toast")>()),
+  toastError: vi.fn(),
+}));
 vi.mock("@/lib/notifications/emit", () => ({ emitNotification: vi.fn() }));
 vi.mock("@/features/sessions/watching", () => ({
   isWatchingAgentSurface: () => true,
@@ -76,6 +85,10 @@ async function startAndFinish(isolation: "container" | "worktree") {
 beforeEach(() => {
   runs = [];
   vi.mocked(cleanupContainerSandbox).mockClear();
+  vi.mocked(removeWorktree).mockClear();
+  vi.mocked(stopTestContainer).mockClear();
+  vi.mocked(removeTranscript).mockClear();
+  vi.mocked(toastError).mockClear();
   vi.mocked(runAgentSession).mockImplementation(
     (args) =>
       new Promise<ReviewEvent | null>((resolve) => {
@@ -150,5 +163,52 @@ describe("sessions store: container sandbox cleanup", () => {
     await useSessionsStore.getState().hydrate();
     expect(useSessionsStore.getState().sessions).toEqual([]);
     expect(vi.mocked(cleanupContainerSandbox).mock.calls).toEqual([["cs-box"]]);
+  });
+
+  it("a failed worktree removal keeps the sandbox and the session; the retry cleans once", async () => {
+    const run = await startAndFinish("container");
+    const boom = new Error("the worktree is in use");
+    vi.mocked(removeWorktree).mockRejectedValueOnce(boom);
+    await useSessionsStore.getState().discard("wt-1");
+    expect(cleanupContainerSandbox).not.toHaveBeenCalled();
+    expect(removeTranscript).not.toHaveBeenCalled();
+    expect(find("wt-1")).toMatchObject({
+      claudeSessionId: run.args.sessionId,
+    });
+    expect(useSessionsStore.getState().busyId).toBeNull();
+    expect(vi.mocked(toastError).mock.calls).toEqual([[boom]]);
+
+    await useSessionsStore.getState().discard("wt-1");
+    expect(find("wt-1")).toBeUndefined();
+    expect(vi.mocked(cleanupContainerSandbox).mock.calls).toEqual([
+      [run.args.sessionId],
+    ]);
+    expect(removeWorktree).toHaveBeenCalledTimes(2);
+  });
+
+  it("the sandbox is cleaned only after the removal resolved", async () => {
+    const run = await startAndFinish("container");
+    let release!: (value: WorktreeRemoveOutcome) => void;
+    vi.mocked(removeWorktree).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const discarding = useSessionsStore.getState().discard("wt-1");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(stopTestContainer).toHaveBeenCalled();
+    expect(cleanupContainerSandbox).not.toHaveBeenCalled();
+    release({
+      branchCleanup: "deleted",
+      branchTip: "base",
+      branchKeptLocal: false,
+      branchUpstream: null,
+      tipMoved: null,
+    });
+    await discarding;
+    expect(vi.mocked(cleanupContainerSandbox).mock.calls).toEqual([
+      [run.args.sessionId],
+    ]);
   });
 });

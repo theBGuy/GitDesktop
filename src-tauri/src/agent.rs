@@ -1871,11 +1871,24 @@ pub(crate) struct OpencodeDetection {
 
 /// Detect paths: never an error, and a failed probe shows neither a version nor a refusal.
 pub(crate) async fn opencode_detection(binary: &Path) -> OpencodeDetection {
-    let (verdict, _, printed) =
-        opencode_verdict_with(binary, opencode_facts(), Instant::now(), || {
-            opencode_verdict_probe(binary)
-        })
-        .await;
+    opencode_detection_with(binary, opencode_facts(), Instant::now(), || {
+        opencode_verdict_probe(binary)
+    })
+    .await
+}
+
+/// `opencode_detection` with its facts, clock and probe injected, so a test runs this body.
+async fn opencode_detection_with<F, Fut>(
+    binary: &Path,
+    facts: &Mutex<OpencodeFacts>,
+    now: Instant,
+    probe: F,
+) -> OpencodeDetection
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = VersionProbe>,
+{
+    let (verdict, _, printed) = opencode_verdict_with(binary, facts, now, probe).await;
     opencode_detection_of(&verdict, printed)
 }
 
@@ -2005,10 +2018,11 @@ enum Captured {
     Cancelled,
 }
 
-/// Whether a runtime client's container may outlive this capture: only a reaped exit
-/// means the client's container ended with it.
+/// Whether a runtime client's container may outlive this capture. A client's own non-negative
+/// exit code means its container ended or never started; a negative one (a signal death, `-1`
+/// on unix, or a crash status) may leave it running: `--rm` acts on the container's exit.
 fn container_may_remain(captured: &AppResult<Captured>) -> bool {
-    !matches!(captured, Ok(Captured::Exited { .. }))
+    !matches!(captured, Ok(Captured::Exited { code, .. }) if *code >= 0)
 }
 
 /// The command `capture_tree` spawns: the base env of every agent spawn, then the
@@ -2646,8 +2660,8 @@ fn opencode2_stream_event(stream: &mut Opencode2Stream, line: &str) -> [Option<R
     match (stream.native.as_mut(), native) {
         (Some(tag), Some(ReviewEvent::NativeSession { id })) => {
             let notice = if tag.rekey {
-                // The store drops the raw id on the notice; every later step of the turn
-                // carries the token too.
+                // The notice arms the store to replace its stored id with this run's
+                // next `NativeSession`; every later step of the turn carries the token too.
                 tag.rekey = false;
                 tag.resumed = None;
                 Some(ReviewEvent::Notice {
@@ -9967,12 +9981,11 @@ opencode/x-preview-f-free
         probes: &std::sync::atomic::AtomicUsize,
         answer: VersionProbe,
     ) -> OpencodeDetection {
-        let (verdict, _, printed) = opencode_verdict_with(bin, facts, now, || {
+        opencode_detection_with(bin, facts, now, || {
             probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             async move { answer }
         })
-        .await;
-        opencode_detection_of(&verdict, printed)
+        .await
     }
 
     /// A detect row's version and refusal are the verdict's own observation: a remembered
@@ -11885,9 +11898,14 @@ opencode/x-preview-f-free
                 stderr: String::new(),
             })
         };
-        let cases: [(AppResult<Captured>, bool); 6] = [
+        let cases: [(AppResult<Captured>, bool); 9] = [
             (exited(0), false),
             (exited(1), false),
+            (exited(137), false),
+            // A client killed by a signal.
+            (exited(-1), true),
+            // Any other negative code.
+            (exited(-1073741819), true),
             (Ok(Captured::TimedOut), true),
             (Ok(Captured::Cancelled), true),
             // An output overflow.
@@ -11993,6 +12011,29 @@ opencode/x-preview-f-free
             started.elapsed() < Duration::from_secs(25),
             "the forced runs were killed, not waited out"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capture_tree_reads_a_signal_death_as_a_container_that_may_remain() {
+        // `$$` is the shell itself, so the child dies by SIGKILL with no exit code.
+        let captured = capture_tree(CaptureRequest {
+            program: Path::new("sh"),
+            args: vec!["-c".to_string(), "kill -9 $$".to_string()],
+            cwd: None,
+            env: Vec::new(),
+            stdin: None,
+            timeout: Duration::from_secs(60),
+            cancel: None,
+        })
+        .await;
+        match &captured {
+            Ok(Captured::Exited { code: -1, .. }) => {}
+            Ok(Captured::Exited { code, .. }) => panic!("exit {code}"),
+            Ok(_) => panic!("the shell did not exit"),
+            Err(error) => panic!("{error}"),
+        }
+        assert!(container_may_remain(&captured));
     }
 
     /// A request whose cancel already fired answers `Cancelled` without spawning, stdin

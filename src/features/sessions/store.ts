@@ -899,14 +899,10 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     const s = get().sessions.find((x) => x.id === id);
     if (!s || s.kept || s.running || get().busyId) return;
     set({ busyId: id });
-    // The container home holds a credentials copy and is independent of the worktree, so clean
-    // it (idempotently) up front — a failed worktree removal shouldn't leave it. A running test
-    // container bind-mounts the worktree, so stop it (awaited) before removing the dir. The
-    // sandbox is keyed by the run's session id, not the record id.
-    if (s.isolation === "container") {
-      persist(cleanupContainerSandbox(s.claudeSessionId));
+    // A running test container bind-mounts the worktree, so stop it (awaited) before
+    // removing the dir.
+    if (s.isolation === "container")
       await stopTestContainer(s.worktreePath).catch(() => undefined);
-    }
     try {
       const { branchCleanup } = await removeWorktree(
         s.repoPath,
@@ -915,6 +911,11 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         true,
       );
       persist(removeTranscript(id));
+      // The container home holds the agent's conversation and its sign-in copy, so it goes
+      // only once the worktree is gone: a failed removal leaves the session usable. It is
+      // keyed by the run's session id, not the record id.
+      if (s.isolation === "container")
+        persist(cleanupContainerSandbox(s.claudeSessionId));
       removeSession(get, set, id);
       const keptNote = KEPT_BRANCH_NOTES[branchCleanup];
       if (keptNote) toast.info(keptNote(s.branch));

@@ -1264,7 +1264,10 @@ impl StreamParser {
     }
 
     /// `message`, making a message not seen yet the final one: opencode 2.2.0's reconcile
-    /// sends no `step_start` for a message the live stream missed.
+    /// sends no `step_start` for a message the live stream missed. ASSUMPTION: a message first
+    /// seen there is newer than every live one, since the reconcile lists only the prompt's own
+    /// messages, oldest first, and the live stream loses none of them except at its tail (read
+    /// in 2.2.0 and 2.3.2).
     fn opened(&mut self, id: &str) -> usize {
         let known = self.messages.len();
         let index = self.message(id);
@@ -3957,24 +3960,23 @@ mod tests {
         assert_eq!(parser.messages[0].blocks[0], "first");
 
         // The boundary: a message one block short of the cap.
-        let filled = || {
+        let filled = |last: usize| {
             let mut parser = StreamParser::new(None);
             feed(&mut parser, &[step_start(m)]);
             let mut ordinals = Vec::new();
             for _ in 0..4 {
-                let ordinal = (parser.messages[0].blocks.len() + PROJECTED_GAP_LIMIT)
-                    .min(MESSAGE_BLOCK_CAP - 2);
+                let ordinal = (parser.messages[0].blocks.len() + PROJECTED_GAP_LIMIT).min(last);
                 parser.line(&projected(m, ordinal, "x"));
                 ordinals.push(ordinal);
             }
-            assert_eq!(ordinals, [1024, 2049, 3074, 4094]);
-            assert_eq!(parser.messages[0].blocks.len(), MESSAGE_BLOCK_CAP - 1);
+            assert_eq!(ordinals, [1024, 2049, 3074, last]);
+            assert_eq!(parser.messages[0].blocks.len(), last + 1);
             parser
         };
         for (ordinal, text) in [(4095, "edge"), (4096, "over")] {
             // 4095 is the last ordinal a projection pads to; 4096 reads as live, which
             // lands on the same block.
-            let mut parser = filled();
+            let mut parser = filled(MESSAGE_BLOCK_CAP - 2);
             parser.line(&projected(m, ordinal, text));
             assert_eq!(parser.messages[0].blocks.len(), MESSAGE_BLOCK_CAP, "{text}");
             assert_eq!(parser.messages[0].blocks[4095], text);
@@ -3984,6 +3986,16 @@ mod tests {
             parser.line(&live(m, "live"));
             assert_eq!(parser.messages[0].blocks.len(), 4098, "{text}");
         }
+        // A message two blocks short: 4095 still pads, 4096 reads as live.
+        let mut parser = filled(MESSAGE_BLOCK_CAP - 3);
+        parser.line(&projected(m, 4095, "edge"));
+        assert_eq!(parser.messages[0].blocks.len(), 4096);
+        assert_eq!(parser.messages[0].blocks[4094], "");
+        assert_eq!(parser.messages[0].blocks[4095], "edge");
+        let mut parser = filled(MESSAGE_BLOCK_CAP - 3);
+        parser.line(&projected(m, 4096, "over"));
+        assert_eq!(parser.messages[0].blocks.len(), 4095);
+        assert_eq!(parser.messages[0].blocks[4094], "over");
     }
 
     #[test]
@@ -4037,7 +4049,7 @@ mod tests {
 
     #[test]
     fn a_tool_use_for_an_unseen_message_opens_it_as_the_final_one() {
-        let (a, b, c) = ("msg_a1", "msg_b1", "msg_c1");
+        let (a, c, d) = ("msg_a1", "msg_c1", "msg_d1");
         let tool = |message: &str| tool_use(message, "read", "completed", json!({"path": "a"}));
         let mut parser = StreamParser::new(None);
         feed(
@@ -4047,7 +4059,7 @@ mod tests {
                 live(a, "First."),
                 step_start(c),
                 live(c, "Second."),
-                tool(b),
+                tool(d),
             ],
         );
         let final_id = |parser: &StreamParser| {
@@ -4055,13 +4067,13 @@ mod tests {
                 .id
                 .clone()
         };
-        assert_eq!(final_id(&parser).as_deref(), Some(b));
+        assert_eq!(final_id(&parser).as_deref(), Some(d));
         // A known message never moves the final one.
         feed(&mut parser, &[tool(a)]);
-        assert_eq!(final_id(&parser).as_deref(), Some(b));
+        assert_eq!(final_id(&parser).as_deref(), Some(d));
         // A fresh parser's first tool line yields the id, then the tool.
         let mut parser = StreamParser::new(None);
-        let slots = parser.line(&tool(b));
+        let slots = parser.line(&tool(d));
         assert!(
             matches!(&slots, [
                 Some(ReviewEvent::NativeSession { id }),

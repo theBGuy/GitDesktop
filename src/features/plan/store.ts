@@ -173,7 +173,8 @@ export const usePlanStore = create<PlanState>((set, get) => {
   /** The in-flight `hydrate()` attempt, so concurrent callers share one disk read
    *  (see `hydrate`). Lives in the factory closure, which runs exactly once. */
   let hydrating: Promise<void> | null = null;
-  /** Run id to the token of the `runTurn` call that owns it; only the owner may write. */
+  /** Run id to the token of the turn that owns it, set when the turn is requested; only
+   *  the owner may start a process or write to the run. */
   const turnOwners = new Map<string, object>();
 
   /** Patch one run by id — maps over the array, touching only that run, so
@@ -182,16 +183,18 @@ export const usePlanStore = create<PlanState>((set, get) => {
     set({ runs: get().runs.map((r) => (r.id === id ? { ...r, ...p } : r)) });
 
   /** Stream one turn of run `id` (a read-only agent session turn), then parse the
-   *  result into a draft. `resume` continues the conversation (a refine). */
+   *  result into a draft. `resume` continues the conversation (a refine). A first
+   *  turn passes the token it minted at its request; other turns mint theirs here. */
   const runTurn = async (
     id: string,
     system: string,
     userPrompt: string,
     resume: boolean,
+    owner?: object,
   ) => {
     const run0 = get().runs.find((r) => r.id === id);
     if (!run0) return;
-    const token = {};
+    const token = owner ?? {};
     turnOwners.set(id, token);
     patch(id, {
       generating: true,
@@ -227,6 +230,9 @@ export const usePlanStore = create<PlanState>((set, get) => {
       (rows) => rows.map((row) => row.path),
       () => [] as string[],
     );
+    // Last await before the process starts: a turn stopped or replaced during it starts
+    // nothing.
+    if (superseded()) return;
     let finalText = "";
     let errored = false;
     // Set by a reset/re-key notice: this run's next `nativeSession` replaces the
@@ -405,10 +411,18 @@ export const usePlanStore = create<PlanState>((set, get) => {
    *  then stream it. */
   const runFirstTurn = async (id: string, args: GenerateArgs) => {
     const { repoPath, goal = "", issueTitle, issueBody, contextPack } = args;
+    // Own the run before the awaited reads: whatever lands during them (Stop, Restart,
+    // Dismiss, a newer turn) must find this turn's token, re-checked below.
+    const token = {};
+    turnOwners.set(id, token);
     const [repoInstructions, settings] = await Promise.all([
       readRepoInstructions(repoPath).catch(() => null),
       loadSettings().catch(() => null),
     ]);
+    // A setup that never started a process has no conversation id to record, so a Stop
+    // during the reads starts nothing, unlike a started turn's Stop.
+    const cur = get().runs.find((r) => r.id === id);
+    if (turnOwners.get(id) !== token || !cur || cur.stopped) return;
     const { system, prompt } = buildPlanPrompt({
       goal,
       issueTitle,
@@ -418,7 +432,7 @@ export const usePlanStore = create<PlanState>((set, get) => {
       globalInstructions: settings?.globalInstructions ?? "",
       contextPack,
     });
-    await runTurn(id, system, prompt, false);
+    await runTurn(id, system, prompt, false, token);
   };
 
   return {

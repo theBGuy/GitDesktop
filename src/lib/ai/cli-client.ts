@@ -99,7 +99,7 @@ export function createCliClient(settings: AiSettings): AiClient {
           wake?.();
         });
 
-      let emitted = 0;
+      let emitted = "";
       try {
         while (true) {
           // Stop the moment Cancel fires — before draining the queue — so no further chunk
@@ -132,7 +132,7 @@ export function createCliClient(settings: AiSettings): AiClient {
           }
           const event = queue.shift() as ReviewEvent;
           if (event.kind === "delta") {
-            emitted += event.text.length;
+            emitted += event.text;
             yield event.text;
           } else if (event.kind === "done") {
             settled = true;
@@ -144,8 +144,10 @@ export function createCliClient(settings: AiSettings): AiClient {
             // The terminal event carries the authoritative full text. A coalescing
             // CLI (Codex emits NO deltas — only this final text) has emitted nothing
             // yet, so yield the untold tail; streaming CLIs already emitted it all.
-            if (event.text.length > emitted) {
-              yield event.text.slice(emitted);
+            // A final text that does not continue what streamed has no tail to append.
+            if (event.text.startsWith(emitted)) {
+              const tail = event.text.slice(emitted.length);
+              if (tail) yield tail;
             }
             return;
           } else if (event.kind === "error") {
