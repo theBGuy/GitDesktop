@@ -71,9 +71,9 @@ export function CommandPalette({
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
-    // Only an exact Enter picks: any modifier, AltGraph included, makes it a
-    // chord, which reaches the listener and under the palette's own modal runs
-    // only the palette's registrations.
+    // Only an exact Enter picks. A modified Enter is a chord the listener
+    // answers (under the palette's own modal, only the palette's
+    // registrations); an AltGraph Enter is character input nothing acts on.
     const pick = eventToBinding(e) === "enter";
     // A key the input method owns is left to it: its Enter confirms a
     // candidate rather than picking a row, and its arrows move the candidate
