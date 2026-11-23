@@ -49,7 +49,8 @@ struct CommentIssueArgs {
 struct CloseIssueArgs {
     /// The issue number.
     number: u64,
-    /// Close reason: "completed" (default) or "not_planned". Empty defaults to "completed".
+    /// Close reason: "completed" (default) or "not_planned". Empty defaults to "completed";
+    /// any other value is refused.
     #[serde(default)]
     reason: String,
 }
@@ -176,6 +177,19 @@ fn merge_messages_from(
     Ok(crate::forge::MergeMessages {
         squash: None,
         merge: commit,
+    })
+}
+
+/// The close confirmation names the reason the forge recorded, never the argument:
+/// a GitLab close records none, so its `reason` is null.
+fn close_issue_reply(
+    number: u64,
+    recorded: Option<crate::forge::CloseReason>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "issue": number,
+        "status": "closed",
+        "reason": recorded.map(crate::forge::CloseReason::as_api_str),
     })
 }
 
@@ -761,8 +775,9 @@ impl GitDesktopMcp {
                        GitLab, per its remote; Bitbucket issues aren't supported — its native \
                        tracker is deprecated; for a repo with a linked Jira project, use \
                        transition_jira_issue instead). Reversible via reopen_issue. `reason` is \
-                       \"completed\" (default) or \"not_planned\" (GitHub; GitLab has no close \
-                       reason and ignores it). Requires --allow-remote-write.",
+                       \"completed\" (default) or \"not_planned\"; any other value is refused on \
+                       every forge. GitLab has no close reason, so it records none there and the \
+                       reply's `reason` is null. Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn close_issue(
@@ -770,18 +785,11 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<CloseIssueArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        // Empty resolves to "completed" in the GitHub core; mirror that in the confirmation.
-        let resolved = if args.reason.is_empty() {
-            "completed"
-        } else {
-            args.reason.as_str()
-        };
-        crate::forge::forge_issue_close(self.repo.clone(), args.number, args.reason.clone(), None)
-            .await
-            .map_err(app_err)?;
-        json_result(
-            &serde_json::json!({ "issue": args.number, "status": "closed", "reason": resolved }),
-        )
+        let recorded =
+            crate::forge::forge_issue_close_recorded(self.repo.clone(), args.number, args.reason, None)
+                .await
+                .map_err(app_err)?;
+        json_result(&close_issue_reply(args.number, recorded))
     }
 
     #[tool(
@@ -1988,6 +1996,62 @@ mod tests {
         assert_eq!(
             refusal(merge_messages_from("squash", None, None, None, s("b"))),
             v10
+        );
+    }
+
+    #[test]
+    fn close_issue_reply_names_only_the_recorded_reason() {
+        use crate::forge::CloseReason;
+        let reply = |reason: serde_json::Value| {
+            serde_json::json!({ "issue": 7, "status": "closed", "reason": reason })
+        };
+        assert_eq!(
+            close_issue_reply(7, Some(CloseReason::NotPlanned)),
+            reply("not_planned".into())
+        );
+        assert_eq!(
+            close_issue_reply(7, Some(CloseReason::Completed)),
+            reply("completed".into())
+        );
+        assert_eq!(close_issue_reply(7, None), reply(serde_json::Value::Null));
+    }
+
+    /// The tool refuses an unknown reason on GitLab too, where the close sends none.
+    /// The remote names an owner that doesn't exist, so a regressed guard reaches no issue.
+    #[tokio::test]
+    async fn close_issue_refuses_an_unknown_reason_on_gitlab() {
+        use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-close-reason-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        run_git(Some(&repo), &["init", "-q"], TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
+        run_git(
+            Some(&repo),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://gitlab.com/gd-test-no-such-owner/none.git",
+            ],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        let h = GitDesktopMcp::with_options(repo, false, true, false, false);
+        let error = h
+            .close_issue(Parameters(CloseIssueArgs {
+                number: 1,
+                reason: "garbage".into(),
+            }))
+            .await
+            .expect_err("an unknown reason must be refused");
+        assert!(
+            error.message.contains("unknown close reason: garbage"),
+            "{error:?}"
         );
     }
 

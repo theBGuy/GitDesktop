@@ -8487,8 +8487,8 @@ pub async fn view_issue(repo_path: &str, number: u64) -> AppResult<IssueDetails>
 //
 // Comment (note), close/reopen, title/body edit, and milestone — mirroring the
 // gh_issue_* commands and dispatching through forge_issue_* (labels/assignees/create
-// live in their own sections below). The GitHub close `reason` has no GitLab
-// analogue, so the dispatch drops it before calling close_issue. The writes here that
+// live in their own sections below). GitLab has no close reason: the dispatch
+// validates it like GitHub's, then closes without it. The writes here that
 // still send `glab api -f key=value` fields (`set_issue_state`, `edit_issue_comment`,
 // `lock_issue`, `move_issue`) rely on `-f` being a RAW string field (no `@file`
 // interpretation, unlike `-F`), so a value starting with `@` is safe there; the text

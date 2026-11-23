@@ -999,14 +999,11 @@ const GH_CLOSE_REASON_NOT_PLANNED: &str = "not planned";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GhCloseReason(&'static str);
 
-/// Maps an API-spelled close reason to the value gh's `--reason` accepts.
-fn gh_close_reason(reason: &str) -> AppResult<GhCloseReason> {
+/// Maps a close reason to the value gh's `--reason` accepts.
+fn gh_close_reason(reason: crate::forge::CloseReason) -> GhCloseReason {
     match reason {
-        "" | "completed" => Ok(GhCloseReason("completed")),
-        "not_planned" => Ok(GhCloseReason(GH_CLOSE_REASON_NOT_PLANNED)),
-        _ => Err(AppError::InvalidArgument(format!(
-            "unknown close reason: {reason}"
-        ))),
+        crate::forge::CloseReason::Completed => GhCloseReason("completed"),
+        crate::forge::CloseReason::NotPlanned => GhCloseReason(GH_CLOSE_REASON_NOT_PLANNED),
     }
 }
 
@@ -1014,16 +1011,15 @@ fn issue_close_args<'a>(n: &'a str, slug: &'a str, gh_reason: GhCloseReason) -> 
     ["issue", "close", n, "--repo", slug, "--reason", gh_reason.0]
 }
 
-/// Closes an issue. `reason` is "completed" or "not_planned" (the API's
-/// spellings; empty defaults to completed), translated to gh's spelling.
+/// Closes an issue with `reason`, translated to gh's spelling.
 pub async fn gh_issue_close(
     repo_path: String,
     number: u64,
-    reason: String,
+    reason: crate::forge::CloseReason,
     lens: Option<String>,
 ) -> AppResult<()> {
     let n = number.to_string();
-    let gh_reason = gh_close_reason(&reason)?;
+    let gh_reason = gh_close_reason(reason);
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let result = run_gh(
         Some(&repo_path),
@@ -1923,11 +1919,12 @@ mod tests {
         ISSUE_TIMELINE_QUERY,
     };
     use crate::error::AppError;
+    use crate::forge::CloseReason;
     use crate::github::test_support::{gh_output, HELD_REST_STDERR};
 
     #[test]
     fn issue_close_args_spell_not_planned_the_way_gh_accepts() {
-        let reason = super::gh_close_reason("not_planned").unwrap();
+        let reason = super::gh_close_reason(CloseReason::parse("not_planned").unwrap());
         let args = super::issue_close_args("7", "o/r", reason);
         assert_eq!(
             args,
@@ -1946,22 +1943,9 @@ mod tests {
     #[test]
     fn issue_close_reason_defaults_to_completed() {
         for input in ["", "completed"] {
-            let reason = super::gh_close_reason(input).unwrap();
+            let reason = super::gh_close_reason(CloseReason::parse(input).unwrap());
             let args = super::issue_close_args("7", "o/r", reason);
             assert_eq!(args[5..], ["--reason", "completed"], "{input:?}");
-        }
-    }
-
-    #[test]
-    fn issue_close_reason_refuses_unknown_values() {
-        for input in ["duplicate", "not planned", "NOT_PLANNED"] {
-            assert!(
-                matches!(
-                    super::gh_close_reason(input),
-                    Err(AppError::InvalidArgument(_))
-                ),
-                "{input:?}"
-            );
         }
     }
 

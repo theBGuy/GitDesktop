@@ -3537,8 +3537,34 @@ pub async fn forge_issue_delete_comment(
     }
 }
 
-/// Close an issue, behind the abstraction. `reason` is GitHub's close reason
-/// (`completed`/`not_planned`); GitLab has no close reason and ignores it.
+/// An issue close reason, in the API's spelling (`completed` / `not_planned`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseReason {
+    Completed,
+    NotPlanned,
+}
+
+impl CloseReason {
+    /// Empty defaults to `Completed`; any other spelling is refused.
+    pub fn parse(reason: &str) -> AppResult<Self> {
+        match reason {
+            "" | "completed" => Ok(Self::Completed),
+            "not_planned" => Ok(Self::NotPlanned),
+            _ => Err(AppError::InvalidArgument(format!(
+                "unknown close reason: {reason}"
+            ))),
+        }
+    }
+
+    pub fn as_api_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::NotPlanned => "not_planned",
+        }
+    }
+}
+
+/// Close an issue, behind the abstraction.
 #[tauri::command]
 pub async fn forge_issue_close(
     repo_path: String,
@@ -3546,12 +3572,31 @@ pub async fn forge_issue_close(
     reason: String,
     lens: Option<String>,
 ) -> AppResult<()> {
+    forge_issue_close_recorded(repo_path, number, reason, lens)
+        .await
+        .map(|_| ())
+}
+
+/// Closes an issue and returns the reason the forge recorded. The reason parses
+/// before the provider dispatch, so every forge refuses the same input; GitLab has
+/// no close reason, so its close records none.
+pub async fn forge_issue_close_recorded(
+    repo_path: String,
+    number: u64,
+    reason: String,
+    lens: Option<String>,
+) -> AppResult<Option<CloseReason>> {
+    let reason = CloseReason::parse(&reason)?;
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::close_issue(&repo_path, number).await,
+        Some((Provider::GitLab, _)) => gitlab::close_issue(&repo_path, number)
+            .await
+            .map(|()| None),
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::close_issue(&repo_path, number, &reason, lens).await,
+        _ => github::close_issue(&repo_path, number, reason, lens)
+            .await
+            .map(|()| Some(reason)),
     }
 }
 
@@ -5706,6 +5751,60 @@ mod tests {
             assert!(required(&pr), "{origin} PR comment: {pr:?}");
             let issue = forge_issue_comment(repo, 1, String::new(), None, refs()).await;
             assert!(required(&issue), "{origin} issue comment: {issue:?}");
+        }
+    }
+
+    #[test]
+    fn close_reason_parses_the_api_spellings_and_refuses_the_rest() {
+        for (input, want) in [
+            ("", CloseReason::Completed),
+            ("completed", CloseReason::Completed),
+            ("not_planned", CloseReason::NotPlanned),
+        ] {
+            assert_eq!(CloseReason::parse(input).unwrap(), want, "{input:?}");
+        }
+        for input in ["duplicate", "not planned", "NOT_PLANNED", " completed", "garbage"] {
+            let refused = CloseReason::parse(input);
+            assert!(
+                matches!(&refused, Err(AppError::InvalidArgument(m))
+                    if *m == format!("unknown close reason: {input}")),
+                "{input:?}: {refused:?}"
+            );
+        }
+        assert_eq!(CloseReason::Completed.as_api_str(), "completed");
+        assert_eq!(CloseReason::NotPlanned.as_api_str(), "not_planned");
+    }
+
+    /// The same unknown reason is refused on both forges, ahead of the dispatch. The
+    /// remotes name an owner that doesn't exist, so a regressed guard reaches no issue.
+    #[tokio::test]
+    async fn an_unknown_close_reason_is_refused_on_every_forge() {
+        use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
+        for origin in [
+            "https://github.com/gd-test-no-such-owner/none.git",
+            "https://gitlab.com/gd-test-no-such-owner/none.git",
+        ] {
+            let dir = tempfile::Builder::new()
+                .prefix("gd-close-reason-")
+                .tempdir()
+                .expect("create temp dir");
+            let repo = dir.path().to_string_lossy().into_owned();
+            run_git(Some(&repo), &["init", "-q"], TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
+            run_git(
+                Some(&repo),
+                &["remote", "add", "origin", origin],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await
+            .unwrap();
+            let out = forge_issue_close(repo, 1, "garbage".into(), None).await;
+            assert!(
+                matches!(&out, Err(AppError::InvalidArgument(m))
+                    if m == "unknown close reason: garbage"),
+                "{origin}: {out:?}"
+            );
         }
     }
 
