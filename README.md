@@ -371,11 +371,13 @@ uploads. When a **GitHub** release carries a `latest.json` updater manifest,
 editing its notes can refresh the manifest in the same save, so apps updating
 from that release show the notes you just wrote.
 
-**Submodules** get a manager of their own: add and remove them, update to the
-commit your repo records or to the tip of the branch each one tracks
+**Submodules** get a manager of their own: add and remove them, update them
+following each submodule's `update` setting (by default, a checkout of the
+commit your repo records) or move one to the tip of the branch it tracks
 (recursing into nested submodules either way), edit a submodule's URL or
-tracked branch, and open one as its own repository. Adding, removing, and
-editing stage the change for you to commit, and the clone dialog can bring
+tracked branch, and open one as its own repository. Pick the exact commit a
+submodule points at from any branch or tag's history, checked out and staged
+in one step. Adding, removing, editing, and choosing a commit stage the change for you to commit, and the clone dialog can bring
 every submodule down with the repo. A changed submodule is tagged in Changes
 with what changed; selecting it lists the commits the submodule moved across,
 its unstaged row lists the uncommitted files inside, and **Open submodule** is

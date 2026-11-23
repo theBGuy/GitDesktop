@@ -171,13 +171,26 @@ row stays out of **Stash change** and you stash from inside it. **Open submodule
 double-click on the row) opens it as its own repository, where you stage, commit and stash
 what's inside.
 
-- **Update** checks a submodule out at the commit your repo records, initializing it and
-  any nested submodules on the way; **Update all** in the footer does the whole set.
+- **Update** follows the submodule's \`update\` setting in your Git config. By default
+  that checks out the commit your repo records; with \`rebase\` your local commits in the
+  submodule are replayed on top of it; with \`merge\` it is merged into the submodule's
+  current branch; with \`none\` the submodule is left alone. It initializes the submodule
+  and any nested submodules on the way, and **Update all** in the footer does the whole
+  set.
 - **Update to latest** (on a row's ⋮, or **Update all to latest** in the footer's ⋮) moves
   a submodule to the tip of the branch it tracks instead: the branch recorded in
   \`.gitmodules\`, or the remote's default branch when none is recorded. Nested submodules
   follow to the commits the moved submodule records, not their own tips. That changes the
   commit your repo points at, so it arrives as a change to review and stage in **Changes**.
+- **Choose commit…** (on a row's ⋮) lists the history of a branch or tag inside the
+  submodule; search the commit messages, or paste a commit id to reach any other commit.
+  Arrow keys move through the commits, and {{key:enter}} on one, or **Check out and
+  stage**, checks it out in the submodule and stages the new pointer together. Before you
+  apply, it says when the commit would overwrite local changes, leave commits behind,
+  isn't fetched yet, or isn't on a remote. Nothing reaches the network unless you press
+  **Fetch** or, on a shallow submodule, **Fetch full history**. *Choose submodule commit*
+  is a command palette entry that opens straight onto the picker when the repository has
+  one initialized submodule.
 - **Add submodule…** clones another repository into a folder of this one. Give it a URL;
   the folder defaults to the URL's last segment and the branch to the remote's default.
   *Add submodule* is a command palette entry of its own, and opens straight onto the form.
@@ -191,8 +204,8 @@ what's inside.
   submodule with local changes, or one at a different commit than this repository
   records, asks a second time before that state is discarded.
 
-Updating fetches over the network; adding, removing, and editing stage their change for
-you to commit. When you clone a repository, the **Clone submodules** checkbox initializes
+Updating fetches over the network; adding, removing, editing, and choosing a commit stage
+their change for you to commit. When you clone a repository, the **Clone submodules** checkbox initializes
 every submodule, including nested ones, in the same pass.
 
 ## Aliases

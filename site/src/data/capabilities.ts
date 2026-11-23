@@ -625,8 +625,13 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
-      "Submodule manager — add, remove, update & track branches, edit URLs, open as repo",
+      "Submodule manager — add, remove, update & track branches, pin to any commit, edit URLs, open as repo",
     highlight: true,
+  },
+  {
+    group: "Repository & workspace",
+    label:
+      "Pin a submodule to any commit: pick it from a branch or tag's history and it is checked out and staged together",
   },
   {
     group: "Repository & workspace",

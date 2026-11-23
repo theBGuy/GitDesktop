@@ -1,16 +1,23 @@
 import {
   type MutationCache,
+  type Query,
   type QueryClient,
+  useInfiniteQuery,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { toast } from "sonner";
+import { sameRepoRoot } from "@/features/repository/submodule-row";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
+import { shouldRetryQuery } from "@/lib/forge-backoff";
+import { isWindows } from "@/lib/hotkeys/binding";
+import { isAppError } from "@/lib/tauri/invoke";
 import * as api from "../api";
 import { peekRepoIdentity } from "../repo-identity";
-import { repoKeys, useRepoIdentity } from "./core";
+import { keepPreviousDataForKeyAxes, repoKeys, useRepoIdentity } from "./core";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
+import { isLocalRepoQuery } from "./local-query-filter";
 import { prChecksRecheck } from "./pr-actions";
 import { type PendingMutationEntry, pendingMutationEntries } from "./pr-writes";
 import {
@@ -204,9 +211,187 @@ export function useSubmodules(repo: string) {
     queryKey: ["repo", repo, "submodules"] as const,
     queryFn: () => api.gitSubmodules(repo),
     staleTime: 30_000,
+    // Re-read on every open: a submodule set up or repaired outside the app must
+    // show, and Tauri never refetches on window focus. Cached rows paint meanwhile.
+    refetchOnMount: "always",
     // A local read: react-query's default "online" mode would park it offline.
     networkMode: "always",
   });
+}
+
+/** Rows per page of the commit picker; the backend clamps at 200. */
+export const SUBMODULE_COMMITS_PAGE = 50;
+
+/** The commit picker's reads, children of `["repo", repo]` so the parent's
+ *  settles cover them. `commits` keeps the path at index 3 and the rev at 5,
+ *  which its placeholder axes name. Every pick read keeps staleTime 0: the
+ *  picker masks verdicts cached before it opened until a re-read lands, and a
+ *  read that skipped its mount re-read would hold one in loading. */
+export const submodulePickKeys = {
+  all: (repo: string, path: string) =>
+    ["repo", repo, "submodule-pick", path] as const,
+  refs: (repo: string, path: string) =>
+    ["repo", repo, "submodule-pick", path, "refs"] as const,
+  commits: (repo: string, path: string, rev: string, search: string | null) =>
+    ["repo", repo, "submodule-pick", path, "commits", rev, search] as const,
+  plan: (repo: string, path: string, sha: string) =>
+    ["repo", repo, "submodule-pick", path, "plan", sha] as const,
+};
+
+export function useSubmoduleRefs(repo: string, path: string) {
+  return useQuery({
+    queryKey: submodulePickKeys.refs(repo, path),
+    queryFn: () => api.gitSubmoduleRefs(repo, path),
+    // A local read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
+  });
+}
+
+/** One ref's history inside the submodule, paged. Rows survive a new `search`
+ *  only: another ref's rows under a new ref's label would mislead. */
+export function useSubmoduleCommits(
+  repo: string,
+  path: string,
+  rev: string | null,
+  search: string | null,
+) {
+  return useInfiniteQuery({
+    queryKey: submodulePickKeys.commits(repo, path, rev ?? "", search),
+    queryFn: ({ pageParam }) =>
+      api.gitSubmoduleCommits(
+        repo,
+        path,
+        rev ?? "",
+        pageParam,
+        SUBMODULE_COMMITS_PAGE,
+        search,
+      ),
+    enabled: rev !== null,
+    // A local read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.hasMore
+        ? allPages.reduce((n, p) => n + p.commits.length, 0)
+        : undefined,
+    placeholderData: keepPreviousDataForKeyAxes(repo, [
+      [3, path],
+      [5, rev ?? ""],
+    ]),
+  });
+}
+
+/** What applying `sha` would do. No placeholder: a plan describes one commit. */
+export function useSubmodulePickPlan(
+  repo: string,
+  path: string,
+  sha: string | null,
+) {
+  return useQuery({
+    queryKey: submodulePickKeys.plan(repo, path, sha ?? ""),
+    queryFn: () => api.gitSubmodulePickPlan(repo, path, sha ?? ""),
+    enabled: sha !== null,
+    // A local read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
+    // A malformed or over-long id is refused the same way every time, and the
+    // read costs a dozen git spawns.
+    retry: (failureCount, err) =>
+      !(isAppError(err) && err.kind === "invalidArgument") &&
+      shouldRetryQuery(failureCount, err),
+  });
+}
+
+/** The setter's mutation key: what the picker's pending reads match on. */
+const submoduleSetCommitKey = (repo: string, path: string) =>
+  ["submodule-set-commit", repo, path] as const;
+
+/** Every LOCAL cached query rooted at the submodule's own folder, whichever
+ *  spelling opened it: a checkout or fetch inside it changes no forge read. */
+function submoduleSubtree(repo: string, path: string) {
+  const root = `${repo.replace(/[/\\]+$/, "")}/${path}`;
+  return {
+    queryKey: ["repo"],
+    predicate: (q: Query) =>
+      typeof q.queryKey[1] === "string" &&
+      sameRepoRoot(q.queryKey[1], root, isWindows) &&
+      isLocalRepoQuery(q),
+  };
+}
+
+/** Checks a commit out inside the submodule, then stages it. Keyed per repo and
+ *  path so a pick holds only its own row's picker; callers await `mutateAsync`
+ *  and read pending through {@link useSubmodulePickPending}. */
+export function useSetSubmoduleCommit(repo: string, path: string) {
+  const queryClient = useQueryClient();
+  const subRepo = submoduleSubtree(repo, path);
+  return useRepoMutation(
+    repo,
+    async (args: { sha: string; expectedIndexSha: string }) => {
+      try {
+        return await api.gitSubmoduleSetCommit(
+          repo,
+          path,
+          args.sha,
+          args.expectedIndexSha,
+        );
+      } finally {
+        void queryClient.invalidateQueries(subRepo);
+      }
+    },
+    {
+      // Local git write — never park it offline.
+      networkMode: "always",
+      localOnly: true,
+      identity: submoduleSetCommitKey(repo, path),
+    },
+  );
+}
+
+/** Fetches inside the submodule. A network run: it parks offline, so its
+ *  controls hold on `useOnline` instead. */
+export function useFetchSubmodule(repo: string, path: string) {
+  const queryClient = useQueryClient();
+  const subRepo = submoduleSubtree(repo, path);
+  return useRepoMutation(
+    repo,
+    async (args: { unshallow: boolean }) => {
+      try {
+        return await api.gitSubmoduleFetch(repo, path, args.unshallow);
+      } finally {
+        void queryClient.invalidateQueries(subRepo);
+      }
+    },
+    { localOnly: true },
+  );
+}
+
+/** Whether a pick for this row is in flight, from the mutation cache, so a
+ *  reopen or another mount still sees it. Notifies a macrotask late: handlers
+ *  that must not act mid-pick ask {@link isSubmodulePickPending} instead. */
+export function useSubmodulePickPending(repo: string, path: string): boolean {
+  const select = useCallback(
+    (cache: MutationCache) =>
+      cache.findAll({
+        mutationKey: submoduleSetCommitKey(repo, path),
+        status: "pending",
+      }).length > 0,
+    [repo, path],
+  );
+  return useMutationCacheSnapshot(select, false);
+}
+
+/** Event-time twin of {@link useSubmodulePickPending}. */
+export function isSubmodulePickPending(
+  queryClient: QueryClient,
+  repo: string,
+  path: string,
+): boolean {
+  return (
+    queryClient.getMutationCache().findAll({
+      mutationKey: submoduleSetCommitKey(repo, path),
+      status: "pending",
+    }).length > 0
+  );
 }
 
 /** One side of a submodule row in Changes. The key MUST stay a child of
@@ -236,8 +421,9 @@ export function useSubmoduleChanges(
   });
 }
 
-/** Init + update submodules; omit `path` for all, set `remote` to move them to
- *  the tip of the branch they track instead of the recorded commit. */
+/** Init + update submodules per each one's `update` setting (by default, a
+ *  checkout of the recorded commit); omit `path` for all, set `remote` to move
+ *  them to the tip of the branch they track instead. */
 export function useUpdateSubmodule(repo: string) {
   return useRepoMutation(repo, (args: { path?: string; remote?: boolean }) =>
     api.gitSubmoduleUpdate(repo, args.path, args.remote ?? false),
