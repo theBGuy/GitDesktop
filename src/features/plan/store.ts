@@ -83,8 +83,8 @@ export interface PlanRun {
   agent: AgentKind;
   model: string;
   effort: string;
-  /** The conversation's stable uuid: `--session-id` on turn 1, `--resume` after;
-   *  also the cancel key. */
+  /** The conversation's stable uuid: `--session-id` on turn 1, `--resume` after.
+   *  Every turn cancels by its own run id (its `TurnToken`), never this. */
   sessionId: string;
   /** The CLI's native resume id captured on turn 1 (Codex thread / opencode
    *  session), so a host conversation resumes the right thread. Unset until then. */
@@ -161,6 +161,13 @@ interface PlanState {
   relocateRepoPath: (oldPath: string, newPath: string) => void;
 }
 
+/** A turn's ownership token: its identity is the ownership check, its `runId` the
+ *  turn's own `agent_session` cancel id (backend cancel ids are single-use). */
+interface TurnToken {
+  readonly runId: string;
+}
+const newTurnToken = (): TurnToken => ({ runId: crypto.randomUUID() });
+
 /**
  * Read-only planning surface. Each plan run is a **resumable read-only agent
  * conversation** (the `agent_session` backend with `readOnly: true` — read tools
@@ -174,8 +181,9 @@ export const usePlanStore = create<PlanState>((set, get) => {
    *  (see `hydrate`). Lives in the factory closure, which runs exactly once. */
   let hydrating: Promise<void> | null = null;
   /** Run id to the token of the turn that owns it, set when the turn is requested; only
-   *  the owner may start a process or write to the run. */
-  const turnOwners = new Map<string, object>();
+   *  the owner may start a process or write to the run. The token also carries the
+   *  turn's own cancel id. */
+  const turnOwners = new Map<string, TurnToken>();
 
   /** Patch one run by id — maps over the array, touching only that run, so
    *  concurrent runs streaming at once never clobber each other. */
@@ -190,11 +198,11 @@ export const usePlanStore = create<PlanState>((set, get) => {
     system: string,
     userPrompt: string,
     resume: boolean,
-    owner?: object,
+    owner?: TurnToken,
   ) => {
     const run0 = get().runs.find((r) => r.id === id);
     if (!run0) return;
-    const token = owner ?? {};
+    const token = owner ?? newTurnToken();
     turnOwners.set(id, token);
     patch(id, {
       generating: true,
@@ -289,6 +297,7 @@ export const usePlanStore = create<PlanState>((set, get) => {
         // Read-only: runs in the live repo, never a worktree, and can't write.
         worktreePath: run0.repoPath,
         sessionId: run0.sessionId,
+        runId: token.runId,
         resume,
         readOnly: true,
         isolation: "worktree",
@@ -413,7 +422,7 @@ export const usePlanStore = create<PlanState>((set, get) => {
     const { repoPath, goal = "", issueTitle, issueBody, contextPack } = args;
     // Own the run before the awaited reads: whatever lands during them (Stop, Restart,
     // Dismiss, a newer turn) must find this turn's token, re-checked below.
-    const token = {};
+    const token = newTurnToken();
     turnOwners.set(id, token);
     const [repoInstructions, settings] = await Promise.all([
       readRepoInstructions(repoPath).catch(() => null),
@@ -541,7 +550,8 @@ export const usePlanStore = create<PlanState>((set, get) => {
     cancel: (id) => {
       const run = get().runs.find((r) => r.id === id);
       if (!run?.generating) return;
-      void cancelAgentSession(run.sessionId);
+      const runId = turnOwners.get(id)?.runId;
+      if (runId) void cancelAgentSession(runId);
       // Settle to a clear stopped state right away; the in-flight turn sees
       // `stopped` when its killed process returns and bails without overwriting.
       patch(id, { generating: false, status: "", stopped: true });
@@ -577,7 +587,8 @@ export const usePlanStore = create<PlanState>((set, get) => {
 
     remove: (id) => {
       const run = get().runs.find((r) => r.id === id);
-      if (run?.generating) void cancelAgentSession(run.sessionId);
+      const runId = turnOwners.get(id)?.runId;
+      if (run?.generating && runId) void cancelAgentSession(runId);
       turnOwners.delete(id);
       set({
         runs: get().runs.filter((r) => r.id !== id),

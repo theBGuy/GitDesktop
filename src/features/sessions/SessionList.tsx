@@ -20,6 +20,7 @@ import {
   useState,
 } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
@@ -34,7 +35,14 @@ import { CreateLocalIssueDialog } from "@/features/issues/CreateLocalIssueDialog
 import { type PlanRun, usePlanStore } from "@/features/plan/store";
 import { useReconcileLocalPrs } from "@/features/pulls/useReconcileLocalPrs";
 import {
+  DISTILL_ROW_LABEL,
+  MENU_PLAN_LABEL,
+  MENU_STOP_LABEL,
+} from "@/features/research/distill-copy";
+import {
   assembleSessionReport,
+  distillPhase,
+  type ResearchDepth,
   type ResearchRun,
   researchRunContextPack,
   useResearchStore,
@@ -268,8 +276,10 @@ function ResearchMenuItems({
   requestConfirm: (req: ConfirmReq) => void;
 }) {
   const store = useResearchStore.getState;
+  const phase = distillPhase(run);
   const turnIntoPlan = async () => {
-    if (!run.report || run.distilling) return;
+    const fresh = store().runs.find((r) => r.id === run.id);
+    if (!fresh?.report || fresh.distilling) return;
     // Snapshot the agent-surface selection AT CLICK, so on completion we can tell
     // whether the user navigated to another run/plan/session mid-distill.
     const selectionAtClick = captureAgentSelection();
@@ -300,10 +310,11 @@ function ResearchMenuItems({
       {run.report && (
         <>
           <ContextMenuItem
+            className={MENU_HELD_ROW_CLASS}
             onClick={() => void turnIntoPlan()}
-            disabled={run.distilling}
+            disabled={phase !== "idle"}
           >
-            {run.distilling ? "Distilling…" : "Turn into a Plan"}
+            {MENU_PLAN_LABEL[phase]}
           </ContextMenuItem>
           <ContextMenuItem
             onClick={() => void store().saveReport(run.id).catch(toastError)}
@@ -320,8 +331,12 @@ function ResearchMenuItems({
         </>
       )}
       {(run.generating || run.distilling) && (
-        <ContextMenuItem onClick={() => store().cancel(run.id)}>
-          Stop
+        <ContextMenuItem
+          className={MENU_HELD_ROW_CLASS}
+          onClick={() => store().cancel(run.id)}
+          disabled={phase === "stopping"}
+        >
+          {MENU_STOP_LABEL[phase]}
         </ContextMenuItem>
       )}
       {(run.stopped || run.error) && (
@@ -1028,6 +1043,11 @@ function SessionRow({
   );
 }
 
+const RESEARCH_BUSY_LABEL: Record<ResearchDepth, string> = {
+  deep: "Researching…",
+  brainstorm: "Brainstorming…",
+};
+
 /** Status line for a research row — mirrors a plan's PlanStatus. `planned` marks
  *  a run that's been handed off to a plan (shown in the Archived tab). */
 function ResearchStatus({
@@ -1045,14 +1065,13 @@ function ResearchStatus({
   );
   const planNumber = useAgentNumber(plan?.id ?? "");
   if (run.generating || run.distilling) {
+    const phase = distillPhase(run);
     return (
       <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
         <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-primary" />
-        {run.distilling
-          ? "Distilling plan brief…"
-          : run.depth === "deep"
-            ? "Researching…"
-            : "Brainstorming…"}
+        {phase === "idle"
+          ? RESEARCH_BUSY_LABEL[run.depth]
+          : DISTILL_ROW_LABEL[phase]}
       </span>
     );
   }

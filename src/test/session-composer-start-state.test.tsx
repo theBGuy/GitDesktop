@@ -484,3 +484,39 @@ describe("Best-of-N round trip (live-drive observation)", () => {
     expect(startEnsemble).not.toHaveBeenCalled();
   });
 });
+
+describe("SessionComposer while the session is busy", () => {
+  it("Enter during a Keep, Discard or Resume sends nothing and keeps the draft", async () => {
+    const send = vi.fn(async () => undefined);
+    useSessionsStore.setState({ sessions: [SESSION], busyId: "s1", send });
+    const user = userEvent.setup();
+    mount({ session: SESSION });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument(),
+    );
+    await user.type(textarea(), "next step");
+    await user.keyboard("{Enter}");
+    expect(send).not.toHaveBeenCalled();
+    expect(textarea()).toHaveValue("next step");
+  });
+
+  it("Send is held with its reason while Keep or Discard runs", async () => {
+    const reason = "Wait for Keep or Discard to finish.";
+    useSessionsStore.setState({ sessions: [SESSION], busyId: "s1" });
+    const user = userEvent.setup();
+    mount({ session: SESSION });
+    await user.type(textarea(), "next step");
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toBeDisabled();
+    const line = screen.getByText(reason);
+    expect(line.closest('[role="status"]')).not.toHaveClass("sr-only");
+    expect(send).toHaveAccessibleDescription(reason);
+    expect(send.parentElement).toHaveAttribute("title", reason);
+
+    act(() => useSessionsStore.setState({ busyId: null }));
+    await waitFor(() => expect(send).toBeEnabled());
+    expect(screen.queryByText(reason)).toBeNull();
+    expect(send).not.toHaveAccessibleDescription();
+    expect(send.parentElement).not.toHaveAttribute("title");
+  });
+});

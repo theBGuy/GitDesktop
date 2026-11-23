@@ -152,10 +152,14 @@ export function appendTranscriptNote(
   return [...segments, { type: "note", text }];
 }
 
+/** The notice that the turn's conversation was restarted (mirrors the Rust
+ *  `NOTICE_SESSION_RESET`). */
+const NOTICE_SESSION_RESET = "nativeSessionReset";
+
 /** The notice codes after which the run's next `nativeSession` replaces the stored
  *  conversation id (mirrors the Rust `NOTICE_SESSION_RESET` / `NOTICE_SESSION_REKEY`). */
 const NOTICE_REPLACES_NATIVE_SESSION: ReadonlySet<string> = new Set([
-  "nativeSessionReset",
+  NOTICE_SESSION_RESET,
   "nativeSessionRekey",
 ]);
 /** Notices that show nothing: a successful sign-in copy is the expected case. */
@@ -325,6 +329,18 @@ export interface AgentReviewArgs {
  *  (and any deltas still in flight ahead of it) before it is replayed. */
 const CHANNEL_TERMINAL_WAIT_MS = 5000;
 
+/** Hands one event to a consumer; a throwing consumer is logged and skipped. */
+function safeDeliver(
+  onEvent: (event: ReviewEvent) => void,
+  event: ReviewEvent,
+): void {
+  try {
+    onEvent(event);
+  } catch (e) {
+    console.error("[agent] event handler failed", e);
+  }
+}
+
 /** A channel for one agent run, gated so `onEvent` sees at most one terminal,
  *  after every delta the channel delivers before it. A throwing consumer is logged
  *  and skipped: a handler that throws must never stall the channel's ordered queue. */
@@ -334,13 +350,7 @@ function gatedChannel(onEvent: (event: ReviewEvent) => void): {
 } {
   const gate = createChannelGate({
     boundMs: CHANNEL_TERMINAL_WAIT_MS,
-    deliver: (event) => {
-      try {
-        onEvent(event);
-      } catch (e) {
-        console.error("[agent] event handler failed", e);
-      }
-    },
+    deliver: (event) => safeDeliver(onEvent, event),
   });
   const channel = new Channel<ReviewEvent>();
   channel.onmessage = gate.onMessage;
@@ -394,9 +404,13 @@ export interface AgentSessionArgs {
   /** The directory the agent runs in — a throwaway worktree for a write session,
    *  or the live repo for a read-only Plan conversation. */
   worktreePath: string;
-  /** The session's stable uuid (sets `--session-id` on turn 1, `--resume` after);
-   *  also the cancel key for `cancelAgentSession`. */
+  /** The conversation's stable uuid: `--session-id` on turn 1, `--resume` after, the
+   *  container name and the MCP config. Never the cancel key (see `runId`). */
   sessionId: string;
+  /** This turn's own cancel id, fresh per turn (the resume retry's second call
+   *  reuses it): the key `cancelAgentSession` takes. 8-64 chars of ASCII letters,
+   *  digits or '-'. */
+  runId: string;
   /** false = first turn (start the session), true = a follow-up turn (resume it). */
   resume: boolean;
   /** Claude-only: a resume turn forks the conversation to a throwaway session id
@@ -436,12 +450,105 @@ export interface AgentSessionArgs {
  * `--add-dir`, opencode `--dangerously-skip-permissions`); Claude and Codex can
  * also run in a container (kernel boundary). Settles like {@link runAgentReview}:
  * with the turn's terminal event after `onEvent` received one, or with `null` at
- * once on cancel.
+ * once on cancel. A Claude or Copilot resume (not a fork) whose CLI answers, before
+ * any output, that the conversation does not exist runs once more as a first turn
+ * under the same ids; that answer never reaches `onEvent`, and a notice goes out
+ * just ahead of the second attempt's first event unless that event is a failure.
  */
 export async function runAgentSession(
   args: AgentSessionArgs,
 ): Promise<ReviewEvent | null> {
-  const { channel, gate } = gatedChannel(args.onEvent);
+  const { agent, runId } = args;
+  if ((agent !== "claude" && agent !== "copilot") || !args.resume || args.fork)
+    return sessionTurn(args, args.onEvent);
+  // Recorded before the first await, so a Stop issued at once still counts.
+  liveRuns.add(runId);
+  try {
+    let held = false;
+    let output = false;
+    const first = await sessionTurn(args, (event) => {
+      if (!held && !output && isResumeMiss(agent, args.sessionId, event)) {
+        held = true;
+        return;
+      }
+      if ((event.kind === "delta" && event.text) || event.kind === "tool")
+        output = true;
+      args.onEvent(event);
+    });
+    if (!held) return first;
+    // A Stop aimed at the first attempt may have reached its entry or found none;
+    // this record carries it across to the second.
+    if (cancelledRuns.has(runId)) return null;
+    // Told only once the new conversation answers: a second attempt stopped before its
+    // spawn, refused, or failing at once started nothing worth a note.
+    let awaitingFirst = true;
+    return await sessionTurn({ ...args, resume: false }, (event) => {
+      if (awaitingFirst) {
+        awaitingFirst = false;
+        if (event.kind !== "error" && !(event.kind === "done" && event.isError))
+          safeDeliver(args.onEvent, {
+            kind: "notice",
+            code: NOTICE_SESSION_RESET,
+            text: resumeMissNote(RESUME_MISS_LABELS[agent]),
+          });
+      }
+      args.onEvent(event);
+    });
+  } finally {
+    liveRuns.delete(runId);
+    cancelledRuns.delete(runId);
+  }
+}
+
+/** The run ids of the resume turns that may still retry, and those of them a Stop
+ *  was sent for. Both hold only runs in flight. */
+const liveRuns = new Set<string>();
+const cancelledRuns = new Set<string>();
+
+/** The agents whose missing conversation `isResumeMiss` recognises, as the pickers
+ *  name them. */
+const RESUME_MISS_LABELS: Record<"claude" | "copilot", string> = {
+  claude: "Claude",
+  copilot: "GitHub Copilot",
+};
+
+/** The note for a turn that started a new conversation; one template with the Rust
+ *  `NOTICE_RESET_GENERIC` and `fresh_start_note`. */
+export function resumeMissNote(label: string): string {
+  return `GitDesktop could not continue the earlier ${label} conversation, so this turn started a new one. The agent does not remember the earlier turns.`;
+}
+
+/** Whether `event` is the CLI's own answer that conversation `sessionId` does not
+ *  exist (Claude 2.1.311, Copilot CLI 1.0.105, probed on the host). Anything else,
+ *  a reworded answer included, is not, so an unrecognised miss fails as before. */
+export function isResumeMiss(
+  agent: AgentSessionArgs["agent"],
+  sessionId: string,
+  event: ReviewEvent,
+): boolean {
+  if (agent === "claude")
+    return (
+      event.kind === "done" &&
+      event.isError &&
+      event.text.trim() ===
+        `No conversation found with session ID: ${sessionId}`
+    );
+  if (agent !== "copilot" || event.kind !== "error" || event.timedOut)
+    return false;
+  // Copilot prints the sentence as stderr's first line, then a usage block.
+  const line = event.message.split(/\r?\n/, 1)[0].trim();
+  const sentence = line.startsWith("Error: ")
+    ? line.slice("Error: ".length)
+    : line;
+  return sentence === `No session, task, or name matched '${sessionId}'.`;
+}
+
+/** One `agent_session` invoke through its own gated channel. */
+async function sessionTurn(
+  args: AgentSessionArgs,
+  onEvent: (event: ReviewEvent) => void,
+): Promise<ReviewEvent | null> {
+  const { channel, gate } = gatedChannel(onEvent);
   const returned = await invoke<ReviewEvent | null>("agent_session", {
     agent: args.agent,
     binPath: args.binPath,
@@ -451,6 +558,7 @@ export async function runAgentSession(
     userPrompt: args.userPrompt,
     worktreePath: args.worktreePath,
     sessionId: args.sessionId,
+    runId: args.runId,
     resume: args.resume,
     fork: args.fork ?? false,
     readOnly: args.readOnly,
@@ -464,6 +572,12 @@ export async function runAgentSession(
   return returned;
 }
 
-/** Signals an in-flight session to stop (shares the backend cancel registry). */
-export const cancelAgentSession = (sessionId: string) =>
-  invoke<void>("agent_review_cancel", { reviewId: sessionId });
+/** Signals an in-flight session turn to stop (shares the backend cancel registry).
+ *  Takes the turn's `runId`: registry ids are single-use, so a session id shared
+ *  by a stopped turn and its quick re-send would let the stopped turn's exit or a
+ *  stale Stop land on the new one. */
+export const cancelAgentSession = (runId: string) => {
+  // Recorded before the invoke, so a first attempt settling meanwhile still sees it.
+  if (liveRuns.has(runId)) cancelledRuns.add(runId);
+  return invoke<void>("agent_review_cancel", { reviewId: runId });
+};

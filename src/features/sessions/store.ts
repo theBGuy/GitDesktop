@@ -49,11 +49,29 @@ import {
 } from "./persistence";
 import { isWatchingAgentSurface } from "./watching";
 
-/** Fire-and-forget a transcript write: persistence must never break a session,
- *  so swallow + log failures. Per-session append ordering is preserved by the
- *  store calling these in sequence (and a process-wide lock in Rust). */
-const persist = (p: Promise<unknown>) =>
-  void p.catch((e) => console.error("[sessions] persist failed", e));
+/** The tail of the transcript write queue. */
+let transcriptWrites: Promise<void> = Promise.resolve();
+
+/** Writes run one at a time in the order they are issued: the transcript commands
+ *  are async and would otherwise land in any order. A failed write is logged and
+ *  never stops the next. */
+const persist = (write: () => Promise<unknown>): Promise<void> => {
+  transcriptWrites = transcriptWrites.then(write).then(
+    () => undefined,
+    (e) => console.error("[sessions] persist failed", e),
+  );
+  return transcriptWrites;
+};
+
+/** Settles once every transcript write issued so far has. */
+export const transcriptWritesSettled = (): Promise<void> => transcriptWrites;
+
+/** Fire-and-forget a sandbox cleanup, logging a failure; it stays off the transcript
+ *  queue so a slow container removal never delays a write. */
+const cleanUpSandbox = (claudeSessionId: string) =>
+  void cleanupContainerSandbox(claudeSessionId).catch((e) =>
+    console.error("[sessions] sandbox cleanup failed", e),
+  );
 
 export type TurnStatus = "running" | "committing" | "done" | "error";
 
@@ -86,7 +104,8 @@ export interface AgentSession {
   base: string;
   /** Latest checkpoint commit (= base until the first turn commits). */
   headHash: string;
-  /** Claude session uuid: `--session-id` on turn 1, `--resume` after; also the cancel key. */
+  /** Claude session uuid: `--session-id` on turn 1, `--resume` after. Every turn
+   *  cancels by its own run id (`turnRunIds`), never this. */
   claudeSessionId: string;
   /** Current model for the next turn ("" = account default). Changeable mid-session. */
   model: string;
@@ -265,14 +284,23 @@ function markInterrupted(s: AgentSession): AgentSession {
   return { ...s, running: false, turns };
 }
 
+/** Session id → the run id of its latest requested turn, the key `cancel` sends.
+ *  Set only by `send` and `start`, at the turn's request (the backend's cancel ids
+ *  are single-use, so each turn needs its own), and deleted by `removeSession`;
+ *  never persisted. */
+const turnRunIds = new Map<string, string>();
+
 /** Removes a session from the list, moving `activeId` to a survivor (or null). */
 function removeSession(get: Get, set: SetState, id: string) {
+  turnRunIds.delete(id);
   const remaining = get().sessions.filter((s) => s.id !== id);
   const activeId =
     get().activeId === id
       ? (remaining[remaining.length - 1]?.id ?? null)
       : get().activeId;
-  set({ sessions: remaining, activeId, busyId: null });
+  // Another session's Keep, Discard or Resume keeps its busy mark.
+  const busyId = get().busyId === id ? null : get().busyId;
+  set({ sessions: remaining, activeId, busyId });
 }
 
 /**
@@ -287,6 +315,7 @@ async function runTurn(
   id: string,
   prompt: string,
   resume: boolean,
+  runId: string,
 ) {
   const find = () => get().sessions.find((s) => s.id === id);
   const s0 = find();
@@ -304,30 +333,6 @@ async function runTurn(
     agent,
     nativeSessionId,
   } = s0;
-
-  // Resolve the session's opted-in MCP ids against the CURRENT registry (re-read each turn,
-  // so editing a server applies next turn) and drop any no longer OFFERED in this repo —
-  // re-scoping a server away or setting it per-repo "off" stops it applying, matching what
-  // the picker would now offer. The backend resolves secrets from the keychain.
-  const mcpIds = s0.mcpServers ?? [];
-  // Scope/override lookup keys for the session's repo (its worktree-stable
-  // identity + the raw checkout path), so a server scoped/overridden from a
-  // sibling worktree still resolves as OFFERED here.
-  const repoKeys = mcpIds.length
-    ? await repoIdentity(s0.repoPath).then((id) =>
-        id !== s0.repoPath ? [s0.repoPath, id] : [s0.repoPath],
-      )
-    : [];
-  const mcpServers = mcpIds.length
-    ? asMcpServerArray(
-        (await loadSettings().catch(() => null))?.mcpServers,
-      ).filter(
-        (srv) =>
-          mcpIds.includes(srv.id) &&
-          isServerAvailable(srv, repoKeys) &&
-          mcpServerUsableBy(srv, s0.agent),
-      )
-    : undefined;
 
   const setSession = (updater: (s: AgentSession) => AgentSession) =>
     set({
@@ -352,7 +357,7 @@ async function runTurn(
     const s = find();
     const t = s?.turns[turnIndex];
     if (!s || !t) return;
-    persist(
+    persist(() =>
       appendResult(
         id,
         turnIndex,
@@ -397,7 +402,55 @@ async function runTurn(
   // id. Run-local on purpose: a failed reset turn must not leave it armed for the next
   // run, and another run's notice must never arm this one.
   let replaceArmed = false;
-  setSession((s) => ({ ...s, running: true }));
+
+  // Resolve the session's opted-in MCP ids against the CURRENT registry (re-read each turn,
+  // so editing a server applies next turn) and drop any no longer OFFERED in this repo —
+  // re-scoping a server away or setting it per-repo "off" stops it applying, matching what
+  // the picker would now offer. The backend resolves secrets from the keychain.
+  const mcpIds = s0.mcpServers ?? [];
+  let mcpServers: ReturnType<typeof asMcpServerArray> | undefined;
+  try {
+    // Scope/override lookup keys for the session's repo (its worktree-stable
+    // identity + the raw checkout path), so a server scoped/overridden from a
+    // sibling worktree still resolves as OFFERED here.
+    const repoKeys = mcpIds.length
+      ? await repoIdentity(s0.repoPath).then((id) =>
+          id !== s0.repoPath ? [s0.repoPath, id] : [s0.repoPath],
+        )
+      : [];
+    mcpServers = mcpIds.length
+      ? asMcpServerArray(
+          (await loadSettings().catch(() => null))?.mcpServers,
+        ).filter(
+          (srv) =>
+            mcpIds.includes(srv.id) &&
+            isServerAvailable(srv, repoKeys) &&
+            mcpServerUsableBy(srv, s0.agent),
+        )
+      : undefined;
+  } catch (e) {
+    // The session is already running, so a failed read must end the turn here, or it
+    // stays busy with no process behind it; a turn Stopped meanwhile keeps its
+    // "Cancelled.".
+    if (find()?.turns[turnIndex]?.status === "running")
+      patchTurn({
+        status: "error",
+        error: presentError(e).summary,
+        statusText: "",
+      });
+    setSession((s) => (ownsLastTurn(s) ? { ...s, running: false } : s));
+    endTurn();
+    return;
+  }
+
+  // A Stop during the setup reads already marked the turn and freed the session:
+  // persist that result and spawn nothing.
+  const sNow = find();
+  if (!sNow) return;
+  if (sNow.turns[turnIndex]?.status !== "running") {
+    endTurn();
+    return;
+  }
   try {
     await runAgentSession({
       binPath: null,
@@ -407,6 +460,7 @@ async function runTurn(
       userPrompt: prompt,
       worktreePath,
       sessionId: claudeSessionId,
+      runId,
       resume,
       readOnly: false,
       isolation,
@@ -424,7 +478,7 @@ async function runTurn(
           if (ownsLastTurn(s) && (replaceArmed || !s.nativeSessionId)) {
             replaceArmed = false;
             setSession((x) => ({ ...x, nativeSessionId: ev.id }));
-            persist(appendNativeSession(id, ev.id));
+            persist(() => appendNativeSession(id, ev.id));
           }
           return;
         }
@@ -616,9 +670,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           live[s.repoPath] &&
           !live[s.repoPath].has(normPath(s.worktreePath))
         ) {
-          persist(removeTranscript(s.id));
-          if (s.isolation === "container")
-            persist(cleanupContainerSandbox(s.claudeSessionId));
+          persist(() => removeTranscript(s.id));
+          if (s.isolation === "container") cleanUpSandbox(s.claudeSessionId);
         }
       }
       // Merge under any sessions created before hydration finished (newest state
@@ -693,16 +746,19 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         ? mcpServers
         : undefined,
       ensembleId,
-      running: false,
+      // Running from creation: the first turn's MCP setup reads come before its spawn.
+      running: true,
       kept: false,
       turns: [newTurn(task)],
     };
+    const runId = crypto.randomUUID();
+    turnRunIds.set(wt.id, runId);
     set({
       creating: false,
       sessions: [...get().sessions, session],
       activeId: wt.id,
     });
-    persist(
+    persist(() =>
       createTranscript({
         id: session.id,
         repoPath: session.repoPath,
@@ -717,10 +773,10 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         mcpServers: session.mcpServers,
       }),
     );
-    persist(appendTurn(wt.id, 0, task, model));
+    persist(() => appendTurn(wt.id, 0, task, model));
     // Fire the first turn in the background and return the new session id so a caller (e.g.
     // the plan "Implement") can link to it.
-    void runTurn(get, set, wt.id, task, false);
+    void runTurn(get, set, wt.id, task, false, runId);
     return wt.id;
   },
 
@@ -758,32 +814,39 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 
   send: async (id, prompt) => {
     const s = get().sessions.find((x) => x.id === id);
-    // A kept session has no worktree to run in — it must be resumed first.
-    if (!s || s.running || s.kept) return;
+    // A kept session has no worktree to run in — it must be resumed first. A Keep,
+    // Discard or Resume in flight owns the session until it settles.
+    if (!s || s.running || s.kept || get().busyId === id) return;
     const task = prompt.trim();
     if (!task) return;
     const seq = s.turns.length;
+    // One synchronous block: the turn is cancellable by its own id and holds the
+    // session before runTurn's first await.
+    const runId = crypto.randomUUID();
+    turnRunIds.set(id, runId);
     set({
       sessions: get().sessions.map((x) =>
-        x.id === id ? { ...x, turns: [...x.turns, newTurn(task)] } : x,
+        x.id === id
+          ? { ...x, running: true, turns: [...x.turns, newTurn(task)] }
+          : x,
       ),
     });
-    persist(appendTurn(id, seq, task, s.model));
-    await runTurn(get, set, id, task, true);
+    persist(() => appendTurn(id, seq, task, s.model));
+    await runTurn(get, set, id, task, true, runId);
   },
 
   setModel: (id, model) => {
     set({
       sessions: get().sessions.map((s) => (s.id === id ? { ...s, model } : s)),
     });
-    persist(appendModel(id, model));
+    persist(() => appendModel(id, model));
   },
 
   setEffort: (id, effort) => {
     set({
       sessions: get().sessions.map((s) => (s.id === id ? { ...s, effort } : s)),
     });
-    persist(appendEffort(id, effort));
+    persist(() => appendEffort(id, effort));
   },
 
   // Mid-session MCP change: update live state (runTurn re-resolves ids→specs each
@@ -794,17 +857,16 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         s.id === id ? { ...s, mcpServers } : s,
       ),
     });
-    persist(appendMcp(id, mcpServers));
+    persist(() => appendMcp(id, mcpServers));
   },
 
   cancel: async (id) => {
     const s = get().sessions.find((x) => x.id === id);
     if (!s || !s.running) return;
-    try {
-      await cancelAgentSession(s.claudeSessionId);
-    } catch (e) {
-      toastError(e);
-    }
+    const runId = turnRunIds.get(id);
+    // Marked and freed before the IPC, as Plan and Research do: the run may return
+    // before the cancel answers, and must already read its turn as Cancelled then.
+    // Nothing writes after the await, so a late answer never touches a newer turn.
     set({
       sessions: get().sessions.map((x) => {
         if (x.id !== id) return x;
@@ -823,6 +885,11 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         return { ...x, running: false, turns };
       }),
     });
+    try {
+      if (runId) await cancelAgentSession(runId);
+    } catch (e) {
+      toastError(e);
+    }
   },
 
   keep: async (id, squash) => {
@@ -844,7 +911,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       // session lingers as a `kept` record you can resume later.
       await removeWorktree(s.repoPath, s.worktreePath, null, false);
       toast.success(`Kept on branch ${s.branch}`);
-      persist(setKept(id, true));
+      persist(() => setKept(id, true));
       set({
         busyId: null,
         sessions: get().sessions.map((x) =>
@@ -882,7 +949,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       // Re-create the worktree on the kept branch (which holds the work); the
       // conversation resumes via `--resume` on the next message.
       await resumeWorktree(s.repoPath, s.worktreePath, s.branch);
-      persist(setKept(id, false));
+      persist(() => setKept(id, false));
       set({
         busyId: null,
         sessions: get().sessions.map((x) =>
@@ -910,12 +977,11 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         s.branch,
         true,
       );
-      persist(removeTranscript(id));
+      persist(() => removeTranscript(id));
       // The container home holds the agent's conversation and its sign-in copy, so it goes
       // only once the worktree is gone: a failed removal leaves the session usable. It is
       // keyed by the run's session id, not the record id.
-      if (s.isolation === "container")
-        persist(cleanupContainerSandbox(s.claudeSessionId));
+      if (s.isolation === "container") cleanUpSandbox(s.claudeSessionId);
       removeSession(get, set, id);
       const keptNote = KEPT_BRANCH_NOTES[branchCleanup];
       if (keptNote) toast.info(keptNote(s.branch));
@@ -930,9 +996,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   deleteSession: (id) => {
     const s = get().sessions.find((x) => x.id === id);
     if (!s || !s.kept) return;
-    persist(removeTranscript(id));
-    if (s.isolation === "container")
-      persist(cleanupContainerSandbox(s.claudeSessionId));
+    persist(() => removeTranscript(id));
+    if (s.isolation === "container") cleanUpSandbox(s.claudeSessionId);
     removeSession(get, set, id);
   },
 }));
