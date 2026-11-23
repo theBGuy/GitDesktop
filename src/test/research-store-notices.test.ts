@@ -688,13 +688,16 @@ describe("distill", () => {
 
   it("D3b an error event or a rejected invoke returns null without throwing", async () => {
     const p1 = store().distillPlanBrief("a");
-    runs[0].emit({
+    // Text already streamed, so only the error event itself makes this null.
+    runs[0].emit({ kind: "delta", text: "## Brief\n\nPartial." });
+    const failure: ReviewEvent = {
       kind: "error",
       message: "boom",
       partialText: null,
       timedOut: false,
-    });
-    runs[0].settle(null);
+    };
+    runs[0].emit(failure);
+    runs[0].settle(failure);
     expect(await p1).toBeNull();
     expect(flags()).toEqual(IDLE);
 
@@ -716,7 +719,9 @@ describe("distill", () => {
     await p;
     await flush();
     expect(runs).toHaveLength(1);
-    store().sendFollowUp("a", "more", "deep", "");
+    store().sendFollowUp("a", "more", "brainstorm", "sonnet");
+    // The run carries this turn's picks onward.
+    expect(find("a")).toMatchObject({ depth: "brainstorm", model: "sonnet" });
     await vi.waitFor(() => expect(runs).toHaveLength(2));
     await flush();
     expect(runs).toHaveLength(2);

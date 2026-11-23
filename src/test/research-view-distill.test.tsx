@@ -8,13 +8,18 @@ import {
   expect,
   it,
   type Mock,
+  onTestFinished,
   vi,
 } from "vitest";
 import { type PlanSeed, usePlanStore } from "@/features/plan/store";
 import { ResearchView } from "@/features/research/ResearchView";
 import {
   assembleSessionReport,
+  clearResearchFollowUpDraft,
+  type ResearchDepth,
   type ResearchRun,
+  researchFollowUpDraft,
+  setResearchFollowUpDraft,
   useResearchStore,
 } from "@/features/research/store";
 import {
@@ -46,7 +51,18 @@ vi.mock("@/features/sessions/AgentPickers", async (importOriginal) => ({
   ...(await importOriginal<
     typeof import("@/features/sessions/AgentPickers")
   >()),
-  ModelPicker: () => null,
+  // A stand-in that shows its value and picks "sonnet" on press.
+  ModelPicker: ({
+    value,
+    onChange,
+  }: {
+    value: string;
+    onChange: (model: string) => void;
+  }) => (
+    <button type="button" aria-label="Model" onClick={() => onChange("sonnet")}>
+      {value || "default"}
+    </button>
+  ),
 }));
 
 interface Run {
@@ -108,6 +124,7 @@ beforeEach(() => {
   seed = vi.fn<(s: PlanSeed | null) => void>();
   usePlanStore.setState({ setPendingPlanSeed: seed });
   useResearchStore.setState({ runs: [RUN], activeResearchId: "a" });
+  clearResearchFollowUpDraft("a");
 });
 
 afterEach(async () => {
@@ -156,6 +173,9 @@ describe("research canvas: the distill's stopping state", () => {
     expect(opening).toHaveAccessibleDescription(
       "Plan gets the full report once the brief stops",
     );
+    // Held, never taken out of the tab order.
+    expect(distilling.tabIndex).toBe(0);
+    expect(opening.tabIndex).toBe(0);
   });
 
   it("(D8) Stop reads Stopping…, keeps focus, and hands focus to the plan button at settle", async () => {
@@ -188,5 +208,111 @@ describe("research canvas: the distill's stopping state", () => {
     if (!cur) throw new Error("run gone");
     expect(seed.mock.calls[0][0]?.issueBody).toBe(assembleSessionReport(cur));
     expect(useResearchStore.getState().activeResearchId).toBe("a");
+  });
+});
+
+describe("research canvas: the follow-up draft", () => {
+  const box = () =>
+    screen.getByRole("textbox", { name: "Continue the research" });
+
+  it("(B1) survives the composer unmounting and comes back on remount", async () => {
+    const user = userEvent.setup();
+    const view = renderView();
+    await user.type(box(), "keep me");
+    view.unmount();
+    renderView();
+    expect(box()).toHaveValue("keep me");
+  });
+
+  it("(B2) a sent follow-up clears the box and the stored draft", async () => {
+    const sent = vi.fn();
+    const { sendFollowUp } = useResearchStore.getState();
+    useResearchStore.setState({ sendFollowUp: sent });
+    onTestFinished(() => useResearchStore.setState({ sendFollowUp }));
+    const user = userEvent.setup();
+    const view = renderView();
+    await user.type(box(), "dig deeper");
+    await user.keyboard("{Enter}");
+    expect(sent).toHaveBeenCalledTimes(1);
+    expect(box()).toHaveValue("");
+    expect(researchFollowUpDraft("a")).toBeUndefined();
+    view.unmount();
+    renderView();
+    expect(box()).toHaveValue("");
+  });
+
+  it("(B3) Dismiss drops the run's draft", async () => {
+    setResearchFollowUpDraft("a", { text: "left over", depth: "brainstorm" });
+    act(() => useResearchStore.getState().remove("a"));
+    expect(researchFollowUpDraft("a")).toBeUndefined();
+  });
+
+  it("(B4) a follow-up held by the distill is back after the handoff", async () => {
+    const user = userEvent.setup();
+    const view = renderView();
+    await user.click(button("Turn into a Plan"));
+    await user.type(box(), "after the plan");
+    await user.keyboard("{Enter}");
+    expect(box()).toHaveValue("after the plan");
+    await act(async () => runs[0].settle());
+    await waitFor(() => expect(seed).toHaveBeenCalledTimes(1));
+    // The handoff left the run; coming back to it mounts a new composer.
+    view.unmount();
+    act(() => useResearchStore.getState().setActiveResearch("a"));
+    renderView();
+    expect(box()).toHaveValue("after the plan");
+    expect(runs).toHaveLength(1);
+  });
+
+  const persona = () =>
+    screen.getByRole("combobox", { name: "Research intent" });
+
+  async function pickBrainstormAndSonnet(
+    user: ReturnType<typeof userEvent.setup>,
+  ) {
+    await user.click(persona());
+    await user.click(await screen.findByRole("option", { name: "Brainstorm" }));
+    await waitFor(() => expect(persona()).toHaveTextContent("Brainstorm"));
+    await user.click(button("Model"));
+    expect(button("Model")).toHaveTextContent("sonnet");
+  }
+
+  it("(B5) the persona and model picks come back with the text", async () => {
+    const user = userEvent.setup();
+    const view = renderView();
+    await pickBrainstormAndSonnet(user);
+    await user.type(box(), "with picks");
+    view.unmount();
+    renderView();
+    expect(box()).toHaveValue("with picks");
+    expect(persona()).toHaveTextContent("Brainstorm");
+    expect(button("Model")).toHaveTextContent("sonnet");
+  });
+
+  it("(B6) Send drops the draft and the run carries the picks", async () => {
+    // Mirrors the real action's run update (it stores this turn's depth and model)
+    // without starting a turn.
+    const sent = vi.fn(
+      (id: string, _text: string, depth: ResearchDepth, model: string) =>
+        useResearchStore.setState((s) => ({
+          runs: s.runs.map((r) => (r.id === id ? { ...r, depth, model } : r)),
+        })),
+    );
+    const { sendFollowUp } = useResearchStore.getState();
+    useResearchStore.setState({ sendFollowUp: sent });
+    onTestFinished(() => useResearchStore.setState({ sendFollowUp }));
+    const user = userEvent.setup();
+    const view = renderView();
+    await pickBrainstormAndSonnet(user);
+    await user.type(box(), "go");
+    await user.keyboard("{Enter}");
+    expect(sent).toHaveBeenCalledWith("a", "go", "brainstorm", "sonnet");
+    expect(researchFollowUpDraft("a")).toBeUndefined();
+    view.unmount();
+    renderView();
+    // No draft is left, so the pickers seed from the run's new values.
+    expect(box()).toHaveValue("");
+    expect(persona()).toHaveTextContent("Brainstorm");
+    expect(button("Model")).toHaveTextContent("sonnet");
   });
 });

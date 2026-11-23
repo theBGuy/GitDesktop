@@ -453,6 +453,25 @@ impl AppState {
             .len()
     }
 
+    /// Yields until `session_id`'s gate counts `refs` holds and waits, so a test knows a
+    /// waiter has registered and parked without sleeping on it; panics past a bound.
+    #[cfg(test)]
+    pub(crate) async fn until_session_container_refs(&self, session_id: &str, refs: usize) {
+        for _ in 0..10_000 {
+            let now = self
+                .session_containers
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(session_id)
+                .map_or(0, |g| g.refs);
+            if now == refs {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("{session_id}'s container gate never reached {refs} refs");
+    }
+
     pub fn close_to_tray(&self) -> bool {
         self.close_to_tray.load(Ordering::Relaxed)
     }
@@ -535,8 +554,8 @@ pub fn monotonic_ms() -> u64 {
 
 /// How long a cancel-created tombstone stays adoptable. The race it exists for is
 /// sub-second — registration is the run command's first statement — while a Stop for
-/// a run that already ended or never started lands with no run registered too, and its
-/// permit must never reach a later registration under that id.
+/// a run that already ended or never started lands with no run registered too, and
+/// past the window its permit must never reach a later registration under that id.
 const TOMBSTONE_ADOPTION_WINDOW: Duration = Duration::from_secs(5);
 
 /// A tombstone that outlived adoptability has no reason to live, so sweep and window
@@ -1220,7 +1239,6 @@ mod quit_guard_tests {
 mod session_container_tests {
     use super::*;
 
-    const SHORT: Duration = Duration::from_millis(50);
     const LONG: Duration = Duration::from_secs(5);
 
     /// A hold of `id` taken in its own task, released when `release` fires; `acquired`
@@ -1247,7 +1265,8 @@ mod session_container_tests {
         let (acquired, mut acquired_rx) = tokio::sync::oneshot::channel();
         let (release, release_rx) = tokio::sync::oneshot::channel();
         let b = spawn_hold(&state, "s1", acquired, release_rx);
-        assert!(tokio::time::timeout(SHORT, &mut acquired_rx).await.is_err());
+        state.until_session_container_refs("s1", 2).await;
+        assert!(acquired_rx.try_recv().is_err());
         drop(a);
         tokio::time::timeout(LONG, acquired_rx)
             .await
@@ -1287,7 +1306,8 @@ mod session_container_tests {
         let (acquired, mut acquired_rx) = tokio::sync::oneshot::channel();
         let (_release, release_rx) = tokio::sync::oneshot::channel();
         let b = spawn_hold(&state, "s1", acquired, release_rx);
-        assert!(tokio::time::timeout(SHORT, &mut acquired_rx).await.is_err());
+        state.until_session_container_refs("s1", 2).await;
+        assert!(acquired_rx.try_recv().is_err());
         drop(a);
         b.abort();
         assert!(b.await.is_err_and(|e| e.is_cancelled()));
@@ -1306,7 +1326,8 @@ mod session_container_tests {
         let (acquired, mut acquired_rx) = tokio::sync::oneshot::channel();
         let (_release, release_rx) = tokio::sync::oneshot::channel();
         let b = spawn_hold(&state, "s1", acquired, release_rx);
-        assert!(tokio::time::timeout(SHORT, &mut acquired_rx).await.is_err());
+        state.until_session_container_refs("s1", 2).await;
+        assert!(acquired_rx.try_recv().is_err());
         b.abort();
         assert!(b.await.is_err_and(|e| e.is_cancelled()));
         assert_eq!(state.session_container_entries(), 1, "(ii) a still holds");
@@ -1318,7 +1339,8 @@ mod session_container_tests {
         let (acquired, mut acquired_rx) = tokio::sync::oneshot::channel();
         let (release, release_rx) = tokio::sync::oneshot::channel();
         let b = spawn_hold(&state, "s1", acquired, release_rx);
-        assert!(tokio::time::timeout(SHORT, &mut acquired_rx).await.is_err());
+        state.until_session_container_refs("s1", 2).await;
+        assert!(acquired_rx.try_recv().is_err());
         drop(a);
         tokio::time::timeout(LONG, acquired_rx)
             .await

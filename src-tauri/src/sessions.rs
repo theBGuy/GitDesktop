@@ -318,15 +318,28 @@ fn read_events(path: &Path) -> Vec<Event> {
         .collect()
 }
 
+/// A log's header: the first `session` line wherever it sits, since logs written
+/// before the frontend queued its writes can hold a turn line ahead of it.
+fn header_of(events: &[Event]) -> Option<&Header> {
+    events.iter().find_map(|e| match e {
+        Event::Session(h) => Some(h),
+        _ => None,
+    })
+}
+
 /// Folds an event log into a session view. A turn with no matching `result` is
 /// rendered as interrupted (nothing is running after a load). Returns None if
-/// the first line isn't a header.
+/// the log has no header.
 fn fold(events: &[Event]) -> Option<LoadedSession> {
-    let header = match events.first() {
-        Some(Event::Session(h)) => h.clone(),
-        _ => return None,
-    };
+    let header = header_of(events)?.clone();
     let mut turns: Vec<LoadedTurn> = Vec::new();
+    // Each pushed turn's seq, index-aligned with `turns`. Writes are queued now, but
+    // older logs can hold lines out of order, so a result goes to the last folded turn
+    // carrying its seq, or waits in `held` for that turn's line; one still waiting at the
+    // end of the log goes to the last turn, the rule older logs were written under, and
+    // the turns come back in seq order.
+    let mut turn_seqs: Vec<u32> = Vec::new();
+    let mut held: Vec<&ResultEvent> = Vec::new();
     let mut model = header.model.clone();
     let mut effort = header.effort.clone();
     let mut kept = false;
@@ -339,6 +352,7 @@ fn fold(events: &[Event]) -> Option<LoadedSession> {
             Event::Session(_) => {}
             Event::Turn(t) => {
                 model = t.model.clone();
+                turn_seqs.push(t.seq);
                 turns.push(LoadedTurn {
                     prompt: t.prompt.clone(),
                     narration: String::new(),
@@ -349,18 +363,23 @@ fn fold(events: &[Event]) -> Option<LoadedSession> {
                     cost_usd: None,
                     error: Some("Interrupted by restart.".into()),
                 });
+                let i = turns.len() - 1;
+                held.retain(|r| {
+                    if r.seq != t.seq {
+                        return true;
+                    }
+                    apply_result(&mut turns[i], r);
+                    false
+                });
             }
             Event::Result(r) => {
-                if let Some(turn) = turns.last_mut() {
-                    turn.status = r.status.clone();
-                    turn.narration = r.narration.clone();
-                    turn.segments = r.segments.clone();
-                    turn.commit_hash = r.commit_hash.clone();
-                    turn.cost_usd = r.cost_usd;
-                    turn.error = r.error.clone();
-                    if let Some(h) = &r.commit_hash {
-                        head_hash = h.clone();
-                    }
+                // The head follows the result lines' log order, wherever each lands.
+                if let Some(h) = &r.commit_hash {
+                    head_hash = h.clone();
+                }
+                match turn_seqs.iter().rposition(|&seq| seq == r.seq) {
+                    Some(i) => apply_result(&mut turns[i], r),
+                    None => held.push(r),
                 }
             }
             Event::Status(s) => match s.status.as_str() {
@@ -384,6 +403,14 @@ fn fold(events: &[Event]) -> Option<LoadedSession> {
             }
         }
     }
+    if let Some(turn) = turns.last_mut() {
+        for r in held {
+            apply_result(turn, r);
+        }
+    }
+    let mut ordered: Vec<(u32, LoadedTurn)> = turn_seqs.into_iter().zip(turns).collect();
+    ordered.sort_by_key(|(seq, _)| *seq);
+    let turns: Vec<LoadedTurn> = ordered.into_iter().map(|(_, turn)| turn).collect();
 
     Some(LoadedSession {
         id: header.id,
@@ -405,6 +432,16 @@ fn fold(events: &[Event]) -> Option<LoadedSession> {
     })
 }
 
+/// Writes a result line's outcome onto its turn.
+fn apply_result(turn: &mut LoadedTurn, r: &ResultEvent) {
+    turn.status = r.status.clone();
+    turn.narration = r.narration.clone();
+    turn.segments = r.segments.clone();
+    turn.commit_hash = r.commit_hash.clone();
+    turn.cost_usd = r.cost_usd;
+    turn.error = r.error.clone();
+}
+
 /// Loads + folds every `*.jsonl` in `dir`, in session creation order.
 fn load_dir(dir: &Path) -> Vec<LoadedSession> {
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -417,9 +454,8 @@ fn load_dir(dir: &Path) -> Vec<LoadedSession> {
             continue;
         }
         let events = read_events(&path);
-        let created = match events.first() {
-            Some(Event::Session(h)) => h.created_at,
-            _ => continue,
+        let Some(created) = header_of(&events).map(|h| h.created_at) else {
+            continue;
         };
         if let Some(s) = fold(&events) {
             sessions.push((created, s));
@@ -809,6 +845,132 @@ mod tests {
         assert_eq!(s.head_hash, "c2");
     }
 
+    fn turn_event(seq: u32) -> Event {
+        Event::Turn(TurnEvent {
+            seq,
+            ts: i64::from(seq),
+            prompt: format!("turn {seq}"),
+            model: "opus".into(),
+        })
+    }
+
+    fn result_event(seq: u32) -> Event {
+        Event::Result(ResultEvent {
+            seq,
+            ts: 10 + i64::from(seq),
+            status: "done".into(),
+            narration: format!("answer {seq}"),
+            segments: None,
+            commit_hash: Some(format!("c{seq}")),
+            cost_usd: None,
+            error: None,
+        })
+    }
+
+    #[test]
+    fn fold_applies_each_result_to_its_own_turn() {
+        // A Stop and a quick re-send: turn 0's result lands after turn 1's.
+        let events = vec![
+            header("s3", 1),
+            turn_event(0),
+            turn_event(1),
+            result_event(1),
+            result_event(0),
+        ];
+        let s = fold(&events).unwrap();
+        assert_eq!(s.turns[0].narration, "answer 0");
+        assert_eq!(s.turns[0].commit_hash.as_deref(), Some("c0"));
+        assert_eq!(s.turns[1].narration, "answer 1");
+        assert_eq!(s.turns[1].commit_hash.as_deref(), Some("c1"));
+        // Log order: the later-written result's commit is the later one on the branch.
+        assert_eq!(s.head_hash, "c0");
+    }
+
+    #[test]
+    fn fold_keeps_a_stopped_turns_late_result_off_the_turn_after_it() {
+        let events = vec![
+            header("s4", 1),
+            turn_event(0),
+            turn_event(1),
+            result_event(0),
+        ];
+        let s = fold(&events).unwrap();
+        assert_eq!(s.turns[0].status, "done");
+        assert_eq!(s.turns[0].narration, "answer 0");
+        assert_eq!(s.turns[1].status, "error");
+        assert_eq!(s.turns[1].error.as_deref(), Some("Interrupted by restart."));
+    }
+
+    #[test]
+    fn fold_puts_a_result_with_no_matching_turn_on_the_last_turn() {
+        let events = vec![
+            header("s5", 1),
+            turn_event(0),
+            turn_event(1),
+            result_event(7),
+        ];
+        let s = fold(&events).unwrap();
+        assert_eq!(s.turns[0].error.as_deref(), Some("Interrupted by restart."));
+        assert_eq!(s.turns[1].narration, "answer 7");
+        assert_eq!(s.head_hash, "c7");
+    }
+
+    #[test]
+    fn fold_holds_a_result_written_before_its_turn() {
+        // Async appends landing out of order: turn 1's result before turn 1's line.
+        let events = vec![
+            header("s6", 1),
+            turn_event(0),
+            result_event(0),
+            result_event(1),
+            turn_event(1),
+        ];
+        let s = fold(&events).unwrap();
+        assert_eq!(s.turns[0].narration, "answer 0");
+        assert_eq!(s.turns[1].status, "done");
+        assert_eq!(s.turns[1].narration, "answer 1");
+        assert_eq!(s.head_hash, "c1");
+    }
+
+    #[test]
+    fn fold_lands_a_result_whose_turn_never_appears_on_the_last_turn() {
+        let events = vec![
+            header("s7", 1),
+            turn_event(0),
+            result_event(1),
+            turn_event(2),
+        ];
+        let s = fold(&events).unwrap();
+        assert_eq!(s.turns[0].error.as_deref(), Some("Interrupted by restart."));
+        assert_eq!(s.turns[1].narration, "answer 1");
+        assert_eq!(s.head_hash, "c1");
+    }
+
+    #[test]
+    fn fold_reads_a_header_that_is_not_on_line_one() {
+        let events = vec![turn_event(0), header("s8", 1), result_event(0)];
+        let s = fold(&events).expect("the session loads");
+        assert_eq!(s.id, "s8");
+        assert_eq!(s.turns.len(), 1);
+        assert_eq!(s.turns[0].narration, "answer 0");
+    }
+
+    #[test]
+    fn fold_returns_swapped_turn_lines_in_seq_order() {
+        let events = vec![
+            header("s9", 1),
+            turn_event(1),
+            turn_event(0),
+            result_event(0),
+            result_event(1),
+        ];
+        let s = fold(&events).unwrap();
+        assert_eq!(s.turns[0].prompt, "turn 0");
+        assert_eq!(s.turns[0].narration, "answer 0");
+        assert_eq!(s.turns[1].prompt, "turn 1");
+        assert_eq!(s.turns[1].narration, "answer 1");
+    }
+
     #[test]
     fn meta_reads_legacy_codex_thread_id_key() {
         // Sessions persisted before the rename wrote `codexThreadId`; the serde
@@ -823,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn fold_requires_header_first() {
+    fn fold_requires_a_header() {
         let events = vec![Event::Turn(TurnEvent {
             seq: 0,
             ts: 1,

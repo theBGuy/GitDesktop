@@ -288,6 +288,40 @@ interface DistillToken {
   cancelled: boolean;
 }
 
+/** A run's unsent follow-up: its text and any persona or model picked for it. */
+export interface ResearchFollowUpDraft {
+  text: string;
+  depth?: ResearchDepth;
+  model?: string;
+}
+
+/** Run id to its unsent follow-up. Outside the view so a draft outlives the composer's
+ *  unmount (the Plan handoff navigates away); never persisted, so a reload starts
+ *  empty. An empty text keeps the entry, since its picks may still be pending. */
+const followUpDrafts = new Map<string, ResearchFollowUpDraft>();
+
+/** The run's unsent follow-up, if it has one. */
+export const researchFollowUpDraft = (
+  runId: string,
+): ResearchFollowUpDraft | undefined => followUpDrafts.get(runId);
+
+/** Merges `patch` into the run's unsent follow-up. */
+export function setResearchFollowUpDraft(
+  runId: string,
+  patch: Partial<ResearchFollowUpDraft>,
+) {
+  followUpDrafts.set(runId, {
+    text: "",
+    ...followUpDrafts.get(runId),
+    ...patch,
+  });
+}
+
+/** Drops the run's unsent follow-up (sent, or the run dismissed). */
+export function clearResearchFollowUpDraft(runId: string) {
+  followUpDrafts.delete(runId);
+}
+
 /**
  * Read-only research surface: each run is a resumable web-enabled agent conversation (the
  * `agent_session` backend with `readOnly: true` + `web: true` — no worktree, runs in the live
@@ -738,8 +772,9 @@ export const useResearchStore = create<ResearchState>((set, get) => {
               // synthesized report — the terminal event's text is the authoritative answer.
               // Adopt it whenever present (deltas only for a degenerate empty terminal event).
               if (ev.text.trim()) finalText = ev.text;
-              // The distill IS the latest turn, so its cost is the run's latest cost;
-              // a stopped distill's cost is dropped, like a stopped turn's.
+              // The distill IS the latest turn, so its cost is the run's latest cost; a
+              // distill stopped before this event has its cost dropped, like a stopped
+              // turn's.
               if (ev.costUsd != null && !superseded())
                 patch(id, { costUsd: ev.costUsd });
               if (ev.isError) errored = true;
@@ -775,9 +810,9 @@ export const useResearchStore = create<ResearchState>((set, get) => {
     cancel: (id) => {
       const run = get().runs.find((r) => r.id === id);
       // Cancel covers both a streaming turn and a running distill. A stopped distill
-      // keeps the run busy (`distillStopping`, normally under a second, worst case
-      // about 50 s) until its command settles, then the handoff goes ahead with the
-      // raw report; a cancel IPC that fails gives the Stop back.
+      // keeps the run busy (`distillStopping`, normally under a second) until its
+      // command settles, however long that takes, then the handoff goes ahead with
+      // the raw report; a cancel IPC that fails gives the Stop back.
       if (run?.distilling) {
         const d = distillOwners.get(id);
         if (!d) {
@@ -843,6 +878,7 @@ export const useResearchStore = create<ResearchState>((set, get) => {
       }
       turnOwners.delete(id);
       distillOwners.delete(id);
+      clearResearchFollowUpDraft(id);
       set({
         runs: get().runs.filter((r) => r.id !== id),
         activeResearchId:

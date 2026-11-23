@@ -6355,9 +6355,10 @@ pub async fn agent_review_cancel(
 /// `user_prompt` full-auto inside `worktree_path` (a throwaway worktree — the
 /// sandbox boundary). `resume = false` starts, `true` continues. Streams the
 /// same `ReviewEvent`s as a review; cancel via `agent_review_cancel` with this
-/// turn's `run_id`, a fresh id per call because the registry assumes single-use
-/// keys. `session_id` still names the conversation (Claude's `--session-id` /
-/// `--resume`), the container and the MCP config file.
+/// turn's `run_id`, fresh per turn because the registry assumes single-use keys
+/// (the frontend's resume retry reuses it for a second call only after the first
+/// call's entry is gone). `session_id` still names the conversation (Claude's
+/// `--session-id` / `--resume`), the container and the MCP config file.
 ///
 /// `agent` picks the CLI; each runs worktree-confined on the **host** (see its
 /// `*_session_args` doc for the mechanism) or in a **container** (kernel
@@ -7099,7 +7100,7 @@ async fn opencode2_host_session(
     let stdin_text = if resume_plan.resumed {
         user_prompt
     } else {
-        format!("{system_prompt}\n\n{user_prompt}")
+        turn_one_prompt(&system_prompt, &user_prompt)
     };
     let servers: Vec<&str> = mcp_specs.iter().map(|s| s.name.as_str()).collect();
     let inherited_content = opencode2_inherited_content(mcp_config_path.as_deref());
@@ -7249,7 +7250,7 @@ async fn opencode2_container_session(
     // A new conversation has no context yet; the 1.x arm left it out of a turn that
     // asked to resume.
     let stdin_text = if resume && !resume_plan.resumed {
-        format!("{system_prompt}\n\n{stdin_text}")
+        turn_one_prompt(system_prompt, &stdin_text)
     } else {
         stdin_text
     };
@@ -15280,7 +15281,6 @@ opencode/x-preview-f-free
     /// wait or stored before it, without disturbing the holder or the next waiter.
     #[tokio::test]
     async fn container_wait_ends_on_a_stop() {
-        const SHORT: Duration = Duration::from_millis(50);
         const LONG: Duration = Duration::from_secs(5);
         let state = Arc::new(AppState::default());
         let waiter = |notify: Arc<Notify>| {
@@ -15295,8 +15295,9 @@ opencode/x-preview-f-free
         // (i) A Stop fired mid-wait ends the wait while the holder still holds.
         let holder = state.hold_session_container("s1").await;
         let stop = Arc::new(Notify::new());
-        let mut stopped = waiter(Arc::clone(&stop));
-        assert!(tokio::time::timeout(SHORT, &mut stopped).await.is_err());
+        let stopped = waiter(Arc::clone(&stop));
+        state.until_session_container_refs("s1", 2).await;
+        assert!(!stopped.is_finished(), "(i) the waiter parks");
         stop.notify_one();
         let acquired = tokio::time::timeout(LONG, stopped)
             .await
@@ -15305,11 +15306,9 @@ opencode/x-preview-f-free
         assert!(!acquired, "(i)");
 
         // (iv) The next waiter still waits for the holder.
-        let mut next = waiter(Arc::new(Notify::new()));
-        assert!(
-            tokio::time::timeout(SHORT, &mut next).await.is_err(),
-            "(iv)"
-        );
+        let next = waiter(Arc::new(Notify::new()));
+        state.until_session_container_refs("s1", 2).await;
+        assert!(!next.is_finished(), "(iv)");
         drop(holder);
         let acquired = tokio::time::timeout(LONG, next)
             .await
@@ -15317,15 +15316,18 @@ opencode/x-preview-f-free
             .expect("(iv) the waiter's task");
         assert!(acquired, "(iv)");
 
-        // (ii) A free gate with a stored permit: the turn was stopped.
-        let stored = Notify::new();
-        stored.notify_one();
-        assert!(
-            wait_for_session_container(&state, "s2", &stored)
-                .await
-                .is_none(),
-            "(ii)"
-        );
+        // (ii) A free gate with a stored permit: the turn was stopped. Both arms are
+        // ready at once, so the repeats make an unbiased select lose with near certainty.
+        for round in 0..64 {
+            let stored = Notify::new();
+            stored.notify_one();
+            assert!(
+                wait_for_session_container(&state, "s2", &stored)
+                    .await
+                    .is_none(),
+                "(ii) round {round}"
+            );
+        }
         // (iii) A free gate and no Stop.
         assert!(
             wait_for_session_container(&state, "s2", &Notify::new())
@@ -15356,6 +15358,7 @@ opencode/x-preview-f-free
             };
             b.matches(CONTAINER_WAIT).count() == 1
                 && b.matches("wait_for_session_container(").count() == 1
+                && b.matches("_container_hold").count() == 1
                 && parent < at
                 && at < dispatch
         };
@@ -15370,11 +15373,52 @@ opencode/x-preview-f-free
                 1,
             ),
             body.replacen("letSome(_container_hold)=", "letSome(_)=", 1),
+            body.replacen(
+                CONTAINER_WAIT,
+                &format!("{CONTAINER_WAIT}drop(_container_hold);"),
+                1,
+            ),
             body.replacen(CONTAINER_WAIT, "", 1),
             body.replacen(host, &format!("{CONTAINER_WAIT}{host}"), 1),
         ] {
             assert_ne!(mutant, body);
             assert!(!pinned(&mutant), "{mutant}");
+        }
+    }
+
+    /// A fresh turn (agent_session's own first-turn joins and both opencode 2 paths)
+    /// joins its prompts through `turn_one_prompt`, so a blank system prompt sends no
+    /// leading blank lines.
+    #[test]
+    fn fresh_session_prompts_join_through_turn_one_prompt() {
+        let src = include_str!("agent.rs");
+        let join = "format!(\"{system_prompt}\\n\\n";
+        for (head, calls) in [
+            ("pub async fn agent_session(", 3),
+            ("async fn opencode2_host_session(", 1),
+            ("async fn opencode2_container_session(", 1),
+        ] {
+            let pinned =
+                |b: &str| b.matches("turn_one_prompt(").count() == calls && !b.contains(join);
+            let body = stripped_fn_body(src, head).expect(head);
+            assert!(pinned(&body), "{head}: {body}");
+            for mutant in [
+                // One call swapped for the bare user prompt.
+                {
+                    let at = body.find("turn_one_prompt(").expect(head);
+                    let end = at + body[at..].find(')').expect(head) + 1;
+                    format!("{}user_prompt{}", &body[..at], &body[end..])
+                },
+                body.replacen(
+                    "turn_one_prompt(",
+                    "format!(\"{system_prompt}\\n\\n{}{}\",",
+                    1,
+                ),
+                format!("{body}{join}{{x}}\")"),
+            ] {
+                assert_ne!(mutant, body);
+                assert!(!pinned(&mutant), "{head}: {mutant}");
+            }
         }
     }
 

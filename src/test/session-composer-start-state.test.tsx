@@ -484,3 +484,19 @@ describe("Best-of-N round trip (live-drive observation)", () => {
     expect(startEnsemble).not.toHaveBeenCalled();
   });
 });
+
+describe("SessionComposer while the session is busy", () => {
+  it("Enter during a Keep, Discard or Resume sends nothing and keeps the draft", async () => {
+    const send = vi.fn(async () => undefined);
+    useSessionsStore.setState({ sessions: [SESSION], busyId: "s1", send });
+    const user = userEvent.setup();
+    mount({ session: SESSION });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument(),
+    );
+    await user.type(textarea(), "next step");
+    await user.keyboard("{Enter}");
+    expect(send).not.toHaveBeenCalled();
+    expect(textarea()).toHaveValue("next step");
+  });
+});

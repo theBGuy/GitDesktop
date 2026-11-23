@@ -177,6 +177,15 @@ describe("a resume whose conversation does not exist", () => {
     expect(events).toEqual([status, earlier, notice("Claude"), ok]);
   });
 
+  it("retries after an empty delta", async () => {
+    const empty: ReviewEvent = { kind: "delta", text: "" };
+    scripts = [turn(claudeMiss(), [empty]), turn(ok)];
+    const events: ReviewEvent[] = [];
+    expect(await runAgentSession(sessionArgs(events))).toEqual(ok);
+    expect(events).toEqual([empty, notice("Claude"), ok]);
+    expect(sessionCalls()).toHaveLength(2);
+  });
+
   it("delivers the second attempt's own miss and never invokes a third time", async () => {
     scripts = [turn(claudeMiss()), turn(claudeMiss())];
     const events: ReviewEvent[] = [];
@@ -422,7 +431,10 @@ describe("a Stop around the retry", () => {
     gate.resolve();
     expect(await run).toBeNull();
     expect(events).toEqual([]);
-    expect(cancelCalls()).toHaveLength(1);
+    expect(cancelCalls()).toEqual([
+      { cmd: "agent_review_cancel", args: { reviewId: RUN } },
+    ]);
+    expect(sessionCalls()[1].runId).toBe(RUN);
   });
 
   it("leaves no record once the run settles", async () => {

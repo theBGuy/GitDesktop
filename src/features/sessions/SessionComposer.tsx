@@ -759,6 +759,8 @@ export function SessionComposer({
     }
     const text = draft.trim();
     if (!text || running || creating) return;
+    // A Keep, Discard or Resume in flight refuses the send, so the draft stays.
+    if (session && useSessionsStore.getState().busyId === session.id) return;
     const prompt = resolvePrompt(text);
     if (prompt === null) return;
     const typed = draft;

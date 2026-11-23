@@ -49,13 +49,16 @@ import {
 } from "./distill-copy";
 import {
   assembleSessionReport,
+  clearResearchFollowUpDraft,
   type DistillPhase,
   distillPhase,
   type ResearchDepth,
   type ResearchHistoryTurn,
   type ResearchRun,
   type ResearchSeed,
+  researchFollowUpDraft,
   researchRunContextPack,
+  setResearchFollowUpDraft,
   useActiveResearchRun,
   useResearchStore,
 } from "./store";
@@ -680,12 +683,32 @@ function ResearchResult({ run }: { run: ResearchRun }) {
  */
 function ResearchFollowUp({ run }: { run: ResearchRun }) {
   const sendFollowUp = useResearchStore((s) => s.sendFollowUp);
-  const [text, setText] = useState("");
-  // Seeded from the run's current persona + model; changing either applies to the
-  // next turn (mounted per run via `key={run.id}`, so it tracks the active run).
-  // The agent itself can't change mid-conversation (the CLI resume is per-agent).
-  const [depth, setDepth] = useState<ResearchDepth>(run.depth);
-  const [model, setModel] = useState(run.model);
+  // Text, persona and model seed from the run's stored draft and write through on
+  // every change, so they survive the Plan handoff unmounting this composer. Without
+  // a draft the persona and model come from the run; either applies to the next turn
+  // (mounted per run via `key={run.id}`, so it tracks the active run). The agent
+  // itself can't change mid-conversation (the CLI resume is per-agent).
+  const [text, setTextState] = useState(
+    () => researchFollowUpDraft(run.id)?.text ?? "",
+  );
+  const [depth, setDepthState] = useState<ResearchDepth>(
+    () => researchFollowUpDraft(run.id)?.depth ?? run.depth,
+  );
+  const [model, setModelState] = useState(
+    () => researchFollowUpDraft(run.id)?.model ?? run.model,
+  );
+  const setText = (next: string) => {
+    setTextState(next);
+    setResearchFollowUpDraft(run.id, { text: next });
+  };
+  const setDepth = (next: ResearchDepth) => {
+    setDepthState(next);
+    setResearchFollowUpDraft(run.id, { depth: next });
+  };
+  const setModel = (next: string) => {
+    setModelState(next);
+    setResearchFollowUpDraft(run.id, { model: next });
+  };
   const ref = useRef<HTMLTextAreaElement>(null);
 
   const hold = sendHold(run);
@@ -696,7 +719,8 @@ function ResearchFollowUp({ run }: { run: ResearchRun }) {
     const fresh = useResearchStore.getState().runs.find((r) => r.id === run.id);
     if (!text.trim() || !fresh || sendHold(fresh) !== null) return;
     sendFollowUp(run.id, text, depth, model);
-    setText("");
+    setTextState("");
+    clearResearchFollowUpDraft(run.id);
   };
 
   // Auto-grow the textarea with its content (JS, not CSS field-sizing, for webview

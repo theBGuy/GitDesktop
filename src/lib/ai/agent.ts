@@ -407,8 +407,9 @@ export interface AgentSessionArgs {
   /** The conversation's stable uuid: `--session-id` on turn 1, `--resume` after, the
    *  container name and the MCP config. Never the cancel key (see `runId`). */
   sessionId: string;
-  /** This turn's own cancel id, fresh per call: the key `cancelAgentSession` takes.
-   *  8-64 chars of ASCII letters, digits or '-'. */
+  /** This turn's own cancel id, fresh per turn (the resume retry's second call
+   *  reuses it): the key `cancelAgentSession` takes. 8-64 chars of ASCII letters,
+   *  digits or '-'. */
   runId: string;
   /** false = first turn (start the session), true = a follow-up turn (resume it). */
   resume: boolean;
@@ -470,12 +471,13 @@ export async function runAgentSession(
         held = true;
         return;
       }
-      if (event.kind === "delta" || event.kind === "tool") output = true;
+      if ((event.kind === "delta" && event.text) || event.kind === "tool")
+        output = true;
       args.onEvent(event);
     });
     if (!held) return first;
-    // A Stop aimed at the first attempt reached a backend entry that is gone now, so
-    // only this record carries it across to the second.
+    // A Stop aimed at the first attempt may have reached its entry or found none;
+    // this record carries it across to the second.
     if (cancelledRuns.has(runId)) return null;
     // Told only once the new conversation answers: a second attempt stopped before its
     // spawn, refused, or failing at once started nothing worth a note.
@@ -571,8 +573,9 @@ async function sessionTurn(
 }
 
 /** Signals an in-flight session turn to stop (shares the backend cancel registry).
- *  Takes the turn's `runId`: registry ids are single-use, so a conversation's
- *  session id would miss every turn after the first. */
+ *  Takes the turn's `runId`: registry ids are single-use, so a session id shared
+ *  by a stopped turn and its quick re-send would let the stopped turn's exit or a
+ *  stale Stop land on the new one. */
 export const cancelAgentSession = (runId: string) => {
   // Recorded before the invoke, so a first attempt settling meanwhile still sees it.
   if (liveRuns.has(runId)) cancelledRuns.add(runId);
