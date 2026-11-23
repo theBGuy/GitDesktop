@@ -1,3 +1,4 @@
+import { DiffFile } from "@git-diff-view/react";
 import {
   onlineManager,
   QueryClient,
@@ -10,7 +11,9 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { IMAGE_CAPTION_REASON } from "@/components/markdown/markdown-images";
@@ -19,7 +22,9 @@ import {
   FORGE_CONTENT_BUDGET_BYTES,
 } from "@/features/diff/content-source";
 import { DiffContent, type LineWidget } from "@/features/diff/DiffSurface";
+import { HOLD_BOUND_MS } from "@/features/diff/diff-pane-slots";
 import { ImagePanes } from "@/features/diff/ImageDiff";
+import { SHOW_FULL_COMPOSER_HELD } from "@/features/diff/whitespace-mode";
 import { ReviewThreadCard } from "@/features/pulls/ReviewThreads";
 import { type FileBytes, forgeFileAtSha, gitFileBase64 } from "@/lib/git/api";
 import {
@@ -557,6 +562,58 @@ describe("a PR host's build across its revs arriving and changing", () => {
     await waitFor(() => expect(pane.expands().length).toBeGreaterThan(0));
   });
 
+  it("keeps a composer's text past a refresh's hold when a failed read's retry lands, then upgrades once it closes", async () => {
+    // The new side's first read fails (a refusal, so it settles with no
+    // automatic retries); a later retry for the same pair answers.
+    let newFails = true;
+    vi.mocked(forgeFileAtSha).mockImplementation(async (_repo, sha) => {
+      if (sha === NEW_SHA && newFails)
+        throw { kind: "invalidArgument", message: "refused" };
+      return bytes(sha === OLD_SHA ? OLD : NEW);
+    });
+    let close: () => void = () => undefined;
+    const lineWidget: LineWidget = {
+      enabled: true,
+      render: ({ onClose }) => {
+        close = onClose;
+        return <textarea aria-label="Draft" />;
+      },
+    };
+    const pane = mountPane({ ...FORGE, lineWidget });
+    const newKey = readKeys(FORGE)[1];
+    await waitFor(() =>
+      expect(pane.client.getQueryState(newKey)?.status).toBe("error"),
+    );
+    await waitFor(() => expect(pane.rows().length).toBeGreaterThan(0));
+    await act(async () => undefined);
+    openComposer(pane.container, 2);
+    const draft = (await screen.findByRole("textbox", {
+      name: "Draft",
+    })) as HTMLTextAreaElement;
+    draft.value = "kept";
+    const row = pane.rows()[0];
+    const builds = vi.spyOn(DiffFile, "createInstance");
+    newFails = false;
+    await act(async () => {
+      await pane.client.refetchQueries({ queryKey: newKey });
+    });
+    await landed(pane);
+    // Past the refresh hold's bound, which then lets the same inputs through.
+    await act(
+      () => new Promise((resolve) => setTimeout(resolve, HOLD_BOUND_MS + 200)),
+    );
+    const shown = screen.getByRole("textbox", {
+      name: "Draft",
+    }) as HTMLTextAreaElement;
+    expect(shown.value).toBe("kept");
+    expect(shown).toBe(draft);
+    expect(row.isConnected).toBe(true);
+    expect(builds).not.toHaveBeenCalled();
+    expect(pane.expands().length).toBe(0);
+    act(() => close());
+    await waitFor(() => expect(pane.expands().length).toBeGreaterThan(0));
+  });
+
   it("keeps a content build when the host loses its revs and source", async () => {
     const { pane, row } = await contentOnScreen();
     pane.update(UNKNOWN);
@@ -578,6 +635,97 @@ describe("a PR host's build across its revs arriving and changing", () => {
     pane.update({ ...PAIR2, data: { ...DIFF, text: TEXT2 } });
     await waitFor(() => expect(row.isConnected).toBe(false));
     expect(pane.expands().length).toBe(0);
+  });
+});
+
+describe("a PR host's build across a change of record", () => {
+  const OLD2_SHA = "d".repeat(40);
+  const NEW2_SHA = "c".repeat(40);
+  const A: PaneProps = {
+    ...FORGE,
+    forgePatch: { source: { lens: "origin" }, scope: "origin#7" },
+  };
+  /** Another pull request's pair for the same path and the same diff text. */
+  const B: PaneProps = {
+    contentRevs: { oldRev: OLD2_SHA, newRev: NEW2_SHA },
+    imageRevs: { old: OLD2_SHA, new: NEW2_SHA },
+    forgePatch: { source: { lens: "origin" }, scope: "origin#8" },
+  };
+  /** B's files: the same change, another line outside its hunks. */
+  const twenty = (s: string) => s.replace("line 20\n", "line twenty\n");
+  const text = (pane: { container: HTMLElement }) =>
+    pane.container.textContent ?? "";
+
+  /** A's content on screen with every gap drawn, so its line 20 shows. */
+  async function aExpanded() {
+    const land = deferredReads();
+    const pane = mountPane(A);
+    await waitFor(() => expect(pane.rows().length).toBeGreaterThan(0));
+    await land(OLD, NEW);
+    await waitFor(() => expect(pane.expands().length).toBeGreaterThan(0));
+    for (let i = 0; i < 10 && pane.expands().length > 0; i++)
+      fireEvent.click(pane.expands()[0]);
+    await waitFor(() => expect(pane.expands().length).toBe(0));
+    expect(text(pane)).toContain("line 20");
+    return { pane, land };
+  }
+
+  it("never shows a record's lines under another record's identical diff", async () => {
+    const { pane } = await aExpanded();
+    const drawn = pane.rows().length;
+    pane.update(B);
+    await waitFor(() =>
+      expect(forgeFileAtSha).toHaveBeenCalledWith(
+        "/repo",
+        NEW2_SHA,
+        "f.txt",
+        "origin",
+        FORGE_CONTENT_BUDGET_BYTES,
+      ),
+    );
+    await act(async () => undefined);
+    expect(text(pane)).not.toContain("line 20");
+    expect(pane.rows().length).toBeGreaterThan(0);
+    expect(pane.rows().length).toBeLessThan(drawn);
+  });
+
+  it("keeps a record's build under the next record's placeholder paint", async () => {
+    const { pane } = await aExpanded();
+    const row = pane.rows()[0];
+    const drawn = pane.rows().length;
+    const watch = watchBlanks(pane.container);
+    pane.update({
+      forgePatch: { source: null, scope: "origin#8" },
+      dataIsPlaceholder: true,
+    });
+    await act(async () => undefined);
+    expect(row.isConnected).toBe(true);
+    expect(pane.rows().length).toBe(drawn);
+    expect(text(pane)).toContain("line 20");
+    expect(watch.blanks()).toBe(0);
+  });
+
+  it("upgrades the next record through the release step once its own reads land", async () => {
+    const layout = stubLayout();
+    const { pane, land } = await aExpanded();
+    pane.update(B);
+    await waitFor(() => expect(text(pane)).not.toContain("line 20"));
+    layout.attach(pane.container);
+    fireEvent.wheel(pane.container);
+    layout.scrollTo(layout.rowOf(32));
+    expect(layout.top()).toBeGreaterThan(0);
+    const editor = inAnchor("data-diff-editor");
+    pane.group()?.append(editor);
+    await act(async () => undefined);
+    await land(twenty(OLD), twenty(NEW), OLD2_SHA, NEW2_SHA);
+    await landed(pane);
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    // B's own reads match, and the open editor holds the upgrade.
+    expect(pane.expands().length).toBe(0);
+    act(() => editor.remove());
+    await waitFor(() => expect(pane.expands().length).toBeGreaterThan(0));
+    await act(async () => undefined);
+    expect(layout.top()).toBe(layout.rowOf(32));
   });
 });
 
@@ -711,6 +859,84 @@ describe("a PR host's image panes across a pair change", () => {
     expect(pane.container.querySelector('img[alt="New"]')).toBe(img);
     expect(screen.getByRole("dialog")).toBe(dialog);
     expect(document.activeElement).toBe(focused);
+  });
+
+  it("keeps the viewer on the side it opened, and closes it for good once that side leaves", async () => {
+    const OLD2_SHA = "f".repeat(40);
+    // Pair 1 adds the image; pair 2 modifies it; pair 3 deletes it.
+    vi.mocked(forgeFileAtSha)
+      .mockClear()
+      .mockImplementation(async (_repo, sha) =>
+        sha === OLD_SHA || sha === NEW3_SHA ? null : bytes(`at-${sha[0]}`),
+      );
+    const pane = mountPane({ ...pairOf(NEW_SHA), data: png(PNG_BARE) });
+    await waitFor(() => expect(figures(pane)).toHaveLength(1));
+    fireEvent.click(
+      screen.getByRole("button", { name: "View Added image fullscreen" }),
+    );
+    const shownAlt = () =>
+      screen.queryByRole("dialog")?.querySelector("img")?.getAttribute("alt");
+    await waitFor(() => expect(shownAlt()).toBe("Added"));
+    const both: PaneProps = {
+      ...pairOf(NEW2_SHA),
+      imageRevs: { old: OLD2_SHA, new: NEW2_SHA },
+      data: png(PNG_BARE),
+    };
+    pane.update(both);
+    await waitFor(() => expect(figures(pane)).toHaveLength(2));
+    await settle();
+    expect(shownAlt()).toBe("New");
+    pane.update({
+      ...pairOf(NEW3_SHA),
+      imageRevs: { old: OLD2_SHA, new: NEW3_SHA },
+      data: png(PNG_BARE),
+    });
+    await waitFor(() => expect(figures(pane)).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // The side coming back doesn't reopen a viewer the reader saw close.
+    pane.update(both);
+    await waitFor(() => expect(figures(pane)).toHaveLength(2));
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("keeps the viewer's zoom and image when its side moves to another index", async () => {
+    const OLD2_SHA = "f".repeat(40);
+    // Pair 1 adds the image; pair 2 gains an old side, the new bytes unchanged.
+    vi.mocked(forgeFileAtSha)
+      .mockClear()
+      .mockImplementation(async (_repo, sha) => {
+        if (sha === OLD_SHA) return null;
+        return bytes(sha === OLD2_SHA ? "old" : "same");
+      });
+    const pane = mountPane({ ...pairOf(NEW_SHA), data: png(PNG_BARE) });
+    await waitFor(() => expect(figures(pane)).toHaveLength(1));
+    fireEvent.click(
+      screen.getByRole("button", { name: "View Added image fullscreen" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    const shownImg = () => dialog.querySelector("img");
+    await waitFor(() => expect(shownImg()?.getAttribute("alt")).toBe("Added"));
+    const img = shownImg();
+    fireEvent.click(
+      within(dialog).getAllByRole("button", { name: "Zoom to 100%" })[0],
+    );
+    expect(
+      within(dialog).getAllByRole("button", { name: "Fit to window" }),
+    ).not.toHaveLength(0);
+    pane.update({
+      ...pairOf(NEW2_SHA),
+      imageRevs: { old: OLD2_SHA, new: NEW2_SHA },
+      data: png(PNG_BARE),
+    });
+    await waitFor(() => expect(figures(pane)).toHaveLength(2));
+    await settle();
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    expect(shownImg()?.getAttribute("alt")).toBe("New");
+    expect(shownImg()).toBe(img);
+    expect(
+      within(dialog).getAllByRole("button", { name: "Fit to window" }),
+    ).not.toHaveLength(0);
   });
 
   it("never falls back to the binary band while the revs are lost and the text changes", async () => {
@@ -1241,5 +1467,116 @@ describe("Markdown preview on a forge-patch diff with a local source", () => {
     expect(
       pane.queryByText("File deleted — previewing the previous version."),
     ).toBeNull();
+  });
+});
+
+describe("Show full diff while an editor is open in the diff", () => {
+  /** One hunk of 220 rows, over the 200-line cap, so the footer offers Show
+   *  full diff; new line 110 is past the cap. */
+  const CAPPED: FileDiff = {
+    ...DIFF,
+    text:
+      "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,110 +1,110 @@\n" +
+      Array.from({ length: 110 }, (_, i) => `-old ${i}\n+new ${i}\n`).join(""),
+  };
+  const showFull = () => screen.getByRole("button", { name: "Show full diff" });
+  const hosts: [string, PaneProps][] = [
+    ["a forge-patch host", UNKNOWN],
+    ["a host without a forge patch (History)", {}],
+  ];
+
+  for (const [name, host] of hosts)
+    it(`${name}: waits with its reason while a comment is open, then shows the full diff once it closes`, async () => {
+      const user = userEvent.setup();
+      let close: () => void = () => undefined;
+      const lineWidget: LineWidget = {
+        enabled: true,
+        render: ({ onClose }) => {
+          close = onClose;
+          return <textarea aria-label="Draft" />;
+        },
+      };
+      const pane = mountPane({ ...host, data: CAPPED, lineWidget });
+      await waitFor(() => expect(pane.rows().length).toBeGreaterThan(0));
+      expect(showFull()).not.toHaveAttribute("aria-disabled");
+      openComposer(pane.container, 2);
+      const draft = (await screen.findByRole("textbox", {
+        name: "Draft",
+      })) as HTMLTextAreaElement;
+      draft.value = "kept";
+      await act(async () => undefined);
+
+      const draftShown = () =>
+        screen.queryByRole("textbox", {
+          name: "Draft",
+        }) as HTMLTextAreaElement | null;
+      fireEvent.click(showFull());
+      await act(async () => undefined);
+      expect(draftShown()?.value).toBe("kept");
+      expect(draftShown()).toBe(draft);
+      expect(
+        pane.container.querySelector('span[data-line-new-num="110"]'),
+      ).toBeNull();
+      expect(showFull()).toHaveAttribute("aria-disabled", "true");
+      expect(showFull()).toHaveAccessibleDescription(SHOW_FULL_COMPOSER_HELD);
+      // Enter and Space on the focused button only keep its reason.
+      showFull().focus();
+      await user.keyboard("{Enter}");
+      await user.keyboard(" ");
+      await act(async () => undefined);
+      expect(draftShown()?.value).toBe("kept");
+      expect(document.activeElement).toBe(showFull());
+      expect(showFull()).toHaveAccessibleDescription(SHOW_FULL_COMPOSER_HELD);
+
+      act(() => close());
+      await waitFor(() =>
+        expect(showFull()).not.toHaveAttribute("aria-disabled"),
+      );
+      expect(showFull()).not.toHaveAccessibleDescription(
+        SHOW_FULL_COMPOSER_HELD,
+      );
+      fireEvent.click(showFull());
+      await waitFor(() =>
+        expect(
+          pane.container.querySelector('span[data-line-new-num="110"]'),
+        ).not.toBeNull(),
+      );
+      expect(
+        screen.queryByRole("button", { name: "Show full diff" }),
+      ).toBeNull();
+    }, 20_000);
+});
+
+describe("a blank context line written without its space", () => {
+  // `diff.suppressBlankEmpty`: the blank line 2 arrives as an empty row.
+  const LF_TEXT =
+    "diff --git a/f.txt b/f.txt\nindex 1111111..2222222 100644\n--- a/f.txt\n+++ b/f.txt\n" +
+    "@@ -1,4 +1,4 @@\n line 1\n\n line 3\n-line 4\n+line four\n";
+  const CRLF_TEXT = LF_TEXT.replace(/\n/g, "\r\n");
+  const drawn = (container: HTMLElement, n: number) =>
+    container.querySelector(`span[data-line-new-num="${n}"]`);
+
+  it.each([
+    ["LF", LF_TEXT],
+    ["CRLF", CRLF_TEXT],
+  ])("renders every row of a %s patch hunk-only", async (_eol, text) => {
+    const pane = mountPane({ data: { ...DIFF, text } });
+    await waitFor(() => expect(pane.rows().length).toBeGreaterThan(0));
+    expect(screen.queryByText("No changes to show")).toBeNull();
+    for (const n of [1, 2, 3, 4])
+      expect(drawn(pane.container, n)).not.toBeNull();
+  });
+
+  it("renders a CRLF patch's rows in content mode too", async () => {
+    const land = deferredReads();
+    const pane = mountPane({ ...FORGE, data: { ...DIFF, text: CRLF_TEXT } });
+    await land(
+      "line 1\r\n\r\nline 3\r\nline 4\r\nline 5\r\n",
+      "line 1\r\n\r\nline 3\r\nline four\r\nline 5\r\n",
+    );
+    await waitFor(() => expect(pane.expands().length).toBeGreaterThan(0));
+    expect(screen.queryByText("No changes to show")).toBeNull();
+    for (const n of [1, 2, 3, 4])
+      expect(drawn(pane.container, n)).not.toBeNull();
   });
 });

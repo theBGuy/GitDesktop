@@ -4,7 +4,12 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { lineComposerOpen } from "@/features/diff/whitespace-mode";
-import { CommitLineComposer } from "@/features/pulls/CommitComments";
+import {
+  CommitLineComposer,
+  lineFromPosition,
+  newSideLines,
+  positionFromLine,
+} from "@/features/pulls/CommitComments";
 import { DraftCommentCard } from "@/features/pulls/PendingReviewBar";
 import {
   OFF_PATCH_REVIEW_REASON,
@@ -67,6 +72,12 @@ const SECTION =
   "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n" +
   "@@ -1,3 +1,3 @@\n line 1\n-line 2\n+line two\n line 3\n" +
   "@@ -31,3 +31,3 @@\n line 31\n-line 32\n+line thirty-two\n line 33\n";
+
+// A byte cap cut this section right after a newline: the header still owes
+// one line on each side.
+const TRUNCATED =
+  "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n" +
+  "@@ -1,2 +1,2 @@\n-old\n+new\n";
 
 const wrap = (node: ReactNode) => (
   <QueryClientProvider client={new QueryClient()}>{node}</QueryClientProvider>
@@ -265,6 +276,66 @@ describe("commit line composer: patch-only lines on every provider", () => {
       );
     });
   }
+
+  it("github: the line after the last hunk is refused, the hunk's last line posts", async () => {
+    renderCommitComposer("github", 34, false);
+    expect(comment()).toHaveAccessibleDescription(COMMIT_OFF);
+    await typeAndSubmit();
+    expect(writes.commit).not.toHaveBeenCalled();
+    cleanup();
+    renderCommitComposer("github", 33, false);
+    await typeAndSubmit();
+    expect(writes.commit).toHaveBeenCalledWith(
+      expect.objectContaining({ line: 33, position: 9 }),
+    );
+  });
+
+  /** A binary-to-text typechange's two sections, joined under one path. */
+  const JOINED =
+    "diff --git a/p b/p\ndeleted file mode 120000\nindex 1111111..0000000\n--- a/p\n+++ /dev/null\n" +
+    "@@ -1 +0,0 @@\n-target\n\\ No newline at end of file\n" +
+    "diff --git a/p b/p\nnew file mode 100644\nindex 0000000..2222222\n--- /dev/null\n+++ b/p\n" +
+    "@@ -0,0 +1,3 @@\n+a\n+b\n+c\n";
+
+  it("github: line and position round-trip over exactly the lines a hunk holds", () => {
+    for (const section of [SECTION, JOINED, TRUNCATED]) {
+      const mapped: number[] = [];
+      for (let line = 1; line <= 40; line++) {
+        const position = positionFromLine(section, line);
+        if (position === null) continue;
+        mapped.push(line);
+        expect(lineFromPosition(section, position)).toBe(line);
+      }
+      // The lines with a position are the ones the diff draws.
+      expect(mapped).toEqual([...newSideLines(section)]);
+      for (let position = 1; position <= 20; position++) {
+        const line = lineFromPosition(section, position);
+        if (line !== null)
+          expect(positionFromLine(section, line)).toBe(position);
+      }
+    }
+    // Past the last hunk, and where the joined section's second file header
+    // sits in a walk that counts it, no position maps to a line.
+    expect(lineFromPosition(SECTION, 10)).toBeNull();
+    expect(lineFromPosition(JOINED, 3)).toBeNull();
+    expect(lineFromPosition(JOINED, 7)).toBeNull();
+    // A hunk cut short ends at the text's end: nothing past `+new` has a row.
+    expect(lineFromPosition(TRUNCATED, 2)).toBe(1);
+    expect(lineFromPosition(TRUNCATED, 3)).toBeNull();
+    expect(positionFromLine(TRUNCATED, 2)).toBeNull();
+    expect([...newSideLines(TRUNCATED)]).toEqual([1]);
+  });
+
+  it("github: positions in a joined typechange section skip the second file's header", () => {
+    const joined = JOINED;
+    expect(positionFromLine(joined, 1)).toBe(4);
+    expect(positionFromLine(joined, 2)).toBe(5);
+    expect(positionFromLine(joined, 3)).toBe(6);
+    expect(positionFromLine(joined, 4)).toBeNull();
+    // The first section's lines keep their positions.
+    expect(positionFromLine(SECTION, 1)).toBe(1);
+    expect(positionFromLine(SECTION, 31)).toBe(6);
+  });
 
   it("gitlab: a range starting in a gap is refused, its start named", async () => {
     renderCommitComposer("gitlab", 32, true, 20);

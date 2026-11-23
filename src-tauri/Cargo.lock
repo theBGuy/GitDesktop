@@ -1600,6 +1600,7 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "sha1",
+ "sha2 0.11.1",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",

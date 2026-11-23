@@ -48,6 +48,11 @@ export const WHITESPACE_COMPOSER_HELD =
 export const LAYOUT_COMPOSER_HELD =
   "Finish or close the line comment you're writing (here or in another tab), then change the diff display.";
 
+/** Show full diff rebuilds only its own diff, so it holds only on an editor
+ *  open inside that diff (`diffEditorOpen` over the diff's root). */
+export const SHOW_FULL_COMPOSER_HELD =
+  "Finish or close the comment you're writing, then show the full diff.";
+
 // Both diff settings are app-wide and hidden tabs keep their DOM under
 // `<Activity>`, so a flip from any pane rebuilds a hidden tab's composer too.
 // Every writer of either setting checks its probe first

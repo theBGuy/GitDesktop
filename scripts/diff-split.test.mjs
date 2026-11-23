@@ -8,11 +8,18 @@ import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { test } from "node:test";
 
+import { hunksMatchContent } from "../src/features/diff/hunk-match.ts";
+import {
+  extractNewSideLines,
+  synthesizeThreadHunk,
+} from "../src/features/pulls/suggestion-utils.ts";
+import * as diffSplit from "../src/lib/git/diff-split.ts";
 import {
   binaryIndexOids,
   binaryRowPaths,
   binarySizeSummary,
   classifyHeaderOnlyDiff,
+  diffLines,
   diffSectionStats,
   HEADER_ONLY_MESSAGE,
   headerOnlyMessage,
@@ -25,6 +32,7 @@ import {
   sectionOldPath,
   splitUnifiedDiff,
   typechangeHalves,
+  withBlankContextSpaces,
 } from "../src/lib/git/diff-split.ts";
 
 // ---------------------------------------------------------------- headerShapes
@@ -1829,6 +1837,26 @@ test("sectionOldPath: a rename or copy source, decoded; nothing else", () => {
     assert.equal(sectionOldPath(section), want, name);
 });
 
+test("a rename source holding a JS line terminator reads whole", () => {
+  // Built at runtime: U+2028 and U+2029 never sit in this file's bytes.
+  const separators = [String.fromCharCode(0x2028), String.fromCharCode(0x2029), "\r"];
+  for (const sep of separators) {
+    const from = `old${sep}name.png`;
+    const label = `U+${sep.charCodeAt(0).toString(16).padStart(4, "0")}`;
+    const renamed =
+      `diff --git a/${from} b/new.png\nsimilarity index 90%\n` +
+      `rename from ${from}\nrename to new.png\nindex 1111aaa..2222bbb 100644\n` +
+      "Binary files a/x and b/new.png differ\n";
+    assert.equal(sectionOldPath(renamed), from, `sectionOldPath: ${label}`);
+    const pure = `diff --git a/${from} b/new.png\nsimilarity index 100%\nrename from ${from}\nrename to new.png\n`;
+    assert.deepEqual(
+      classifyHeaderOnlyDiff(pure),
+      { kind: "rename", oldPath: from, newPath: "new.png" },
+      `classifyHeaderOnlyDiff: ${label}`,
+    );
+  }
+});
+
 // ---------------------------------------------------------------- patchLines
 
 test("patchLines: the lines each side's hunks draw, bounded by the counts", () => {
@@ -1848,25 +1876,51 @@ test("patchLines: the lines each side's hunks draw, bounded by the counts", () =
   assert.deepEqual([...patchLines("").old], []);
 });
 
-/** CommitComments' `newSideLines`, read from its source: a component module
- *  this installless suite can't import, so its text is type-stripped here. */
-function loadNewSideLines() {
+/** CommitComments' hunk walks (`patchPositions`, `newSideLines`), read from
+ *  its source: a component module this installless suite can't import, so
+ *  their text is type-stripped here, and every value it imports from
+ *  diff-split.ts is bound from that module. */
+function loadCommitWalks() {
   const text = readFileSync(
     new URL("../src/features/pulls/CommitComments.tsx", import.meta.url),
     "utf8",
   ).replace(/\r\n/g, "\n");
+  const imported = /^import \{([^}]*)\} from "@\/lib\/git\/diff-split";$/m.exec(
+    text,
+  );
   const counts = text.match(/^const HUNK_COUNTS = .*;$/m);
-  const at = text.indexOf("export function newSideLines(");
-  const end = text.indexOf("\n}\n", at);
-  if (!counts || at < 0 || end < 0)
-    throw new Error("newSideLines: its source moved; update this loader");
-  const body = text.slice(at, end + 2).replace("export function", "function");
-  const js = stripTypeScriptTypes(`${counts[0]}\n${body}\n`);
-  return new Function(`${js}\nreturn newSideLines;`)();
+  const bodies = ["patchPositions", "newSideLines"].map((name) => {
+    const at = text.indexOf(`function ${name}(`);
+    const end = text.indexOf("\n}\n", at);
+    return at < 0 || end < 0 ? null : text.slice(at, end + 2);
+  });
+  if (!imported || !counts || bodies.includes(null))
+    throw new Error("CommitComments' hunk walks moved; update this loader");
+  const names = imported[1]
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name !== "" && !name.startsWith("type "));
+  for (const name of names)
+    if (typeof diffSplit[name] !== "function")
+      throw new Error(`diff-split.ts exports no function ${name}`);
+  const js = stripTypeScriptTypes(`${counts[0]}\n${bodies.join("\n")}\n`);
+  return new Function(
+    ...names,
+    `${js}\nreturn { patchPositions, newSideLines };`,
+  )(...names.map((name) => diffSplit[name]));
+}
+
+/** The new-side lines the suggestion pre-fill reads in a section: each line it
+ *  can extract on its own (every fixture's lines sit under 64). */
+function suggestionLines(text) {
+  const out = [];
+  for (let n = 1; n <= 64; n++)
+    if (extractNewSideLines(text, n, n) !== null) out.push(n);
+  return out;
 }
 
 test("patchLines().new equals newSideLines on every fixture", () => {
-  const newSideLines = loadNewSideLines();
+  const { newSideLines } = loadCommitWalks();
   const fixtures = [
     "@@ -2,3 +2,3 @@\n a\n-b\n+B\n c\n@@ -10,2 +10,3 @@\n x\n+y\n z\n",
     "@@ -0,0 +1,2 @@\n+a\n+b\n",
@@ -1883,10 +1937,391 @@ test("patchLines().new equals newSideLines on every fixture", () => {
     "",
     "no hunk at all\n",
   ];
-  for (const text of fixtures)
+  for (const text of fixtures) {
     assert.deepEqual(
       [...patchLines(text).new],
       [...newSideLines(text)],
       JSON.stringify(text),
     );
+    assert.deepEqual(
+      [...patchLines(text).new],
+      suggestionLines(text),
+      `suggestion: ${JSON.stringify(text)}`,
+    );
+  }
+});
+
+test("every hunk walk holds the same new-side lines, artifact and blank lines alike", () => {
+  const { patchPositions, newSideLines } = loadCommitWalks();
+  const rows = [
+    [
+      "a normal section",
+      "diff --git a/f b/f\n--- a/f\n+++ b/f\n" +
+        "@@ -2,3 +2,3 @@\n a\n-b\n+B\n c\n@@ -10,2 +10,3 @@\n x\n+y\n z\n",
+      [2, 3, 4, 10, 11, 12],
+    ],
+    // A byte cap that ends right after a newline: the hunk still owes lines,
+    // and the split's empty tail is none of them.
+    ["a byte-capped section", "@@ -1,3 +1,3 @@\n-old\n+new\n", [1]],
+    ["a section capped in its context", "@@ -1,3 +1,3 @@\n a\n-b\n+B\n", [1, 2]],
+    ["a joined typechange, link first", TYPECHANGE, []],
+    ["a joined typechange, binary first", TYPECHANGE_TO_LINK, [1]],
+    [
+      "a joined text typechange",
+      textSection("x", "deleted") + textSection("x", "new"),
+      [1],
+    ],
+    // `diff.suppressBlankEmpty`: a blank context line written without its space.
+    ["a suppress-blank-empty hunk", "@@ -1,4 +1,4 @@\n a\n-b\n+B\n\n d\n", [1, 2, 3, 4]],
+    ["a suppress-blank-empty CRLF hunk", "@@ -1,3 +1,3 @@\r\n a\r\n\r\n c\r\n", [1, 2, 3]],
+  ];
+  for (const [name, text, want] of rows) {
+    assert.deepEqual([...patchLines(text).new], want, `patchLines: ${name}`);
+    assert.deepEqual([...newSideLines(text)], want, `newSideLines: ${name}`);
+    assert.deepEqual(
+      patchPositions(text).filter((line) => line !== null),
+      want,
+      `patchPositions: ${name}`,
+    );
+    assert.deepEqual(suggestionLines(text), want, `suggestion: ${name}`);
+  }
+  // hunk-match reads the same lines: it accepts the files a whole hunk was cut
+  // from, blank context lines included, and never closes a cut hunk on the
+  // split's empty tail, even where the file's next line is blank.
+  const matches = [
+    ["a normal section", "@@ -2,3 +2,3 @@\n a\n-b\n+B\n c\n", "0\na\nb\nc\nz\n", "0\na\nB\nc\nz\n", true],
+    ["a byte-capped section", "@@ -1,3 +1,3 @@\n a\n-b\n+B\n", "a\nb\n\n", "a\nB\n\n", false],
+    ["a joined typechange's text half", typechangeHalves(TYPECHANGE_TO_LINK, "x").text, "", "target\n", true],
+    ["a suppress-blank-empty hunk", "@@ -1,4 +1,4 @@\n a\n-b\n+B\n\n d\n", "a\nb\n\nd\n", "a\nB\n\nd\n", true],
+    ["a blank line after the change", "@@ -1,3 +1,3 @@\n-a\n+b\n\n x\n", "a\n\nx\ny\n", "b\n\nx\ny\n", true],
+  ];
+  for (const [name, text, oldText, newText, want] of matches)
+    assert.equal(hunksMatchContent(text, oldText, newText), want, `hunk-match: ${name}`);
+});
+
+test("the suggestion pre-fill reads only the lines a section's hunks hold", () => {
+  // The final newline's empty tail is no line 3.
+  const section = "@@ -1,2 +1,2 @@\n a\n-b\n+c\n";
+  assert.equal(extractNewSideLines(section, 3, 3), null);
+  assert.deepEqual(extractNewSideLines(section, 1, 2), ["a", "c"]);
+  // A blank context line written without its space is a line of the hunk.
+  assert.deepEqual(
+    extractNewSideLines("@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n", 1, 3),
+    ["a", "", "c"],
+  );
+  // A joined typechange's second header is never a line of the first hunk.
+  for (let n = 1; n <= 4; n++)
+    assert.equal(extractNewSideLines(TYPECHANGE, n, n), null, `line ${n}`);
+});
+
+test("diffLines drops only the empty tail a final newline leaves", () => {
+  assert.deepEqual(diffLines("a\nb\n"), ["a", "b"]);
+  assert.deepEqual(diffLines("a\nb"), ["a", "b"]);
+  assert.deepEqual(diffLines("a\n\n"), ["a", ""]);
+  assert.deepEqual(diffLines("a\r\n"), ["a\r"]);
+  assert.deepEqual(diffLines(""), []);
+  assert.deepEqual(diffLines("\n"), [""]);
+});
+
+test("withBlankContextSpaces restores only the blank context rows a hunk owes", () => {
+  const lf = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,4 +1,4 @@\n a\n\n b\n-c\n+d\n";
+  assert.equal(
+    withBlankContextSpaces(lf),
+    "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,4 +1,4 @@\n a\n \n b\n-c\n+d\n",
+  );
+  const crlf = lf.replace(/\n/g, "\r\n");
+  assert.equal(
+    withBlankContextSpaces(crlf),
+    crlf.replace("\r\n\r\n b", "\r\n \r\n b"),
+  );
+  // The last row of a hunk, and a text with no final newline.
+  assert.equal(withBlankContextSpaces("@@ -1,2 +1,2 @@\n a\n\n"), "@@ -1,2 +1,2 @@\n a\n \n");
+  assert.equal(withBlankContextSpaces("@@ -1,2 +1,2 @@\n a\n\r"), "@@ -1,2 +1,2 @@\n a\n \r");
+  // Nothing to restore: the same string comes back, even past a full hunk.
+  for (const text of [
+    "@@ -1 +1 @@\n-a\n+b\n\n",
+    "@@ -1,2 +1,2 @@\n a\n \n",
+    "\n\n",
+    "",
+    TYPECHANGE,
+  ])
+    assert.equal(withBlankContextSpaces(text), text, JSON.stringify(text));
+  // Every hunk walk reads the restored text as it reads the original.
+  for (const text of [lf, crlf, "@@ -5,2 +5,2 @@\n \n-x\n+y\n", "@@ -1,3 +1,3 @@\n a\n-b\n+B\n"]) {
+    const restored = withBlankContextSpaces(text);
+    assert.deepEqual([...patchLines(restored).new], [...patchLines(text).new]);
+    assert.deepEqual([...patchLines(restored).old], [...patchLines(text).old]);
+  }
+});
+
+/** ReviewThreads' hunk parse and Apply recovery (`parseHunk`, `newSideLines`,
+ *  `recoverOriginals`), type-stripped from its source like
+ *  {@link loadCommitWalks}: they import nothing. */
+function loadThreadWalks() {
+  const text = readFileSync(
+    new URL("../src/features/pulls/ReviewThreads.tsx", import.meta.url),
+    "utf8",
+  ).replace(/\r\n/g, "\n");
+  const bodies = ["parseHunk", "newSideLines", "recoverOriginals"].map((name) => {
+    const at = text.indexOf(`\nfunction ${name}(`);
+    const end = text.indexOf("\n}\n", at);
+    return at < 0 || end < 0 ? null : text.slice(at + 1, end + 2);
+  });
+  if (bodies.includes(null))
+    throw new Error("ReviewThreads' hunk walks moved; update this loader");
+  const js = stripTypeScriptTypes(`${bodies.join("\n")}\n`);
+  return new Function(
+    `${js}\nreturn { parseHunk, recoverOriginals };`,
+  )();
+}
+
+test("a synthesized thread hunk over a blank context line keeps Apply and its labels", () => {
+  const { parseHunk, recoverOriginals } = loadThreadWalks();
+  const section =
+    "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n";
+  const numbered = (hunk) =>
+    parseHunk(hunk)
+      .filter((l) => l.number !== null)
+      .map((l) => [l.number, l.text]);
+
+  // Anchored on the blank line 2 itself.
+  const single = synthesizeThreadHunk(section, { line: 2, startLine: 0 });
+  assert.deepEqual(numbered(single), [[2, " "]]);
+  for (const provider of ["gitlab", "bitbucket"]) {
+    const thread = { line: 2, startLine: 0 };
+    assert.deepEqual(
+      recoverOriginals(thread, parseHunk(single), undefined, provider),
+      { lines: [""], startLine: 2 },
+      provider,
+    );
+  }
+
+  // A range whose first line is the blank line 2, ending on changed line 3.
+  const thread = { line: 3, startLine: 2 };
+  const range = synthesizeThreadHunk(section, thread);
+  assert.deepEqual(numbered(range), [
+    [2, " "],
+    [3, "+c"],
+  ]);
+  const parsed = parseHunk(range);
+  assert.deepEqual(recoverOriginals(thread, parsed, undefined, "gitlab"), {
+    lines: ["c"],
+    startLine: 3,
+  });
+  assert.deepEqual(
+    recoverOriginals(thread, parsed, { above: 1, below: 0 }, "gitlab"),
+    { lines: ["", "c"], startLine: 2 },
+  );
+  assert.deepEqual(recoverOriginals(thread, parsed, undefined, "bitbucket"), {
+    lines: ["", "c"],
+    startLine: 2,
+  });
+});
+
+/** What Apply's verify compares each expected line against: Rust's
+ *  `split_line_ending` (src-tauri/src/git/ops.rs) over the file's
+ *  `split_inclusive('\n')` pieces, which drops "\r\n", else "\n", else nothing. */
+function splitLineEndings(content) {
+  return (content.match(/[^\n]*\n|[^\n]+$/g) ?? []).map((piece) => {
+    if (piece.endsWith("\r\n")) return piece.slice(0, -2);
+    if (piece.endsWith("\n")) return piece.slice(0, -1);
+    return piece;
+  });
+}
+
+// A CRLF file whose last line has no terminator: git's patch rows carry the "\r"
+// and the last row is followed by "\ No newline at end of file" (the decoy: its
+// "\r" is file content, which split_line_ending keeps).
+const CRLF_NEW = "a\r\n\r\nc\r\nx\r";
+const CRLF_HUNK = [
+  "@@ -1,4 +1,4 @@",
+  " a\r",
+  " \r",
+  "-b\r",
+  "+c\r",
+  " x\r",
+  "\\ No newline at end of file",
+].join("\n");
+// A forge that suppressed the blank context row's space sends it as "\r" alone.
+const CRLF_SECTION = `diff --git a/f b/f\n--- a/f\n+++ b/f\n${CRLF_HUNK.replace("\n \r\n", "\n\r\n")}\n`;
+
+test("Apply's expected lines equal what split_line_ending reads from the CRLF file", () => {
+  const { parseHunk, recoverOriginals } = loadThreadWalks();
+  const want = splitLineEndings(CRLF_NEW);
+  assert.deepEqual(want, ["a", "", "c", "x\r"]);
+  const range = (from, to) => want.slice(from - 1, to);
+
+  // GitHub's own diffHunk: a bare fence on a ranged comment replaces the range.
+  assert.deepEqual(
+    recoverOriginals({ line: 4, startLine: 1 }, parseHunk(CRLF_HUNK), undefined, "github"),
+    { lines: range(1, 4), startLine: 1 },
+    "github diffHunk",
+  );
+  // GitLab and Bitbucket: the hunk synthesized from the file's section.
+  for (const [from, to] of [
+    [1, 4],
+    [2, 2],
+    [3, 3],
+    [4, 4],
+  ]) {
+    const thread = { line: to, startLine: from === to ? 0 : from };
+    const hunk = synthesizeThreadHunk(CRLF_SECTION, thread);
+    const glRange = { above: to - from, below: 0 };
+    assert.deepEqual(
+      recoverOriginals(thread, parseHunk(hunk), glRange, "gitlab"),
+      { lines: range(from, to), startLine: from },
+      `gitlab ${from}-${to}`,
+    );
+    assert.deepEqual(
+      recoverOriginals(thread, parseHunk(hunk), undefined, "bitbucket"),
+      { lines: range(from, to), startLine: from },
+      `bitbucket ${from}-${to}`,
+    );
+  }
+
+  // The same rows newline-terminated: the last row's "\r" is the CRLF terminator.
+  const terminated = CRLF_HUNK.replace("\n\\ No newline at end of file", "");
+  assert.deepEqual(
+    recoverOriginals({ line: 4, startLine: 0 }, parseHunk(terminated), undefined, "github"),
+    { lines: splitLineEndings("a\r\n\r\nc\r\nx\r\n").slice(3), startLine: 4 },
+    "terminated last row",
+  );
+});
+
+test("the suggestion pre-fill carries no carriage return", () => {
+  assert.deepEqual(extractNewSideLines(CRLF_SECTION, 1, 4), ["a", "", "c", "x"]);
+});
+
+// ------------------------------------------------- a C-quoted name opening U+FEFF
+
+// The quoted rename/copy names carry no a/ or b/ prefix, so U+FEFF opens the
+// decoded bytes: a BOM-eating decode would read a sibling's name. Built at
+// runtime: no U+FEFF sits in this file's bytes.
+test("a C-quoted name keeps a leading U+FEFF", () => {
+  const bom = String.fromCharCode(0xfeff);
+  const forms = [
+    // core.quotePath's octal escapes of U+FEFF's UTF-8 bytes.
+    ["octal escapes", "\\357\\273\\277", "", ""],
+    // A raw U+FEFF, quoted because a tab elsewhere in the name forces it.
+    ["a raw U+FEFF", bom, "\\t", "\t"],
+  ];
+  for (const [form, lead, escaped, raw] of forms) {
+    const oldName = `${lead}old${escaped}.png`;
+    const newName = `${lead}new${escaped}.png`;
+    const oldPath = `${bom}old${raw}.png`;
+    const newPath = `${bom}new${raw}.png`;
+    const renamed = `diff --git "a/${oldName}" "b/${newName}"\nsimilarity index 90%\nrename from "${oldName}"\nrename to "${newName}"\n`;
+    assert.equal(sectionOldPath(renamed), oldPath, `rename source, ${form}`);
+    assert.equal(sectionFilePath(renamed), newPath, `rename destination, ${form}`);
+    const edited = `${renamed}index 1111111..2222222 100644\nBinary files "a/${oldName}" and "b/${newName}" differ\n`;
+    assert.equal(sectionOldPath(edited), oldPath, `edited rename source, ${form}`);
+    const plus = `diff --git "a/${newName}" "b/${newName}"\nindex 1111111..2222222 100644\n--- "a/${newName}"\n+++ "b/${newName}"\n@@ -1 +1 @@\n-a\n+b\n`;
+    assert.equal(sectionFilePath(plus), newPath, `+++ name, ${form}`);
+    const plusRename = `diff --git "a/${oldName}" "b/${newName}"\n--- "a/${oldName}"\n+++ "b/${newName}"\n`;
+    assert.equal(sectionOldPath(plusRename), oldPath, `--- source, ${form}`);
+  }
+});
+
+// A forge host's text arm: hunk-match refuses a new file's base listing.
+test("hunk-match refuses a directory listing as a new file's old side", () => {
+  const added = "diff --git a/x b/x\nnew file mode 100644\n--- /dev/null\n+++ b/x\n@@ -0,0 +1,2 @@\n+a\n+b\n";
+  assert.equal(hunksMatchContent(added, "tree base:x\n\na.txt\n", "a\nb\n"), false);
+  assert.equal(hunksMatchContent(added, "", "a\nb\n"), true);
+  const deleted = "diff --git a/x b/x\ndeleted file mode 100644\n--- a/x\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-a\n-b\n";
+  assert.equal(hunksMatchContent(deleted, "a\nb\n", "tree head:x\n\na.txt\n"), false);
+  assert.equal(hunksMatchContent(deleted, "a\nb\n", ""), true);
+});
+
+// ---------------------------------------------------------- sectionOldPath (---)
+
+test("sectionOldPath: a body-withheld rename reads its source from the --- line", () => {
+  const rows = [
+    ["plain", "diff --git a/old.svg b/new.svg\n--- a/old.svg\n+++ b/new.svg\n", "old.svg"],
+    [
+      "C-quoted",
+      'diff --git "a/caf\\303\\251.svg" b/new.svg\n--- "a/caf\\303\\251.svg"\n+++ b/new.svg\n',
+      `caf${String.fromCharCode(0xe9)}.svg`,
+    ],
+    [
+      "a space, with git's trailing TAB",
+      "diff --git a/my old.svg b/new.svg\n--- a/my old.svg\t\n+++ b/new.svg\t\n",
+      "my old.svg",
+    ],
+    [
+      "a space, without a TAB",
+      "diff --git a/my old.svg b/new.svg\n--- a/my old.svg\n+++ b/new.svg\n",
+      "my old.svg",
+    ],
+    [
+      "CRLF lines",
+      "diff --git a/old.svg b/new.svg\r\n--- a/old.svg\r\n+++ b/new.svg\r\n",
+      "old.svg",
+    ],
+    [
+      "a hunk after the header",
+      "diff --git a/old b/new\n--- a/old\n+++ b/new\n@@ -1 +1 @@\n-a\n+b\n",
+      "old",
+    ],
+    // Not renames: the same path on both sides, or an absent side.
+    ["unchanged path", "diff --git a/x.svg b/x.svg\n--- a/x.svg\n+++ b/x.svg\n", undefined],
+    ["a new file", "diff --git a/n.svg b/n.svg\n--- /dev/null\n+++ b/n.svg\n", undefined],
+    ["a deleted file", "diff --git a/d.svg b/d.svg\n--- a/d.svg\n+++ /dev/null\n", undefined],
+    ["no a/ prefix", "diff --git a/o b/n\n--- o\n+++ b/n\n", undefined],
+  ];
+  for (const [name, section, want] of rows)
+    assert.equal(sectionOldPath(section), want, name);
+  // A git rename keeps reading its `rename from` line.
+  assert.equal(
+    sectionOldPath(
+      "diff --git a/old.txt b/x\nrename from old.txt\nrename to x\n--- a/decoy\n+++ b/x\n",
+    ),
+    "old.txt",
+  );
+});
+
+// A BOM file: the patch carries U+FEFF at the start of new-side line 1, and a
+// U+FEFF that opens line 2 is content (the decoy). Built at runtime: no BOM
+// sits in this file's bytes.
+const BOM = String.fromCharCode(0xfeff);
+const BOM_NEW = `${BOM}a\n${BOM}b\nc\n`;
+const BOM_HUNK = `@@ -1,3 +1,3 @@\n ${BOM}a\n-${BOM}old\n+${BOM}b\n c`;
+const BOM_SECTION = `diff --git a/f b/f\n--- a/f\n+++ b/f\n${BOM_HUNK}\n`;
+
+/** replace_file_lines (git/ops.rs) strips one leading BOM before it splits. */
+function backendLines(raw) {
+  return splitLineEndings(raw.startsWith(BOM) ? raw.slice(1) : raw);
+}
+
+test("Apply's expected lines drop the BOM only from line 1, as the backend reads it", () => {
+  const { parseHunk, recoverOriginals } = loadThreadWalks();
+  const want = backendLines(BOM_NEW);
+  assert.deepEqual(want, ["a", `${BOM}b`, "c"]);
+  for (const [from, to] of [
+    [1, 2],
+    [2, 3],
+  ]) {
+    const expected = { lines: want.slice(from - 1, to), startLine: from };
+    const thread = { line: to, startLine: from };
+    assert.deepEqual(
+      recoverOriginals(thread, parseHunk(BOM_HUNK), undefined, "github"),
+      expected,
+      `github ${from}-${to}`,
+    );
+    const hunk = synthesizeThreadHunk(BOM_SECTION, thread);
+    assert.deepEqual(
+      recoverOriginals(thread, parseHunk(hunk), { above: to - from, below: 0 }, "gitlab"),
+      expected,
+      `gitlab ${from}-${to}`,
+    );
+    assert.deepEqual(
+      recoverOriginals(thread, parseHunk(hunk), undefined, "bitbucket"),
+      expected,
+      `bitbucket ${from}-${to}`,
+    );
+  }
+});
+
+test("the suggestion pre-fill drops the BOM only from line 1", () => {
+  assert.deepEqual(extractNewSideLines(BOM_SECTION, 1, 2), ["a", `${BOM}b`]);
+  assert.deepEqual(extractNewSideLines(BOM_SECTION, 2, 3), [`${BOM}b`, "c"]);
 });

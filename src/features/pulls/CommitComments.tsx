@@ -35,7 +35,7 @@ import {
 } from "@/features/diff/whitespace-mode";
 import { usePrCapabilities } from "@/features/pulls/usePrCapabilities";
 import { clipTitleFromText } from "@/lib/clip-title";
-import type { splitUnifiedDiff } from "@/lib/git/diff-split";
+import { diffLines, type splitUnifiedDiff } from "@/lib/git/diff-split";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
   COMMIT_COMMENT_WRITES_FAMILY,
@@ -89,8 +89,8 @@ export function useCommitCommentsGate(repoPath: string): boolean {
 /**
  * Derive the new-side (right) line a GitHub commit comment anchors to from its
  * diff `position`. GitHub sends `position` (1-based index of the line within the
- * file's patch, counting EVERY line after the first `@@` header — subsequent hunk
- * headers included) but often leaves `line` null, so the position must be walked
+ * file's patch, counting every hunk line after the first `@@` header, subsequent
+ * hunk headers included) but often leaves `line` null, so the position must be walked
  * against the file's own diff section. Returns null when the section is absent, the
  * position is out of range, or the target isn't on the new side.
  *
@@ -103,46 +103,7 @@ export function lineFromPosition(
   position: number | null,
 ): number | null {
   if (!section || position == null || position < 1) return null;
-  const lines = section.split("\n");
-  // Walk from the first hunk header; count every line after it (position 1 is
-  // the first line following that header).
-  let firstHunk = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].startsWith("@@")) {
-      firstHunk = i;
-      break;
-    }
-  }
-  if (firstHunk === -1) return null;
-
-  let pos = 0;
-  let newLine = 0;
-  for (let i = firstHunk; i < lines.length; i++) {
-    const l = lines[i];
-    if (l.startsWith("@@")) {
-      // Re-seat the new-side counter from this hunk's header (`@@ -a,b +c,d @@`).
-      const m = l.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-      if (m) newLine = Number(m[1]) - 1;
-      if (i !== firstHunk) pos += 1; // subsequent headers count toward position
-      if (pos === position) return null; // a header line has no new-side line
-      continue;
-    }
-    pos += 1;
-    if (l.startsWith("\\")) {
-      // `\ No newline…`: counts toward position, but is not content — never an anchor.
-      if (pos === position) return null;
-      continue;
-    }
-    if (l.startsWith("-")) {
-      // Removed line: no new-side number; if the position lands here, unresolved.
-      if (pos === position) return null;
-      continue;
-    }
-    // Context (" ") or added ("+") line advances the new-side counter.
-    newLine += 1;
-    if (pos === position) return newLine;
-  }
-  return null;
+  return patchPositions(section)[position - 1] ?? null;
 }
 
 /**
@@ -158,41 +119,65 @@ export function positionFromLine(
   line: number | null,
 ): number | null {
   if (!section || line == null || line < 1) return null;
-  const lines = section.split("\n");
-  // Find the first hunk header; position 1 is the first line following it.
-  let firstHunk = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].startsWith("@@")) {
-      firstHunk = i;
-      break;
-    }
-  }
-  if (firstHunk === -1) return null;
-
-  let pos = 0;
-  let newLine = 0;
-  for (let i = firstHunk; i < lines.length; i++) {
-    const l = lines[i];
-    if (l.startsWith("@@")) {
-      // Re-seat the new-side counter from this hunk's header (`@@ -a,b +c,d @@`).
-      const m = l.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-      if (m) newLine = Number(m[1]) - 1;
-      if (i !== firstHunk) pos += 1; // subsequent headers count toward position
-      continue;
-    }
-    pos += 1;
-    // `\ No newline…`: counts toward position, never advances the new-side counter.
-    if (l.startsWith("\\")) continue;
-    // Removed line: no new-side number, so it can never match the target line.
-    if (l.startsWith("-")) continue;
-    // Context (" ") or added ("+") line advances the new-side counter.
-    newLine += 1;
-    if (newLine === line) return pos;
-  }
-  return null;
+  const at = patchPositions(section).indexOf(line);
+  return at === -1 ? null : at + 1;
 }
 
 const HUNK_COUNTS = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+/**
+ * The new-side line at each GitHub `position` of a file's diff section (index 0
+ * is position 1; null for a later hunk header, a `\` marker or a removed line).
+ * Both position functions read this one walk, so they stay each other's inverse.
+ * Each hunk is bounded by its header's counts, as {@link newSideLines} reads
+ * them: a line past the last hunk, or a joined section's second file header,
+ * is no line of any hunk and has no position.
+ */
+function patchPositions(section: string): (number | null)[] {
+  const at: (number | null)[] = [];
+  let hunks = 0;
+  let oldLeft = 0;
+  let newLeft = 0;
+  let newLine = 0;
+  // The line before was a hunk's own, so a `\` marker here is still its.
+  let afterHunkLine = false;
+  for (const l of diffLines(section)) {
+    if (oldLeft <= 0 && newLeft <= 0) {
+      if (afterHunkLine && l.startsWith("\\")) {
+        at.push(null);
+        continue;
+      }
+      afterHunkLine = false;
+      const m = HUNK_COUNTS.exec(l);
+      if (!m) continue;
+      // Position 1 is the line after the first header; each later one counts.
+      if (hunks > 0) at.push(null);
+      hunks += 1;
+      oldLeft = m[1] === undefined ? 1 : Number(m[1]);
+      newLine = Number(m[2]);
+      newLeft = m[3] === undefined ? 1 : Number(m[3]);
+      continue;
+    }
+    afterHunkLine = true;
+    // `\ No newline…`: counts toward position, never advances the new-side counter.
+    if (l.startsWith("\\")) {
+      at.push(null);
+      continue;
+    }
+    // Removed line: no new-side number.
+    if (l.startsWith("-")) {
+      oldLeft--;
+      at.push(null);
+      continue;
+    }
+    // Context (" ") or added ("+") line takes the next new-side number.
+    if (!l.startsWith("+")) oldLeft--;
+    newLeft--;
+    at.push(newLine);
+    newLine += 1;
+  }
+  return at;
+}
 
 /**
  * The new-side line numbers a unified diff text can draw, counted as
@@ -205,7 +190,7 @@ export function newSideLines(text: string): Set<number> {
   let oldLeft = 0;
   let newLeft = 0;
   let newLine = 0;
-  for (const l of text.split("\n")) {
+  for (const l of diffLines(text)) {
     if (oldLeft <= 0 && newLeft <= 0) {
       const m = HUNK_COUNTS.exec(l);
       if (m) {

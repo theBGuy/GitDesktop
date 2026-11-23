@@ -253,7 +253,9 @@ interface PanesState {
   new?: Size;
   /** Sides whose image fired `error`, so they will never measure. */
   failed?: Partial<Record<PaneKey, true>>;
-  viewing?: number;
+  /** The side the viewer shows: a side, never a slot of the shown ones, which
+   *  shift when a new-only pair gains its old side. */
+  viewing?: PaneKey;
   /** A forge-patch host's last settled reads of this file, drawn while a new
    *  pair's first reads are in flight. */
   settled?: Record<PaneKey, SideRead>;
@@ -494,18 +496,21 @@ export function ImagePanes({
     return shell(null);
   }
 
+  // Keyed by side, so the viewer's zoom and image survive a side's move to
+  // another index (a new-only pair gaining its old side).
   const images: LightboxImage[] = shown.map((pane) => ({
+    id: pane.key,
     src: pane.src,
     alt: pane.label,
     label: pane.label,
     naturalWidth: current?.[pane.key]?.w,
     naturalHeight: current?.[pane.key]?.h,
   }));
-  // A side that left takes its slot in the viewer with it.
-  const viewing =
-    current?.viewing === undefined || shown.length === 0
-      ? null
-      : Math.min(current.viewing, shown.length - 1);
+  // The viewer's slot follows its side; a side that left closes it for good.
+  const viewingAt = shown.findIndex((pane) => pane.key === current?.viewing);
+  const viewing = viewingAt === -1 ? null : viewingAt;
+  if (current?.viewing !== undefined && viewing === null)
+    patch({ viewing: undefined });
 
   return shell(
     <>
@@ -542,9 +547,7 @@ export function ImagePanes({
             label={pane.label}
             onMeasure={(size) => patch({ [pane.key]: size })}
             onFail={() => markFailed(pane.key)}
-            onOpen={() =>
-              patch({ viewing: shown.findIndex((s) => s.key === pane.key) })
-            }
+            onOpen={() => patch({ viewing: pane.key })}
             size={current?.[pane.key]}
             bytes={pane.bytes}
             src={src}
@@ -562,7 +565,7 @@ export function ImagePanes({
       <ImageLightbox
         images={images}
         index={viewing ?? 0}
-        onIndexChange={(next) => patch({ viewing: next })}
+        onIndexChange={(next) => patch({ viewing: shown[next]?.key })}
         onOpenChange={(open) => {
           if (!open) patch({ viewing: undefined });
         }}

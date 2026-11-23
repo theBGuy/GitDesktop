@@ -1,4 +1,5 @@
 import { useEffect, useEffectEvent, useState } from "react";
+import { withBlankContextSpaces } from "@/lib/git/diff-split";
 import {
   djb2,
   type HighlightWorkRequest,
@@ -140,7 +141,9 @@ export function useWorkerHighlight(
       filePath: args.filePath,
       // `engaged` (checked by the caller) already gated on lang being non-null.
       lang: args.lang as string,
-      hunkText: args.text,
+      // The renderer's own input (createDiffFile), so the worker parses what the
+      // view draws and its side hashes match; the signature keys on the raw text.
+      hunkText: withBlankContextSpaces(args.text),
       content: args.content,
       tmGrammar: args.tmGrammar,
     };

@@ -1244,4 +1244,43 @@ describe("Pull request Files tab drawn by the real diff", () => {
     expect(nodes.some((n) => n.isConnected)).toBe(false);
     expect(screen.getAllByText(/^Binary file/).length).toBeGreaterThan(0);
   }, 30_000);
+
+  it("drops an image's pair once refreshed details name no head, never while they load", async () => {
+    binaries.add("img.png");
+    lists[7] = ["img.png"];
+    wire.answer = (cmd, args) => {
+      if (cmd === "forge_pr_content_revs")
+        return { oldSha: BASE, newSha: args.headSha };
+      if (cmd === "forge_file_at_sha")
+        return {
+          base64: "iVBORw0KGgo=",
+          mime: "image/png",
+          tooLarge: false,
+          size: 8,
+        };
+      return undefined;
+    };
+    const user = userEvent.setup();
+    const { client } = mount();
+    await openFilesTab(user);
+    const figures = () => document.querySelectorAll("figure");
+    await waitFor(() => expect(figures()).toHaveLength(2), { timeout: 10_000 });
+    const nodes = [...figures()];
+    // A refresh is in flight: the details on screen still name the head.
+    const refreshed = deferred<PrDetails>();
+    views[7] = () => refreshed.promise;
+    act(() => void client.invalidateQueries());
+    const detailsKey = ["repo", REPO, "pr", "origin", 7];
+    await waitFor(() =>
+      expect(client.getQueryState(detailsKey)?.fetchStatus).toBe("fetching"),
+    );
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect([...figures()]).toEqual(nodes);
+    // It lands with no head (Bitbucket's commits read failed): the revs read
+    // stays disabled, never errors, and the kept pair goes.
+    await act(async () => refreshed.resolve(pr(7, { headSha: "" })));
+    await waitFor(() => expect(figures()).toHaveLength(0));
+    expect(nodes.some((n) => n.isConnected)).toBe(false);
+    expect(screen.getAllByText(/^Binary file/).length).toBeGreaterThan(0);
+  }, 30_000);
 });

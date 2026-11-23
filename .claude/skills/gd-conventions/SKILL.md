@@ -1758,10 +1758,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `useFileAtRev` directly; Markdown preview stays a local read. An editor that
   can open inside a diff row is counted by `DIFF_EDITOR_SELECTOR`
   (`src/features/diff/whitespace-mode.ts`), the one predicate behind
-  `lineComposerOpen()` and the upgrade hold; a new one marks its open state
-  with `data-diff-editor`. It counts a `data-diff-editor` or
-  `data-thread-editing` mark only inside a `[data-diff-anchor]` row; the line
-  composer matches by its own `[data-diff-line-widget]` wrapper.
+  `lineComposerOpen()` and the upgrade hold; a new one marks its open state with
+  `data-diff-editor`. It counts a `data-diff-editor` or `data-thread-editing`
+  mark only inside a `[data-diff-anchor]` row; the line composer matches by its
+  own `[data-diff-line-widget]` wrapper.
 
 ## Rust / Tauri conventions
 

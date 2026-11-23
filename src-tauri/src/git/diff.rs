@@ -17,6 +17,7 @@ const IMAGE_MAX_BYTES: usize = 20_000_000;
 thread_local! {
     static PROBE_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SHOW_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TYPE_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static VERIFY_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static HASH_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -184,10 +185,20 @@ async fn preview_rev_failure(repo: &str, rev: &str, out: GitOutput) -> AppResult
     out.exit_verdict().map(|_| ())
 }
 
+/// Whether `spec` names a blob. Callers ask only after a read found an object
+/// there, so the type read can't fail for a missing one and a failure is an error.
+async fn names_a_blob(repo: &str, spec: &str) -> AppResult<bool> {
+    #[cfg(test)]
+    TYPE_SPAWNS.with(|n| n.set(n.get() + 1));
+    let out = run_git(Some(repo), &["cat-file", "-t", spec], DEFAULT_TIMEOUT).await?;
+    Ok(out.stdout_lossy().trim() == "blob")
+}
+
 /// Raw file bytes (base64) at a revision, or from the working tree when
 /// `rev` is None. `None` result = the file doesn't exist there (e.g. the
-/// old side of an added file). `probe_size` opts document-chosen revision
-/// reads into a size check before buffering; omitted means a single read.
+/// old side of an added file, or a directory or submodule at that path).
+/// `probe_size` opts document-chosen revision reads into a size check before
+/// buffering; omitted means a single read.
 #[tauri::command]
 pub async fn git_file_base64(
     repo_path: String,
@@ -218,6 +229,10 @@ pub async fn git_file_base64(
                     AppError::Command("Git returned an unreadable file size.".into())
                 })?;
                 if size > IMAGE_MAX_BYTES as u64 {
+                    // The size is any object's: a tree past the cap is no file, not a large one.
+                    if !names_a_blob(&repo_path, &spec).await? {
+                        return Ok(None);
+                    }
                     return Ok(Some(FileBytes {
                         base64: None,
                         mime: None,
@@ -228,9 +243,24 @@ pub async fn git_file_base64(
             }
             #[cfg(test)]
             SHOW_SPAWNS.with(|n| n.set(n.get() + 1));
-            let out = run_git_raw(Some(&repo_path), &["show", &spec], DEFAULT_TIMEOUT).await?;
+            // `--no-color` keeps a user's `color.diff` off a tree's listing; a blob's
+            // bytes print unchanged. No `--pretty`: it loads every `pretty.*` key, and
+            // a malformed one would fail the read.
+            let out = run_git_raw(
+                Some(&repo_path),
+                &["show", "--no-color", &spec],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            // Failures stay `git show`'s, which every git version words as
+            // preview_rev_failure reads them; only a success that opens like a tree's
+            // listing or a commit's log pays one type read.
             if out.code != 0 {
                 preview_rev_failure(&repo_path, &rev, out).await?;
+                PreviewRead::Absent
+            } else if (out.stdout.starts_with(b"tree ") || out.stdout.starts_with(b"commit "))
+                && !names_a_blob(&repo_path, &spec).await?
+            {
                 PreviewRead::Absent
             } else {
                 let size = out.stdout.len() as u64;
@@ -4006,6 +4036,11 @@ mod tests {
         PROBE_SPAWNS.with(|n| n.set(0));
         SHOW_SPAWNS.with(|n| n.set(0));
         VERIFY_SPAWNS.with(|n| n.set(0));
+        TYPE_SPAWNS.with(|n| n.set(0));
+    }
+
+    fn type_spawns() -> usize {
+        TYPE_SPAWNS.with(|n| n.get())
     }
 
     fn assert_preview_spawns(probe: usize, show: usize, verify: usize) {
@@ -4076,6 +4111,7 @@ mod tests {
             assert_eq!(got.mime, None);
             let probe = usize::from(probe_size == Some(true));
             assert_preview_spawns(probe, 1 - probe, 0);
+            assert_eq!(type_spawns(), probe, "only an over-cap probe asks the type");
             assert_eq!(got.size, Some(IMAGE_MAX_BYTES as u64 + 1));
 
             reset_preview_spawns();
@@ -4311,6 +4347,243 @@ mod tests {
             read_preview_worktree(&repo, "huge.png", "huge.png").unwrap(),
             PreviewRead::TooLarge(size) if size == IMAGE_MAX_BYTES as u64 + 1
         ));
+    }
+
+    /// A revision read of a path that names a directory, or a submodule whose commit is
+    /// in this repository, finds no file there and answers `None`, never the listing or
+    /// log `git show` prints. A blob that only opens like one reads unchanged.
+    #[tokio::test]
+    async fn preview_rev_reads_of_a_directory_or_submodule_are_absent() {
+        use base64::Engine;
+        let (_tmp, dir, repo) = init_preview_repo().await;
+        std::fs::write(dir.join("tree.txt"), "tree 0123:x\n\na.txt\n").unwrap();
+        std::fs::write(dir.join("commit.txt"), "commit 0123\nAuthor: T\n").unwrap();
+        std::fs::create_dir(dir.join("icon.png")).unwrap();
+        std::fs::write(dir.join("icon.png").join("a.txt"), "a\n").unwrap();
+        let base = commit_all(&repo, "a directory").await;
+        std::fs::remove_dir_all(dir.join("icon.png")).unwrap();
+        std::fs::write(dir.join("icon.png"), png_fixture(16, 16)).unwrap();
+        let head = commit_all(&repo, "a file replaces it").await;
+        let svg = git_ok(&repo, &["rev-parse", "HEAD:icon.svg"]).await;
+        std::fs::write(dir.join("lost.txt"), "lost\n").unwrap();
+        let lost = git_ok(&repo, &["hash-object", "-w", "--", "lost.txt"]).await;
+        let lost = lost.trim();
+        std::fs::remove_file(dir.join("lost.txt")).unwrap();
+        for entry in [
+            format!("120000,{},link.svg", svg.trim()),
+            format!("160000,{base},sub.png"),
+            format!("160000,{},gone.png", "1".repeat(40)),
+            format!("100644,{lost},lost.txt"),
+        ] {
+            git_ok(&repo, &["update-index", "--add", "--cacheinfo", &entry]).await;
+        }
+        git_ok(&repo, &["commit", "-qm", "links"]).await;
+        let links = git_ok(&repo, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let object = dir.join(".git/objects").join(&lost[..2]).join(&lost[2..]);
+        let mut permissions = std::fs::metadata(&object).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&object, permissions).unwrap();
+        std::fs::remove_file(&object).unwrap();
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let file = |name: &str| encode(&std::fs::read(dir.join(name)).unwrap());
+        for probe_size in [None, Some(true)] {
+            let read = |rev: &str, path: &str| {
+                git_file_base64(repo.clone(), Some(rev.into()), path.into(), probe_size)
+            };
+            let probe = usize::from(probe_size == Some(true));
+            // Blobs read unchanged; only one opening like a listing or a log pays a type
+            // read.
+            for (path, bytes, types) in [
+                ("tree.txt", file("tree.txt"), 1),
+                ("commit.txt", file("commit.txt"), 1),
+                ("ok.png", encode(&png_fixture(1200, 630)), 0),
+                ("link.svg", file("icon.svg"), 0),
+            ] {
+                reset_preview_spawns();
+                let got = read(&links, path).await.unwrap();
+                let got = got.unwrap_or_else(|| panic!("{path} at {probe_size:?} is a blob"));
+                assert_eq!(got.base64, Some(bytes), "{path} at {probe_size:?}");
+                assert_preview_spawns(probe, 1, 0);
+                assert_eq!(type_spawns(), types, "{path}");
+            }
+            // A tree, or a gitlink whose commit is here: `git show` succeeds, and the
+            // listing or log it prints costs one type read.
+            for (rev, path) in [
+                (base.as_str(), "icon.png"),
+                (links.as_str(), "sub.png"),
+                (":0", "sub.png"),
+            ] {
+                reset_preview_spawns();
+                let got = read(rev, path)
+                    .await
+                    .unwrap_or_else(|e| panic!("{rev}:{path} at {probe_size:?}: {e:?}"));
+                assert!(got.is_none(), "{rev}:{path} at {probe_size:?}: {got:?}");
+                assert_preview_spawns(probe, 1, 0);
+                assert_eq!(type_spawns(), 1, "{rev}:{path}");
+            }
+            // A gitlink whose commit is absent and a blob whose object is gone both fail
+            // the read, an error as before; neither asks the type.
+            for (rev, path) in [
+                (links.as_str(), "gone.png"),
+                (":0", "gone.png"),
+                (links.as_str(), "lost.txt"),
+                (":0", "lost.txt"),
+            ] {
+                reset_preview_spawns();
+                let err = read(rev, path)
+                    .await
+                    .expect_err("a missing object is an error");
+                assert!(matches!(err, AppError::Git { .. }), "{rev}:{path}: {err:?}");
+                assert_preview_spawns(probe, 1 - probe, 0);
+                assert_eq!(type_spawns(), 0, "{rev}:{path}");
+            }
+            let file = read(&head, "icon.png").await.unwrap().unwrap();
+            assert_eq!(file.base64, Some(encode(&png_fixture(16, 16))));
+            let err = read("bogus", "icon.png").await.unwrap_err();
+            assert!(matches!(err, AppError::Git { .. }), "{err:?}");
+        }
+    }
+
+    /// A user's color config can't move the opening a tree's listing starts with:
+    /// `color.diff` outranks the runner's `color.ui=false` on a tree header.
+    #[tokio::test]
+    async fn preview_rev_reads_of_a_directory_ignore_color_and_pretty_config() {
+        use base64::Engine;
+        let (_tmp, dir, repo) = init_preview_repo().await;
+        std::fs::write(dir.join("tree.txt"), "tree 0123:x\n\na.txt\n").unwrap();
+        std::fs::write(dir.join("esc.txt"), b"\x1b[33mtree x\n").unwrap();
+        std::fs::create_dir(dir.join("icon.png")).unwrap();
+        std::fs::write(dir.join("icon.png").join("a.txt"), "a\n").unwrap();
+        let base = commit_all(&repo, "a directory").await;
+        let entry = format!("160000,{base},sub.png");
+        git_ok(&repo, &["update-index", "--add", "--cacheinfo", &entry]).await;
+        git_ok(&repo, &["commit", "-qm", "a submodule"]).await;
+        git_ok(&repo, &["branch", "tip", &base]).await;
+        for (key, value) in [
+            ("color.diff", "always"),
+            ("color.ui", "always"),
+            ("format.pretty", "oneline"),
+            ("log.decorate", "full"),
+        ] {
+            git_ok(&repo, &["config", key, value]).await;
+        }
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        for probe_size in [None, Some(true)] {
+            let read = |rev: &str, path: &str| {
+                git_file_base64(repo.clone(), Some(rev.into()), path.into(), probe_size)
+            };
+            let got = read(&base, "icon.png").await.unwrap();
+            assert!(got.is_none(), "{base}:icon.png at {probe_size:?}: {got:?}");
+            for name in ["tree.txt", "esc.txt", "ok.png"] {
+                let got = read("HEAD", name).await.unwrap();
+                let got = got.unwrap_or_else(|| panic!("{name} at {probe_size:?} is a blob"));
+                let bytes = std::fs::read(dir.join(name)).unwrap();
+                assert_eq!(got.base64, Some(encode(&bytes)), "{name} at {probe_size:?}");
+            }
+            // Accepted fallback: under format.pretty=oneline a submodule reads as its log.
+            let got = read("HEAD", "sub.png").await.unwrap().unwrap();
+            let shown = base64::engine::general_purpose::STANDARD
+                .decode(got.base64.unwrap())
+                .unwrap();
+            assert!(shown.starts_with(base.as_bytes()), "{shown:?}");
+        }
+    }
+
+    /// A valueless key under `[pretty]` kills any `git show` given an explicit
+    /// `--pretty`, so the read passes none and still reads a blob and a directory.
+    #[tokio::test]
+    async fn preview_rev_reads_survive_a_valueless_pretty_key() {
+        use base64::Engine;
+        let (_tmp, dir, repo) = init_preview_repo().await;
+        std::fs::create_dir(dir.join("icon.png")).unwrap();
+        std::fs::write(dir.join("icon.png").join("a.txt"), "a\n").unwrap();
+        let base = commit_all(&repo, "a directory").await;
+        // `git config` can't write a key with no value; git's own parser reads one.
+        let config = dir.join(".git").join("config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[pretty]\n\tunused\n");
+        std::fs::write(&config, text).unwrap();
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        for probe_size in [None, Some(true)] {
+            let read = |rev: &str, path: &str| {
+                git_file_base64(repo.clone(), Some(rev.into()), path.into(), probe_size)
+            };
+            let got = read("HEAD", "ok.png")
+                .await
+                .unwrap_or_else(|e| panic!("ok.png at {probe_size:?}: {e:?}"))
+                .expect("a blob");
+            assert_eq!(got.base64, Some(encode(&png_fixture(1200, 630))));
+            let got = read(&base, "icon.png")
+                .await
+                .unwrap_or_else(|e| panic!("icon.png at {probe_size:?}: {e:?}"));
+            assert!(got.is_none(), "icon.png at {probe_size:?}: {got:?}");
+        }
+    }
+
+    /// A tree past the byte cap is still a directory: the probe's size is any
+    /// object's, so it must not refuse the path as a too-large file.
+    #[tokio::test]
+    async fn preview_size_probe_answers_none_for_a_directory_past_the_cap() {
+        let (_tmp, _dir, repo) = init_preview_repo().await;
+        let blob = git_ok(&repo, &["rev-parse", "HEAD:icon.svg"]).await;
+        let oid = (0..blob.trim().len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&blob.trim()[i..i + 2], 16).unwrap())
+            .collect::<Vec<u8>>();
+        // Fixed-width names in ascending order, as a tree object requires.
+        let mut tree = Vec::new();
+        let mut entries = 0usize;
+        while tree.len() <= IMAGE_MAX_BYTES {
+            tree.extend_from_slice(format!("100644 {entries:07}\0").as_bytes());
+            tree.extend_from_slice(&oid);
+            entries += 1;
+        }
+        let big = crate::git::runner::run_git_raw_input_bytes(
+            Some(&repo),
+            &["hash-object", "-t", "tree", "-w", "--stdin"],
+            Some(&tree),
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap()
+        .exit_verdict()
+        .unwrap()
+        .stdout_lossy();
+        let root = run_git_input(
+            Some(&repo),
+            &["mktree"],
+            Some(&format!("040000 tree {}\tbig.png\n", big.trim())),
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy();
+        let commit = git_ok(&repo, &["commit-tree", root.trim(), "-m", "big tree"]).await;
+        let size = git_ok(
+            &repo,
+            &["cat-file", "-s", &format!("{}:big.png", commit.trim())],
+        )
+        .await;
+        assert!(size.trim().parse::<u64>().unwrap() > IMAGE_MAX_BYTES as u64);
+        for probe_size in [None, Some(true)] {
+            reset_preview_spawns();
+            let got = git_file_base64(
+                repo.clone(),
+                Some(commit.trim().into()),
+                "big.png".into(),
+                probe_size,
+            )
+            .await
+            .unwrap();
+            assert!(got.is_none(), "at {probe_size:?}: {got:?}");
+            let probe = usize::from(probe_size == Some(true));
+            assert_preview_spawns(probe, 1 - probe, 0);
+            assert_eq!(type_spawns(), 1);
+        }
     }
 
     #[cfg(any(windows, unix))]

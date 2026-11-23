@@ -45,7 +45,8 @@ pub async fn forge_pr_content_revs(
     let old_sha = match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab_merge_base(&repo_path, number, &head_sha).await?,
         Some((Provider::Bitbucket, _)) => {
-            bitbucket_merge_base(&repo_path, number, &head_sha).await?
+            let creds = http::load_credentials().await?;
+            bitbucket_merge_base(&creds, &repo_path, number, &head_sha).await?
         }
         _ => github_merge_base(&repo_path, number, lens.as_deref(), &head_sha).await?,
     };
@@ -66,7 +67,10 @@ pub async fn forge_commit_first_parent(
     full_sha(&oid)?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab_first_parent(&repo_path, &oid).await,
-        Some((Provider::Bitbucket, _)) => bitbucket_first_parent(&repo_path, &oid).await,
+        Some((Provider::Bitbucket, _)) => {
+            let creds = http::load_credentials().await?;
+            bitbucket_first_parent(&creds, &repo_path, &oid).await
+        }
         _ => github_first_parent(&repo_path, lens.as_deref(), &oid).await,
     }
 }
@@ -87,7 +91,8 @@ pub async fn forge_file_at_sha(
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab_file(&repo_path, &sha, &file_path, cap).await,
         Some((Provider::Bitbucket, _)) => {
-            bitbucket_file(&repo_path, &sha, &file_path, &segments, cap).await
+            let creds = http::load_credentials().await?;
+            bitbucket_file(&creds, &repo_path, &sha, &file_path, &segments, cap).await
         }
         _ => {
             github_file(
@@ -279,8 +284,9 @@ async fn github_merge_base(
     merge_base_local_first(repo, &base, head, present, compare).await
 }
 
-/// The local merge base when the clone holds both commits and can answer, else the
-/// forge's: a shallow clone can hold both tips but not the merge base behind its boundary.
+/// The local merge base when the clone holds both commits, is measured not shallow and
+/// can answer, else the forge's: past a shallow boundary git can answer an older common
+/// ancestor as readily as none.
 async fn merge_base_local_first(
     repo: &str,
     base: &str,
@@ -288,12 +294,30 @@ async fn merge_base_local_first(
     present: bool,
     forge: impl std::future::Future<Output = AppResult<String>>,
 ) -> AppResult<String> {
-    if present {
+    if present && matches!(is_shallow(repo).await, Ok(false)) {
         if let Ok(sha) = local_merge_base(repo, base, head).await {
             return Ok(sha);
         }
     }
     forge.await
+}
+
+/// git's own shallowness answer; anything but "true" or "false" is an error.
+async fn is_shallow(repo: &str) -> AppResult<bool> {
+    let out = run_git_raw(
+        Some(repo),
+        &["rev-parse", "--is-shallow-repository"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    match (out.code, String::from_utf8_lossy(&out.stdout).trim()) {
+        (0, "true") => Ok(true),
+        (0, "false") => Ok(false),
+        _ => Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        }),
+    }
 }
 
 async fn github_first_parent(
@@ -360,10 +384,36 @@ enum GhPlan {
     TooLarge(u64),
     /// Past the inline limit: read the body through the raw media type.
     Raw(u64, String),
+    /// A directory or a submodule: no file at that path.
+    Absent,
 }
 
-/// The contents answer as a plan. An answer for another path, or for a directory or
-/// submodule, is an error, never that other content.
+/// The contents answer's body. A directory answers as the array of its entries, which
+/// is no file there; an array that isn't the requested path's listing is an error.
+fn gh_contents_body(stdout: &[u8], requested: &str) -> AppResult<Option<GhContents>> {
+    let unreadable = |detail: String| gh_unreadable("the file", detail);
+    // An object parses typed, so serde still refuses a duplicated field.
+    if stdout.iter().find(|b| !b" \t\r\n".contains(b)) != Some(&b'[') {
+        return serde_json::from_slice(stdout)
+            .map(Some)
+            .map_err(|e| unreadable(e.to_string()));
+    }
+    let entries: Vec<Value> =
+        serde_json::from_slice(stdout).map_err(|e| unreadable(e.to_string()))?;
+    let listed = !entries.is_empty()
+        && entries.iter().all(|entry| {
+            (entry.get("path").and_then(Value::as_str))
+                .and_then(|path| path.strip_prefix(requested)?.strip_prefix('/'))
+                .is_some_and(|child| !child.is_empty() && !child.contains('/'))
+        });
+    if !listed {
+        return Err(unreadable("the answer lists another directory".into()));
+    }
+    Ok(None)
+}
+
+/// The contents answer as a plan. An answer for another path is an error, never that
+/// other content; a directory or submodule there is no file.
 fn gh_contents_plan(contents: GhContents, requested: &str, cap: u64) -> AppResult<GhPlan> {
     let unreadable = |detail: &str| gh_unreadable("the file", detail.to_string());
     if contents.path.as_deref() != Some(requested) {
@@ -407,14 +457,14 @@ fn gh_contents_plan(contents: GhContents, requested: &str, cap: u64) -> AppResul
                 _ => Ok(GhPlan::Raw(size, blob)),
             }
         }
+        Some("dir" | "submodule") => Ok(GhPlan::Absent),
         _ => Err(unreadable("the path isn't a file")),
     }
 }
 
-/// Lowercase hex of the git blob id of `bytes` under SHA-1 (`blob <len>\0` + bytes).
-fn git_blob_sha1(bytes: &[u8]) -> String {
-    use sha1::{Digest, Sha1};
-    let mut hasher = Sha1::new();
+/// Lowercase hex of the git blob id of `bytes` (`blob <len>\0` + bytes) under `D`.
+fn git_blob_hex<D: sha1::Digest>(bytes: &[u8]) -> String {
+    let mut hasher = D::new();
     hasher.update(format!("blob {}\0", bytes.len()).as_bytes());
     hasher.update(bytes);
     // digest 0.11's output Array has no LowerHex, so hex-encode byte by byte.
@@ -425,18 +475,31 @@ fn git_blob_sha1(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Whether `bytes` are the blob `id` names: None for a SHA-256 id, which this build
-/// carries no hasher for.
-fn blob_id_matches(bytes: &[u8], id: &str) -> Option<bool> {
-    (id.len() == 40).then(|| git_blob_sha1(bytes).eq_ignore_ascii_case(id))
+fn git_blob_sha1(bytes: &[u8]) -> String {
+    git_blob_hex::<sha1::Sha1>(bytes)
+}
+
+fn git_blob_sha256(bytes: &[u8]) -> String {
+    git_blob_hex::<sha2::Sha256>(bytes)
+}
+
+/// Whether `bytes` are the blob `id` names, hashed in the id's own object format (40
+/// hex SHA-1, 64 hex SHA-256); an id of any other width never matches.
+fn blob_id_matches(bytes: &[u8], id: &str) -> bool {
+    let actual = match id.len() {
+        40 => git_blob_sha1(bytes),
+        64 => git_blob_sha256(bytes),
+        _ => return false,
+    };
+    actual.eq_ignore_ascii_case(id)
 }
 
 #[derive(Debug)]
 enum GhBody {
     Ship(FileBytes),
-    /// The body isn't the blob the answer names, or can't be checked against it: read
-    /// that blob by id. Measured: the contents API follows a symlink to an in-repo file
-    /// and serves the target's bytes, size and type under the link blob's `sha`.
+    /// The body isn't the blob the answer names: read that blob by id. Measured: the
+    /// contents API follows a symlink to an in-repo file and serves the target's
+    /// bytes, size and type under the link blob's `sha`.
     ReadBlob,
 }
 
@@ -449,15 +512,16 @@ fn gh_body(bytes: Vec<u8>, size: u64, blob: &str, cap: u64) -> AppResult<GhBody>
             "its content doesn't match its size".into(),
         ));
     }
-    Ok(match blob_id_matches(&bytes, blob) {
-        Some(true) => GhBody::Ship(finish_forge_bytes(bytes, cap, Some(size))),
-        Some(false) | None => GhBody::ReadBlob,
+    Ok(if blob_id_matches(&bytes, blob) {
+        GhBody::Ship(finish_forge_bytes(bytes, cap, Some(size)))
+    } else {
+        GhBody::ReadBlob
     })
 }
 
 /// The blob read by id: bytes that hash to another blob are an error.
 fn gh_blob_answer(bytes: Vec<u8>, blob: &str, cap: u64) -> AppResult<FileBytes> {
-    if blob_id_matches(&bytes, blob) == Some(false) {
+    if !blob_id_matches(&bytes, blob) {
         return Err(gh_unreadable(
             "the file",
             "its blob doesn't match its id".into(),
@@ -487,9 +551,11 @@ async fn github_file(
         gh_commit_outcome(known, sha)?;
         return Ok(None);
     };
-    let contents: GhContents = serde_json::from_slice(&out.stdout)
-        .map_err(|e| gh_unreadable("the file", e.to_string()))?;
+    let Some(contents) = gh_contents_body(&out.stdout, path)? else {
+        return Ok(None);
+    };
     let (bytes, size, blob) = match gh_contents_plan(contents, path, cap)? {
+        GhPlan::Absent => return Ok(None),
         GhPlan::TooLarge(size) => return Ok(Some(too_large(size))),
         GhPlan::Bytes(bytes, size, blob) => (bytes, size, blob),
         GhPlan::Raw(size, blob) => {
@@ -640,7 +706,7 @@ fn gitlab_raw_answer(
         ));
     }
     if let Some(id) = blob_id {
-        if !is_full_sha(id) || blob_id_matches(&out.stdout, id) == Some(false) {
+        if !is_full_sha(id) || !blob_id_matches(&out.stdout, id) {
             return Err(gl_unreadable(
                 "the file",
                 "its content doesn't match its blob id".into(),
@@ -706,11 +772,15 @@ async fn bb_repo_base(repo: &str) -> AppResult<String> {
 
 /// Bitbucket abbreviates the PR's destination hash, so the full merge base comes from
 /// the merge-base endpoint over the caller's head and that hash.
-async fn bitbucket_merge_base(repo: &str, number: u64, head: &str) -> AppResult<String> {
-    let creds = http::load_credentials().await?;
+async fn bitbucket_merge_base(
+    creds: &BbCredentials,
+    repo: &str,
+    number: u64,
+    head: &str,
+) -> AppResult<String> {
     let base = bb_repo_base(repo).await?;
     let pr: Value = http::bb_get_json(
-        &creds,
+        creds,
         &format!("{base}/pullrequests/{number}"),
         "pull request",
         BbOpKind::Read,
@@ -728,7 +798,7 @@ async fn bitbucket_merge_base(repo: &str, number: u64, head: &str) -> AppResult<
         })?;
     let endpoint = format!("{base}/merge-base/{head}..{dest}");
     let merge_base: Value =
-        http::bb_get_json(&creds, &endpoint, "merge base", BbOpKind::Read).await?;
+        http::bb_get_json(creds, &endpoint, "merge base", BbOpKind::Read).await?;
     sha_at(&merge_base, "/hash")
         .ok_or_else(|| bb_unreadable("merge base", "its commit hash is missing".into()))
 }
@@ -739,11 +809,14 @@ fn bb_short_hash(hash: &str) -> bool {
     (7..=64).contains(&hash.len()) && hash.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-async fn bitbucket_first_parent(repo: &str, oid: &str) -> AppResult<Option<String>> {
-    let creds = http::load_credentials().await?;
+async fn bitbucket_first_parent(
+    creds: &BbCredentials,
+    repo: &str,
+    oid: &str,
+) -> AppResult<Option<String>> {
     let base = bb_repo_base(repo).await?;
     let commit: Value = http::bb_get_json(
-        &creds,
+        creds,
         &format!("{base}/commit/{oid}"),
         "commit",
         BbOpKind::Read,
@@ -756,21 +829,24 @@ async fn bitbucket_first_parent(repo: &str, oid: &str) -> AppResult<Option<Strin
 enum BbMeta {
     Size(u64),
     Missing,
+    Directory,
 }
 
-/// Meta `attributes` whose `src` body is not the git blob `git show` reads: a link, an
+/// Meta `attributes` whose `src` body is not the git blob a local read returns: a link, an
 /// LFS object (Bitbucket serves the stored object, not the pointer), a submodule.
 const BB_UNREADABLE_ATTRIBUTES: [&str; 3] = ["link", "lfs", "subrepository"];
 
-/// A `src/{sha}/{path}?format=meta` answer: 200 with a file's size, 404 for the caller
-/// to confirm, and any other status (or a directory, an answer for another path, a
-/// file under an attribute above, or an unreadable 200) an error.
+/// A `src/{sha}/{path}?format=meta` answer: 200 with a file's size, 200 for a directory
+/// (no file there), 404 for the caller to confirm, and any other status (or an answer
+/// for another path, a file under an attribute above or without a readable attribute
+/// list, or an unreadable 200) an error.
 fn bb_meta_outcome(status: u16, body: &str, requested: &str) -> AppResult<BbMeta> {
     match status {
         200 => {
             let meta: Value = serde_json::from_str(body)
                 .map_err(|e| bb_unreadable("file", format!("could not parse its metadata: {e}")))?;
-            if meta.get("type").and_then(Value::as_str) != Some("commit_file") {
+            let kind = meta.get("type").and_then(Value::as_str);
+            if !matches!(kind, Some("commit_file" | "commit_directory")) {
                 return Err(bb_unreadable("file", "the path isn't a file".into()));
             }
             if meta.get("path").and_then(Value::as_str) != Some(requested) {
@@ -779,11 +855,19 @@ fn bb_meta_outcome(status: u16, body: &str, requested: &str) -> AppResult<BbMeta
                     "the answer names another path".into(),
                 ));
             }
-            let attributes = meta.get("attributes").and_then(Value::as_array);
+            if kind == Some("commit_directory") {
+                return Ok(BbMeta::Directory);
+            }
+            // Measured: every file's meta carries `attributes` (`[]` for a plain file),
+            // so an answer without a readable list could be any of the kinds below.
+            let attributes: Option<Vec<&str>> = meta
+                .get("attributes")
+                .and_then(Value::as_array)
+                .and_then(|list| list.iter().map(Value::as_str).collect());
+            let attributes = attributes
+                .ok_or_else(|| bb_unreadable("file", "its attributes are missing".into()))?;
             if let Some(attribute) = attributes
                 .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
                 .find(|a| BB_UNREADABLE_ATTRIBUTES.contains(a))
             {
                 return Err(bb_unreadable(
@@ -832,27 +916,28 @@ fn bitbucket_body_answer(bytes: Vec<u8>, cap: u64, size: u64) -> AppResult<FileB
 }
 
 async fn bitbucket_file(
+    creds: &BbCredentials,
     repo: &str,
     sha: &str,
     path: &str,
     segments: &[&str],
     cap: u64,
 ) -> AppResult<Option<FileBytes>> {
-    let creds: BbCredentials = http::load_credentials().await?;
     let base = bb_repo_base(repo).await?;
     let src = format!("{base}/src/{sha}/{}", encode_segments(segments));
     // The byte reader folds every non-2xx into lossy text, so the status comes first.
-    let (status, body) = http::bb_get_classified(&creds, &format!("{src}?format=meta")).await?;
+    let (status, body) = http::bb_get_classified(creds, &format!("{src}?format=meta")).await?;
     match bb_meta_outcome(status, &body, path)? {
         BbMeta::Missing => {
             let (status, body) =
-                http::bb_get_classified(&creds, &format!("{base}/commit/{sha}")).await?;
+                http::bb_get_classified(creds, &format!("{base}/commit/{sha}")).await?;
             bb_commit_outcome(status, &body, sha)?;
             Ok(None)
         }
+        BbMeta::Directory => Ok(None),
         BbMeta::Size(size) if size > cap => Ok(Some(too_large(size))),
         BbMeta::Size(size) => {
-            let bytes = http::bb_get_json_bytes(&creds, &src, BbOpKind::Read)
+            let bytes = http::bb_get_json_bytes(creds, &src, BbOpKind::Read)
                 .await
                 .map_err(|failure| match failure {
                     BbGetFailure::Transport(error) | BbGetFailure::Other(error) => error,
@@ -1170,8 +1255,7 @@ mod tests {
         );
         for bad in [
             json!({"type": "file", "size": 1, "encoding": "base64", "content": "QQ==", "path": "other", "sha": SHA}),
-            json!({"type": "dir", "size": 0, "path": "p", "sha": SHA}),
-            json!({"type": "submodule", "size": 0, "path": "p", "sha": SHA}),
+            json!({"type": "dir", "size": 0, "path": "other", "sha": SHA}),
             json!({"type": "symlink", "path": "p", "sha": SHA}),
             json!({"type": "symlink", "target": "x", "path": "p"}),
             json!({"type": "file", "encoding": "base64", "content": "QQ==", "path": "p", "sha": SHA}),
@@ -1187,10 +1271,93 @@ mod tests {
         assert!(serde_json::from_value::<GhContents>(json!([{"type": "file"}])).is_err());
     }
 
+    #[test]
+    fn github_reads_a_directory_or_submodule_object_as_no_file() {
+        for kind in ["dir", "submodule"] {
+            let answer = json!({"type": kind, "size": 0, "path": "p", "sha": SHA});
+            let answer = serde_json::from_value::<GhContents>(answer).unwrap();
+            assert_eq!(
+                gh_contents_plan(answer, "p", u64::MAX).unwrap(),
+                GhPlan::Absent,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn github_reads_a_directory_listing_as_no_file() {
+        let body = |value: Value| gh_contents_body(value.to_string().as_bytes(), "p");
+        let listing = json!([
+            {"type": "file", "name": "a.txt", "path": "p/a.txt", "sha": SHA},
+            {"type": "dir", "name": "d", "path": "p/d", "sha": SHA},
+        ]);
+        assert!(body(listing).unwrap().is_none());
+        let file = json!({"type": "file", "size": 1, "path": "p", "sha": SHA});
+        assert!(body(file).unwrap().is_some());
+        // A listing of another directory, or of nothing, is no answer for this path.
+        for bad in [
+            json!([]),
+            json!([{"type": "file", "path": "other/a.txt", "sha": SHA}]),
+            json!([{"type": "file", "path": "p", "sha": SHA}]),
+            json!([{"type": "file", "sha": SHA}]),
+        ] {
+            assert!(matches!(body(bad.clone()), Err(AppError::Gh(_))), "{bad}");
+        }
+        assert!(matches!(
+            gh_contents_body(b"not json", "p"),
+            Err(AppError::Gh(_))
+        ));
+    }
+
+    #[test]
+    fn github_listing_entries_must_name_a_child() {
+        let body = |value: Value| gh_contents_body(value.to_string().as_bytes(), "icon.png");
+        let child = json!([{"type": "file", "path": "icon.png/a.txt", "sha": SHA}]);
+        assert!(body(child).unwrap().is_none());
+        for bad in [
+            json!([{"type": "file", "path": "icon.png/", "sha": SHA}]),
+            json!([
+                {"type": "file", "path": "icon.png/a.txt", "sha": SHA},
+                {"type": "dir", "path": "icon.png/", "sha": SHA},
+            ]),
+            json!([{"type": "file", "path": "icon.pngx/a.txt", "sha": SHA}]),
+            // Only direct children: a deeper path is another directory's entry.
+            json!([{"type": "file", "path": "icon.png/sub/a.txt", "sha": SHA}]),
+            json!([
+                {"type": "file", "path": "icon.png/a.txt", "sha": SHA},
+                {"type": "file", "path": "icon.png/sub/a.txt", "sha": SHA},
+            ]),
+        ] {
+            assert!(matches!(body(bad.clone()), Err(AppError::Gh(_))), "{bad}");
+        }
+    }
+
+    #[test]
+    fn github_contents_object_refuses_a_duplicated_field() {
+        let twice = format!(
+            r#"{{"type":"file","size":1,"path":"other.png","path":"icon.png","sha":"{SHA}"}}"#
+        );
+        let got = gh_contents_body(twice.as_bytes(), "icon.png");
+        assert!(
+            matches!(got, Err(AppError::Gh(_))),
+            "{:?}",
+            got.map(|c| c.is_some())
+        );
+        // Leading whitespace still reads an object, and an array, as what it is.
+        let once = format!(r#"  {{"type":"file","size":1,"path":"icon.png","sha":"{SHA}"}}"#);
+        assert!(gh_contents_body(once.as_bytes(), "icon.png")
+            .unwrap()
+            .is_some());
+        let listing = b"\n [{\"path\":\"icon.png/a.txt\"}]";
+        assert!(gh_contents_body(listing, "icon.png").unwrap().is_none());
+    }
+
     /// Measured on git/git (`RelNotes` is a 120000 link to
     /// `Documentation/RelNotes/2.98.0.adoc`): the tree's blob for the link and its bytes.
     const LINK_BLOB: &str = "513bc0bea80652bcd4583ea0071b5cb96d172fa0";
     const LINK_TEXT: &[u8] = b"Documentation/RelNotes/2.98.0.adoc";
+    /// The same bytes' blob id in a SHA-256 repository.
+    const LINK_BLOB_256: &str = "21e5a8939ce9839f52415ac24c1a81e72331ae0436936d4130f179109c45781e";
 
     #[test]
     fn git_blob_ids_match_git() {
@@ -1200,13 +1367,22 @@ mod tests {
             git_blob_sha1(b""),
             "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
         );
-        assert_eq!(blob_id_matches(LINK_TEXT, LINK_BLOB), Some(true));
+        // `git hash-object` in a `git init --object-format=sha256` repo.
+        assert_eq!(git_blob_sha256(LINK_TEXT), LINK_BLOB_256);
         assert_eq!(
-            blob_id_matches(LINK_TEXT, &LINK_BLOB.to_uppercase()),
-            Some(true)
+            git_blob_sha256(b""),
+            "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813"
         );
-        assert_eq!(blob_id_matches(b"other", LINK_BLOB), Some(false));
-        assert_eq!(blob_id_matches(LINK_TEXT, &"a".repeat(64)), None);
+        for (bytes, id) in [(LINK_TEXT, LINK_BLOB), (LINK_TEXT, LINK_BLOB_256)] {
+            assert!(blob_id_matches(bytes, id), "{id}");
+            assert!(blob_id_matches(bytes, &id.to_uppercase()), "{id}");
+            assert!(!blob_id_matches(b"other", id), "{id}");
+        }
+        // An id of either width must be that format's hash of these bytes.
+        assert!(!blob_id_matches(LINK_TEXT, &"a".repeat(64)));
+        assert!(!blob_id_matches(LINK_TEXT, &LINK_BLOB_256[..40]));
+        assert!(!blob_id_matches(LINK_TEXT, &LINK_BLOB[..39]));
+        assert!(!blob_id_matches(LINK_TEXT, ""));
     }
 
     #[test]
@@ -1234,17 +1410,25 @@ mod tests {
             gh_body(target.clone(), target.len() as u64, LINK_BLOB, u64::MAX).unwrap(),
             GhBody::ReadBlob
         ));
-        // A SHA-256 id can't be hashed here, so its blob is read by id too.
+        // A SHA-256 id is hashed the same way: its own blob ships, another is read by id.
+        let shipped_256 = gh_body(LINK_TEXT.to_vec(), 34, LINK_BLOB_256, u64::MAX).unwrap();
+        assert!(matches!(&shipped_256, GhBody::Ship(read) if decoded(read) == LINK_TEXT));
         assert!(matches!(
             gh_body(LINK_TEXT.to_vec(), 34, &"a".repeat(64), u64::MAX).unwrap(),
             GhBody::ReadBlob
         ));
         // The blob read by id ships the link's own bytes; anything else is an error.
-        let link = gh_blob_answer(LINK_TEXT.to_vec(), LINK_BLOB, u64::MAX).unwrap();
-        assert_eq!(decoded(&link), LINK_TEXT);
-        assert_eq!(link.size, Some(34));
+        for id in [LINK_BLOB, LINK_BLOB_256] {
+            let link = gh_blob_answer(LINK_TEXT.to_vec(), id, u64::MAX).unwrap();
+            assert_eq!(decoded(&link), LINK_TEXT);
+            assert_eq!(link.size, Some(34));
+            assert!(matches!(
+                gh_blob_answer(target.clone(), id, u64::MAX),
+                Err(AppError::Gh(_))
+            ));
+        }
         assert!(matches!(
-            gh_blob_answer(target.clone(), LINK_BLOB, u64::MAX),
+            gh_blob_answer(LINK_TEXT.to_vec(), &"a".repeat(64), u64::MAX),
             Err(AppError::Gh(_))
         ));
         let capped = gh_blob_answer(LINK_TEXT.to_vec(), LINK_BLOB, 10).unwrap();
@@ -1394,8 +1578,10 @@ mod tests {
         let body = b"print('hi')\n".to_vec();
         let len = body.len() as u64;
         let blob = git_blob_sha1(&body);
+        // `git hash-object` of the same bytes in a SHA-256 repository.
+        let blob_256 = "fa6030fda55d07405b0121c6857402a405c7dbac40c83efd6b6df392da5c7a73";
         let out = || glab(0, &body, "");
-        for blob_id in [None, Some(blob.as_str()), Some(&"a".repeat(64))] {
+        for blob_id in [None, Some(blob.as_str()), Some(blob_256)] {
             let read = gitlab_raw_answer(out(), u64::MAX, len, blob_id).unwrap();
             assert_eq!(decoded(&read), body);
         }
@@ -1403,6 +1589,8 @@ mod tests {
             (len + 1, None),
             (len - 1, Some(blob.as_str())),
             (len, Some(LINK_BLOB)),
+            (len, Some(LINK_BLOB_256)),
+            (len, Some(&"a".repeat(64))),
             (len, Some("e6")),
         ] {
             assert!(
@@ -1446,8 +1634,18 @@ mod tests {
     }
 
     #[test]
+    fn bitbucket_reads_a_directory_as_no_file() {
+        let directory = r#"{"type":"commit_directory","path":"README.md"}"#;
+        assert_eq!(
+            bb_meta_outcome(200, directory, "README.md").unwrap(),
+            BbMeta::Directory
+        );
+    }
+
+    #[test]
     fn bitbucket_meta_answers_split_size_absence_and_failure() {
-        let file = r#"{"type":"commit_file","size":642,"path":"README.md"}"#;
+        // Measured on dispatch-demo: README.md answers `attributes: []`, a PNG `["binary"]`.
+        let file = r#"{"type":"commit_file","size":642,"path":"README.md","attributes":[]}"#;
         assert_eq!(
             bb_meta_outcome(200, file, "README.md").unwrap(),
             BbMeta::Size(642)
@@ -1462,7 +1660,8 @@ mod tests {
             BbMeta::Missing
         );
         for (status, body) in [
-            (200, r#"{"type":"commit_directory","path":"README.md"}"#),
+            (200, r#"{"type":"commit_directory","path":"docs"}"#),
+            (200, r#"{"type":"commit_link","path":"README.md"}"#),
             (200, r#"{"type":"commit_file","path":"README.md"}"#),
             (200, "not json"),
             // An answer for another path, or for none.
@@ -1471,6 +1670,23 @@ mod tests {
                 r#"{"type":"commit_file","size":642,"path":"docs/README.md"}"#,
             ),
             (200, r#"{"type":"commit_file","size":642}"#),
+            // No readable attribute list: the body could be any of the kinds below.
+            (
+                200,
+                r#"{"type":"commit_file","size":642,"path":"README.md"}"#,
+            ),
+            (
+                200,
+                r#"{"type":"commit_file","size":642,"path":"README.md","attributes":null}"#,
+            ),
+            (
+                200,
+                r#"{"type":"commit_file","size":642,"path":"README.md","attributes":"lfs"}"#,
+            ),
+            (
+                200,
+                r#"{"type":"commit_file","size":642,"path":"README.md","attributes":[{"lfs":true}]}"#,
+            ),
             // A body that isn't the git blob: a link, an LFS object, a submodule.
             (
                 200,
@@ -1627,9 +1843,135 @@ mod tests {
         assert_eq!(skipped.unwrap(), forge);
     }
 
+    /// Past a shallow boundary git can answer an older common ancestor: base and head
+    /// each merge the root, so the root is reachable from both while the true merge base
+    /// hides behind the topic side's boundary. A shallow clone asks the forge.
+    #[tokio::test]
+    async fn a_shallow_clone_never_trusts_its_own_merge_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let origin = dir.path().join("origin").to_string_lossy().into_owned();
+        std::fs::create_dir(&origin).unwrap();
+        git(&origin, &["init", "-q", "-b", "main"]).await;
+        git(&origin, &["config", "user.name", "t"]).await;
+        git(&origin, &["config", "user.email", "t@example.invalid"]).await;
+        git(&origin, &["commit", "-q", "--allow-empty", "-m", "root"]).await;
+        let root = git(&origin, &["rev-parse", "HEAD"]).await;
+        let tree = git(&origin, &["rev-parse", "HEAD^{tree}"]).await;
+        let commit = |parents: Vec<String>, msg: &'static str| {
+            let origin = origin.clone();
+            let tree = tree.clone();
+            async move {
+                let mut args = vec!["commit-tree".to_string(), tree, "-m".into(), msg.into()];
+                for p in parents {
+                    args.extend(["-p".to_string(), p]);
+                }
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                git(&origin, &args).await
+            }
+        };
+        let fork = commit(vec![root.clone()], "fork").await;
+        let base = commit(vec![fork.clone(), root.clone()], "base").await;
+        let topic = commit(vec![fork.clone()], "topic").await;
+        let head = commit(vec![topic, root.clone()], "head").await;
+        git(&origin, &["update-ref", "refs/heads/main", &base]).await;
+        git(&origin, &["update-ref", "refs/heads/topic", &head]).await;
+        assert_eq!(git(&origin, &["merge-base", &base, &head]).await, fork);
+
+        let slashed = origin.replace('\\', "/");
+        let url = if slashed.starts_with('/') {
+            format!("file://{slashed}")
+        } else {
+            format!("file:///{slashed}")
+        };
+        let shallow = dir.path().join("shallow").to_string_lossy().into_owned();
+        let parent = dir.path().to_string_lossy().into_owned();
+        git(
+            &parent,
+            &[
+                "clone",
+                "-q",
+                "--depth",
+                "2",
+                "--no-single-branch",
+                &url,
+                &shallow,
+            ],
+        )
+        .await;
+        let all = vec![base.clone(), head.clone(), fork.clone(), root.clone()];
+        assert!(
+            crate::git::compare::git_objects_present(shallow.clone(), all)
+                .await
+                .unwrap()
+        );
+        // The premise: the shallow clone answers, and answers the older ancestor.
+        assert_eq!(
+            local_merge_base(&shallow, &base, &head).await.unwrap(),
+            root
+        );
+        assert!(is_shallow(&shallow).await.unwrap());
+        assert!(!is_shallow(&origin).await.unwrap());
+
+        let answer =
+            merge_base_local_first(&shallow, &base, &head, true, async { Ok(fork.clone()) }).await;
+        assert_eq!(answer.unwrap(), fork);
+        let unused = async { Err(AppError::Gh("asked the forge".into())) };
+        let local = merge_base_local_first(&origin, &base, &head, true, unused).await;
+        assert_eq!(local.unwrap(), fork);
+    }
+
+    /// How a live test reaches the forge: through the commands, or straight to the
+    /// Bitbucket arms with the stored pair, since `load_credentials`' test slot is
+    /// background.rs's alone.
+    #[derive(Clone, Copy)]
+    enum Live<'a> {
+        Commands,
+        Bitbucket(&'a BbCredentials),
+    }
+
+    impl Live<'_> {
+        async fn file(
+            self,
+            repo: &str,
+            sha: &str,
+            path: &str,
+            max_bytes: Option<u64>,
+        ) -> AppResult<Option<FileBytes>> {
+            match self {
+                Live::Commands => {
+                    forge_file_at_sha(repo.into(), sha.into(), path.into(), None, max_bytes).await
+                }
+                Live::Bitbucket(creds) => {
+                    let segments = file_segments(path)?;
+                    let cap = effective_cap(max_bytes);
+                    bitbucket_file(creds, repo, sha, path, &segments, cap).await
+                }
+            }
+        }
+
+        async fn merge_base(self, repo: &str, number: u64, head: &str) -> AppResult<String> {
+            match self {
+                Live::Commands => {
+                    let revs =
+                        forge_pr_content_revs(repo.into(), number, None, head.into()).await?;
+                    assert_eq!(revs.new_sha, head);
+                    Ok(revs.old_sha)
+                }
+                Live::Bitbucket(creds) => bitbucket_merge_base(creds, repo, number, head).await,
+            }
+        }
+
+        async fn first_parent(self, repo: &str, oid: &str) -> AppResult<Option<String>> {
+            match self {
+                Live::Commands => forge_commit_first_parent(repo.into(), oid.into(), None).await,
+                Live::Bitbucket(creds) => bitbucket_first_parent(creds, repo, oid).await,
+            }
+        }
+    }
+
     /// Live, read-only: each forge's answers against the fixture clone's own objects.
     /// Run one at a time with `GD_LIVE_FIXTURE_ROOT` set and `-- --ignored --exact <path>`.
-    async fn live_matches_local(repo: &str, pairs: &[(&str, &str)]) {
+    async fn live_matches_local(live: Live<'_>, repo: &str, pairs: &[(&str, &str)]) {
         for (sha, path) in pairs {
             let local = run_git_raw(
                 Some(repo),
@@ -1639,11 +1981,7 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(local.code, 0, "{sha}:{path}");
-            let read =
-                forge_file_at_sha(repo.into(), sha.to_string(), path.to_string(), None, None)
-                    .await
-                    .unwrap()
-                    .unwrap();
+            let read = live.file(repo, sha, path, None).await.unwrap().unwrap();
             assert_eq!(decoded(&read), local.stdout, "{sha}:{path}");
             println!(
                 "live {repo} {sha}:{path} = {} B, identical",
@@ -1651,17 +1989,12 @@ mod tests {
             );
         }
         let (sha, path) = pairs[0];
-        let missing = forge_file_at_sha(
-            repo.into(),
-            sha.into(),
-            format!("{path}.absent"),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+        let missing = live
+            .file(repo, sha, &format!("{path}.absent"), None)
+            .await
+            .unwrap();
         assert!(missing.is_none());
-        let unknown = forge_file_at_sha(repo.into(), "f".repeat(40), path.into(), None, None).await;
+        let unknown = live.file(repo, &"f".repeat(40), path, None).await;
         match &unknown {
             Ok(_) => panic!("an unknown commit read as Ok"),
             Err(error) => println!(
@@ -1669,27 +2002,22 @@ mod tests {
                 error.to_string().lines().next().unwrap_or("")
             ),
         }
-        let capped = forge_file_at_sha(repo.into(), sha.into(), path.into(), None, Some(1))
-            .await
-            .unwrap()
-            .unwrap();
+        let capped = live.file(repo, sha, path, Some(1)).await.unwrap().unwrap();
         assert!(capped.too_large && capped.base64.is_none());
     }
 
-    async fn live_revs_match_local(repo: &str, number: u64, head: &str, base_tip: &str) {
-        let revs = forge_pr_content_revs(repo.into(), number, None, head.into())
-            .await
-            .unwrap();
+    async fn live_revs_match_local(
+        live: Live<'_>,
+        repo: &str,
+        number: u64,
+        head: &str,
+        base_tip: &str,
+    ) {
+        let old_sha = live.merge_base(repo, number, head).await.unwrap();
         let local = git(repo, &["merge-base", base_tip, head]).await;
-        println!(
-            "live {repo} #{number} merge base {} (local {local})",
-            revs.old_sha
-        );
-        assert_eq!(revs.old_sha, local);
-        assert_eq!(revs.new_sha, head);
-        let parent = forge_commit_first_parent(repo.into(), head.into(), None)
-            .await
-            .unwrap();
+        println!("live {repo} #{number} merge base {old_sha} (local {local})");
+        assert_eq!(old_sha, local);
+        let parent = live.first_parent(repo, head).await.unwrap();
         assert_eq!(
             parent.as_deref(),
             Some(
@@ -1713,60 +2041,6 @@ mod tests {
         Some(path.to_string_lossy().into_owned())
     }
 
-    type TestCredentials = Option<(String, String)>;
-
-    /// Installs test credentials through `swap` and puts back whatever the slot held
-    /// before, however the test ends: the swap-and-restore shape background.rs's
-    /// consumer of `http::swap_test_credentials` uses, so neither clobbers the other.
-    struct RestoreCredentials<F: FnMut(TestCredentials) -> TestCredentials> {
-        swap: F,
-        previous: Option<TestCredentials>,
-    }
-
-    impl<F: FnMut(TestCredentials) -> TestCredentials> RestoreCredentials<F> {
-        fn install(mut swap: F, credentials: TestCredentials) -> Self {
-            let previous = swap(credentials);
-            Self {
-                swap,
-                previous: Some(previous),
-            }
-        }
-    }
-
-    impl<F: FnMut(TestCredentials) -> TestCredentials> Drop for RestoreCredentials<F> {
-        fn drop(&mut self) {
-            if let Some(previous) = self.previous.take() {
-                (self.swap)(previous);
-            }
-        }
-    }
-
-    #[test]
-    fn the_credential_guard_restores_the_previous_slot_value() {
-        // A slot of its own: the process-wide one has another consumer running in
-        // parallel (background.rs), which this test must not race.
-        let slot = std::sync::Mutex::new(Some(("earlier".to_string(), "t".to_string())));
-        let swap = |value: TestCredentials| std::mem::replace(&mut *slot.lock().unwrap(), value);
-        let stored = Some(("stored".to_string(), "token".to_string()));
-        {
-            let _guard = RestoreCredentials::install(swap, stored.clone());
-            assert_eq!(*slot.lock().unwrap(), stored);
-        }
-        assert_eq!(
-            *slot.lock().unwrap(),
-            Some(("earlier".to_string(), "t".to_string()))
-        );
-        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = RestoreCredentials::install(swap, None);
-            panic!("the test failed");
-        }));
-        assert!(unwound.is_err());
-        assert_eq!(
-            *slot.lock().unwrap(),
-            Some(("earlier".to_string(), "t".to_string()))
-        );
-    }
-
     #[tokio::test]
     #[ignore = "live forge reads; needs GD_LIVE_FIXTURE_ROOT/dispatch-demo and a stored token"]
     async fn live_bitbucket_reads_match_git() {
@@ -1774,17 +2048,21 @@ mod tests {
             return;
         };
         // Test builds refuse the keyring inside `load_credentials`; this opt-in live
-        // probe hands the stored token to the client through its test seam instead.
+        // probe reads the stored pair itself and hands it to the Bitbucket arms.
         let secret = |key| {
             crate::secrets::read_forge_secret(http::BB_HOST, key)
                 .unwrap()
                 .unwrap()
         };
-        let stored = (secret(http::KEY_EMAIL), secret(http::KEY_TOKEN));
-        let _restore = RestoreCredentials::install(http::swap_test_credentials, Some(stored));
+        let creds = BbCredentials {
+            email: secret(http::KEY_EMAIL),
+            token: secret(http::KEY_TOKEN),
+        };
+        let live = Live::Bitbucket(&creds);
         let png = git(&repo, &["rev-parse", "2375ce8b"]).await;
         let readme = git(&repo, &["rev-parse", "db7d0969"]).await;
         live_matches_local(
+            live,
             &repo,
             &[
                 (&png, "src/lib/images/svelte-welcome.png"),
@@ -1792,7 +2070,6 @@ mod tests {
             ],
         )
         .await;
-        let creds = http::load_credentials().await.unwrap();
         let base = bb_repo_base(&repo).await.unwrap();
         for number in [1, 7] {
             let pr: Value = http::bb_get_json(
@@ -1811,7 +2088,7 @@ mod tests {
             };
             let head = git(&repo, &["rev-parse", &short("source")]).await;
             let dest = git(&repo, &["rev-parse", &short("destination")]).await;
-            live_revs_match_local(&repo, number, &head, &dest).await;
+            live_revs_match_local(live, &repo, number, &head, &dest).await;
         }
     }
 
@@ -1823,6 +2100,7 @@ mod tests {
         };
         let sha = "b85aba600beec62db61cd8c5dc1cab2aa562da73";
         live_matches_local(
+            Live::Commands,
             &repo,
             &[
                 (sha, "README.md"),
@@ -1844,7 +2122,7 @@ mod tests {
             .unwrap();
         let start = sha_at(&mr, "/diff_refs/start_sha").unwrap();
         let head = sha_at(&mr, "/diff_refs/head_sha").unwrap();
-        live_revs_match_local(&repo, 64, &head, &start).await;
+        live_revs_match_local(Live::Commands, &repo, 64, &head, &start).await;
     }
 
     /// Live, read-only: git/git's `RelNotes` is a link to an in-repo file, which the
@@ -1889,11 +2167,13 @@ mod tests {
         };
         let base = "73b582487b0491471273733a809943044684e17b";
         live_matches_local(
+            Live::Commands,
             &repo,
             &[(base, "src/assets/hero.png"), (base, "src/style.css")],
         )
         .await;
         live_revs_match_local(
+            Live::Commands,
             &repo,
             152,
             "b739cdf906b34cf5fa035362d4d4a7116d1c41a7",

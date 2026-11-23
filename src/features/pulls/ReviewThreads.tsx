@@ -116,6 +116,8 @@ interface HunkLine {
   number: number | null;
   kind: "add" | "del" | "context";
   text: string;
+  /** `\ No newline at end of file` follows: the line has no terminator. */
+  noEol?: boolean;
 }
 
 /** The raw new-side text for lines `[from, to]` (inclusive, 1-based) of a hunk,
@@ -135,7 +137,13 @@ function newSideLines(
     const hit = byNumber.get(n);
     if (!hit) return null; // gap — range not fully in the hunk
     // Strip the single leading marker (+ or space); del lines have no number.
-    picked.push(hit.text.slice(1));
+    // Mirrors replace_file_lines (git/ops.rs), which Apply's verify compares
+    // against: line 1 sheds one leading BOM, and split_line_ending makes a
+    // terminated line shed one "\r" while an unterminated one keeps it.
+    let body = hit.text.slice(1);
+    const bom = String.fromCharCode(0xfeff);
+    if (n === 1 && body.startsWith(bom)) body = body.slice(1);
+    picked.push(hit.noEol ? body : body.replace(/\r$/, ""));
   }
   return picked;
 }
@@ -301,8 +309,12 @@ function parseHunk(hunk: string): HunkLine[] | null {
     // content, so it gets no new-side number and must not advance the counter
     // (otherwise every line after a no-trailing-newline transition shifts by one,
     // and Apply's expected_lines/startLine — which now rely on this numbering —
-    // would refuse a legitimate suggestion).
-    if (marker === "\\") continue;
+    // would refuse a legitimate suggestion). It marks that line unterminated.
+    if (marker === "\\") {
+      const prev = out.at(-1);
+      if (prev) prev.noEol = true;
+      continue;
+    }
     if (marker === "+") {
       out.push({ number: newNo, kind: "add", text: raw });
       newNo += 1;

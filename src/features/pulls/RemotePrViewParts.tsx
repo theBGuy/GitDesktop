@@ -181,7 +181,8 @@ export function PrFilesPane({
   /** The pull request's merge base and head, for expand context and image
    *  previews. Absent while unknown or while the diff is another record's. */
   contentRevs?: PrContentRevs;
-  /** The revs read for the shown head settled in error with no answer. */
+  /** The revs read for the shown head settled in error with no answer, or the
+   *  settled details name no head to read. */
   revsUnavailable?: boolean;
   /** All PR review threads; the pane anchors those on the selected file. */
   threads?: ReviewThreadOut[];

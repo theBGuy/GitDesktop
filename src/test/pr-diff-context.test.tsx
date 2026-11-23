@@ -16,6 +16,8 @@ import {
   forgeFileAtSha,
   forgePrCommitDiff,
   forgeStatus,
+  gitCommitParents,
+  gitCommitRecordsParent,
   gitFileBase64,
   gitObjectsPresent,
   type PrContentRevs,
@@ -32,6 +34,8 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgeFileAtSha: vi.fn(),
   forgePrCommitDiff: vi.fn(),
   forgeStatus: vi.fn(),
+  gitCommitParents: vi.fn(),
+  gitCommitRecordsParent: vi.fn(),
   gitFileBase64: vi.fn(),
   gitObjectsPresent: vi.fn(),
 }));
@@ -125,6 +129,11 @@ beforeEach(() => {
   vi.mocked(saveSettingsMerged).mockResolvedValue(DEFAULT_SETTINGS);
   vi.mocked(forgeStatus).mockResolvedValue(GITHUB);
   vi.mocked(forgeCommitComments).mockResolvedValue([]);
+  // A local commit's first parent resolves here unless a test says not.
+  vi.mocked(gitCommitParents).mockResolvedValue([
+    { hash: PARENT, subject: "parent" },
+  ]);
+  vi.mocked(gitCommitRecordsParent).mockResolvedValue(true);
   presence = async () => false;
   vi.mocked(gitObjectsPresent).mockImplementation(async (_r, oids) =>
     presence(oids),
@@ -564,6 +573,76 @@ describe("PR commit drill-in: whole-file reads at the first parent", () => {
       scope: COMMIT_SCOPE,
     });
     expect(forgeCommitFirstParent).toHaveBeenCalledWith(REPO, OID, "origin");
+  });
+
+  it("reads a shallow boundary's pair from the forge, never the absent local parent", async () => {
+    // The commit is here; its parent sits past the shallow graft.
+    presence = async (oids) => oids.join() === OID;
+    vi.mocked(gitCommitParents).mockResolvedValue([]);
+    vi.mocked(forgeCommitFirstParent).mockResolvedValue(PARENT);
+    renderCommit(edit("a.ts"));
+    await waitFor(() =>
+      expect(pane("a.ts")?.contentRevs).toEqual({
+        oldRev: PARENT,
+        newRev: OID,
+      }),
+    );
+    expect(pane("a.ts")?.imageRevs).toEqual({ old: PARENT, new: OID });
+    expect(pane("a.ts")?.forgePatch).toEqual({
+      source: { lens: "origin" },
+      scope: COMMIT_SCOPE,
+    });
+    expect(gitCommitRecordsParent).toHaveBeenCalledWith(REPO, OID);
+  });
+
+  it("shows a shallow boundary's modified image as a change, never as added", async () => {
+    panes.real = true;
+    stubCanvas();
+    presence = async (oids) => oids.join() === OID;
+    vi.mocked(gitCommitParents).mockResolvedValue([]);
+    vi.mocked(forgeCommitFirstParent).mockResolvedValue(PARENT);
+    const png = {
+      base64: "iVBORw0KGgo=",
+      mime: "image/png",
+      tooLarge: false,
+      size: 8,
+    };
+    vi.mocked(forgeFileAtSha).mockResolvedValue(png);
+    // The local reader answers the unresolvable `oid~1` as an absent file.
+    vi.mocked(gitFileBase64).mockImplementation(async (_r, rev) =>
+      rev === `${OID}~1` ? null : png,
+    );
+    const view = renderCommit(
+      "diff --git a/img.png b/img.png\nindex 1111111..2222222 100644\nBinary files a/img.png and b/img.png differ\n",
+    );
+    const figures = () => view.container.querySelectorAll("figure");
+    await waitFor(() => expect(figures()).toHaveLength(2), { timeout: 10_000 });
+    expect(view.container.textContent).not.toContain("Added");
+    expect(forgeFileAtSha).toHaveBeenCalledWith(
+      REPO,
+      PARENT,
+      "img.png",
+      "origin",
+      null,
+    );
+  }, 15_000);
+
+  it("keeps a local root commit's pair local, its old side absent", async () => {
+    presence = async () => true;
+    vi.mocked(gitCommitParents).mockResolvedValue([]);
+    vi.mocked(gitCommitRecordsParent).mockResolvedValue(false);
+    renderCommit(edit("a.ts"));
+    await waitFor(() =>
+      expect(pane("a.ts")?.forgePatch).toEqual({
+        source: "local",
+        scope: COMMIT_SCOPE,
+      }),
+    );
+    expect(pane("a.ts")?.contentRevs).toEqual({
+      oldRev: `${OID}~1`,
+      newRev: OID,
+    });
+    expect(forgeCommitFirstParent).not.toHaveBeenCalled();
   });
 
   it("gives a forge-read root commit only its new side, and no images", async () => {

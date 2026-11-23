@@ -58,6 +58,8 @@ import {
 import {
   useCommitComments,
   useCommitFirstParent,
+  useCommitParents,
+  useCommitRecordsParent,
   useObjectsPresent,
   usePrCommitDiff,
 } from "@/lib/git/queries";
@@ -141,21 +143,48 @@ export function PrCommitDetail({
   // Markdown preview reads the file at this commit, so it's offered only once
   // the commit is a local object (after a Check out PR or a fetch).
   const commitPresent = useObjectsPresent(repoPath, [commit.oid]);
-  // Not in this clone: its first parent comes from the forge instead.
+  // A local commit's parents as this clone resolves them. None is a root, or
+  // a shallow clone's boundary, whose parent the graft hides; the raw header
+  // tells the two apart.
+  const localParents = useCommitParents(
+    repoPath,
+    commitPresent.data === true ? commit.oid : null,
+  );
+  const parentless = localParents.data?.length === 0;
+  const recordsParent = useCommitRecordsParent(
+    repoPath,
+    commit.oid,
+    parentless,
+  );
+  // The local reader takes a missing ancestor for an absent file, so a local
+  // commit whose first parent doesn't resolve here (a shallow boundary, or a
+  // failed parent read) takes its pair from the forge, like one not here.
+  const parentElsewhere =
+    commitPresent.data === true &&
+    (localParents.isError ||
+      (parentless && !recordsParent.isPending && recordsParent.data !== false));
   const forgeParent = useCommitFirstParent(
     repoPath,
     lens,
     commit.oid,
-    commitPresent.data === false,
+    commitPresent.data === false || parentElsewhere,
+  );
+  // The forge's parent can still be a local object (fetched past the graft).
+  const parentPresent = useObjectsPresent(
+    repoPath,
+    parentElsewhere && forgeParent.data ? [forgeParent.data] : [],
   );
   // Whole-file reads at the first parent and the commit: this clone's objects
-  // when it holds the commit, else the forge. A root commit read from the forge
-  // has no old side, so its images keep the placeholder (null = working tree).
-  // The first answer holds for the commit: forge reads by sha stay valid after
-  // a fetch, and a failed refetch keeps what it had.
+  // when it holds both (a local root's old side reads as absent), else the
+  // forge. A root commit read from the forge has no old side, so its images
+  // keep the placeholder (null = working tree). The first answer holds for the
+  // commit: forge reads by sha stay valid after a fetch, and a failed refetch
+  // keeps what it had.
   const answered = ((): CommitFileContent | undefined => {
     if (commitPresent.data === undefined) return undefined;
-    if (commitPresent.data) {
+    if (commitPresent.data && !parentElsewhere) {
+      if (localParents.data === undefined) return undefined;
+      if (parentless && recordsParent.data === undefined) return undefined;
       const parent = `${commit.oid}~1`;
       return {
         revs: { oldRev: parent, newRev: commit.oid },
@@ -167,10 +196,11 @@ export function PrCommitDetail({
     if (parent === undefined) return undefined;
     if (parent === null)
       return { revs: { newRev: commit.oid }, source: { lens } };
+    if (commitPresent.data && parentPresent.isPending) return undefined;
     return {
       revs: { oldRev: parent, newRev: commit.oid },
       images: { old: parent, new: commit.oid },
-      source: { lens },
+      source: parentPresent.data === true ? "local" : { lens },
     };
   })();
   const content = useLatchedFor(`${lens}\0${commit.oid}`, answered);

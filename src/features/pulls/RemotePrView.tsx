@@ -5594,13 +5594,15 @@ export function RemotePrView({
                 // files; a failed refetch keeps the answer it had (the read
                 // keys on this pull request and head, with no placeholder).
                 contentRevs={!diffStale ? contentRevs.data : undefined}
-                // Settled with no answer (a refused read is never retried):
-                // the pane drops any image pair it kept for an older head.
+                // Settled with no answer (a refused read is never retried), or
+                // details that name no head, which leave the read disabled: the
+                // pane drops any image pair it kept for an older head.
                 revsUnavailable={
                   !diffStale &&
-                  contentRevs.isError &&
-                  !contentRevs.isFetching &&
-                  contentRevs.data === undefined
+                  (!prHeadSha(pr) ||
+                    (contentRevs.isError &&
+                      !contentRevs.isFetching &&
+                      contentRevs.data === undefined))
                 }
                 // The same threads + handlers/gates the Conversation block uses — one
                 // filtered list off the top-level read, not a second fetch, so an

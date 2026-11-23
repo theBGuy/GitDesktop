@@ -646,7 +646,9 @@ the last list up, with a line above it saying it couldn't refresh.
   binary file and a symbolic link trade places, in either direction, local diffs show
   both the binary side's size line and the link's text. A pull request's **Files** and
   **Commits** tabs do the same for any binary file, an image included (with the size
-  line on GitHub and Bitbucket only), and the link's line takes comments there.
+  line on GitHub and Bitbucket only). The link's line takes comments on the **Files**
+  tab, and on the **Commits** tab when the file became the link, since commit comments
+  anchor to the new side.
 - **Pull request diffs** on a pull request's **Files** tab, and in a commit opened from
   its **Commits** tab, expand the lines above and below each change and preview changed
   images (an SVG shows its preview above its text diff), on GitHub, GitLab and
@@ -683,8 +685,8 @@ the last list up, with a line above it saying it couldn't refresh.
   the layout too while a diff is on screen and wide enough for split, though not
   during a line selection, a discard confirmation or Markdown preview. While you're
   writing a line comment, replying to a thread in a diff, or editing a pending review
-  comment there, Unified and Split stay locked until you finish or close it, so the
-  text isn't lost.
+  comment there, Unified and Split stay locked until you finish or close it, and that
+  diff's **Show full diff** waits too, so the text isn't lost.
 - **Split renders as unified** while the pane is too narrow for two readable columns;
   hovering the sheet's **Split** option shows why, and screen readers read the reason
   with it. Your preference is kept either way, so widening the pane brings the split
