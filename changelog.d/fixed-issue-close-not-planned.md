@@ -1,2 +1,2 @@
-- Closing a GitHub issue as "Not planned" now works and records that reason on
-  the issue.
+- **Close as not planned** now closes a GitHub issue and records the
+  not-planned reason on it.

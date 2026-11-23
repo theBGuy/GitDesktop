@@ -994,19 +994,24 @@ pub async fn gh_issue_comment(
 /// gh's `--reason` enum spells this with a space, unlike the API's `not_planned`.
 const GH_CLOSE_REASON_NOT_PLANNED: &str = "not planned";
 
+/// A close reason in gh's `--reason` spelling. The argv builder takes this
+/// instead of `&str`, so a caller can't hand it the raw input string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GhCloseReason(&'static str);
+
 /// Maps an API-spelled close reason to the value gh's `--reason` accepts.
-fn gh_close_reason(reason: &str) -> AppResult<&'static str> {
+fn gh_close_reason(reason: &str) -> AppResult<GhCloseReason> {
     match reason {
-        "" | "completed" => Ok("completed"),
-        "not_planned" => Ok(GH_CLOSE_REASON_NOT_PLANNED),
+        "" | "completed" => Ok(GhCloseReason("completed")),
+        "not_planned" => Ok(GhCloseReason(GH_CLOSE_REASON_NOT_PLANNED)),
         _ => Err(AppError::InvalidArgument(format!(
             "unknown close reason: {reason}"
         ))),
     }
 }
 
-fn issue_close_args<'a>(n: &'a str, slug: &'a str, gh_reason: &'a str) -> [&'a str; 7] {
-    ["issue", "close", n, "--repo", slug, "--reason", gh_reason]
+fn issue_close_args<'a>(n: &'a str, slug: &'a str, gh_reason: GhCloseReason) -> [&'a str; 7] {
+    ["issue", "close", n, "--repo", slug, "--reason", gh_reason.0]
 }
 
 /// Closes an issue. `reason` is "completed" or "not_planned" (the API's
@@ -1936,19 +1941,14 @@ mod tests {
                 "not planned"
             ]
         );
-        let at = args.iter().position(|a| *a == "--reason").unwrap();
-        assert_eq!(args[at + 1], "not planned");
-        assert!(!args.contains(&"not_planned"), "{args:?}");
     }
 
     #[test]
     fn issue_close_reason_defaults_to_completed() {
         for input in ["", "completed"] {
-            assert_eq!(
-                super::gh_close_reason(input).unwrap(),
-                "completed",
-                "{input:?}"
-            );
+            let reason = super::gh_close_reason(input).unwrap();
+            let args = super::issue_close_args("7", "o/r", reason);
+            assert_eq!(args[5..], ["--reason", "completed"], "{input:?}");
         }
     }
 
