@@ -282,28 +282,37 @@ describe("sessions store: every Stop cancels its own turn's run id", () => {
       isError: true,
       costUsd: 0,
     };
-    const attempt = deferred<void>();
+    // Attempt 1 delivers the miss at once, then stays pending until released.
+    const release = deferred<void>();
+    let missDelivered = false;
     vi.mocked(invoke).mockImplementation((async (
       cmd: string,
       args: Record<string, unknown> = {},
     ) => {
       if (cmd === "agent_review_cancel") return new Promise(() => undefined);
       if (cmd !== "agent_session") throw new Error(`unexpected ${cmd}`);
-      await attempt.promise;
       const channel = args.onEvent as {
         onmessage: (event: ReviewEvent) => void;
       };
       channel.onmessage(miss);
+      missDelivered = true;
+      await release.promise;
       return miss;
     }) as never);
     const invoked = (cmd: string) =>
       vi.mocked(invoke).mock.calls.filter((c) => c[0] === cmd);
     useSessionsStore.setState({ sessions: [session("a")] });
     const sent = store().send("a", "one");
-    await vi.waitFor(() => expect(invoked("agent_session")).toHaveLength(1));
-    const runId = (invoked("agent_session")[0][1] as { runId: string }).runId;
+    await vi.waitFor(() => expect(missDelivered).toBe(true));
+    const first = invoked("agent_session")[0][1] as {
+      runId: string;
+      resume: boolean;
+    };
+    expect(first.resume).toBe(true);
+    const runId = first.runId;
+    // The miss is held now; Stop lands while attempt 1 is still pending.
     void store().cancel("a");
-    attempt.resolve();
+    release.resolve();
     await sent;
     expect(invoked("agent_session")).toHaveLength(1);
     expect(invoked("agent_review_cancel")).toEqual([

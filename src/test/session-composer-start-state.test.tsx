@@ -499,4 +499,24 @@ describe("SessionComposer while the session is busy", () => {
     expect(send).not.toHaveBeenCalled();
     expect(textarea()).toHaveValue("next step");
   });
+
+  it("Send is held with its reason while Keep or Discard runs", async () => {
+    const reason = "Wait for Keep or Discard to finish.";
+    useSessionsStore.setState({ sessions: [SESSION], busyId: "s1" });
+    const user = userEvent.setup();
+    mount({ session: SESSION });
+    await user.type(textarea(), "next step");
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toBeDisabled();
+    const line = screen.getByText(reason);
+    expect(line.closest('[role="status"]')).not.toHaveClass("sr-only");
+    expect(send).toHaveAccessibleDescription(reason);
+    expect(send.parentElement).toHaveAttribute("title", reason);
+
+    act(() => useSessionsStore.setState({ busyId: null }));
+    await waitFor(() => expect(send).toBeEnabled());
+    expect(screen.queryByText(reason)).toBeNull();
+    expect(send).not.toHaveAccessibleDescription();
+    expect(send.parentElement).not.toHaveAttribute("title");
+  });
 });
