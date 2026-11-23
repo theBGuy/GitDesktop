@@ -11,6 +11,7 @@ import {
   changesSince,
   contentBuildGate,
   contentReadsKey,
+  contentUpgradeGate,
   paintedAfter,
 } from "../src/features/diff/file-content-gate.ts";
 
@@ -383,4 +384,102 @@ test("another pairing of the same path builds at once, never held", () => {
     oldFetching: true,
   });
   assert.equal(other.decision, "build");
+});
+
+// ---------------------------------------------------- forge-patch upgrade
+
+test("contentUpgradeGate: each input row's decision", () => {
+  const base = {
+    forge: true,
+    wanted: true,
+    onScreen: false,
+    contentShown: false,
+    pathOnScreen: false,
+    settled: false,
+    matched: false,
+    same: false,
+    editorOpen: false,
+  };
+  const shown = { onScreen: true, pathOnScreen: true };
+  const content = { ...shown, contentShown: true };
+  const ready = { settled: true, matched: true };
+  const rows = [
+    // A forge read never blanks the pane: its hunk-only diff paints first.
+    [{}, "hunk-only"],
+    // Revs or source not known yet: the first paint is hunk-only, recorded.
+    [{ wanted: false }, "hunk-only"],
+    [{ forge: false, wanted: false }, "hunk-only"],
+    // A local first read with nothing of this path on screen keeps the
+    // single-paint gate.
+    [{ forge: false }, "pending"],
+    // Local reads never blank a build of this path on screen, of this text
+    // or of the text before it.
+    [{ forge: false, ...shown }, "hunk-only"],
+    [{ forge: false, pathOnScreen: true }, "hunk-only"],
+    // The guard (or a budget) refused the reads: hunk-only, nothing else.
+    [{ settled: true }, "hunk-only"],
+    [{ settled: true, ...shown }, "hunk-only"],
+    // Nothing of this text on screen yet: the paint is the content build.
+    [ready, "build"],
+    [{ forge: false, ...ready }, "build"],
+    [{ ...ready, pathOnScreen: true }, "build"],
+    // Over a hunk-only paint the build waits for its release step.
+    [{ ...ready, ...shown }, "release"],
+    [{ forge: false, ...ready, ...shown }, "release"],
+    // An editor open in the diff holds the step; it ends the hold by closing.
+    [{ ...ready, ...shown, editorOpen: true }, "hunk-only"],
+    [{ ...shown, editorOpen: true }, "hunk-only"],
+    // A content build on screen stays while its reads are the same, unsettled,
+    // refused, or unknown again: losing the reads never downgrades it.
+    [{ ...ready, ...content, same: true }, "keep"],
+    [{ ...ready, ...content, same: true, editorOpen: true }, "keep"],
+    [content, "keep"],
+    [{ ...content, wanted: false }, "keep"],
+    [{ ...content, settled: true }, "keep"],
+    // Other content for the same text goes through the release step too.
+    [{ ...ready, ...content }, "release"],
+    [{ ...ready, ...content, editorOpen: true }, "keep"],
+  ];
+  for (const [over, want] of rows)
+    assert.equal(
+      contentUpgradeGate({ ...base, ...over }),
+      want,
+      JSON.stringify(over),
+    );
+});
+
+test("a hunk-only paint over unsettled reads is forced, so the reads build as they land", () => {
+  const unsettled = { reads: READS, text: "t", oldText: "", newText: "" };
+  const landed = { ...unsettled, oldText: "a\n", newText: "b\n" };
+  const gate = (painted, now, settled, paintsUnsettled) =>
+    contentBuildGate({
+      wantContent: true,
+      oldSettled: settled,
+      newSettled: settled,
+      oldFetching: !settled,
+      newFetching: !settled,
+      ...changesSince(painted, now),
+      boundExpired: false,
+      frozen: false,
+      paintsUnsettled,
+    });
+  const first = gate(null, unsettled, false, true);
+  assert.equal(first, "hunk-only");
+  const painted = paintedAfter(null, first, false, unsettled, {
+    wantContent: true,
+    inFlight: true,
+  });
+  assert.equal(painted.complete, false);
+  assert.equal(gate(painted, landed, true, false), "build");
+  // Control: recorded as a complete paint, the same arrival reads as a read
+  // ahead of its text and is held.
+  const unforced = paintedAfter(
+    null,
+    gate(null, unsettled, false, false),
+    false,
+    unsettled,
+    { wantContent: true, inFlight: true },
+  );
+  assert.equal(unforced.complete, true);
+  assert.equal(gate(unforced, landed, true, false), "hold-previous");
 });

@@ -637,13 +637,25 @@ the last list up, with a line above it saying it couldn't refresh.
   *1.2 MB → 725 KB · 486 KB smaller (−40%)*, or *Deleted file · 900 KB* for a removed one.
   When two different sizes round to the same figure, the line gives exact byte counts.
   A screen reader always hears the exact counts. A changed file mode gets its own line.
-  GitHub and Bitbucket pull requests show sizes too; on GitHub.com that includes files
-  your clone doesn't have. A non-image binary file with unstaged changes (in your
+  GitHub and Bitbucket pull requests show sizes too, and on GitHub that covers files
+  your clone doesn't have (on a GitHub Enterprise host once \`gh auth login\` has
+  signed you in to it). A non-image binary file with unstaged changes (in your
   working tree or an agent session's) also offers **Open with default program** (a file
   your system would run instead is refused) and **Show in Explorer**; for a deleted one,
   **Show in Explorer** opens the nearest folder that still exists. When a non-image
-  binary file and a symbolic link trade places, local diffs show both the binary side's
-  size line and the link's text, as do pull requests where a link became a binary file.
+  binary file and a symbolic link trade places, in either direction, local diffs show
+  both the binary side's size line and the link's text. A pull request's **Files** and
+  **Commits** tabs do the same for any binary file, an image included (with the size
+  line on GitHub and Bitbucket only), and the link's line takes comments there.
+- **Pull request diffs** on a pull request's **Files** tab, and in a commit opened from
+  its **Commits** tab, expand the lines above and below each change and preview changed
+  images (an SVG shows its preview above its text diff), on GitHub, GitLab and
+  Bitbucket. The files are read from your clone when it holds the pull request's
+  commits, and from the forge otherwise, so on GitHub a pull request from a fork needs
+  nothing checked out. A renamed file's old side is read at its old path, and a commit
+  is compared with its first parent. The diff may show just its changes first, then
+  fill in the surrounding lines in place, keeping the line at the top of the view where
+  it was. A very large file keeps the changes-only view.
 - **Markdown preview** — markdown and MDX diffs add a **Raw / Preview** toggle to the
   diff toolbar. **Preview** renders the file's new version as formatted prose
   (headings, tables, highlighted code fences), so a docs change reads the way it will
@@ -670,8 +682,9 @@ the last list up, with a line above it saying it couldn't refresh.
   palette (palette-only by default — bind a key in **Settings → Keyboard**) switches
   the layout too while a diff is on screen and wide enough for split, though not
   during a line selection, a discard confirmation or Markdown preview. While you're
-  writing a line comment, Unified and Split stay locked until you finish or close
-  it, so the draft isn't lost.
+  writing a line comment, replying to a thread in a diff, or editing a pending review
+  comment there, Unified and Split stay locked until you finish or close it, so the
+  text isn't lost.
 - **Split renders as unified** while the pane is too narrow for two readable columns;
   hovering the sheet's **Split** option shows why, and screen readers read the reason
   with it. Your preference is kept either way, so widening the pane brings the split
@@ -2220,7 +2233,7 @@ diff excerpt, and every reply — as Markdown.
 
 ## Compose your own review
 
-In the **Files** tab, **click a line number** — or **drag across a range** of them — to
+In the **Files** tab, **click a line number**, or **drag across a range** of them, to
 open an inline composer right under the diff. A dragged range lands as a **real multi-line
 anchor** on **GitHub and GitLab**; **Bitbucket** anchors at the last line, and the composer
 says so. Clicking the **+** on **any line** of a drag (not just its last) reopens the same
@@ -2235,6 +2248,16 @@ range. From there you can:
 - **Add suggestion** — insert a provider-correct \`\`\`suggestion block pre-filled with the
   selected code, ready to edit (GitHub carries the range on the anchor, GitLab uses its
   \`:-N+0\` form, and Bitbucket suggestions are single-line).
+
+A comment goes on a line the pull request's diff contains. A line you expanded into view
+has no **+** of its own, and clicking its number only selects it: you reach it with a
+range you drag across it, and the **+** on any diff line of that range opens the
+composer, which keeps what you write. On **GitHub**, every line of a range has to be one
+the pull request's diff holds on that side, context lines included, so a range can't
+reach across a gap between two blocks of the diff, expanded or not; **GitLab** and
+**Bitbucket** need only its last line in the diff. Where a range breaks that rule,
+**Add single comment** and **Start a review** (**Add to review** once a review is in
+progress) stay disabled and say why.
 
 A **Review in progress** bar shows the pending count with **Submit review…** and
 **Discard**. Submitting opens a dialog to choose a **verdict** — **Comment**, **Approve**,
@@ -2267,7 +2290,8 @@ commit detail instead). The detail view also carries **commit comments** — a w
 thread and **line-anchored comments** on the commit's diff (click a line, or drag a range),
 with create / edit / delete of your own, on GitHub, GitLab, and Bitbucket. A dragged range is
 a real range on **GitLab**; **GitHub** and **Bitbucket** commit comments anchor to a single
-line, and the composer says so.
+line, and the composer says so. A line you expanded into view isn't in the commit's diff,
+so it can't take a comment; on **GitLab**, both ends of a range have to be in that diff.
 
 The detail view keeps the commit's changes on screen if a background refresh fails, with a
 line saying it couldn't refresh and a **Retry**; while you're offline, the line says so

@@ -4,6 +4,8 @@
 // (relative runtime imports carry their .ts suffix) — and this dep-free suite
 // never joins frontend.yml's node_modules-required roster.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { stripTypeScriptTypes } from "node:module";
 import { test } from "node:test";
 
 import {
@@ -17,8 +19,10 @@ import {
   isTypechangeDiff,
   MODE_CHANGE,
   parseModeChange,
+  patchLines,
   sectionFilePath,
   sectionIsBinary,
+  sectionOldPath,
   splitUnifiedDiff,
   typechangeHalves,
 } from "../src/lib/git/diff-split.ts";
@@ -1729,4 +1733,160 @@ test("binarySizeSummary: a 0-byte side takes no parenthetical", () => {
     sr: `Size changed from ${L(0)} bytes to ${L(700)} bytes, ${L(700)} bytes larger.`,
   });
   assert.equal(pair(5021, 0).delta, "4.9 KB smaller");
+});
+
+// ------------------------------------------------- PR typechange join (opt-in)
+
+test("joinTypechanges: a binary→symlink keeps both halves, in git's order", () => {
+  const split = splitUnifiedDiff(
+    OTHER_SECTION + TYPECHANGE_TO_LINK + OTHER_SECTION.replace(/y/g, "z"),
+    { joinTypechanges: true },
+  );
+  assert.deepEqual([...split.keys()], ["y.txt", "x", "z.txt"]);
+  assert.equal(split.get("x"), TYPECHANGE_TO_LINK);
+  const halves = typechangeHalves(split.get("x"), "x");
+  assert.notEqual(halves, null);
+  assert.equal(halves.binaryFirst, true);
+  assert.equal(split.get("y.txt"), OTHER_SECTION);
+});
+
+test("joinTypechanges: symlink→binary still joins; an all-text pair stays last-wins", () => {
+  const opts = { joinTypechanges: true };
+  assert.equal(splitUnifiedDiff(TYPECHANGE, opts).get("x"), TYPECHANGE);
+  assert.notEqual(typechangeHalves(TYPECHANGE, "x"), null);
+  for (const pair of [
+    textSection("x", "deleted") + textSection("x", "new"),
+    textSection("x", "new") + textSection("x", "deleted"),
+  ])
+    assert.equal(
+      splitUnifiedDiff(pair, opts).get("x"),
+      pair.slice(pair.indexOf("diff --git", 1)),
+    );
+});
+
+test("joinTypechanges is opt-in: the default keeps the symlink section alone", () => {
+  const made = TYPECHANGE_TO_LINK.slice(
+    TYPECHANGE_TO_LINK.indexOf("diff --git", 1),
+  );
+  assert.equal(splitUnifiedDiff(TYPECHANGE_TO_LINK).get("x"), made);
+  assert.equal(splitUnifiedDiff(TYPECHANGE_TO_LINK, {}).get("x"), made);
+  assert.equal(
+    splitUnifiedDiff(TYPECHANGE_TO_LINK, { joinTypechanges: false }).get("x"),
+    made,
+  );
+});
+
+// ------------------------------------------------------------ sectionOldPath
+
+test("sectionOldPath: a rename or copy source, decoded; nothing else", () => {
+  const rows = [
+    [
+      "a rename",
+      "diff --git a/old.txt b/x\nsimilarity index 80%\nrename from old.txt\nrename to x\n" +
+        "index 1111aaa..2222bbb 100644\n--- a/old.txt\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+      "old.txt",
+    ],
+    [
+      "a copy",
+      "diff --git a/src/a.ts b/src/b.ts\nsimilarity index 90%\ncopy from src/a.ts\ncopy to src/b.ts\n",
+      "src/a.ts",
+    ],
+    [
+      "a path with a space",
+      "diff --git a/a b.txt b/c.txt\nrename from a b.txt\nrename to c.txt\n",
+      "a b.txt",
+    ],
+    [
+      "a quoted non-ASCII source",
+      'diff --git "a/\\303\\251.txt" b/new.txt\nrename from "\\303\\251.txt"\nrename to new.txt\n',
+      "é.txt",
+    ],
+    [
+      "CRLF header lines",
+      "diff --git a/old b/x\r\nrename from old\r\nrename to x\r\n",
+      "old",
+    ],
+    [
+      "a plain modification",
+      "diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+      undefined,
+    ],
+    // The header ends at the first `---` or `@@` line: nothing after it is read.
+    [
+      "a rename line after the --- line",
+      "diff --git a/x b/x\n--- a/x\n+++ b/x\nrename from evil\n",
+      undefined,
+    ],
+    [
+      "a rename line after a hunk header",
+      "diff --git a/x b/x\n@@ -1 +1 @@\nrename from evil\n",
+      undefined,
+    ],
+    ["not a section", "rename from old\n", undefined],
+    ["an empty text", "", undefined],
+  ];
+  for (const [name, section, want] of rows)
+    assert.equal(sectionOldPath(section), want, name);
+});
+
+// ---------------------------------------------------------------- patchLines
+
+test("patchLines: the lines each side's hunks draw, bounded by the counts", () => {
+  const twoHunks =
+    "diff --git a/f b/f\n--- a/f\n+++ b/f\n" +
+    "@@ -2,3 +2,3 @@\n a\n-b\n+B\n c\n" +
+    "@@ -10,2 +10,3 @@\n x\n+y\n z\n";
+  const { old, new: added } = patchLines(twoHunks);
+  assert.deepEqual([...old], [2, 3, 4, 10, 11]);
+  assert.deepEqual([...added], [2, 3, 4, 10, 11, 12]);
+  assert.deepEqual(
+    [...patchLines("@@ -0,0 +1,2 @@\n+a\n+b\n").new],
+    [1, 2],
+  );
+  assert.deepEqual([...patchLines("@@ -0,0 +1,2 @@\n+a\n+b\n").old], []);
+  assert.deepEqual([...patchLines("@@ -1,2 +0,0 @@\n-a\n-b\n").old], [1, 2]);
+  assert.deepEqual([...patchLines("").old], []);
+});
+
+/** CommitComments' `newSideLines`, read from its source: a component module
+ *  this installless suite can't import, so its text is type-stripped here. */
+function loadNewSideLines() {
+  const text = readFileSync(
+    new URL("../src/features/pulls/CommitComments.tsx", import.meta.url),
+    "utf8",
+  ).replace(/\r\n/g, "\n");
+  const counts = text.match(/^const HUNK_COUNTS = .*;$/m);
+  const at = text.indexOf("export function newSideLines(");
+  const end = text.indexOf("\n}\n", at);
+  if (!counts || at < 0 || end < 0)
+    throw new Error("newSideLines: its source moved; update this loader");
+  const body = text.slice(at, end + 2).replace("export function", "function");
+  const js = stripTypeScriptTypes(`${counts[0]}\n${body}\n`);
+  return new Function(`${js}\nreturn newSideLines;`)();
+}
+
+test("patchLines().new equals newSideLines on every fixture", () => {
+  const newSideLines = loadNewSideLines();
+  const fixtures = [
+    "@@ -2,3 +2,3 @@\n a\n-b\n+B\n c\n@@ -10,2 +10,3 @@\n x\n+y\n z\n",
+    "@@ -0,0 +1,2 @@\n+a\n+b\n",
+    "@@ -1,2 +0,0 @@\n-a\n-b\n",
+    "@@ -3 +3 @@\n-a\n+b\n",
+    "@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+c\n\\ No newline at end of file\n",
+    "@@ -1,2 +1,2 @@\r\n a\r\n-b\r\n+c\r\n",
+    "@@ -1,1 +1,1 @@\n-a\n-b\n-c\n+d\n+e\n",
+    "@@ -5,2 +5,2 @@\n \n-x\n+y\n",
+    TYPECHANGE,
+    TYPECHANGE_TO_LINK,
+    OTHER_SECTION + OTHER_SECTION.replace(/y/g, "z"),
+    textSection("x", "deleted") + textSection("x", "new"),
+    "",
+    "no hunk at all\n",
+  ];
+  for (const text of fixtures)
+    assert.deepEqual(
+      [...patchLines(text).new],
+      [...newSideLines(text)],
+      JSON.stringify(text),
+    );
 });

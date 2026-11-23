@@ -17,6 +17,7 @@ import type {
   RemoteListFilter,
   ReviewStatePage,
 } from "../types";
+import type { FileBytes } from "./workingtree";
 
 /** Open PRs/MRs whose head is `head` — the ComparePanel duplicate probe. */
 export const forgePrsForBranch = (
@@ -157,6 +158,55 @@ export const forgePrCommitDiff = (
  *  PR-independent commit diff just passes a placeholder. */
 export const forgeCommitDiff = (repoPath: string, sha: string) =>
   invoke<string>("forge_pr_commit_diff", { repoPath, number: 0, oid: sha });
+
+/** The two commits a PR's whole-file reads pair: its merge base and the head. */
+export interface PrContentRevs {
+  /** The PR's merge base, full-length. */
+  oldSha: string;
+  /** The head the caller passed, echoed. */
+  newSha: string;
+}
+
+/** The PR's merge base against `headSha` (one forge read, plus a compare when the
+ *  commits aren't local). Rejects when no merge base can be read. */
+export const forgePrContentRevs = (
+  repoPath: string,
+  number: number,
+  lens: RemoteLens,
+  headSha: string,
+) =>
+  invoke<PrContentRevs>("forge_pr_content_revs", {
+    repoPath,
+    number,
+    lens,
+    headSha,
+  });
+
+/** A commit's first parent from the forge; null for a root commit. */
+export const forgeCommitFirstParent = (
+  repoPath: string,
+  oid: string,
+  lens: RemoteLens,
+) =>
+  invoke<string | null>("forge_commit_first_parent", { repoPath, oid, lens });
+
+/** One file's bytes at a full sha, from the forge. null = the path doesn't exist at
+ *  that commit; any failure (an unknown commit included) rejects. `maxBytes` caps
+ *  the read below the 20 MB preview cap (null = that cap). */
+export const forgeFileAtSha = (
+  repoPath: string,
+  sha: string,
+  filePath: string,
+  lens: RemoteLens,
+  maxBytes: number | null,
+) =>
+  invoke<FileBytes | null>("forge_file_at_sha", {
+    repoPath,
+    sha,
+    filePath,
+    lens,
+    maxBytes,
+  });
 
 /** Whether a commit exists on any remote (the History-tab comment surface gates on
  *  it — you can only comment on a commit the forge already has). */

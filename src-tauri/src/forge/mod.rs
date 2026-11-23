@@ -18,6 +18,7 @@ pub mod http;
 pub mod jira;
 pub mod model;
 pub mod my_work;
+pub mod pr_content;
 pub mod session;
 
 use crate::error::{AppError, AppResult};

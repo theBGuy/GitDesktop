@@ -785,7 +785,8 @@ export function ReviewThreadCard({
           })}
           {onReply &&
             (replying ? (
-              <div className="space-y-2">
+              // Marked as an editor open in a diff: a rebuild would drop its text.
+              <div className="space-y-2" data-diff-editor="">
                 {/* Not a live region: the always-mounted span below announces it. */}
                 {replyHeldReason !== null && (
                   <p className="flex items-start gap-1.5 text-muted-foreground text-xs">

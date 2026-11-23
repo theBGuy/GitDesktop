@@ -33,11 +33,16 @@ export interface ContentBuildInputs {
   boundExpired: boolean;
   /** Keep the shown paint regardless (a view held on purpose), bound or not. */
   frozen: boolean;
+  /** The caller paints hunk-only over unsettled reads rather than blanking (a
+   *  forge-patch host): that paint is never held over, so the reads build as
+   *  they land. */
+  paintsUnsettled?: boolean;
 }
 
 export function contentBuildGate(i: ContentBuildInputs): ContentBuildDecision {
   if (!i.wantContent) return "hunk-only";
-  if (!i.oldSettled || !i.newSettled) return "build";
+  if (!i.oldSettled || !i.newSettled)
+    return i.paintsUnsettled ? "hunk-only" : "build";
   const painted = i.textChanged || i.contentChanged;
   if (i.frozen && painted) return "hold-previous";
   if (!i.previousComplete) return "build";
@@ -138,4 +143,53 @@ export function changesSince(
       painted.oldText !== now.oldText || painted.newText !== now.newText,
     previousComplete: painted.complete,
   };
+}
+
+/** A forge-patch diff's content-mode upgrade. `pending`: render nothing yet
+ *  (a local first read with nothing of this path on screen, the single-paint
+ *  gate). `hunk-only`: paint or keep the hunk-only diff. `build`: build content
+ *  mode now. `keep`: the content build on screen stays as it is. `release`:
+ *  other content is ready over the build on screen, and waits for the step that
+ *  keeps the reader's line; an editor open in the diff holds that step. */
+export type ContentUpgradeDecision =
+  | "pending"
+  | "hunk-only"
+  | "build"
+  | "keep"
+  | "release";
+
+export interface ContentUpgradeInputs {
+  /** The whole-file reads come from a forge, never this clone's objects. */
+  forge: boolean;
+  /** Content mode applies: revs and their source are known, within budget. */
+  wanted: boolean;
+  /** A build of this path and diff text is on screen. */
+  onScreen: boolean;
+  /** That build is a content build (implies `onScreen`). */
+  contentShown: boolean;
+  /** A build of this path is on screen, of any diff text. */
+  pathOnScreen: boolean;
+  /** Both whole-file reads have an answer. */
+  settled: boolean;
+  /** The reads fit content mode and the hunk-match guard passed. */
+  matched: boolean;
+  /** The matched reads are the content build on screen. */
+  same: boolean;
+  /** An editor is open inside this diff; its text goes with a rebuild. */
+  editorOpen: boolean;
+}
+
+/** A build on screen is never blanked or rebuilt without its text changing:
+ *  losing the reads (revs, source, a refetch) keeps a content build, and every
+ *  move to other content for the same text goes through the release step. */
+export function contentUpgradeGate(
+  i: ContentUpgradeInputs,
+): ContentUpgradeDecision {
+  if (i.contentShown)
+    return i.matched && !i.same && !i.editorOpen ? "release" : "keep";
+  if (!i.wanted) return "hunk-only";
+  if (!i.settled) return i.forge || i.pathOnScreen ? "hunk-only" : "pending";
+  if (!i.matched) return "hunk-only";
+  if (!i.onScreen) return "build";
+  return i.editorOpen ? "hunk-only" : "release";
 }

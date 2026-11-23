@@ -135,7 +135,9 @@ delete), and deep links to the settings GitHub keeps browser-only.
 A unified or split diff with syntax highlighting, collapsible surrounding
 context, image diffing with each side's dimensions and file size, and a size
 change shown for other binary files (`1.2 MB → 725 KB · 486 KB smaller (−40%)`),
-GitHub and Bitbucket pull requests included. A non-image binary file with
+GitHub and Bitbucket pull requests included. Pull request diffs on GitHub,
+GitLab and Bitbucket expand their surrounding context and preview changed
+images too, GitHub fork pull requests included. A non-image binary file with
 unstaged changes (in your working copy or an agent session's) opens in its
 default program (a file your system would run instead is refused), or shows
 in Explorer, right from its diff; for a deleted file, Explorer opens the

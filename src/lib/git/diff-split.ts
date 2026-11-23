@@ -690,17 +690,89 @@ export function diffSectionStats(diff: string): DiffStatEntry[] {
  * an unkeyable section has no file row to attach to. A binary creation joins
  * its path's earlier section, so the size line sees the typechange; otherwise
  * the later section wins, since the text viewer parses one section per file
- * (a binary→symlink keeps its symlink text).
+ * (a binary→symlink keeps its symlink text). `joinTypechanges` also joins a
+ * section to an earlier BINARY one, so a binary→symlink keeps both halves; it
+ * is opt-in, for hosts that draw both halves (the pull request views).
  */
-export function splitUnifiedDiff(diff: string): Map<string, string> {
+export function splitUnifiedDiff(
+  diff: string,
+  opts?: { joinTypechanges?: boolean },
+): Map<string, string> {
   const sections = new Map<string, string>();
   for (const part of diff.split(DIFF_SECTION_BOUNDARY)) {
     if (!part.trim()) continue;
     const path = sectionFilePath(part);
     if (!path) continue;
     const prev = sections.get(path);
-    const join = prev !== undefined && sectionIsBinary(part);
+    const join =
+      prev !== undefined &&
+      (sectionIsBinary(part) ||
+        (opts?.joinTypechanges === true && sectionIsBinary(prev)));
     sections.set(path, join ? prev + part : part);
   }
   return sections;
+}
+
+/** A section's decoded `rename from` / `copy from` path, read from its own
+ *  header; undefined for any other section. */
+export function sectionOldPath(section: string): string | undefined {
+  const lines = section.split("\n");
+  const first = (lines[0] ?? "").replace(/\r$/, "");
+  if (!first.startsWith("diff --git ")) return undefined;
+  const header = first.slice("diff --git ".length);
+  for (const raw of lines.slice(1)) {
+    const line = raw.replace(/\r$/, "");
+    if (
+      line.startsWith("diff --git ") ||
+      line.startsWith("---") ||
+      line.startsWith("@@")
+    )
+      return undefined;
+    const move = MOVE_LINE.exec(line);
+    if (move && move[2] === "from") return movedSourcePath(move[3], header);
+  }
+  return undefined;
+}
+
+const PATCH_HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+/**
+ * The line numbers each side of a section's hunks draws, each hunk bounded by
+ * its header's counts (an omitted count is 1), so a second file's header in a
+ * joined section is never read as a line. The `new` set is CommitComments'
+ * `newSideLines` on every input (scripts/diff-split.test.mjs pins that).
+ */
+export function patchLines(section: string): {
+  old: ReadonlySet<number>;
+  new: ReadonlySet<number>;
+} {
+  const oldSide = new Set<number>();
+  const newSide = new Set<number>();
+  let oldLeft = 0;
+  let newLeft = 0;
+  let oldLine = 0;
+  let newLine = 0;
+  for (const l of section.split("\n")) {
+    if (oldLeft <= 0 && newLeft <= 0) {
+      const m = PATCH_HUNK.exec(l);
+      if (m) {
+        oldLine = Number(m[1]);
+        oldLeft = m[2] === undefined ? 1 : Number(m[2]);
+        newLine = Number(m[3]);
+        newLeft = m[4] === undefined ? 1 : Number(m[4]);
+      }
+      continue;
+    }
+    if (l.startsWith("\\")) continue;
+    if (!l.startsWith("+")) {
+      if (oldLeft > 0) oldSide.add(oldLine);
+      oldLine++;
+      oldLeft--;
+      if (l.startsWith("-")) continue;
+    }
+    if (newLeft > 0) newSide.add(newLine);
+    newLine++;
+    newLeft--;
+  }
+  return { old: oldSide, new: newSide };
 }

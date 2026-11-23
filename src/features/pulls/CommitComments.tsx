@@ -1100,6 +1100,7 @@ export function CommitLineComposer({
   fileSection,
   onClose,
   lens,
+  patchOnly = false,
 }: {
   repoPath: string;
   sha: string;
@@ -1115,6 +1116,9 @@ export function CommitLineComposer({
   onClose: () => void;
   /** Which repo the commit lives on (origin vs upstream lens). */
   lens: RemoteLens;
+  /** Refuse a line the section doesn't draw on every provider, for a host
+   *  whose diff can draw lines outside its patch. GitHub always refuses one. */
+  patchOnly?: boolean;
 }) {
   const createLineComment = useCreateCommitComment(repoPath, lens);
   const mentions = useMentionCandidates({ repoPath, lens, provider });
@@ -1129,12 +1133,27 @@ export function CommitLineComposer({
   // the END line (GitHub/Bitbucket commit comments are single-line APIs).
   const position =
     provider === "github" ? positionFromLine(fileSection, line) : null;
-  const disabledReason =
-    side === "old"
-      ? "Commit comments anchor to the new side — pick a line on the right."
-      : provider === "github" && position === null
-        ? "This line isn't in the commit's diff for this file."
-        : null;
+  const drawn = patchOnly ? newSideLines(fileSection ?? "") : null;
+  const offPatch =
+    provider === "github"
+      ? position === null
+      : drawn !== null && !drawn.has(line);
+  // A GitLab range posts its start line too, so under `patchOnly` both ends
+  // must be lines the patch draws.
+  const startOffPatch =
+    provider === "gitlab" && isRange && drawn !== null && !drawn.has(rangeFrom);
+  const disabledReason = (() => {
+    switch (true) {
+      case side === "old":
+        return "Commit comments anchor to the new side — pick a line on the right.";
+      case offPatch:
+        return "This line isn't in the commit's diff for this file.";
+      case startOffPatch:
+        return "This range starts on a line that isn't in the commit's diff for this file.";
+      default:
+        return null;
+    }
+  })();
   const canPost = disabledReason === null;
 
   const rangeHint = isRange ? RANGE_HINT[provider](line) : null;

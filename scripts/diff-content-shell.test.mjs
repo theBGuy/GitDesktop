@@ -177,7 +177,8 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
       : (returns.find((r) => r > body.open + g.index) ?? -1);
   };
   const imageAt = armReturn(
-    /\bif\s*\(\s*repoPath\s*&&\s*imageRevs\s*&&\s*imageMime\s*\(\s*filePath\s*\)\s*\)/,
+    // A host anchoring typechange halves takes them over the image arm.
+    /\bif\s*\(\s*repoPath\s*&&\s*imageRevs\s*&&\s*imageMime\s*\(\s*filePath\s*\)\s*(?:&&\s*!\s*\(\s*typechangeAnchors\s*&&\s*halves\s*!==\s*null\s*\)\s*)?\)/,
   );
   const headerOnlyAt = armReturn(/\bif\s*\(\s*headerOnly\s*!==\s*null\s*\)/);
   const typechangeAt = armReturn(/\bif\s*\(\s*halves\s*!==\s*null\s*\)/);
@@ -1650,8 +1651,7 @@ test("commit comment hosts derive selectedBinary for the shown file", () => {
     });
   // Negative controls: each host's attribute dropped or made constant, a new
   // host in a listed file, and a new host in an unlisted one.
-  const prValue =
-    'selectedBinary={sectionIsBinary(\n                        sections.get(effectivePath ?? "") ?? "",\n                      )}';
+  const prValue = "selectedBinary={selectedBinary}";
   const historyValue = "selectedBinary={selectedBinary}";
   const newHost =
     'function NewHost() {\n  return <CommitComments repoPath="x" />;\n}\n\n';
