@@ -1971,6 +1971,12 @@ test("the Keep local, mirror, local-upstream and agent-session push refusals lab
     '{"kind":"pushUpstreamIsLocal","message":"Push blocked — feat tracks a local branch (main), not a remote.","branch":"feat","upstream":"main"}',
     `{"kind":"branchIsAgentSession","message":"\\"gd/session/x\\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it.","branch":"gd/session/x"}`,
     `{"kind":"pushDestinationIsAgentSession","message":"\\"topic\\" would push to origin/gd/session/x, which is in gd/session/ — reserved for agent sessions, so GitDesktop won't push to it.","branch":"topic","remote":"origin","dest":"gd/session/x"}`,
+    `{"kind":"pushRemoteUnusable","message":"\\"feat\\" is set to push to \\"nope\\" (branch.feat.pushRemote), which GitDesktop can't use as a push remote, so nothing was pushed. Set branch.feat.pushRemote to the name of one of this repository's remotes, or unset it.","branch":"feat","key":"branch.feat.pushRemote","value":"nope"}`,
+    `{"kind":"pushRemoteUnusable","message":"remote.pushDefault is set but empty, so \\"feat\\" has no push destination and nothing was pushed. Unset remote.pushDefault, or set it to the name of one of this repository's remotes.","branch":"feat","key":"remote.pushDefault","value":""}`,
+    '{"kind":"pushDestinationExists","message":"fork already has a branch named feat, and it points at a different commit, so nothing was pushed.","branch":"feat","remote":"fork","dest":"feat"}',
+    '{"kind":"pushHeadMoved","message":"HEAD is no longer on feat, so nothing was pushed.","expected":"feat"}',
+    '{"kind":"pushHeadMoved","message":"HEAD is no longer detached, so nothing was pushed.","expected":"HEAD"}',
+    '{"kind":"pushTipMoved","message":"feat changed after you confirmed, so nothing was pushed. Review it and push again.","branch":"feat"}',
   ];
   for (const wire of payloads) {
     const e = JSON.parse(wire);

@@ -3,10 +3,10 @@
 // it. Both detection routes (SyncControls' beginPush, BranchSwitcher's
 // beginPublishBranch) share one two-phase machine: before the ask a settle only
 // records, the decision reads that record after the last await, and once the
-// prompt is up a settle swaps it for the fork guard, releases its hold, or is
-// dropped. Source pins over whitespace-normalized text, each with an in-memory
-// mutant proving it can fail; an unreadable file or a missing anchor is a
-// problem, never a pass.
+// prompt is up a settle swaps it for the fork guard, releases its hold, and a
+// match after Publish is announced once the push lands. Source pins over
+// whitespace-normalized text, each with an in-memory mutant proving it can
+// fail; an unreadable file or a missing anchor is a problem, never a pass.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -74,16 +74,22 @@ const ROUTES = [
     fn: "beginPush",
     repo: "pushedIn",
     refusal: "refuseWhilePushing()",
-    push: "void doPush(",
+    push: "const ran = doPush(",
     waitClosed: false,
+    // A match whose head repository and branch ARE the destination opens no
+    // guard (publishUpdatesForkPr): the publish updates that pull request.
+    noMatch: "m === null || updatesForkPr(m)",
+    guardMatch: "if (match && !updatesForkPr(match)) {",
   },
   {
     file: SWITCHER,
     fn: "beginPublishBranch",
     repo: "publishIn",
     refusal: "pushAlreadyActive()",
-    push: "void runPushBranch(",
+    push: "const ran = runPushBranch(",
     waitClosed: true,
+    noMatch: "m === null || updatesForkPr(m)",
+    guardMatch: "if (match && !updatesForkPr(match)) {",
   },
 ];
 
@@ -204,7 +210,7 @@ function routeProblems(route, src) {
     out.push(p("the settle handler toasts through refuseIfSwitched"));
   else if (
     onSettle !==
-    `{clearTimeout(timer); if (m === null) {useConfirm.getState().setRequestHold(asked, {}); return;} if (asked !== null && useConfirm.getState().request === asked && landedIn(${route.repo}).live) {withdrawPublishConfirm(publishAsk); openGuard(m);}}`
+    `{clearTimeout(timer); if (${route.noMatch}) {useConfirm.getState().setRequestHold(asked, {}); return;} if (asked !== null && useConfirm.getState().request === asked && landedIn(${route.repo}).live) {withdrawPublishConfirm(publishAsk); openGuard(m);}}`
   )
     out.push(p(`the settle handler drifted: ${onSettle}`));
 
@@ -214,7 +220,7 @@ function routeProblems(route, src) {
     `landedIn(${route.repo});`,
     "if (!live) {",
     `if (${route.refusal} || refuseWhilePublishing(queryClient, repoPath)) return;`,
-    "if (match) {withdrawPublishConfirm(publishAsk); openGuard(match); return;}",
+    `${route.guardMatch}withdrawPublishConfirm(publishAsk); openGuard(match); return;}`,
     route.push,
   ];
   let from = 0;
@@ -226,6 +232,10 @@ function routeProblems(route, src) {
     }
     from = i + step.length;
   }
+
+  // (9) The route's own push carries the one late-match notice.
+  if (body.split("noticeLateForkMatch(").length !== 2)
+    out.push(p("not one late-match notice"));
 
   // (8) One spelling of the copy and the bound, imported from publish-confirm.
   // The REASON and NOTE sentences are matched file-wide; the generic fragments
@@ -248,21 +258,31 @@ function routeProblems(route, src) {
   return out;
 }
 
-/** (6) BranchSwitcher's own-mark exemption, in its one sanctioned form, and
- *  the mark cleared only by the release latch. */
+/** (6) BranchSwitcher's own-mark exemption, in its one sanctioned form, after
+ *  the sync bar's check (never `mine`, so it refuses first), and the mark
+ *  cleared only by the release latch. */
 function switcherProblems(src) {
   if (src === null) return ["BranchSwitcher: source unreadable"];
   const out = [];
   const active = fnBody(src, "pushAlreadyActive");
   if (active === null) out.push("pushAlreadyActive: not found");
-  else if (
-    !norm(active).includes(
-      "{if (publishDetectRef.current === mine) return refuseWhilePushRuns(queryClient, repoPath); if (publishDetectRef.current?.repo === repoPath) {",
+  else {
+    const flat = norm(active);
+    if (
+      !flat.includes(
+        "{if (headerDetectionFor(repoPath) !== null) {toast.info(BRANCH_PUSH_ACTIVE_MESSAGE); return true;} if (publishDetectRef.current === mine)",
+      )
     )
-  )
-    out.push(
-      "pushAlreadyActive: no publishDetectRef.current === mine exemption",
-    );
+      out.push("pushAlreadyActive: the sync bar's check does not refuse first");
+    if (
+      !flat.includes(
+        "if (publishDetectRef.current === mine) return refuseWhilePushRuns(queryClient, repoPath); if (publishDetectRef.current?.repo === repoPath) {",
+      )
+    )
+      out.push(
+        "pushAlreadyActive: no publishDetectRef.current === mine exemption",
+      );
+  }
   // Keep local: the listed route re-checks the row its fresh read returned.
   // Each route's refusal before that read is pinned by the Vitest rows in
   // src/test/branch-switcher-keep-local.test.tsx.
@@ -367,6 +387,12 @@ function syncProblems(src) {
     )
   )
     out.push("SyncControls: beginPush has no fire-time re-entry guard");
+  // A press from an earlier mount of the bar, which this mount never counted.
+  if (
+    begin !== null &&
+    !norm(begin).includes("if (headerDetectionFor(repoPath) !== null) return;")
+  )
+    out.push("SyncControls: beginPush ignores an earlier mount's check");
   if (/const \{\s*\[/.test(src))
     out.push("SyncControls: a computed-key destructure (a compiler bailout)");
   return out;
@@ -453,7 +479,7 @@ for (const route of ROUTES) {
       mutate(
         real,
         file,
-        /(\n {4}const \[list, fetchUrl, pushUrl\] = await Promise\.all)/,
+        /(\n {4}const \[list, (?:fetchUrl, pushUrl|rows)\] = await Promise\.all)/,
         (_m, g) => `\n    await check;${g}`,
       ),
       `${fn}: an await precedes the local reads`,
@@ -463,7 +489,7 @@ for (const route of ROUTES) {
       mutate(
         mutate(real, file, `\n    ${TIMER_DECL}`, ""),
         file,
-        /(\n {4}\/\/ (?:A named publish|The HEAD arm publishes))/,
+        /(\n {4}\/\/ (?:A named publish|Publish goes where))/,
         (_m, g) => `\n    ${TIMER_DECL}${g}`,
       ),
       `${fn}: not declared before the check: let timer`,
@@ -563,7 +589,7 @@ for (const route of ROUTES) {
       mutate(
         real,
         file,
-        /\n {6}if \((refuseWhilePushing|pushAlreadyActive)\(\) \|\| refuseWhilePublishing\(queryClient, repoPath\)\)\n {8}return;/,
+        /\n {6,8}if \(\s*(refuseWhilePushing|pushAlreadyActive)\(\) \|\|\s*refuseWhilePublishing\(queryClient, repoPath\)\s*\)\n {8,10}return;/,
         () => "",
       ),
       `${fn}: promptless arm out of order at: if (`,
@@ -631,7 +657,7 @@ for (const route of ROUTES) {
       mutate(
         real,
         file,
-        /(\n {4}const \[list, fetchUrl, pushUrl\] = await Promise\.all)/,
+        /(\n {4}const \[list, (?:fetchUrl, pushUrl|rows)\] = await Promise\.all)/,
         (_m, g) => `\n${text}${g}`,
       );
     failsWith(
@@ -664,6 +690,16 @@ for (const route of ROUTES) {
       ),
       `${fn}: no settle handler`,
     );
+    // (9) the late-match notice deleted, or called twice
+    const NOTICE = /\n[ \t]*noticeLateForkMatch\(\{[\s\S]*?\}\);/;
+    failsWith(
+      mutate(real, file, NOTICE, () => ""),
+      `${fn}: not one late-match notice`,
+    );
+    failsWith(
+      mutate(real, file, NOTICE, (m) => `${m}${m}`),
+      `${fn}: not one late-match notice`,
+    );
   });
 }
 
@@ -677,6 +713,25 @@ test("BranchSwitcher: the own-mark exemption's mutants are caught", () => {
       "",
     ),
     "pushAlreadyActive: no publishDetectRef.current === mine exemption",
+  );
+  // The sync bar's check moved under the exemption, or dropped.
+  failsWith(
+    mutate(
+      real,
+      SWITCHER,
+      "    if (headerDetectionFor(repoPath) !== null) {\n      toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);\n      return true;\n    }\n",
+      "",
+    ),
+    "pushAlreadyActive: the sync bar's check does not refuse first",
+  );
+  failsWith(
+    mutate(
+      real,
+      SWITCHER,
+      "if (headerDetectionFor(repoPath) !== null) {",
+      "if (headerDetectionFor(repoPath) !== null && mine === undefined) {",
+    ),
+    "pushAlreadyActive: the sync bar's check does not refuse first",
   );
   failsWith(
     mutate(
@@ -746,8 +801,8 @@ test("SyncControls: the busy-narrowing mutants are caught", () => {
     mutate(
       real,
       SYNC,
-      "const detecting = (detections[repoPath] ?? 0) > 0;",
-      "const detecting = (detectionsRef.current[repoPath] ?? 0) > 0;",
+      "(detections[repoPath] ?? 0) > 0 || storedDetection !== null;",
+      "(detectionsRef.current[repoPath] ?? 0) > 0 || storedDetection !== null;",
     ),
     "detectionsRef read outside its handlers",
   );
@@ -759,6 +814,15 @@ test("SyncControls: the busy-narrowing mutants are caught", () => {
       "",
     ),
     "beginPush has no fire-time re-entry guard",
+  );
+  failsWith(
+    mutate(
+      real,
+      SYNC,
+      "    if (headerDetectionFor(repoPath) !== null) return;\n",
+      "",
+    ),
+    "beginPush ignores an earlier mount's check",
   );
   failsWith(
     mutate(

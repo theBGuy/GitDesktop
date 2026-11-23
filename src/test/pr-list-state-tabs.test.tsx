@@ -384,6 +384,45 @@ describe("PullRequestsPanel (real panel)", () => {
     expect([...new Set(states())]).toEqual(["open", "merged", "unmerged"]);
   });
 
+  it.each([
+    ["gitlab", "!12"],
+    ["github", "#12"],
+  ] as const)(
+    "%s: a row's number line leads with %s",
+    async (provider, ref) => {
+      vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
+      vi.mocked(forgeStatus).mockResolvedValue(
+        provider === "gitlab" ? READY_GITLAB : READY_GITHUB,
+      );
+      vi.mocked(listLocalPrs).mockResolvedValue([]);
+      vi.mocked(forgePrListPage).mockResolvedValue({
+        rows: [
+          {
+            number: 12,
+            url: "https://example.test/12",
+            title: "Numbered row",
+            baseRefName: "main",
+            headRefName: "feat-12",
+            isDraft: false,
+            state: "OPEN",
+            author: null,
+            labels: [],
+            createdAt: "",
+            headSha: "",
+            stack: null,
+            stackUnknown: false,
+            crossRepository: false,
+          } as PrListPage["rows"][number],
+        ],
+        capped: false,
+      });
+      renderPanel();
+      const title = await screen.findByText("Numbered row");
+      const numberLine = title.closest("p")?.nextElementSibling;
+      expect(numberLine?.textContent?.startsWith(ref)).toBe(true);
+    },
+  );
+
   it("badges Draft only on an open draft row", async () => {
     const draftRow = (title: string, number: number, state: string) =>
       ({

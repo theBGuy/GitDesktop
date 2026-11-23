@@ -27,6 +27,7 @@ import {
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
+import { prRef } from "@/lib/pulls/pr-state";
 import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { toastError } from "@/lib/toast";
 import { refuseWhilePublishing } from "./PublishPendingBanner";
@@ -184,7 +185,7 @@ export function ForkPrPublishGuard({
               className="cursor-pointer underline underline-offset-3 hover:text-foreground"
               onClick={() => match && openUrl(match.url).catch(toastError)}
             >
-              PR #{match?.number} — {match?.title}
+              PR {match ? prRef("github", match.number) : "#"} — {match?.title}
             </button>{" "}
             — from <span className="font-mono">{slug}</span>. Publishing to{" "}
             <span className="font-mono">{destination}</span> creates a separate

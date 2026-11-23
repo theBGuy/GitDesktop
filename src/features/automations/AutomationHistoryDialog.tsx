@@ -16,6 +16,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { create } from "zustand";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
@@ -50,7 +51,9 @@ import {
 import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
 import { useRepoIdentity } from "@/lib/git/queries";
 import { repoIdentity } from "@/lib/git/repo-identity";
+import type { ForgeProvider, ForgeStatus } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { PR_SIGIL } from "@/lib/pulls/pr-state";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { repoNameFromPath } from "@/lib/stores/notifications";
@@ -324,12 +327,17 @@ function markerTitle(outcomes: Outcome[]): string {
 
 const TITLE_FOR: Record<
   TargetKind,
-  (entry: AutomationHistoryEntry, outcomes: Outcome[]) => string
+  (
+    entry: AutomationHistoryEntry,
+    outcomes: Outcome[],
+    provider: ForgeProvider | null | undefined,
+  ) => string
 > = {
-  remote: (entry) => {
+  remote: (entry, _outcomes, provider) => {
     const title = asText(entry.title);
-    const ref = asText(entry.ref);
-    return title ? `#${ref} · ${title}` : `#${ref}`;
+    // The stored ref is text, so the sigil is prefixed as is (a junk ref stays visible).
+    const ref = `${PR_SIGIL[provider ?? "github"]}${asText(entry.ref)}`;
+    return title ? `${ref} · ${title}` : ref;
   },
   local: (entry) => asText(entry.title),
   commit: (entry) => {
@@ -470,6 +478,14 @@ function AutomationHistoryBody({
   // its main checkout; the raw path stands in while it resolves, and stays in once
   // the lookup has failed for good — until a remount refetches it.
   const identity = useRepoIdentity(repoPath).data;
+  // The history is one repository's, so its rows print that repository's sigil.
+  // Cache-only, as the runner's prints: opening history never probes the forge.
+  const provider = useSyncExternalStore(
+    (notify: () => void) => queryClient.getQueryCache().subscribe(notify),
+    () =>
+      queryClient.getQueryData<ForgeStatus>(["repo", repoPath, "forge-status"])
+        ?.provider,
+  );
   const history = useQuery({
     queryKey: automationHistoryKey(repoPath),
     queryFn: () => listAutomationHistory(repoPath),
@@ -652,6 +668,7 @@ function AutomationHistoryBody({
       ) : (
         <HistoryList
           rows={rows}
+          provider={provider}
           anyEnabled={anyEnabled}
           isLive={isLive}
           onListKeyDown={onListKeyDown}
@@ -670,6 +687,7 @@ function AutomationHistoryBody({
 
 function HistoryList({
   rows,
+  provider,
   anyEnabled,
   isLive,
   onListKeyDown,
@@ -679,6 +697,7 @@ function HistoryList({
   onSetUp,
 }: {
   rows: AutomationHistoryEntry[];
+  provider: ForgeProvider | null | undefined;
   anyEnabled: boolean;
   /** Whether THIS instance holds a running/queued automation run for the row's
    *  target in that outcome's mode. */
@@ -734,6 +753,7 @@ function HistoryList({
         <HistoryRow
           key={entry.id}
           entry={entry}
+          provider={provider}
           isLive={isLive}
           onOpenTarget={onOpenTarget}
           onViewResult={onViewResult}
@@ -749,12 +769,15 @@ const ROW_CLASS =
 
 function HistoryRow({
   entry,
+  provider,
   isLive,
   onOpenTarget,
   onViewResult,
   onFocusRow,
 }: {
   entry: AutomationHistoryEntry;
+  /** The repository's cached forge provider; an unloaded one prints GitHub's `#`. */
+  provider: ForgeProvider | null | undefined;
   isLive: (entry: AutomationHistoryEntry, action: ActionId | null) => boolean;
   onOpenTarget: (entry: AutomationHistoryEntry) => void;
   onViewResult: (resultId: string) => void;
@@ -763,7 +786,8 @@ function HistoryRow({
   const outcomes = Array.isArray(entry.outcomes) ? entry.outcomes : [];
   const Glyph = glyphFor(entry);
   const title =
-    TITLE_FOR[entry.targetKind]?.(entry, outcomes) ?? markerTitle(outcomes);
+    TITLE_FOR[entry.targetKind]?.(entry, outcomes, provider) ??
+    markerTitle(outcomes);
   const count = asCount(entry.count);
   const stamp = stampMs(entry.ts) !== null ? entry.ts : null;
   // Only a pull request has somewhere to go; a commit or marker row would give

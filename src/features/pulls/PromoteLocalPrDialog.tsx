@@ -37,7 +37,9 @@ import {
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
+import { withCrossNameGuidance } from "@/lib/pulls/cross-name-create";
 import type { LocalPr } from "@/lib/pulls/local";
+import { prRef } from "@/lib/pulls/pr-state";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import { landedIn, repoNameFromPath } from "@/lib/stores/notifications";
@@ -102,7 +104,8 @@ export function PromoteLocalPrDialog({
   const isGitLab = forge.data?.provider === "gitlab";
   // The label names the detected forge (all three); the noun stays two-way
   // because only GitLab calls it a merge request.
-  const remoteLabel = providerLabel(forge.data?.provider);
+  const provider = forge.data?.provider;
+  const remoteLabel = providerLabel(provider);
   // Both toasts' View, named only once the forge status has answered:
   // `providerLabel` defaults to GitHub, and nothing gates this flow on the status.
   const forgeViewLabel = forge.data ? `View on ${remoteLabel}` : undefined;
@@ -317,7 +320,7 @@ export function PromoteLocalPrDialog({
       markPrCreated(repoPath, pr.head, { number, url });
       // The back-link before the carry, so a carry failure still leaves it.
       await linkLocal(
-        `Promoted to ${remoteLabel} ${prNoun} [#${number}](${url}).`,
+        `Promoted to ${remoteLabel} ${prNoun} [${prRef(provider, number)}](${url}).`,
       );
       // Carry the local comments over, in order, so none are lost.
       failedStep = "carrying over comments";
@@ -331,7 +334,7 @@ export function PromoteLocalPrDialog({
       // both a repo switch and a move to another pull request: landed elsewhere
       // they would close a dialog the user reopened there and pull them back.
       const { live, away } = landedIn(repoPath);
-      toast.success(`Opened ${prNoun} #${number}${away}`, {
+      toast.success(`Opened ${prNoun} ${prRef(provider, number)}${away}`, {
         description: url,
         action: {
           label: forgeViewLabel ?? "View",
@@ -350,11 +353,18 @@ export function PromoteLocalPrDialog({
       }
     } catch (e) {
       if (created === null) {
+        // A renamed copy's refusal names the Push menu, which acts on HEAD; a
+        // head that isn't checked out is pointed at its own row instead. Every
+        // toast form and the notification carry this one sentence.
+        const headIsCurrent =
+          branches.data?.some((b) => b.name === pr.head && b.isCurrent) ===
+          true;
+        const guided = withCrossNameGuidance(e, headIsCurrent);
         // The create call rejected and no remote PR is known to exist: keep the
         // dialog open either way (a may-have-landed error says to check before
         // retrying). A failed local close attempted no create: nothing to undo.
         if (closedAt === null) {
-          toastError(e);
+          toastError(guided);
           return;
         }
         // Reopened BEFORE the toast, so the retry-capable dialog sits over a
@@ -372,13 +382,13 @@ export function PromoteLocalPrDialog({
           const awayRepo = landedIn(repoPath).live
             ? null
             : repoNameFromPath(repoPath);
-          if (mayHaveLanded(e)) {
-            if (awayRepo) toastErrorWithNote(e, `In ${awayRepo}`);
-            else toastError(e);
+          if (mayHaveLanded(guided)) {
+            if (awayRepo) toastErrorWithNote(guided, `In ${awayRepo}`);
+            else toastError(guided);
           } else {
-            const sentence = prCreateFailedSentence(prNoun, pr.head, e);
+            const sentence = prCreateFailedSentence(prNoun, pr.head, guided);
             toastErrorWithNote(
-              e,
+              guided,
               awayRepo
                 ? `In ${awayRepo}, ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}.`
                 : `${sentence}.`,
@@ -388,17 +398,20 @@ export function PromoteLocalPrDialog({
           // A pushed-branch line already says the create failed; a push failure
           // leads with the notification's sentence, since the description is
           // taken by the reopen instruction.
-          const { summary } = presentError(e);
+          const { summary } = presentError(guided);
           let title = `Couldn't create the ${prNoun}: ${summary}`;
-          if (mayHaveLanded(e) || summary.startsWith(BRANCH_PUSHED_FAILED_LEAD))
+          if (
+            mayHaveLanded(guided) ||
+            summary.startsWith(BRANCH_PUSHED_FAILED_LEAD)
+          )
             title = summary;
-          else if (createFailedAtPush(e) || createTimedOutAtPush(e))
-            title = `${prCreateFailedSentence(prNoun, pr.head, e)}: ${summary}`;
+          else if (createFailedAtPush(guided) || createTimedOutAtPush(guided))
+            title = `${prCreateFailedSentence(prNoun, pr.head, guided)}: ${summary}`;
           toastComposedError({
             title,
             description:
               "The local PR couldn't be reopened — reopen it from its view.",
-            errors: [e, reopenError],
+            errors: [guided, reopenError],
             headings: [`Creating the ${prNoun}`, "Reopening the local PR"],
           });
         }
@@ -407,7 +420,7 @@ export function PromoteLocalPrDialog({
           repoPath,
           head: pr.head,
           noun: prNoun,
-          error: e,
+          error: guided,
         });
         return;
       }
@@ -421,7 +434,7 @@ export function PromoteLocalPrDialog({
       const { live, away } = landedIn(repoPath);
       if (stillOnThisPr(live)) flushSync(() => onOpenChange(false));
       toastComposedError({
-        title: `Created ${prNoun} #${number}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
+        title: `Created ${prNoun} ${prRef(provider, number)}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         errors: [e],
         view: { url, label: forgeViewLabel },
         duration: 10000,

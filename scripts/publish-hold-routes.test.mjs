@@ -52,6 +52,10 @@ const CALLEES = {
     hook: "useDeleteRemoteBranch",
     file: `${Q}branches.ts`,
   },
+  gitRenameBranchRemote: {
+    hook: "useRenameBranchOnRemote",
+    file: `${Q}branches.ts`,
+  },
 };
 
 const HOOKS = Object.values(CALLEES).map((c) => c.hook);
@@ -64,6 +68,7 @@ const ROUTES = {
   [`${R}BranchSwitcher.tsx`]: ["useDeleteRemoteBranch", "usePush"],
   [`${R}SyncControls.tsx`]: ["usePush"],
   [`${R}ForkPrPublishGuard.tsx`]: ["usePush"],
+  [`${R}RenameBranchDialog.tsx`]: ["useRenameBranchOnRemote"],
   "features/pulls/CreatePrDialog.tsx": ["useCreatePr"],
   "features/pulls/PromoteLocalPrDialog.tsx": ["useCreatePr"],
   "features/tags/TagDetailView.tsx": ["useDeleteTagOnOrigin", "usePushTag"],
@@ -128,10 +133,30 @@ const EXCLUDED = {
     reason:
       "a Vitest harness whose push never reaches the backend; it starts pushes only to test the local delete's and the branch update's fire-time holds",
   },
+  "test/branch-switcher-publish-hold.test.tsx": {
+    hooks: ["usePublishRepo"],
+    reason:
+      "a Vitest harness whose publish never reaches the backend; it starts one only to test the rename, delete and dialog publish holds",
+  },
+  "test/branch-row-remote-rename.test.tsx": {
+    hooks: ["usePush", "useRenameBranchOnRemote"],
+    reason:
+      "a Vitest harness whose remote rename and pushes never reach the backend; it starts them only to test the branch rows' push-family paint and holds",
+  },
+  "test/sync-bar-push-routing.test.tsx": {
+    hooks: ["useRenameBranchOnRemote"],
+    reason:
+      "a Vitest harness whose remote rename never reaches the backend; it starts one only to test the sync bar's Push hold",
+  },
   "test/sync-controls-holds.test.tsx": {
     hooks: ["usePush"],
     reason:
       "a Vitest harness whose push never reaches the backend; it starts a sibling worktree's push only to test the sync bar's fire-time sibling hold",
+  },
+  "test/branch-push-routing.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts a sibling worktree's push only to test the branch list's foreign-push paint and hold",
   },
 };
 
@@ -185,6 +210,21 @@ const HANDLERS = [
     order: ["refuseWhilePublishing(", "closeForkGuard("],
   },
   { file: `${R}ForkPrPublishGuard.tsx`, name: "pushToFork", refusals: 2 },
+  {
+    file: `${R}RenameBranchDialog.tsx`,
+    member: "onSubmit",
+    // One ahead of the local rename of the checked-out branch, one ahead of
+    // every remote step.
+    refusals: 2,
+    order: [
+      "remoteStep && refuseWhileOffline()",
+      "remoteStep && refuseWhilePushRuns(",
+      "isHead && refuseWhilePublishing(",
+      "renameBranch.mutateAsync(",
+      "if (refuseWhilePublishing(queryClient, repoPath)) return;",
+      "renameOnRemote.mutateAsync(",
+    ],
+  },
   {
     file: "features/pulls/CreatePrDialog.tsx",
     member: "onSubmit",
@@ -251,7 +291,7 @@ const RENDER_PINS = {
       "heldReason={(() => {switch (true) {case pushActive: return branchPushHoldReason(pushPaused); case publishActive: return PUBLISH_HOLD_REASON; default: return offlineHold;",
       // The row says "Publishing" only for a push recorded as a create, never
       // while the pre-push detection is still deciding.
-      "if (rowDetecting) return branchPreparingLabel(publishDetect?.remote ?? null);",
+      "if (rowDetection !== undefined) return branchPreparingLabel(rowDetection.remote);",
     ],
     stale: [],
   },
@@ -917,11 +957,11 @@ test("the push and publish copy pins fail on their old spellings", () => {
   failsWith(
     mutate(realSources(), `${R}BranchSwitcher.tsx`, (text) =>
       text.replace(
-        "branchPreparingLabel(publishDetect?.remote ?? null)",
-        "branchPublishLabel(publishDetect?.remote ?? null)",
+        "branchPreparingLabel(rowDetection.remote)",
+        "branchPublishLabel(rowDetection.remote)",
       ),
     ),
-    "if (rowDetecting)",
+    "if (rowDetection !== undefined)",
   );
   // Any feature file calling it, not only the switcher; a comment naming it is
   // not a call (push-writes.ts's own call is outside features/).

@@ -68,6 +68,7 @@ import {
   resolveLocalLanding,
 } from "@/lib/local-landing/resolve";
 import { useMenuKeyFollowUpCanceller } from "@/lib/menu-key-follow-up";
+import { prRef } from "@/lib/pulls/pr-state";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useSettings } from "@/lib/settings/queries";
@@ -1151,7 +1152,9 @@ function MyWorkRow({
         <Icon className="size-3.5" aria-hidden />
       </span>
       <span className="shrink-0 tabular-nums text-muted-foreground">
-        #{item.number}
+        {item.isPullRequest
+          ? prRef(item.provider, item.number)
+          : `#${item.number}`}
       </span>
       <span
         className="min-w-0 flex-1 truncate"

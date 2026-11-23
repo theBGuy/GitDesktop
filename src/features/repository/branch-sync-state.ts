@@ -41,16 +41,10 @@ export function remoteHasBranch(
   return list?.some((r) => r.remote === remote && r.name === branch);
 }
 
-// The create decision is out of reach by design for: narrow or remapped fetch
-// refspecs and a git without the %(push) atoms (no destination git resolves), a
-// push remote with its own push refspecs (git's bare push runs as configured),
-// several pushurls (the first is named; the push goes to all), force pushes (their
-// own confirm), and presence, which is remote-tracking refs as of the last fetch.
-// Measured on the owner's 109 repos: push refspecs 0, several pushurls 0, narrow
-// fetch 1 (a fixture); stale presence can't be measured without a network read.
-// A mirror push remote is not on this list: Rust refuses every push to one
-// (pushRemoteIsMirror) before git runs. It claims a create only from facts git
-// reports, with no network read.
+// The push-destination contract and its out-of-contract classes live on
+// `resolve_push_target` (git/remote.rs). This file claims a create only from
+// facts git reports (remote-tracking refs as of the last fetch), with no network
+// read.
 
 /** The bare-push create decision. A resolved destination that the remote is
  *  not known to have → true (ask); known present → false; an UNRESOLVED
@@ -312,6 +306,25 @@ export function destinationSlug(
   slugOf: (url: string) => string | null,
 ): string | null {
   return url !== null && forgeShapedUrl(url) ? slugOf(url) : null;
+}
+
+/** Whether publishing `branch` to the remote behind `pushUrl` updates the fork
+ *  pull request `match` describes (its head repository and head branch) rather
+ *  than creating a separate copy: then the fork guard has nothing to warn about.
+ *  Slugs compare case-insensitively; a null or unparsable URL answers false. */
+export function publishUpdatesForkPr(
+  match: { headRepoOwner: string; headRepoName: string; headRefName: string },
+  pushUrl: string | null,
+  branch: string,
+  slugOf: (url: string) => string | null,
+): boolean {
+  if (branch !== match.headRefName) return false;
+  const slug = destinationSlug(pushUrl, slugOf);
+  if (slug === null) return false;
+  return (
+    slug.toLowerCase() ===
+    `${match.headRepoOwner}/${match.headRepoName}`.toLowerCase()
+  );
 }
 
 /** One run of prompt text; `mono` marks a ref, remote or slug. */

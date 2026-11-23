@@ -1448,7 +1448,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Push-like run recheck** — writes whose own default trigger starts CI for
   the code they touch arm `recheckRunsAfterPush` (`queries/push-writes.ts`) on
   success, because the run can appear, or flip status, after the settle-time
-  read. They are: pushing commits or tags; opening, reopening or landing a pull
+  read. They are: pushing commits or tags; renaming a branch on its remote
+  (`useRenameBranchOnRemote`, `queries/branches.ts`, whenever its push landed:
+  renamed or old name kept); opening, reopening or landing a pull
   request (origin-lens merge, GitLab arm-auto-merge) or updating its branch; a
   resolve push; publishing or deleting a release; publishing a repository;
   creating a linked branch on the origin lens; dispatching a workflow; and
@@ -1461,11 +1463,13 @@ one grep away on the named symbol. Grows via Conventions-sync.
   head move), reopen and merge name their PR; the finish-resolve push
   (`useFinishRemotePrResolve`) covers every PR in its lens. A plain push,
   re-run, re-run job, play job and approve name no PR and cover both lenses.
+  A remote rename hands none: the name it pushes has no PR yet.
   Merge hands them because a Bitbucket fast-forward puts the PR's head sha on
   the base, and Bitbucket's checks read that sha's statuses; for any other
   merge it is a precaution. A later arm re-arms the per-repo timer, and its
-  one fire covers every coalesced arm's reads. A remote-branch delete instead
-  schedules `recheckListsLater` with the keys its own call site builds
+  one fire covers every coalesced arm's reads. A remote-branch delete, and a
+  remote rename that deleted the old name (`renamed`), instead schedule
+  `recheckListsLater` with `headDeletePrListKeys` (`queries/branches.ts`)
   (GitHub closes a head-deleted PR asynchronously); a PR merge (unless queued),
   close or reopen and an issue close or reopen arm the same re-read with
   lens-scoped list keys, since the forge's list membership lags the row's own
@@ -1473,8 +1477,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   detail reads, since the forge closes the issues a merge resolves after it
   answers. Its per-repo entry holds the union of the keys owed and fires ONE
   invalidation. Guards: `scripts/push-recheck-family.test.mjs` pins the arm
-  sites (the run rechecks, keyed on the api callees; the branch-delete and the
-  merge, close and reopen list re-reads, which no other write schedules), and
+  sites (the run rechecks, keyed on the api callees; the branch-delete,
+  remote-rename, merge, close and reopen list re-reads, which no other write
+  schedules), and
   `scripts/push-writes.test.mjs` pins the union fire.
 - **Remote state re-file** — a write that changes a remote PR's or issue's
   open/closed state (a merge unless queued, a close, a reopen) re-files that
@@ -1620,6 +1625,18 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `usePendingRepoWrites` + `pendingWriteMatching` (typed twins:
   `pendingIssueWrite`, `pendingDiscussionWrite`), matched on the record its
   variables name.
+- **Branch-push family** — a branch push and a remote rename share one mutation
+  key (`branchPushKey`, `queries/push-writes.ts`), so every hold that reads the
+  family (`usePendingBranchPushes`, `refuseWhilePushRuns`,
+  `refuseWhileBranchPushes`) covers both. `pendingBranchPushesFor` reads a
+  rename (`RemoteRenameVars`) as TWO states, the old name and the new, marked
+  `renaming`: the row carries either one while it runs. A new write that sends
+  a branch, or holds the repository's network lock for as long, joins the
+  family instead of growing a hold of its own. The one route the family leaves
+  open is the rename dialog on a branch whose own remote rename runs in this
+  checkout, which shows the running state. Both halves carry the exception:
+  the render-time hold (`renameHoldOf`, `BranchSwitcher.tsx`) and the
+  fire-time refusal (`refuseWhileBranchPushes`' `exceptOwnRename`).
 - **Record-scoped pending** — a detail view or strip that one mounted instance
   reuses across records (the roster is the guard's `MEMBERS` list, below; a new
   reused view joins it in the same change) never reads a mutation observer's

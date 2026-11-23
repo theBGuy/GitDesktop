@@ -33,5 +33,7 @@ export function applyReconcileVerdict(
     return cur;
   if (verdict === "merged")
     return { ...cur, status: "merged", mergedAt: cur.mergedAt ?? now };
-  return { ...cur, status: "closed" };
+  // Every close here is a transition (the guard lets only open records through),
+  // so any `closedAt` on the record is stale from an earlier reopen.
+  return { ...cur, status: "closed", closedAt: now };
 }

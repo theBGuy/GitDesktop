@@ -81,6 +81,8 @@ const NETWORK_CALLEES = [
   "gitFetchObjects",
   "gitPull",
   "gitPush",
+  // Local checks, then one `ls-remote` of the remote it names.
+  "gitRemoteRenameCheck",
   "forgeStatus",
 ];
 
@@ -144,6 +146,12 @@ const EXEMPT = [
     queryKey: '["background-pr-sync"]',
     reason:
       "a forge poller: its store reads only gate the network calls, so parking it offline is the intent",
+  },
+  {
+    file: "src/lib/git/queries/branches.ts",
+    queryKey: '"remote-rename-check"',
+    reason:
+      "the remote rename's check runs ls-remote against the remote, so it must pause offline rather than fail as if the remote were unreachable",
   },
 ];
 

@@ -163,7 +163,7 @@ pub(crate) async fn run_git_mutating_with_creds_for_branch(
     timeout: Duration,
     branch: &str,
 ) -> AppResult<GitOutput> {
-    let recheck = Some(SpawnRecheck::Named(branch));
+    let recheck = Some(SpawnRecheck::named(branch));
     run_git_mutating_with_creds_checked(state, repo_path, cred, sub, timeout, recheck).await
 }
 
@@ -952,7 +952,11 @@ pub(crate) async fn git_pull_core(
     Ok(())
 }
 
+/// `expected_branch` / `expected_head` pin the push to the branch it was pressed on (the
+/// short name, or `HEAD` for a detached HEAD) and the tip its confirm showed; `creates`
+/// says the caller's own check found the destination absent. All absent is unpinned.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // the push inputs plus the three optional pins
 pub async fn git_push(
     state: State<'_, AppState>,
     repo_path: String,
@@ -961,8 +965,13 @@ pub async fn git_push(
     branch: Option<String>,
     remote: Option<String>,
     remote_branch: Option<String>,
-) -> AppResult<PushGuard> {
-    git_push_core(
+    expected_branch: Option<String>,
+    expected_head: Option<String>,
+    creates: Option<bool>,
+) -> AppResult<PushGuardWire> {
+    let pins = PushPins::from_wire(expected_branch, expected_head)?;
+    // Boxed: the invoke handler builds a command's future on the UI-thread stack.
+    Box::pin(git_push_core(
         &state,
         repo_path,
         set_upstream,
@@ -970,8 +979,131 @@ pub async fn git_push(
         branch,
         remote,
         remote_branch,
-    )
+        pins,
+        creates.unwrap_or(false),
+    ))
     .await
+}
+
+/// `git_push`'s return value: [`PushGuard`] plus the one outcome only the GUI's pinned
+/// force push can reach. The camelCase wire strings mirror the `PushGuard` union in
+/// `src/lib/git/api/sync.ts`, pinned by `push_guard_wire_serializes_to_the_camel_case_wire_values`.
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(clippy::enum_variant_names)] // the shared `Lease` prefix IS the shared guarantee
+pub(crate) enum PushGuardWire {
+    LeaseAndIncludes,
+    LeaseOnlyOldGit,
+    LeaseOnlyNoReflog,
+    /// `--force-if-includes` refused a clone with no fetch history for the tracking ref;
+    /// the retry ran under a lease pinned to the tracking tip read before the first try.
+    LeasePinnedNoTrackingReflog,
+}
+
+impl From<PushGuard> for PushGuardWire {
+    fn from(guard: PushGuard) -> Self {
+        match guard {
+            PushGuard::LeaseAndIncludes => Self::LeaseAndIncludes,
+            PushGuard::LeaseOnlyOldGit => Self::LeaseOnlyOldGit,
+            PushGuard::LeaseOnlyNoReflog => Self::LeaseOnlyNoReflog,
+        }
+    }
+}
+
+/// What a GUI push is pinned to: HEAD's branch (never [`ExpectedRef::Any`]) and,
+/// optionally, its tip. Compared after the early HEAD read and before every spawn.
+#[derive(Debug, Clone)]
+struct PushPins {
+    branch: crate::git::commit::ExpectedRef,
+    head: Option<String>,
+}
+
+impl PushPins {
+    /// The IPC form: `expected_head` is a full object id and needs `expected_branch`.
+    fn from_wire(
+        expected_branch: Option<String>,
+        expected_head: Option<String>,
+    ) -> AppResult<Option<Self>> {
+        use crate::git::commit::ExpectedRef;
+        let branch = ExpectedRef::from_wire(expected_branch)?;
+        if let Some(head) = &expected_head {
+            let hex = head.bytes().all(|b| b.is_ascii_hexdigit());
+            if !(matches!(head.len(), 40 | 64) && hex) {
+                return Err(AppError::InvalidArgument(format!(
+                    "expected head must be a full commit id: {head}"
+                )));
+            }
+            if branch == ExpectedRef::Any {
+                return Err(AppError::InvalidArgument(
+                    "expected head requires an expected branch".to_string(),
+                ));
+            }
+        }
+        Ok((branch != ExpectedRef::Any).then_some(PushPins {
+            branch,
+            head: expected_head,
+        }))
+    }
+
+    /// The pinned branch in its wire form: the short name, or `HEAD` when detached.
+    fn expected(&self) -> String {
+        match &self.branch {
+            crate::git::commit::ExpectedRef::Branch(b) => b.clone(),
+            _ => "HEAD".to_string(),
+        }
+    }
+
+    /// Compares HEAD (`head_ref`, git's full ref; None when detached) with the pinned
+    /// branch. Spawns nothing.
+    fn check_branch(&self, head_ref: Option<&str>) -> AppResult<()> {
+        use crate::git::commit::ExpectedRef;
+        let on = head_ref.map(|r| r.strip_prefix("refs/heads/").unwrap_or(r));
+        let same = match &self.branch {
+            ExpectedRef::Branch(b) => on == Some(b.as_str()),
+            ExpectedRef::Detached => head_ref.is_none(),
+            ExpectedRef::Any => true,
+        };
+        if !same {
+            return Err(AppError::PushHeadMoved {
+                expected: self.expected(),
+            });
+        }
+        Ok(())
+    }
+
+    /// [`Self::check_branch`], then HEAD's commit with the pinned tip. A failed tip read
+    /// is that read's error.
+    async fn check(&self, repo_path: &str, head_ref: Option<&str>) -> AppResult<()> {
+        self.check_branch(head_ref)?;
+        if let Some(want) = &self.head {
+            let out = run_git(
+                Some(repo_path),
+                &["rev-parse", "--verify", "HEAD^{commit}"],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            if !out.stdout_lossy().trim().eq_ignore_ascii_case(want) {
+                return Err(AppError::PushTipMoved {
+                    branch: self.expected(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Self::check`] against HEAD read now.
+    async fn check_now(&self, repo_path: &str) -> AppResult<()> {
+        let head_ref = crate::git::branches::current_branch_ref(repo_path).await?;
+        self.check(repo_path, head_ref.as_deref()).await
+    }
+}
+
+/// A force push's lease pinned to an explicit expected tip: only [`git_push_core`]'s
+/// tracking-reflog degrade retry passes one.
+#[derive(Debug, Clone, PartialEq)]
+struct LeasePin {
+    dest: String,
+    sha: String,
 }
 
 /// Which guarantee a completed push actually ran under. Only meaningful for a
@@ -1003,7 +1135,13 @@ pub(crate) enum PushGuard {
 /// Private to this module on purpose: MCP tools push only through
 /// [`git_push_same_name_core`] (refuses a named push onto a differently named
 /// branch of a named remote) and [`git_force_push_head_core`] (HEAD only, so git's
-/// push.default applies), never through this follow-tracking entry.
+/// push.default applies), never through this pinned, follow-the-routing-rule entry.
+///
+/// A force push of HEAD pinned to a branch and its tip carries one more fallback: on a
+/// clone whose tracking ref has no reflog `--force-if-includes` refuses although nothing
+/// moved, so the push is retried once under a lease pinned to the tracking tip read
+/// before the first attempt, when [`tracking_reflog_retry_allowed`] proves all three legs.
+#[allow(clippy::too_many_arguments)] // the push inputs plus the GUI's pins
 async fn git_push_core(
     state: &AppState,
     repo_path: String,
@@ -1012,18 +1150,184 @@ async fn git_push_core(
     branch: Option<String>,
     remote: Option<String>,
     remote_branch: Option<String>,
-) -> AppResult<PushGuard> {
-    git_push_with_policy(
+    pins: Option<PushPins>,
+    creates: bool,
+) -> AppResult<PushGuardWire> {
+    let degrade = match (&pins, force, &branch, set_upstream) {
+        (Some(p), true, None, false) if p.head.is_some() => {
+            tracking_degrade_preread(&repo_path, p).await
+        }
+        _ => None,
+    };
+    let first = git_push_with_policy(
         state,
-        repo_path,
+        repo_path.clone(),
         set_upstream,
         force,
-        branch,
-        remote,
-        remote_branch,
+        branch.clone(),
+        remote.clone(),
+        remote_branch.clone(),
         CrossNameUpstream::Follow,
+        pins.as_ref(),
+        creates,
+        None,
+    )
+    .await;
+    match (first, degrade) {
+        (Err(AppError::Git { code, stderr }), Some(pre))
+            if stderr.contains(IF_INCLUDES_REJECTION) =>
+        {
+            let allowed = tracking_reflog_retry_allowed(
+                &repo_path,
+                &pre.branch_ref,
+                &pre.tracking,
+                &pre.lease.sha,
+            )
+            .await;
+            if !allowed {
+                return Err(AppError::Git { code, stderr });
+            }
+            git_push_with_policy(
+                state,
+                repo_path,
+                set_upstream,
+                force,
+                branch,
+                remote,
+                remote_branch,
+                CrossNameUpstream::Follow,
+                pins.as_ref(),
+                creates,
+                Some(&pre.lease),
+            )
+            .await?;
+            Ok(PushGuardWire::LeasePinnedNoTrackingReflog)
+        }
+        (result, _) => result.map(PushGuardWire::from),
+    }
+}
+
+/// The values the tracking-reflog degrade retry is decided on, read before the first
+/// attempt for the PINNED branch, never HEAD.
+#[derive(Debug)]
+struct DegradePreread {
+    /// `refs/heads/<pinned branch>`.
+    branch_ref: String,
+    /// The destination's remote-tracking ref, git's own `%(push)`.
+    tracking: String,
+    /// The destination branch and the tracking ref's commit id when read.
+    lease: LeasePin,
+}
+
+/// Position of `%(push)` among the push-destination atoms.
+const PUSH_TRACKING_ATOM_INDEX: usize = 2;
+
+/// Reads [`DegradePreread`] for a pinned branch; None (the arm off) when the pin is not
+/// a branch or the destination, its tracking ref or that ref's id doesn't resolve.
+async fn tracking_degrade_preread(repo_path: &str, pins: &PushPins) -> Option<DegradePreread> {
+    use crate::git::commit::{CasRef, ExpectedRef};
+    let ExpectedRef::Branch(name) = &pins.branch else {
+        return None;
+    };
+    let CasRef::Branch(branch_ref) = pins.branch.cas_ref(repo_path).await.ok()? else {
+        return None;
+    };
+    let text = crate::git::branches::read_refs_with_push_destination(
+        repo_path,
+        &branch_ref,
+        UPSTREAM_TRACKING_FORMAT,
     )
     .await
+    .ok()?;
+    let (Some(_), Some(dest)) = bare_push_destination(&text, &branch_ref, name) else {
+        return None;
+    };
+    crate::git::branches::validate_ref_name(&dest).ok()?;
+    let tracking = tracking_line(&text, &branch_ref)?
+        .atoms()
+        .get(PUSH_TRACKING_ATOM_INDEX)
+        .copied()
+        .filter(|t| t.starts_with("refs/"))?
+        .to_string();
+    let sha = ref_commit(repo_path, &tracking).await?;
+    Some(DegradePreread {
+        branch_ref,
+        tracking,
+        lease: LeasePin { dest, sha },
+    })
+}
+
+/// `full_ref`'s commit id, None when it doesn't resolve or the read fails.
+async fn ref_commit(repo_path: &str, full_ref: &str) -> Option<String> {
+    let peeled = format!("{full_ref}^{{commit}}");
+    let out = run_git_raw(
+        Some(repo_path),
+        &["rev-parse", "--verify", "--quiet", &peeled],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    let id = out.stdout_lossy().trim().to_string();
+    (out.code == 0 && !id.is_empty()).then_some(id)
+}
+
+/// Whether the degrade retry may run, on three proofs; any other answer (entries
+/// present, a non-zero exit, a failed spawn) keeps git's refusal:
+/// 1. `tracking` has zero reflog entries (`reflog show -n 1` exits 0 and prints nothing);
+/// 2. `tracking` still points at `pre_id`;
+/// 3. `pre_id` is reachable from an entry of `branch_ref`'s reflog, the test
+///    `--force-if-includes` itself makes: one `rev-list --stdin` fed `pre_id` and a
+///    `^<entry>` line per entry prints nothing (`--not --stdin` does not negate stdin
+///    lines on git 2.51.1, measured).
+async fn tracking_reflog_retry_allowed(
+    repo_path: &str,
+    branch_ref: &str,
+    tracking: &str,
+    pre_id: &str,
+) -> bool {
+    let reflog = |full_ref: &str, limit: bool| {
+        let mut args = vec!["reflog", "show"];
+        if limit {
+            args.extend(["-n", "1"]);
+        }
+        args.extend(["--format=%H", full_ref]);
+        let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+        async move {
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            run_git_raw(Some(repo_path), &argv, DEFAULT_TIMEOUT)
+                .await
+                .ok()
+                .filter(|out| out.code == 0)
+                .map(|out| out.stdout_lossy())
+        }
+    };
+    match reflog(tracking, true).await {
+        Some(text) if text.trim().is_empty() => {}
+        _ => return false,
+    }
+    if ref_commit(repo_path, tracking).await.as_deref() != Some(pre_id) {
+        return false;
+    }
+    let Some(entries) = reflog(branch_ref, false).await else {
+        return false;
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut input = format!("{pre_id}\n");
+    for id in entries.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if seen.insert(id) {
+            input.push('^');
+            input.push_str(id);
+            input.push('\n');
+        }
+    }
+    crate::git::runner::run_git_raw_input(
+        Some(repo_path),
+        &["rev-list", "-n", "1", "--stdin"],
+        Some(&input),
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .is_ok_and(|out| out.code == 0 && out.stdout_lossy().trim().is_empty())
 }
 
 /// The MCP `push` tool's entry. A named push whose tracking would land it on a
@@ -1046,6 +1350,9 @@ pub(crate) async fn git_push_same_name_core(
         remote,
         None,
         CrossNameUpstream::Refuse,
+        None,
+        false,
+        None,
     )
     .await
 }
@@ -1064,6 +1371,9 @@ pub(crate) async fn git_force_push_head_core(
         None,
         None,
         CrossNameUpstream::Refuse,
+        None,
+        false,
+        None,
     )
     .await
 }
@@ -1089,13 +1399,19 @@ fn refuse_publishing_session_branch(name: &str) -> AppResult<()> {
 /// unreadable mark. It sees only the branch a route names or HEAD's branch, so a bare
 /// push sending more (`push.default=matching`, a push remote's own push refspecs) can
 /// carry another marked branch: out of reach by decision (0 of 109 owner repos use
-/// either), and the optional pre-push hook stops it.
+/// either), and the optional pre-push hook stops it. An unmarked spelling that git
+/// stores as a marked case variant refuses under the stored name, failing closed on an
+/// unreadable spelling.
 pub(crate) async fn refuse_publishing_branch(repo_path: &str, name: &str) -> AppResult<()> {
     refuse_publishing_session_branch(name)?;
     if crate::git::branches::branch_keep_local(repo_path, name).await? {
         return Err(AppError::BranchKeptLocal {
             branch: name.to_string(),
         });
+    }
+    let stored = crate::git::branches::stored_branch_spelling(repo_path, name).await?;
+    if stored != name && crate::git::branches::branch_keep_local(repo_path, &stored).await? {
+        return Err(AppError::BranchKeptLocal { branch: stored });
     }
     Ok(())
 }
@@ -1160,39 +1476,135 @@ fn bare_push_local_upstream(text: &str, refname: &str) -> Option<String> {
     (push_remote == ".").then_some(up)
 }
 
-/// Where a HEAD push goes: `Bare` resolves the remote from HEAD at spawn, and
-/// `PublishOrigin` is the `-u origin HEAD` publish.
+/// Where a HEAD push goes: `Bare` resolves the remote from HEAD at spawn, and `Publish`
+/// is the `-u` publish to HEAD's configured push remote, else origin (a detached or
+/// invalidly named HEAD always publishes the literal `-u origin HEAD`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum HeadRoute {
     Bare,
-    PublishOrigin,
+    Publish,
 }
 
-/// What a push re-reads under the network lock before each spawn. `Head` re-runs every
-/// HEAD read; `Named` is an argv pinned to a branch, remote and destination, so it re-runs
-/// only the branch's publishing refusal (the remote's mirror flag is read once, early).
+/// What a push re-reads under the network lock before each spawn: the route's own reads,
+/// then the pins last, when the push carries any, so only the two pin reads separate
+/// the final compare from the spawn.
 #[derive(Clone, Copy, Debug)]
-enum SpawnRecheck<'a> {
+struct SpawnRecheck<'a> {
+    route: RecheckRoute<'a>,
+    pins: Option<&'a PushPins>,
+}
+
+/// `Head` re-runs every HEAD read; `Named` is an argv pinned to a branch, remote and
+/// destination, so it re-runs only the branch's publishing refusal (the remote's mirror
+/// flag is read once, early).
+#[derive(Clone, Copy, Debug)]
+enum RecheckRoute<'a> {
     Head(HeadRoute),
     Named(&'a str),
 }
 
-impl SpawnRecheck<'_> {
+impl<'a> SpawnRecheck<'a> {
+    /// An unpinned recheck of a named branch's argv.
+    fn named(branch: &'a str) -> Self {
+        SpawnRecheck {
+            route: RecheckRoute::Named(branch),
+            pins: None,
+        }
+    }
+
     async fn run(self, repo_path: &str) -> AppResult<()> {
-        match self {
-            SpawnRecheck::Head(route) => refuse_head_push(repo_path, route).await.map(drop),
-            SpawnRecheck::Named(branch) => refuse_publishing_branch(repo_path, branch).await,
+        match self.route {
+            RecheckRoute::Head(route) => refuse_head_push(repo_path, route, self.pins)
+                .await
+                .map(drop)?,
+            RecheckRoute::Named(branch) => refuse_publishing_branch(repo_path, branch).await?,
+        }
+        #[cfg(test)]
+        let _ = RECHECK_PINS_HOOK.try_with(|hook| hook());
+        if let Some(pins) = self.pins {
+            pins.check_now(repo_path).await?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Runs in [`SpawnRecheck::run`] between the route's reads and the final pin check.
+    static RECHECK_PINS_HOOK: std::sync::Arc<dyn Fn() + Send + Sync>;
+}
+
+/// What [`refuse_head_push`] read: HEAD's full ref and branch (None when detached), and
+/// the remote the route pushes to (None for a bare push git has no destination for).
+#[derive(Debug)]
+struct HeadPush {
+    head_ref: Option<String>,
+    branch: Option<String>,
+    remote: Option<String>,
+}
+
+/// The remote a HEAD push authenticates against and is mirror-checked on. `Bare` is
+/// git's own routing ([`PushConfig::bare_push_remote`]), None when the winning value is
+/// empty; `Publish` is HEAD's configured push remote (unusable refuses), else origin.
+/// `remotes` is consulted only for a configured push remote of a validly named HEAD.
+fn head_push_remote(
+    config: &crate::git::status::PushConfig,
+    route: HeadRoute,
+    head: Option<&str>,
+    remotes: &[String],
+) -> AppResult<Option<String>> {
+    match route {
+        HeadRoute::Bare => Ok(config.bare_push_remote(head).map(str::to_string)),
+        HeadRoute::Publish => {
+            let valid = head.filter(|b| crate::git::branches::validate_ref_name(b).is_ok());
+            let configured = match valid {
+                Some(b) => configured_push_remote_checked(config, remotes, b)?,
+                None => None,
+            };
+            Ok(Some(configured.unwrap_or("origin").to_string()))
         }
     }
 }
 
+/// `branch`'s configured push remote ([`PushConfig::push_remote_setting`]), validated:
+/// empty, an invalid name or not one of `remotes` is
+/// [`PushRemoteUnusable`](AppError::PushRemoteUnusable), naming the key that won.
+fn configured_push_remote_checked<'c>(
+    config: &'c crate::git::status::PushConfig,
+    remotes: &[String],
+    branch: &str,
+) -> AppResult<Option<&'c str>> {
+    let Some((key, value)) = config.push_remote_setting(branch) else {
+        return Ok(None);
+    };
+    let usable = !value.is_empty()
+        && crate::git::branches::validate_ref_name(value).is_ok()
+        && remotes.iter().any(|r| r == value);
+    if !usable {
+        return Err(AppError::PushRemoteUnusable {
+            branch: branch.to_string(),
+            key,
+            value: value.to_string(),
+        });
+    }
+    Ok(Some(value))
+}
+
 /// Every pre-spawn read of a HEAD push, run early and again at spawn for an argv that
 /// resolves HEAD there: HEAD's branch (`None` when detached), its publishing refusal,
-/// and one config listing for the mirror refusal on the remote the route pushes to.
-async fn refuse_head_push(repo_path: &str, route: HeadRoute) -> AppResult<Option<String>> {
+/// and one config listing for the push remote and its mirror refusal. `pins`' branch is
+/// compared first, so a moved HEAD answers that and never the other branch's refusal.
+async fn refuse_head_push(
+    repo_path: &str,
+    route: HeadRoute,
+    pins: Option<&PushPins>,
+) -> AppResult<HeadPush> {
     use crate::git::status::{mirror_refusal, push_config_strict, PushRemote};
     // git's own full ref, so the destination read's pattern is never rebuilt from a name.
     let head_ref = crate::git::branches::current_branch_ref(repo_path).await?;
+    if let Some(pins) = pins {
+        pins.check_branch(head_ref.as_deref())?;
+    }
     let head = head_ref
         .as_deref()
         .and_then(|r| r.strip_prefix("refs/heads/"))
@@ -1201,13 +1613,27 @@ async fn refuse_head_push(repo_path: &str, route: HeadRoute) -> AppResult<Option
         refuse_publishing_branch(repo_path, b).await?;
     }
     let config = push_config_strict(repo_path).await?;
-    let target = match route {
-        HeadRoute::Bare => PushRemote::Bare {
-            head: head.as_deref(),
-        },
-        HeadRoute::PublishOrigin => PushRemote::Named("origin"),
+    let needs_remotes = route == HeadRoute::Publish
+        && head
+            .as_deref()
+            .is_some_and(|b| config.push_remote_setting(b).is_some());
+    let remotes = if needs_remotes {
+        git_remotes(repo_path.to_string()).await?
+    } else {
+        Vec::new()
     };
-    mirror_refusal(&config, target)?;
+    let remote = head_push_remote(&config, route, head.as_deref(), &remotes)?;
+    // A bare push git has no destination for is git's own failure, never a mirror push.
+    match (route, remote.as_deref()) {
+        (HeadRoute::Bare, Some(_)) => mirror_refusal(
+            &config,
+            PushRemote::Bare {
+                head: head.as_deref(),
+            },
+        )?,
+        (HeadRoute::Publish, Some(r)) => mirror_refusal(&config, PushRemote::Named(r))?,
+        (_, None) => {}
+    }
     // A bare push of a non-session HEAD lands on a session branch only under
     // push.default=upstream, which the push atoms resolve; matching and a push remote's
     // own refspecs send refs the user configured and stay out of reach. The atom's push
@@ -1234,10 +1660,14 @@ async fn refuse_head_push(repo_path: &str, route: HeadRoute) -> AppResult<Option
             refuse_session_destination(b, &remote, &dest)?;
         }
     }
-    Ok(head)
+    Ok(HeadPush {
+        head_ref,
+        branch: head,
+        remote,
+    })
 }
 
-#[allow(clippy::too_many_arguments)] // existing push inputs plus the caller's policy
+#[allow(clippy::too_many_arguments)] // push inputs, the caller's policy, pins and leases
 async fn git_push_with_policy(
     state: &AppState,
     repo_path: String,
@@ -1247,6 +1677,9 @@ async fn git_push_with_policy(
     remote: Option<String>,
     remote_branch: Option<String>,
     cross_name: CrossNameUpstream,
+    pins: Option<&PushPins>,
+    creates: bool,
+    lease_pin: Option<&LeasePin>,
 ) -> AppResult<PushGuard> {
     if remote_branch.is_some() && (branch.is_none() || remote.is_none()) {
         return Err(AppError::InvalidArgument(
@@ -1254,56 +1687,70 @@ async fn git_push_with_policy(
         ));
     }
     // The credential config is scoped to the remote we actually push to, resolved
-    // below. Defaults to origin (the HEAD path and the origin-tracked cases).
-    let mut cred_remote = "origin".to_string();
+    // below; None (a bare push git has no destination for) builds none.
+    let cred_remote: Option<String>;
     // The HEAD path's `-u` publish names its branch explicitly (see that arm).
     let mut head_branch: Option<String> = None;
+    // `(branch, remote, dest)` when the argv carries the create-only lease, so its
+    // `(stale info)` refusal can be named.
+    let mut create_lease: Option<(String, String, String)> = None;
     // Owned Strings: a named-branch push interpolates the branch into a refspec,
     // which can't borrow from a temporary.
     let args: Vec<String> = match &branch {
         None => {
-            // A remote can only be chosen for an explicit branch — the HEAD path
-            // pushes to HEAD's own upstream, or publishes it to origin.
+            // A remote can only be chosen for an explicit branch: the HEAD path follows
+            // git's own routing, or publishes to HEAD's push remote (see `HeadRoute`).
             if remote.is_some() {
                 return Err(AppError::InvalidArgument(
                     "remote requires an explicit branch".to_string(),
                 ));
             }
             // Bare and force pushes resolve HEAD at spawn, after the credential and lock
-            // waits, so the spawn re-checks too; pinning them would change push.default
-            // semantics. This early read is the fast failure.
+            // waits, so the spawn re-checks too, pins included. This early read is the
+            // fast failure.
             let route = if set_upstream {
-                HeadRoute::PublishOrigin
+                HeadRoute::Publish
             } else {
                 HeadRoute::Bare
             };
-            let head = refuse_head_push(&repo_path, route).await?;
+            let head = refuse_head_push(&repo_path, route, pins).await?;
+            if let Some(pins) = pins {
+                pins.check(&repo_path, head.head_ref.as_deref()).await?;
+            }
             if set_upstream && crate::git::branches::head_is_unborn(&repo_path).await? {
                 return Err(crate::git::branches::unborn_head_error());
             }
-            let mut a = vec!["push".to_string()];
-            if force {
-                // The pair refuses to clobber remote work this branch hasn't
-                // integrated: a bare lease is satisfied by ANY fetch, and the app
-                // auto-fetches in the background.
-                a.push("--force-with-lease".to_string());
-                a.push(FORCE_IF_INCLUDES.to_string());
-            }
+            cred_remote = head.remote.clone();
+            let mut a = head_push_argv(force, lease_pin);
             if set_upstream {
                 // Pin the branch read above as an explicit same-name pair so the push and
                 // upstream repair agree after the lock wait. Detached HEAD or a name
-                // failing validate_ref_name keeps the literal `HEAD` fallback.
-                head_branch = head.filter(|b| crate::git::branches::validate_ref_name(b).is_ok());
-                let target = head_branch
-                    .as_deref()
-                    .map_or("HEAD".to_string(), publish_refspec);
-                a.extend(["-u".to_string(), "origin".to_string(), target]);
+                // failing validate_ref_name keeps the literal `-u origin HEAD`, unleased.
+                head_branch = head
+                    .branch
+                    .filter(|b| crate::git::branches::validate_ref_name(b).is_ok());
+                match head_branch.as_deref() {
+                    Some(b) => {
+                        let target = head.remote.unwrap_or_else(|| "origin".to_string());
+                        if !force
+                            && (creates || !tracking_ref_present(&repo_path, &target, b).await)
+                        {
+                            a.push(create_lease_arg(b));
+                            create_lease = Some((b.to_string(), target.clone(), b.to_string()));
+                        }
+                        a.extend(["-u".to_string(), target, publish_refspec(b)]);
+                    }
+                    None => a.extend(["-u", "origin", "HEAD"].map(str::to_string)),
+                }
             }
             a
         }
         Some(b) => {
             crate::git::branches::validate_ref_name(b)?;
             refuse_publishing_branch(&repo_path, b).await?;
+            if let Some(pins) = pins {
+                pins.check_now(&repo_path).await?;
+            }
             // A caller-chosen remote is validated for shape AND verified to exist
             // BEFORE any mutation: the existence check is the primary guard (a URL
             // can never appear in `git remote` output — and it requires `:`, which
@@ -1315,7 +1762,9 @@ async fn git_push_with_policy(
                 crate::git::branches::validate_ref_name(r).map_err(|_| {
                     AppError::InvalidArgument(format!("invalid remote name: {r}"))
                 })?;
-                let remotes = git_remotes(repo_path.clone()).await?;
+            }
+            let remotes = git_remotes(repo_path.clone()).await?;
+            if let Some(r) = &remote {
                 if !remotes.iter().any(|n| n == r) {
                     return Err(AppError::InvalidArgument(format!("unknown remote: {r}")));
                 }
@@ -1358,81 +1807,68 @@ async fn git_push_with_policy(
                 }
                 return Err(AppError::InvalidArgument(format!("no such branch: {b}")));
             };
-            // The credential config must target the remote we actually push to, not
-            // always origin — a branch tracking a fork's `upstream` (or an explicit
-            // `remote`) authenticates against THAT host, not origin's.
-            cred_remote = resolve_push_target(remote.as_deref(), &remotename, gone).to_string();
-            crate::git::status::refuse_mirror_push(
-                &repo_path,
-                crate::git::status::PushRemote::Named(&cred_remote),
-            )
-            .await?;
-            // A live `.` upstream targets this repository (an explicit remote never is `.`),
-            // set_upstream included. A non-branch `.` upstream is a same-name self-push.
-            if let (".", Upstream::Branch(up)) = (cred_remote.as_str(), &upstream) {
-                return Err(AppError::PushUpstreamIsLocal {
-                    branch: b.clone(),
-                    upstream: up.clone(),
-                });
-            }
-            // The destination is the named one, else the tracked upstream's branch; the
-            // local name is already checked above. Before the cross-name refusal, so both
-            // policies answer with the session copy.
-            if is_named_remote(&cred_remote) {
-                let dest = remote_branch.as_deref().or_else(|| {
-                    tracked_push_upstream(
-                        &upstream,
-                        &remotename,
-                        gone,
-                        set_upstream,
-                        remote.as_deref(),
-                        None,
-                    )
-                });
-                if let Some(dest) = dest {
-                    refuse_session_destination(b, &cred_remote, dest)?;
-                }
-            }
-            // Refuse from the same tracking snapshot as the argv, before credentials or
-            // a mutating spawn. Local `.` tracking has no named-remote remedy.
-            if cross_name == CrossNameUpstream::Refuse {
-                if let Some(up) = cross_name_refusal(
+            let config = crate::git::status::push_config_strict(&repo_path).await?;
+            // Phase 1: the MCP policy's cross-name refusal is decided against the
+            // upstream's own remote first; when it holds, the push config is not consulted
+            // and the flow below is the one that policy always had.
+            let mcp_refuses = cross_name == CrossNameUpstream::Refuse
+                && cross_name_refusal(
                     b,
                     &upstream,
                     &remotename,
                     gone,
                     set_upstream,
-                    remote.as_deref(),
+                    None,
+                    None,
                     remote_branch.as_deref(),
-                ) {
-                    return Err(AppError::PushUpstreamNameMismatch {
-                        branch: b.clone(),
-                        remote: remotename,
-                        remote_branch: up.to_string(),
-                    });
-                }
-            }
-            build_push_args(
-                b,
-                &upstream,
-                &remotename,
+                )
+                .is_some();
+            // Phase 2: an explicit remote always wins and the push config is never read
+            // for it; otherwise the configured push remote, validated.
+            let configured = if remote.is_none() && !mcp_refuses {
+                configured_push_remote_checked(&config, &remotes, b)?
+            } else {
+                None
+            };
+            let route = NamedRoute {
+                branch: b,
+                upstream: &upstream,
+                remotename: &remotename,
                 gone,
                 set_upstream,
-                force,
-                remote.as_deref(),
-                remote_branch.as_deref(),
-            )
+                requested: remote.as_deref(),
+                configured,
+                remote_branch: remote_branch.as_deref(),
+            };
+            // The credential config targets the remote the push goes to.
+            let target = route.refuse(&config, &remotes, cross_name)?;
+            let dest = route.dest();
+            let tracked =
+                force || !route.publishes() || tracking_ref_present(&repo_path, &target, b).await;
+            let lease = CreateLease {
+                creates,
+                dest_tracked: tracked,
+            };
+            let args = route.argv(force, lease);
+            if args.contains(&create_lease_arg(dest)) {
+                create_lease = Some((b.clone(), target.clone(), dest.to_string()));
+            }
+            cred_remote = Some(target);
+            args
         }
     };
-    let cred = crate::forge::credential_config_for_remote(&repo_path, &cred_remote).await?;
+    let cred = match &cred_remote {
+        Some(r) => crate::forge::credential_config_for_remote(&repo_path, r).await?,
+        None => Vec::new(),
+    };
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     // Only an argv naming no branch resolves HEAD at spawn; a pinned one re-reads its mark.
-    let recheck = match (branch.as_deref().or(head_branch.as_deref()), set_upstream) {
-        (Some(pinned), _) => SpawnRecheck::Named(pinned),
-        (None, false) => SpawnRecheck::Head(HeadRoute::Bare),
-        (None, true) => SpawnRecheck::Head(HeadRoute::PublishOrigin),
+    let route = match (branch.as_deref().or(head_branch.as_deref()), set_upstream) {
+        (Some(pinned), _) => RecheckRoute::Named(pinned),
+        (None, false) => RecheckRoute::Head(HeadRoute::Bare),
+        (None, true) => RecheckRoute::Head(HeadRoute::Publish),
     };
-    let recheck = Some(recheck);
+    let recheck = Some(SpawnRecheck { route, pins });
     let (repo, timeout) = (repo_path.as_str(), NETWORK_TIMEOUT);
     match run_git_mutating_with_creds_checked(state, repo, &cred, &argv, timeout, recheck).await {
         Ok(_) => Ok(PushGuard::LeaseAndIncludes),
@@ -1469,6 +1905,17 @@ async fn git_push_with_policy(
             run_git_mutating_with_creds_checked(state, repo, &cred, &retry, timeout, recheck)
                 .await?;
             Ok(PushGuard::LeaseOnlyNoReflog)
+        }
+        // The create-only lease refuses only a destination that exists at another commit.
+        Err(AppError::Git { stderr, .. })
+            if create_lease.is_some() && stderr.contains("(stale info)") =>
+        {
+            let (branch, remote, dest) = create_lease.unwrap_or_default();
+            Err(AppError::PushDestinationExists {
+                branch,
+                remote,
+                dest,
+            })
         }
         // Only the bare HEAD push reaches git's push.default=simple name check: every
         // named arm passes an explicit refspec.
@@ -1675,51 +2122,79 @@ pub(crate) fn parse_upstream_tracking(
     if refname != expected_ref {
         return None;
     }
-    // Three shapes of `branch.<b>.merge`: `refs/heads/<x>` is branch `<x>`; any other
-    // `refs/` ref (`refs/pull/<n>/head` from a pull fetch refspec) is NOT a branch,
-    // pushed under the local name with its tracking config left alone; a bare name
-    // (hand-edited config, which git DWIMs) is the branch name itself.
-    let upstream = match parts.next().unwrap_or("") {
-        "" => Upstream::Untracked,
-        remoteref => match remoteref.strip_prefix("refs/heads/") {
-            Some(name) => Upstream::Branch(name.to_string()),
-            None if remoteref.starts_with("refs/") => Upstream::NotABranch,
-            None => Upstream::Branch(remoteref.to_string()),
-        },
-    };
+    let upstream = upstream_from_remoteref(parts.next().unwrap_or(""));
     let remotename = parts.next().unwrap_or("").to_string();
     let track = parts.next().unwrap_or("");
     // Mirror branches.rs's gone detection: `[gone]` in %(upstream:track).
     Some((upstream, remotename, track.contains("[gone]")))
 }
 
-/// Resolve the remote a named-branch push targets. Pure so the decision table
-/// stays unit-testable, and shared by `git_push_with_policy` (for the credential
-/// config), [`build_push_args`] (for the argv) and [`tracked_push_upstream`] (for
-/// the tracked arm) so there's one source of truth.
+/// An `%(upstream:remoteref)` value as an [`Upstream`]. Three shapes of
+/// `branch.<b>.merge`: `refs/heads/<x>` is branch `<x>`; any other `refs/` ref
+/// (`refs/pull/<n>/head` from a pull fetch refspec) is NOT a branch, pushed under the
+/// local name with its tracking config left alone; a bare name (hand-edited config,
+/// which git DWIMs) is the branch name itself. Empty is untracked.
+pub(crate) fn upstream_from_remoteref(remoteref: &str) -> Upstream {
+    match remoteref {
+        "" => Upstream::Untracked,
+        remoteref => match remoteref.strip_prefix("refs/heads/") {
+            Some(name) => Upstream::Branch(name.to_string()),
+            None if remoteref.starts_with("refs/") => Upstream::NotABranch,
+            None => Upstream::Branch(remoteref.to_string()),
+        },
+    }
+}
+
+/// The push-destination contract, the one routing rule every named push follows: an
+/// explicit remote always wins and the push configuration is never read for it; else
+/// `branch.<b>.pushRemote`, else `remote.pushDefault` (a set, unusable value is
+/// [`PushRemoteUnusable`](AppError::PushRemoteUnusable), never a fallback); else the
+/// LIVE upstream's remote; else `origin`. The destination branch is the upstream's name
+/// only when the push goes to the upstream's own remote; anywhere else it is the local
+/// name. The HEAD `-u` publish takes the configured push remote, else origin, never the
+/// upstream's remote. The bare and force HEAD pushes follow git's own routing instead,
+/// pinned to the branch (and, for a force push, the tip) they were pressed on.
 ///
-/// - An explicit `requested_remote` always wins.
-/// - Otherwise a branch tracked (and not gone) targets its OWN upstream remote;
-///   an untracked / gone branch falls back to `origin` (the publish destination).
+/// Out of the contract, with their status (counts are of the owner's 109 repos, measured
+/// when the status read's destination claim shipped):
+/// 1. a push remote with its own push refspecs (0): documented, git's bare push sends them;
+/// 2. several pushurls (0): documented;
+/// 3. a narrow or remapped fetch refspec (1, a fixture): documented;
+/// 4. a git without the `%(push)` atoms (unmeasured): documented, destinations read unknown;
+/// 5. force pushes: closed by the branch and tip pins;
+/// 6. presence as last-fetch remote-tracking state: open, no network read before a push;
+///    the create-only lease bounds its damage on the arms that set the upstream.
+///
+/// The lease's presence probe can misread two shapes: a remote whose name contains a
+/// slash (`refs/remotes/a/b/c` is both remote `a/b` branch `c` and remote `a` branch
+/// `b/c`, so a present answer may belong to the other and the lease is not armed), and a
+/// remapped fetch refspec (the tracking ref lives elsewhere, so the probe reads absent
+/// and the lease arms, which can only refuse).
+///
+/// Pure so the decision table stays unit-testable; shared by the argv builder, the
+/// policy's refusals and [`NamedPushRouting::destination`], so there is one resolver.
 fn resolve_push_target<'a>(
     requested_remote: Option<&'a str>,
+    configured: Option<&'a str>,
     remotename: &'a str,
     gone: bool,
 ) -> &'a str {
-    match requested_remote {
+    match requested_remote.or(configured) {
         Some(r) => r,
         None if !remotename.is_empty() && !gone => remotename,
         None => "origin",
     }
 }
 
-/// The tracked arm's destination, shared by the argv builder and the MCP policy.
+/// The tracked arm's destination, shared by the argv builder and the MCP policy: the
+/// upstream's branch, only when the push goes to the upstream's own remote.
 fn tracked_push_upstream<'a>(
     upstream: &'a Upstream,
     remotename: &str,
     gone: bool,
     set_upstream: bool,
     requested_remote: Option<&str>,
+    configured: Option<&str>,
     remote_branch: Option<&str>,
 ) -> Option<&'a str> {
     match upstream {
@@ -1727,7 +2202,8 @@ fn tracked_push_upstream<'a>(
             if !gone
                 && !set_upstream
                 && remote_branch.is_none()
-                && resolve_push_target(requested_remote, remotename, gone) == remotename =>
+                && resolve_push_target(requested_remote, configured, remotename, gone)
+                    == remotename =>
         {
             Some(up)
         }
@@ -1737,6 +2213,7 @@ fn tracked_push_upstream<'a>(
 
 /// Refuse only cross-name tracked destinations on named remotes; local tracking
 /// has no remote destination for the MCP remedy to offer.
+#[allow(clippy::too_many_arguments)] // the tracking inputs plus the push's routing
 fn cross_name_refusal<'a>(
     branch: &str,
     upstream: &'a Upstream,
@@ -1744,6 +2221,7 @@ fn cross_name_refusal<'a>(
     gone: bool,
     set_upstream: bool,
     requested_remote: Option<&str>,
+    configured: Option<&str>,
     remote_branch: Option<&str>,
 ) -> Option<&'a str> {
     if !is_named_remote(remotename) {
@@ -1755,23 +2233,198 @@ fn cross_name_refusal<'a>(
         gone,
         set_upstream,
         requested_remote,
+        configured,
         remote_branch,
     )
     .filter(|up| *up != branch)
 }
 
-/// Decide the `git push` args for pushing a NAMED local branch, from its resolved
-/// tracking state and an optional caller-chosen `requested_remote`. Pure — no git
-/// calls — so the decision table is unit-testable.
+/// One named-branch push's routing inputs, from its tracking read and the caller.
 ///
-/// - `upstream`: what the branch tracks, see [`parse_upstream_tracking`] (e.g.
-///   `Upstream::Branch("feat")` for `origin/feat`).
-/// - `remotename`: `%(upstream:remotename)` (the tracked upstream's remote).
-/// - `gone`: the tracked ref was deleted (`[gone]`).
-/// - `requested_remote`: an explicit push target (the switcher's per-remote Publish
-///   items, or MCP's `remote`); `None` resolves the default.
-/// - `remote_branch`: an explicit DESTINATION branch name; only ever `Some` with an
-///   explicit `requested_remote` (the caller enforces it).
+/// - `upstream`: what the branch tracks, see [`parse_upstream_tracking`];
+/// - `remotename`: `%(upstream:remotename)` (the tracked upstream's remote);
+/// - `gone`: the tracked ref was deleted (`[gone]`);
+/// - `requested`: an explicit push target, which always wins;
+/// - `configured`: the validated configured push remote, consulted only without one;
+/// - `remote_branch`: an explicit DESTINATION branch name, only ever with `requested`.
+#[derive(Clone, Copy, Debug)]
+struct NamedRoute<'a> {
+    branch: &'a str,
+    upstream: &'a Upstream,
+    remotename: &'a str,
+    gone: bool,
+    set_upstream: bool,
+    requested: Option<&'a str>,
+    configured: Option<&'a str>,
+    remote_branch: Option<&'a str>,
+}
+
+impl<'a> NamedRoute<'a> {
+    /// The remote `T` the push goes to ([`resolve_push_target`]).
+    fn target(&self) -> &'a str {
+        resolve_push_target(self.requested, self.configured, self.remotename, self.gone)
+    }
+
+    fn tracked(&self) -> Option<&'a str> {
+        tracked_push_upstream(
+            self.upstream,
+            self.remotename,
+            self.gone,
+            self.set_upstream,
+            self.requested,
+            self.configured,
+            self.remote_branch,
+        )
+    }
+
+    /// Whether the push publishes and tracks (`-u`): untracked, gone, or asked to, never
+    /// with an explicit destination; a non-branch upstream retracks only on request.
+    fn publishes(&self) -> bool {
+        self.remote_branch.is_none()
+            && match self.upstream {
+                Upstream::Untracked => true,
+                Upstream::Branch(_) => self.gone || self.set_upstream,
+                Upstream::NotABranch => self.set_upstream,
+            }
+    }
+
+    /// The destination branch: the named one, else the tracked upstream's, else the
+    /// local name.
+    fn dest(&self) -> &'a str {
+        self.remote_branch
+            .or_else(|| self.tracked())
+            .unwrap_or(self.branch)
+    }
+
+    /// The routing refusals, in order, against `T`: a mirror remote, a local `.`
+    /// upstream, a destination in gd/session/, the MCP policy's cross-name refusal, a
+    /// remote that is not one of `remotes` or fails `validate_ref_name`, and a destination
+    /// that would fail it as the full ref `refs/heads/<dest>`. Answers `T`.
+    fn refuse(
+        &self,
+        config: &crate::git::status::PushConfig,
+        remotes: &[String],
+        cross_name: CrossNameUpstream,
+    ) -> AppResult<String> {
+        let target = self.target();
+        crate::git::status::mirror_refusal(config, crate::git::status::PushRemote::Named(target))?;
+        // A live `.` upstream targets this repository (an explicit remote never is `.`),
+        // set_upstream included.
+        if let (".", Upstream::Branch(up)) = (target, self.upstream) {
+            return Err(AppError::PushUpstreamIsLocal {
+                branch: self.branch.to_string(),
+                upstream: up.clone(),
+            });
+        }
+        // The local name is already checked; before the cross-name refusal, so both
+        // policies answer with the session copy.
+        if is_named_remote(target) {
+            refuse_session_destination(self.branch, target, self.dest())?;
+        }
+        if cross_name == CrossNameUpstream::Refuse {
+            if let Some(up) = cross_name_refusal(
+                self.branch,
+                self.upstream,
+                self.remotename,
+                self.gone,
+                self.set_upstream,
+                self.requested,
+                self.configured,
+                self.remote_branch,
+            ) {
+                return Err(AppError::PushUpstreamNameMismatch {
+                    branch: self.branch.to_string(),
+                    remote: self.remotename.to_string(),
+                    remote_branch: up.to_string(),
+                });
+            }
+        }
+        // Both names can come from config and reach argv: the remote bare, where `-x` would
+        // read as an option; the destination only behind `refs/heads/`, where a leading dash
+        // is valid, so it passes exactly where that full ref passes `validate_ref_name`.
+        let valid = crate::git::branches::validate_ref_name(target).is_ok();
+        if !valid || !remotes.iter().any(|r| r == target) {
+            return Err(AppError::InvalidArgument(format!(
+                "unknown remote: {target}"
+            )));
+        }
+        let dest = self.dest();
+        let body = dest.trim_start_matches('-');
+        let bad = !body.is_empty() && crate::git::branches::validate_ref_name(body).is_err();
+        if dest.is_empty() || bad {
+            return Err(AppError::InvalidArgument(format!(
+                "invalid branch name: {dest}"
+            )));
+        }
+        Ok(target.to_string())
+    }
+
+    fn argv(&self, force: bool, lease: CreateLease) -> Vec<String> {
+        build_push_args(self, force, lease)
+    }
+}
+
+/// When a non-force named push carries the create-only lease: on the caller's `creates`
+/// on any arm, and on an arm that sets the upstream whenever the destination's tracking
+/// ref is not proven present (`dest_tracked`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CreateLease {
+    creates: bool,
+    dest_tracked: bool,
+}
+
+impl CreateLease {
+    /// Never leased: no create recorded, the destination proven tracked.
+    #[cfg(test)]
+    const NONE: Self = CreateLease {
+        creates: false,
+        dest_tracked: true,
+    };
+}
+
+/// `--force-with-lease=refs/heads/<dest>:` (empty expected value): git refuses the push
+/// unless `dest` is absent on the remote or already at the pushed commit.
+fn create_lease_arg(dest: &str) -> String {
+    format!("--force-with-lease=refs/heads/{dest}:")
+}
+
+/// `--force-with-lease=refs/heads/<dest>:<sha>`, the lease pinned to an explicit tip.
+fn pinned_lease_arg(dest: &str, sha: &str) -> String {
+    format!("--force-with-lease=refs/heads/{dest}:{sha}")
+}
+
+/// A HEAD push's argv up to its `-u` part: a force push takes the lease pinned to
+/// `lease_pin` alone, else the lease plus `--force-if-includes`, which refuses to clobber
+/// remote work this branch hasn't integrated (a bare lease is satisfied by any fetch).
+fn head_push_argv(force: bool, lease_pin: Option<&LeasePin>) -> Vec<String> {
+    let mut a = vec!["push".to_string()];
+    match (force, lease_pin) {
+        (true, Some(pin)) => a.push(pinned_lease_arg(&pin.dest, &pin.sha)),
+        (true, None) => {
+            a.push("--force-with-lease".to_string());
+            a.push(FORCE_IF_INCLUDES.to_string());
+        }
+        (false, _) => {}
+    }
+    a
+}
+
+/// Whether `refs/remotes/<remote>/<branch>` exists (`show-ref --verify --quiet` exit 0).
+/// Any other answer, a failed spawn included, reads absent: that arms the create-only
+/// lease, which can only refuse a destination that differs.
+async fn tracking_ref_present(repo_path: &str, remote: &str, branch: &str) -> bool {
+    let tracking = format!("refs/remotes/{remote}/{branch}");
+    run_git_raw(
+        Some(repo_path),
+        &["show-ref", "--verify", "--quiet", &tracking],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .is_ok_and(|out| out.code == 0)
+}
+
+/// Decide the `git push` args for pushing a NAMED local branch, from its
+/// [`NamedRoute`]. Pure — no git calls — so the decision table is unit-testable.
 ///
 /// The target `T` is [`resolve_push_target`]. Rules:
 /// - `remote_branch` = `rb` → `push T refs/heads/<branch>:refs/heads/<rb>`, no `-u`:
@@ -1783,75 +2436,100 @@ fn cross_name_refusal<'a>(
 /// - tracked branch `up` and `T == remotename`: `push T
 ///   refs/heads/<branch>:refs/heads/<up>` (a bare `push T <branch>` would advance the
 ///   WRONG remote ref when the names differ).
-/// - tracked and `T != remotename` (a copy elsewhere, e.g. a fork's `origin` snapshot
-///   of an `upstream`-tracked branch), or a non-branch upstream: `push T
-///   refs/heads/<branch>:refs/heads/<branch>` with NO `-u` — publishes under the LOCAL
-///   name, upstream config untouched.
+/// - tracked and `T != remotename` (a configured push remote, or an explicit copy
+///   elsewhere), or a non-branch upstream: `push T refs/heads/<branch>:refs/heads/<branch>`
+///   with NO `-u` — the local name, upstream config untouched.
 ///
 /// Refspecs are fully qualified so a branch named `+x`/`-x` can't be read as a
 /// force/delete indicator; the remote is only ever the bare `push <remote>` arg.
-/// `force` prepends `--force-with-lease --force-if-includes` before the refspec in
-/// every arm.
-#[allow(clippy::too_many_arguments)] // one flat arg per decision-table input
-fn build_push_args(
-    branch: &str,
-    upstream: &Upstream,
-    remotename: &str,
-    gone: bool,
-    set_upstream: bool,
-    force: bool,
-    requested_remote: Option<&str>,
-    remote_branch: Option<&str>,
-) -> Vec<String> {
-    let target = resolve_push_target(requested_remote, remotename, gone);
+/// `force` prepends `--force-with-lease --force-if-includes` in every arm and never
+/// takes the create-only lease, which otherwise sits ahead of `-u` and the remote.
+fn build_push_args(route: &NamedRoute<'_>, force: bool, lease: CreateLease) -> Vec<String> {
+    let branch = route.branch;
+    let publish = route.publishes();
+    let dest = route.dest();
     let mut args = vec!["push".to_string()];
     if force {
         args.push("--force-with-lease".to_string());
         args.push(FORCE_IF_INCLUDES.to_string());
+    } else if lease.creates || (publish && !lease.dest_tracked) {
+        args.push(create_lease_arg(dest));
     }
-    if let Some(rb) = remote_branch {
-        // Destination named outright: never `-u` and never the tracking-derived
-        // name — the local branch's upstream is a different question from where
-        // this one push lands.
-        args.push(target.to_string());
-        args.push(format!("refs/heads/{branch}:refs/heads/{rb}"));
-        return args;
+    if publish {
+        args.push("-u".to_string());
     }
-    let publish = match upstream {
-        Upstream::Untracked => true,
-        Upstream::Branch(_) => gone || set_upstream,
-        // Only an explicit request retracks away from a non-branch upstream.
-        Upstream::NotABranch => set_upstream,
-    };
-    let tracked = tracked_push_upstream(
-        upstream,
-        remotename,
-        gone,
-        set_upstream,
-        requested_remote,
-        remote_branch,
-    );
-    match (publish, tracked) {
-        (true, _) => {
-            // Publish + track, under the LOCAL name.
-            args.extend(["-u", target].map(str::to_string));
-            args.push(publish_refspec(branch));
-        }
-        (false, Some(up)) => {
-            // Tracked → its own remote: target the remote branch name explicitly (it
-            // may differ from the local one).
-            args.push(target.to_string());
-            args.push(format!("refs/heads/{branch}:refs/heads/{up}"));
-        }
-        _ => {
-            // Tracked, but pushing to a DIFFERENT remote than the upstream, or tracking
-            // a non-branch ref — a copy under the local name, no `-u`, upstream config
-            // untouched (never retrack).
-            args.push(target.to_string());
-            args.push(publish_refspec(branch));
-        }
-    }
+    args.push(route.target().to_string());
+    args.push(format!("refs/heads/{branch}:refs/heads/{dest}"));
     args
+}
+
+/// Where a named push of a branch goes under the routing rule, for the branch list.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum NamedPushDestination {
+    To {
+        remote: String,
+        branch: String,
+    },
+    /// Refused for a routing reason (see [`NamedPushRouting::destination`]).
+    Refused,
+}
+
+/// The two reads [`NamedPushRouting::destination`] decides on, read once per listing.
+pub(crate) struct NamedPushRouting {
+    config: crate::git::status::PushConfig,
+    remotes: Vec<String>,
+}
+
+/// One push-config listing plus the repository's remotes.
+pub(crate) async fn named_push_routing(repo_path: &str) -> AppResult<NamedPushRouting> {
+    Ok(NamedPushRouting {
+        config: crate::git::status::push_config_strict(repo_path).await?,
+        remotes: git_remotes(repo_path.to_string()).await?,
+    })
+}
+
+impl NamedPushRouting {
+    /// Where a GUI push of `branch` naming no remote and asking no retrack lands, through
+    /// the same functions that build its argv. `Refused` exactly where that push refuses
+    /// for a routing reason: an unusable configured push remote, a `.` remote beside a
+    /// branch upstream, a mirror remote, a remote that is not configured, a remote name
+    /// that fails `validate_ref_name` or a destination that would fail it as `refs/heads/<dest>`,
+    /// a destination in gd/session/, or a branch name that fails it or is itself a session
+    /// branch. Keep local and an unborn branch are not routing refusals.
+    pub(crate) fn destination(
+        &self,
+        branch: &str,
+        upstream: &Upstream,
+        remotename: &str,
+        gone: bool,
+    ) -> NamedPushDestination {
+        if crate::git::branches::validate_ref_name(branch).is_err()
+            || crate::git::branches::is_session_branch_name(branch)
+        {
+            return NamedPushDestination::Refused;
+        }
+        let Ok(configured) = configured_push_remote_checked(&self.config, &self.remotes, branch)
+        else {
+            return NamedPushDestination::Refused;
+        };
+        let route = NamedRoute {
+            branch,
+            upstream,
+            remotename,
+            gone,
+            set_upstream: false,
+            requested: None,
+            configured,
+            remote_branch: None,
+        };
+        match route.refuse(&self.config, &self.remotes, CrossNameUpstream::Follow) {
+            Ok(remote) => NamedPushDestination::To {
+                remote,
+                branch: route.dest().to_string(),
+            },
+            Err(_) => NamedPushDestination::Refused,
+        }
+    }
 }
 
 /// The branch a forge publish pushes: HEAD's branch NAME, validated for the publish
@@ -1925,9 +2603,8 @@ pub(crate) fn publish_refspec(branch: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_push_args, cache_get, cache_invalidate, cache_put, cross_name_refusal,
-        git_fetch_core, git_pull_core,
-        git_push_core, git_push_same_name_core, git_remote_add_core, git_remote_remove_core,
+        cache_get, cache_invalidate, cache_put, cross_name_refusal, git_fetch_core, git_pull_core,
+        git_push_same_name_core, git_remote_add_core, git_remote_remove_core,
         git_remote_set_url_core, is_auth_class_failure, is_push_default_left,
         is_push_simple_name_refusal,
         is_unknown_push_option, parse_upstream_tracking, publish_refspec, push_upstream_branch,
@@ -2920,7 +3597,7 @@ mod tests {
     fn push_untracked_publishes_with_upstream() {
         // Empty upstream → first-time publish + track.
         assert_eq!(
-            build_push_args("feature", &up(""), "", false, false, false, None, None),
+            build_push_args_today("feature", &up(""), "", false, false, false, None, None),
             vec!["push", "-u", "origin", "refs/heads/feature:refs/heads/feature"]
         );
     }
@@ -2929,15 +3606,38 @@ mod tests {
     fn push_gone_upstream_publishes_with_upstream() {
         // A deleted upstream ref (still named by %(upstream:remoteref)) republishes.
         assert_eq!(
-            build_push_args("feature", &up("feature"), "origin", true, false, false, None, None),
-            vec!["push", "-u", "origin", "refs/heads/feature:refs/heads/feature"]
+            build_push_args_today(
+                "feature",
+                &up("feature"),
+                "origin",
+                true,
+                false,
+                false,
+                None,
+                None
+            ),
+            vec![
+                "push",
+                "-u",
+                "origin",
+                "refs/heads/feature:refs/heads/feature"
+            ]
         );
     }
 
     #[test]
     fn push_tracked_same_name_plain_push() {
         assert_eq!(
-            build_push_args("feature", &up("feature"), "origin", false, false, false, None, None),
+            build_push_args_today(
+                "feature",
+                &up("feature"),
+                "origin",
+                false,
+                false,
+                false,
+                None,
+                None
+            ),
             vec!["push", "origin", "refs/heads/feature:refs/heads/feature"]
         );
     }
@@ -2947,7 +3647,16 @@ mod tests {
         // Local `feature` tracks `origin/feat` → explicit refspec so we advance
         // the right remote ref, not `origin/feature`.
         assert_eq!(
-            build_push_args("feature", &up("feat"), "origin", false, false, false, None, None),
+            build_push_args_today(
+                "feature",
+                &up("feat"),
+                "origin",
+                false,
+                false,
+                false,
+                None,
+                None
+            ),
             vec!["push", "origin", "refs/heads/feature:refs/heads/feat"]
         );
     }
@@ -2957,7 +3666,16 @@ mod tests {
         // No requested remote + a branch tracking a fork's `upstream/main` targets
         // its OWN remote: T == remotename → the refspec-to-`up` arm.
         assert_eq!(
-            build_push_args("main", &up("main"), "upstream", false, false, false, None, None),
+            build_push_args_today(
+                "main",
+                &up("main"),
+                "upstream",
+                false,
+                false,
+                false,
+                None,
+                None
+            ),
             vec!["push", "upstream", "refs/heads/main:refs/heads/main"]
         );
     }
@@ -2967,7 +3685,16 @@ mod tests {
         // Explicitly requesting the branch's OWN tracked remote is the same arm:
         // T == remotename → advance the tracked remote-branch name explicitly.
         assert_eq!(
-            build_push_args("feature", &up("feat"), "origin", false, false, false, Some("origin"), None),
+            build_push_args_today(
+                "feature",
+                &up("feat"),
+                "origin",
+                false,
+                false,
+                false,
+                Some("origin"),
+                None
+            ),
             vec!["push", "origin", "refs/heads/feature:refs/heads/feat"]
         );
     }
@@ -2977,7 +3704,16 @@ mod tests {
         // A tracked-on-origin branch pushed explicitly to `upstream` → a copy under
         // the LOCAL name, no `-u`, upstream config untouched.
         assert_eq!(
-            build_push_args("feature", &up("feat"), "origin", false, false, false, Some("upstream"), None),
+            build_push_args_today(
+                "feature",
+                &up("feat"),
+                "origin",
+                false,
+                false,
+                false,
+                Some("upstream"),
+                None
+            ),
             vec!["push", "upstream", "refs/heads/feature:refs/heads/feature"]
         );
     }
@@ -2987,8 +3723,22 @@ mod tests {
         // Publishing an untracked branch to a chosen remote: `-u <remote>` under
         // the local name.
         assert_eq!(
-            build_push_args("feature", &up(""), "", false, false, false, Some("fork"), None),
-            vec!["push", "-u", "fork", "refs/heads/feature:refs/heads/feature"]
+            build_push_args_today(
+                "feature",
+                &up(""),
+                "",
+                false,
+                false,
+                false,
+                Some("fork"),
+                None
+            ),
+            vec![
+                "push",
+                "-u",
+                "fork",
+                "refs/heads/feature:refs/heads/feature"
+            ]
         );
     }
 
@@ -2996,8 +3746,22 @@ mod tests {
     fn push_set_upstream_forces_upstream_form_even_when_tracked() {
         // An explicit set_upstream request retracks even a tracked branch.
         assert_eq!(
-            build_push_args("feature", &up("feature"), "origin", false, true, false, None, None),
-            vec!["push", "-u", "origin", "refs/heads/feature:refs/heads/feature"]
+            build_push_args_today(
+                "feature",
+                &up("feature"),
+                "origin",
+                false,
+                true,
+                false,
+                None,
+                None
+            ),
+            vec![
+                "push",
+                "-u",
+                "origin",
+                "refs/heads/feature:refs/heads/feature"
+            ]
         );
     }
 
@@ -3005,7 +3769,16 @@ mod tests {
     fn push_force_flag_precedes_refspec_args() {
         // The force pair sits right after `push`, before the refspec.
         assert_eq!(
-            build_push_args("feature", &up("feat"), "origin", false, false, true, None, None),
+            build_push_args_today(
+                "feature",
+                &up("feat"),
+                "origin",
+                false,
+                false,
+                true,
+                None,
+                None
+            ),
             vec![
                 "push",
                 "--force-with-lease",
@@ -3015,7 +3788,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            build_push_args("feature", &up(""), "", false, false, true, None, None),
+            build_push_args_today("feature", &up(""), "", false, false, true, None, None),
             vec![
                 "push",
                 "--force-with-lease",
@@ -3032,7 +3805,16 @@ mod tests {
         // Force + a requested non-tracked remote: the force pair still sits right
         // after `push`, then the bare remote, then the fully-qualified refspec.
         assert_eq!(
-            build_push_args("feature", &up("feat"), "origin", false, false, true, Some("upstream"), None),
+            build_push_args_today(
+                "feature",
+                &up("feat"),
+                "origin",
+                false,
+                false,
+                true,
+                Some("upstream"),
+                None
+            ),
             vec![
                 "push",
                 "--force-with-lease",
@@ -3150,15 +3932,33 @@ mod tests {
             in cases
         {
             let actual =
-                tracked_push_upstream(&upstream, remote, gone, set, requested, destination);
+                tracked_push_upstream(&upstream, remote, gone, set, requested, None, destination);
             assert_eq!(actual, tracked, "{label}");
             assert_eq!(
-                cross_name_refusal("x", &upstream, remote, gone, set, requested, destination),
+                cross_name_refusal(
+                    "x",
+                    &upstream,
+                    remote,
+                    gone,
+                    set,
+                    requested,
+                    None,
+                    destination
+                ),
                 refuse,
                 "{label}",
             );
             assert_eq!(
-                build_push_args("x", &upstream, remote, gone, set, false, requested, destination),
+                build_push_args_today(
+                    "x",
+                    &upstream,
+                    remote,
+                    gone,
+                    set,
+                    false,
+                    requested,
+                    destination
+                ),
                 argv,
                 "{label}",
             );
@@ -3199,7 +3999,7 @@ mod tests {
             );
         }
 
-        git_push_core(&state, work, false, false, Some("x".into()), None, None)
+        git_push_core_unpinned(&state, work, false, false, Some("x".into()), None, None)
             .await
             .expect("Follow pushes to the tracked destination");
         assert_eq!(run(&origin, &["rev-parse", "refs/heads/main"]).await, tip);
@@ -3336,9 +4136,12 @@ mod tests {
             (false, true, true),
         ] {
             let result = if mcp_core {
-                super::git_force_push_head_core(&state, work.clone()).await
+                super::git_force_push_head_core(&state, work.clone())
+                    .await
+                    .map(super::PushGuardWire::from)
             } else {
-                git_push_core(&state, work.clone(), set_upstream, force, None, None, None).await
+                git_push_core_unpinned(&state, work.clone(), set_upstream, force, None, None, None)
+                    .await
             };
             match result.expect_err("session HEAD must not publish") {
                 e @ AppError::BranchIsAgentSession { .. } => assert_eq!(
@@ -3359,7 +4162,7 @@ mod tests {
         let (_guard, base, _origin, _url) = seeded_origin("session-publish-named").await;
         let work = base.join("work").to_string_lossy().into_owned();
         run(&work, &["branch", "gd/session/abc"]).await;
-        let error = git_push_core(
+        let error = git_push_core_unpinned(
             &AppState::default(),
             work.clone(),
             true,
@@ -3491,13 +4294,32 @@ mod tests {
         crate::git::branches::set_branch_keep_local_core(&work, "feat/x", true)
             .await
             .unwrap();
-        super::refuse_publishing_branch(&work, "Feat/X")
+        // A case variant git reads as the marked loose ref refuses under the stored name,
+        // only where the store's names can alias.
+        let variant = super::refuse_publishing_branch(&work, "Feat/X").await;
+        if crate::git::branches::refs_can_alias(&work).await {
+            match variant {
+                Err(AppError::BranchKeptLocal { branch }) => assert_eq!(branch, "feat/x"),
+                other => panic!("a folding store refuses the variant: {other:?}"),
+            }
+        } else {
+            variant.expect("a case-sensitive store refuses only the marked spelling");
+        }
+        super::refuse_publishing_branch(&work, "no/such/branch")
             .await
-            .expect("only the marked spelling refuses");
+            .expect("a name with no ref answers Ok");
         match super::refuse_publishing_branch("C:/gd-no-such-repo", "gd/session/x").await {
             Err(AppError::BranchIsAgentSession { branch }) => assert_eq!(branch, "gd/session/x"),
             other => panic!("expected the session refusal, got {other:?}"),
         }
+        let outside = tempfile::tempdir().unwrap();
+        let outside_s = outside.path().to_string_lossy().into_owned();
+        assert!(
+            super::refuse_publishing_branch(&outside_s, "feat/x")
+                .await
+                .is_err(),
+            "outside a repository the spelling read errs, so a non-session name refuses"
+        );
     }
 
     /// Every GUI push arm refuses a marked branch before git runs and lands nothing; with
@@ -3536,7 +4358,7 @@ mod tests {
                 some("other"),
             ),
         ] {
-            let result = git_push_core(
+            let result = git_push_core_unpinned(
                 &state,
                 work.clone(),
                 set_upstream,
@@ -3563,7 +4385,7 @@ mod tests {
             .await
             .unwrap();
         assert_kept_local(
-            git_push_core(
+            git_push_core_unpinned(
                 &state,
                 work.clone(),
                 false,
@@ -3586,7 +4408,7 @@ mod tests {
         crate::git::branches::set_branch_keep_local_core(&work, "feat/x", false)
             .await
             .unwrap();
-        git_push_core(&state, work.clone(), false, false, None, None, None)
+        git_push_core_unpinned(&state, work.clone(), false, false, None, None, None)
             .await
             .expect("the unmarked twin lands");
         assert_eq!(
@@ -3648,9 +4470,11 @@ mod tests {
                 let (state, work) = (std::sync::Arc::clone(&state), work.clone());
                 let run = async move {
                     if force {
-                        super::git_force_push_head_core(&state, work).await
+                        super::git_force_push_head_core(&state, work)
+                            .await
+                            .map(super::PushGuardWire::from)
                     } else {
-                        git_push_core(&state, work, false, false, None, None, None).await
+                        git_push_core_unpinned(&state, work, false, false, None, None, None).await
                     }
                 };
                 NETWORK_LOCK_WAIT_HOOK.scope(queued, run)
@@ -3695,9 +4519,11 @@ mod tests {
             let (state, work) = (std::sync::Arc::clone(&state), work.clone());
             let push = async move {
                 if force {
-                    super::git_force_push_head_core(&state, work).await
+                    super::git_force_push_head_core(&state, work)
+                        .await
+                        .map(super::PushGuardWire::from)
                 } else {
-                    git_push_core(&state, work, false, false, None, None, None).await
+                    git_push_core_unpinned(&state, work, false, false, None, None, None).await
                 }
             };
             let result = tokio::time::timeout(
@@ -3752,7 +4578,7 @@ mod tests {
                         }
                     }
                 });
-                let push = git_push_core(
+                let push = git_push_core_unpinned(
                     &state,
                     work.clone(),
                     set_upstream,
@@ -3788,7 +4614,7 @@ mod tests {
         let tip = |repo: String| async move { feat_x_tip(&repo).await };
         let published = tip(origin.clone()).await;
         let argv = ["push", "origin", "feat/x"];
-        let recheck = Some(super::SpawnRecheck::Named("feat/x"));
+        let recheck = Some(super::SpawnRecheck::named("feat/x"));
         let result =
             super::run_git_with_creds_rechecked(&work, &marking, &argv, NETWORK_TIMEOUT, recheck)
                 .await;
@@ -4031,8 +4857,8 @@ mod tests {
     }
 
     /// Every route that pushes a named branch spawns through the branch runner naming that
-    /// branch (R1), and every other fn pairing `"push"` with a plain credentialed runner is
-    /// one of the three ref pushes no branch refusal governs (R2), over the production text
+    /// branch, and every other fn pairing `"push"` with a plain credentialed runner is one
+    /// of the four `EXEMPT` ref pushes no branch refusal governs, over the production text
     /// of each file that calls one. Out of reach: a push in a file outside this list, an
     /// argv built in a helper the scanned fn calls, and any indented fn (an impl-block
     /// method, or one in an inline module such as gitlab.rs's and bitbucket.rs's
@@ -4040,10 +4866,11 @@ mod tests {
     #[test]
     fn branch_pushes_rerun_the_publishing_refusal_at_spawn() {
         use crate::github::repo_meta::tests::wiring_body;
-        const EXEMPT: [&str; 3] = [
+        const EXEMPT: [&str; 4] = [
             "git_push_tag_core",
             "git_delete_tag_core",
             "git_delete_remote_branch_core",
+            "delete_remote_branch_leased",
         ];
         let ops = production_text(include_str!("ops.rs"));
         let pr = production_text(include_str!("../github/pr.rs"));
@@ -4200,7 +5027,7 @@ mod tests {
                 some("other"),
             ),
         ] {
-            let result = git_push_core(
+            let result = git_push_core_unpinned(
                 &state,
                 work.clone(),
                 set_upstream,
@@ -4227,7 +5054,7 @@ mod tests {
         run(&work, &["config", "remote.pushDefault", "second"]).await;
         run(&work, &["switch", "-q", "--detach", "feat/x"]).await;
         assert_mirror(
-            git_push_core(&state, work.clone(), false, false, None, None, None).await,
+            git_push_core_unpinned(&state, work.clone(), false, false, None, None, None).await,
             "second",
             "detached pushDefault",
         );
@@ -4239,7 +5066,7 @@ mod tests {
         // The twin: the mirror only on `second`, which this push doesn't use.
         run(&work, &["config", "remote.origin.mirror", "false"]).await;
         assert_mirror(
-            git_push_core(
+            git_push_core_unpinned(
                 &state,
                 work.clone(),
                 false,
@@ -4252,7 +5079,7 @@ mod tests {
             "second",
             "named on the mirror second",
         );
-        git_push_core(&state, work.clone(), false, false, None, None, None)
+        git_push_core_unpinned(&state, work.clone(), false, false, None, None, None)
             .await
             .expect("a mirror on another remote doesn't refuse");
         assert_eq!(
@@ -4355,9 +5182,11 @@ mod tests {
                 let (state, work) = (std::sync::Arc::clone(&state), work.clone());
                 let run = async move {
                     if force {
-                        super::git_force_push_head_core(&state, work).await
+                        super::git_force_push_head_core(&state, work)
+                            .await
+                            .map(super::PushGuardWire::from)
                     } else {
-                        git_push_core(&state, work, false, false, None, None, None).await
+                        git_push_core_unpinned(&state, work, false, false, None, None, None).await
                     }
                 };
                 NETWORK_LOCK_WAIT_HOOK.scope(queued, run)
@@ -4422,7 +5251,7 @@ mod tests {
 
         run(&work, &["config", "remote.up.mirror", "true"]).await;
         assert_mirror(
-            git_push_core(&state, work.clone(), false, false, None, None, None).await,
+            git_push_core_unpinned(&state, work.clone(), false, false, None, None, None).await,
             "up",
             "untracked bare",
         );
@@ -4433,7 +5262,7 @@ mod tests {
         );
         run(&work, &["switch", "-q", "--detach"]).await;
         assert_mirror(
-            git_push_core(&state, work.clone(), false, false, None, None, None).await,
+            git_push_core_unpinned(&state, work.clone(), false, false, None, None, None).await,
             "up",
             "detached bare",
         );
@@ -4444,7 +5273,7 @@ mod tests {
         run(&work, &["remote", "add", "second", &up]).await;
         run(&work, &["config", "remote.second.mirror", "false"]).await;
         run(&work, &["switch", "-q", "loose"]).await;
-        match git_push_core(&state, work.clone(), false, false, None, None, None).await {
+        match git_push_core_unpinned(&state, work.clone(), false, false, None, None, None).await {
             Err(AppError::Git { stderr, .. }) => {
                 assert!(
                     stderr.contains("No configured push destination"),
@@ -4460,14 +5289,14 @@ mod tests {
         run(&work, &["config", "remote.up.mirror", "false"]).await;
         run(&work, &["config", "push.autoSetupRemote", "true"]).await;
         run(&work, &["switch", "-q", "--detach"]).await;
-        match git_push_core(&state, work.clone(), false, false, None, None, None).await {
+        match git_push_core_unpinned(&state, work.clone(), false, false, None, None, None).await {
             Err(AppError::Git { stderr, .. }) => {
                 assert!(stderr.contains("not currently on a branch"), "{stderr}")
             }
             other => panic!("detached twin: expected git's own refusal, got {other:?}"),
         }
         run(&work, &["switch", "-q", "loose"]).await;
-        git_push_core(&state, work.clone(), false, false, None, None, None)
+        git_push_core_unpinned(&state, work.clone(), false, false, None, None, None)
             .await
             .expect("the bare push lands on the only remote");
         assert_eq!(
@@ -4506,9 +5335,11 @@ mod tests {
                 let (state, work) = (std::sync::Arc::clone(&state), work.clone());
                 let run = async move {
                     if force {
-                        super::git_force_push_head_core(&state, work).await
+                        super::git_force_push_head_core(&state, work)
+                            .await
+                            .map(super::PushGuardWire::from)
                     } else {
-                        git_push_core(&state, work, false, false, None, None, None).await
+                        git_push_core_unpinned(&state, work, false, false, None, None, None).await
                     }
                 };
                 NETWORK_LOCK_WAIT_HOOK.scope(queued, run)
@@ -4637,7 +5468,8 @@ mod tests {
             let topic = || Some("topic".to_string());
             for (row, force) in [("tracked", false), ("tracked, forced", true)] {
                 let result =
-                    git_push_core(&state, work.clone(), false, force, topic(), None, None).await;
+                    git_push_core_unpinned(&state, work.clone(), false, force, topic(), None, None)
+                        .await;
                 assert_session_destination(result, &refused, &format!("{dest}: {row}"));
             }
             assert_session_destination(
@@ -4650,7 +5482,7 @@ mod tests {
                 &["config", "branch.topic.merge", "refs/heads/feature"],
             )
             .await;
-            let explicit = git_push_core(
+            let explicit = git_push_core_unpinned(
                 &state,
                 work.clone(),
                 false,
@@ -4663,7 +5495,7 @@ mod tests {
             assert_session_destination(explicit, &refused, &format!("{dest}: explicit"));
             assert_eq!(run(&origin, &["for-each-ref"]).await, before, "{dest}");
 
-            git_push_core(&state, work.clone(), false, false, topic(), None, None)
+            git_push_core_unpinned(&state, work.clone(), false, false, topic(), None, None)
                 .await
                 .expect("a cross-name non-session upstream pushes under Follow");
             assert_eq!(
@@ -4702,9 +5534,11 @@ mod tests {
             let (state, work) = (std::sync::Arc::clone(&state), work.clone());
             let push = async move {
                 if force {
-                    super::git_force_push_head_core(&state, work).await
+                    super::git_force_push_head_core(&state, work)
+                        .await
+                        .map(super::PushGuardWire::from)
                 } else {
-                    git_push_core(&state, work, false, false, None, None, None).await
+                    git_push_core_unpinned(&state, work, false, false, None, None, None).await
                 }
             };
             let result = tokio::time::timeout(
@@ -4723,7 +5557,7 @@ mod tests {
         assert_eq!(run(&origin, &["for-each-ref"]).await, before);
 
         run(&work, &["config", "push.default", "current"]).await;
-        git_push_core(&state, work.clone(), false, false, None, None, None)
+        git_push_core_unpinned(&state, work.clone(), false, false, None, None, None)
             .await
             .expect("under current the bare push lands on topic");
         assert_eq!(
@@ -4750,7 +5584,8 @@ mod tests {
         let before = run(&origin, &["for-each-ref"]).await;
         let refused = session_destination_copy("topic", "origin", "GD/Session/X");
         let state = AppState::default();
-        let bare = git_push_core(&state, work.clone(), false, false, None, None, None).await;
+        let bare =
+            git_push_core_unpinned(&state, work.clone(), false, false, None, None, None).await;
         assert_session_destination(bare, &refused, "bare, mixed case");
         let forced = super::git_force_push_head_core(&state, work.clone()).await;
         assert_session_destination(forced, &refused, "forced, mixed case");
@@ -4793,9 +5628,11 @@ mod tests {
                 let (state, work) = (std::sync::Arc::clone(&state), work.clone());
                 let run = async move {
                     if force {
-                        super::git_force_push_head_core(&state, work).await
+                        super::git_force_push_head_core(&state, work)
+                            .await
+                            .map(super::PushGuardWire::from)
                     } else {
-                        git_push_core(&state, work, false, false, None, None, None).await
+                        git_push_core_unpinned(&state, work, false, false, None, None, None).await
                     }
                 };
                 NETWORK_LOCK_WAIT_HOOK.scope(queued, run)
@@ -4863,7 +5700,7 @@ mod tests {
         .await;
         assert_eq!(atom.trim(), "second");
 
-        match git_push_core(&state, work.clone(), false, false, None, None, None).await {
+        match git_push_core_unpinned(&state, work.clone(), false, false, None, None, None).await {
             Err(e @ AppError::PushDestinationIsAgentSession { .. }) => {
                 panic!("row a: refused as a session destination: {e:?}")
             }
@@ -4877,7 +5714,7 @@ mod tests {
 
         run(&work, &["config", "remote.second.mirror", "true"]).await;
         assert_mirror(
-            git_push_core(&state, work.clone(), false, false, None, None, None).await,
+            git_push_core_unpinned(&state, work.clone(), false, false, None, None, None).await,
             "second",
             "row b",
         );
@@ -4964,7 +5801,8 @@ mod tests {
         let feat = || Some("feat".to_string());
         for force in [false, true] {
             let row = format!("named, force={force}");
-            let result = git_push_core(&state, work.clone(), false, force, feat(), None, None);
+            let result =
+                git_push_core_unpinned(&state, work.clone(), false, force, feat(), None, None);
             assert_local_upstream(result.await, &row);
         }
         for set_upstream in [false, true] {
@@ -4975,7 +5813,7 @@ mod tests {
         for push_default in ["simple", "upstream"] {
             run(&work, &["config", "push.default", push_default]).await;
             assert_eq!(push_remote_atom(&work).await, ".", "{push_default}");
-            let bare = git_push_core(&state, work.clone(), false, false, None, None, None);
+            let bare = git_push_core_unpinned(&state, work.clone(), false, false, None, None, None);
             assert_local_upstream(bare.await, &format!("bare, {push_default}"));
             let forced = super::git_force_push_head_core(&state, work.clone());
             assert_local_upstream(forced.await, &format!("forced, {push_default}"));
@@ -4985,7 +5823,7 @@ mod tests {
 
         run(&work, &["config", "push.default", "simple"]).await;
         let explicit = Some("origin".to_string());
-        git_push_core(&state, work.clone(), false, false, feat(), explicit, None)
+        git_push_core_unpinned(&state, work.clone(), false, false, feat(), explicit, None)
             .await
             .expect("an explicit remote pushes to it");
         let feat_tip = run(&work, &["rev-parse", "refs/heads/feat"]).await;
@@ -4996,7 +5834,7 @@ mod tests {
         run(&work, &["branch", "-q", "-D", "main"]).await;
         // The bare arm refuses a gone `.` upstream; the named arm then publishes it.
         let pushed = tip(origin, "refs/heads/feat").await;
-        let bare = git_push_core(&state, work.clone(), false, false, None, None, None);
+        let bare = git_push_core_unpinned(&state, work.clone(), false, false, None, None, None);
         assert_local_upstream(bare.await, "bare, gone `.` upstream");
         let forced = super::git_force_push_head_core(&state, work.clone());
         assert_local_upstream(forced.await, "forced, gone `.` upstream");
@@ -5005,7 +5843,7 @@ mod tests {
             .await
             .contains("refs/heads/main"));
 
-        git_push_core(&state, work.clone(), false, false, feat(), None, None)
+        git_push_core_unpinned(&state, work.clone(), false, false, feat(), None, None)
             .await
             .expect("a gone local upstream publishes to origin");
         let feat_tip = run(&work, &["rev-parse", "refs/heads/feat"]).await;
@@ -5025,7 +5863,7 @@ mod tests {
         let path = |name: &str| remotes.iter().find(|(n, _)| *n == name).unwrap().1.clone();
         let state = AppState::default();
         let main_before = run(&work, &["rev-parse", "refs/heads/main"]).await;
-        let bare = || git_push_core(&state, work.clone(), false, false, None, None, None);
+        let bare = || git_push_core_unpinned(&state, work.clone(), false, false, None, None, None);
         let rows = [
             (
                 "pushDefault",
@@ -5147,6 +5985,11 @@ mod tests {
             .unwrap();
         let line = tracking_line(&text, refname).expect("the branch's own line");
         assert_eq!(line.atoms(), single_strs.as_slice(), "{text:?}");
+        assert_eq!(
+            line.atoms()[super::PUSH_TRACKING_ATOM_INDEX],
+            single_strs[2],
+            "%(push)"
+        );
         assert_eq!(line.push_remotename(), Some(single_strs[0]));
         assert_eq!(line.upstream_atom(), Some(single_strs[3]));
         assert_eq!(line.upstream_remoteref(), "refs/heads/main");
@@ -5217,7 +6060,7 @@ mod tests {
             seeded_origin_unpinned_push_default("session-publish-feature").await;
         let work = base.join("work").to_string_lossy().into_owned();
         run(&work, &["checkout", "-q", "-b", "feature/y"]).await;
-        git_push_core(
+        git_push_core_unpinned(
             &AppState::default(),
             work.clone(),
             true,
@@ -5409,7 +6252,7 @@ mod tests {
             }
             let state = AppState::default();
             for set_upstream in [false, true] {
-                let error = git_push_core(
+                let error = git_push_core_unpinned(
                     &state,
                     repo_s.clone(),
                     set_upstream,
@@ -5439,7 +6282,7 @@ mod tests {
                 .await;
             }
             let state = AppState::default();
-            let error = git_push_core(&state, repo_s, true, false, None, None, None)
+            let error = git_push_core_unpinned(&state, repo_s, true, false, None, None, None)
                 .await
                 .unwrap_err();
             assert_unborn_push_refusal(error);
@@ -5453,7 +6296,7 @@ mod tests {
         init_repo(&repo_s, "seed.txt").await;
         run(&repo_s, &["switch", "--orphan", "fresh"]).await;
         let state = AppState::default();
-        let error = git_push_core(
+        let error = git_push_core_unpinned(
             &state,
             repo_s,
             true,
@@ -5477,7 +6320,7 @@ mod tests {
                 init_repo(&repo_s, "seed.txt").await;
             }
             let state = AppState::default();
-            let error = git_push_core(
+            let error = git_push_core_unpinned(
                 &state,
                 repo_s,
                 true,
@@ -5514,7 +6357,7 @@ mod tests {
         let tip = run(&work_s, &["rev-parse", "HEAD"]).await;
 
         let state = AppState::default();
-        git_push_core(
+        git_push_core_unpinned(
             &state,
             work_s.clone(),
             false,
@@ -5589,7 +6432,7 @@ mod tests {
         CONFIG_WRITE_ATTEMPT_HOOK
             .scope(
                 hook,
-                git_push_core(
+                git_push_core_unpinned(
                     &state,
                     work_s.clone(),
                     false,
@@ -5610,7 +6453,7 @@ mod tests {
         CONFIG_WRITE_ATTEMPT_HOOK
             .scope(
                 hook,
-                git_push_core(&state, work_s.clone(), true, false, None, None, None),
+                git_push_core_unpinned(&state, work_s.clone(), true, false, None, None, None),
             )
             .await
             .expect("the push succeeds");
@@ -5636,7 +6479,7 @@ mod tests {
         CONFIG_WRITE_ATTEMPT_HOOK
             .scope(
                 hook,
-                git_push_core(&state, work_s.clone(), true, false, None, None, None),
+                git_push_core_unpinned(&state, work_s.clone(), true, false, None, None, None),
             )
             .await
             .expect("the push succeeds");
@@ -6249,8 +7092,9 @@ mod tests {
         });
         let push = tokio::spawn({
             let (state, work_s) = (std::sync::Arc::clone(&state), work_s.clone());
-            let run =
-                async move { git_push_core(&state, work_s, true, false, None, None, None).await };
+            let run = async move {
+                git_push_core_unpinned(&state, work_s, true, false, None, None, None).await
+            };
             NETWORK_LOCK_WAIT_HOOK.scope(queued, CONFIG_WRITE_ATTEMPT_HOOK.scope(hook, run))
         });
         // The push is about to wait on the domain the test holds; only now does the
@@ -6337,7 +7181,7 @@ mod tests {
         run(&clone1_s, &["commit", "-q", "--amend", "-m", "amended seed"]).await;
 
         let state = AppState::default();
-        let err = git_push_core(&state, clone1_s.clone(), false, true, None, None, None)
+        let err = git_push_core_unpinned(&state, clone1_s.clone(), false, true, None, None, None)
             .await
             .expect_err("a stale lease must not clobber the remote");
         let AppError::Git { stderr, .. } = &err else {
@@ -6396,9 +7240,10 @@ mod tests {
 
         let state = AppState::default();
         for force in [false, true] {
-            let err = git_push_core(&state, work_s.clone(), false, force, None, None, None)
-                .await
-                .expect_err("git refuses the bare push");
+            let err =
+                git_push_core_unpinned(&state, work_s.clone(), false, force, None, None, None)
+                    .await
+                    .expect_err("git refuses the bare push");
             let AppError::PushUpstreamNameMismatch {
                 branch,
                 remote,
@@ -6420,7 +7265,7 @@ mod tests {
         );
 
         // "Push to origin/feat/x": the named destination, tracking untouched.
-        git_push_core(
+        git_push_core_unpinned(
             &state,
             work_s.clone(),
             false,
@@ -6452,7 +7297,7 @@ mod tests {
         assert_eq!(upstream().await, "refs/remotes/origin/feat/x");
 
         // "Publish as origin/feat/y": the same remote, retracked to the new name.
-        git_push_core(
+        git_push_core_unpinned(
             &state,
             work_s.clone(),
             true,
@@ -6470,7 +7315,7 @@ mod tests {
             tip
         );
         assert_eq!(upstream().await, "refs/remotes/origin/feat/y");
-        git_push_core(&state, work_s.clone(), false, false, None, None, None)
+        git_push_core_unpinned(&state, work_s.clone(), false, false, None, None, None)
             .await
             .expect("a bare push works again once the names match");
     }
@@ -6528,7 +7373,7 @@ mod tests {
                 .await
                 .trim()
                 .to_string();
-            let published = git_push_core(
+            let published = git_push_core_unpinned(
                 &state,
                 work_s.clone(),
                 true,
@@ -6602,7 +7447,7 @@ mod tests {
         .await;
 
         let state = AppState::default();
-        let err = git_push_core(&state, work_s.clone(), false, false, None, None, None)
+        let err = git_push_core_unpinned(&state, work_s.clone(), false, false, None, None, None)
             .await
             .expect_err("git refuses the bare push");
         let AppError::Git { stderr, .. } = &err else {
@@ -7529,7 +8374,7 @@ and the repository exists.
         run(&clone1_s, &["commit", "-q", "--amend", "-m", "amended seed"]).await;
 
         let state = AppState::default();
-        let err = git_push_core(&state, clone1_s.clone(), false, true, None, None, None)
+        let err = git_push_core_unpinned(&state, clone1_s.clone(), false, true, None, None, None)
             .await
             .expect_err("a merely-fetched remote commit must not be clobbered");
         let AppError::Git { stderr, .. } = &err else {
@@ -7545,10 +8390,10 @@ and the repository exists.
         // Integrating the remote work unblocks the very same push.
         run(&clone1_s, &["pull", "--rebase", "-q"]).await;
         assert_eq!(
-            git_push_core(&state, clone1_s.clone(), false, true, None, None, None)
+            git_push_core_unpinned(&state, clone1_s.clone(), false, true, None, None, None)
                 .await
                 .expect("an integrated branch force-pushes"),
-            PushGuard::LeaseAndIncludes
+            super::PushGuardWire::LeaseAndIncludes
         );
         let landed = run(&origin_s, &["ls-tree", "--name-only", "refs/heads/main"]).await;
         assert!(
@@ -7610,10 +8455,10 @@ and the repository exists.
 
         let state = AppState::default();
         assert_eq!(
-            git_push_core(&state, clone_s.clone(), false, true, None, None, None)
+            git_push_core_unpinned(&state, clone_s.clone(), false, true, None, None, None)
                 .await
                 .expect("a no-reflog rejection is spurious; the push must still land"),
-            PushGuard::LeaseOnlyNoReflog
+            super::PushGuardWire::LeaseOnlyNoReflog
         );
         assert_eq!(
             run(&origin_s, &["rev-parse", "refs/heads/main"]).await.trim(),
@@ -7640,7 +8485,7 @@ and the repository exists.
         // qualifying the refspec embeds the `+` inside `refs/heads/+main`, never
         // as its leading char, so git can't read it as a force-push.
         assert_eq!(
-            build_push_args("+main", &up(""), "", false, false, false, None, None),
+            build_push_args_today("+main", &up(""), "", false, false, false, None, None),
             vec!["push", "-u", "origin", "refs/heads/+main:refs/heads/+main"]
         );
     }
@@ -7651,8 +8496,22 @@ and the repository exists.
         // `origin/feature`), not the deleted `feat` — matching the "Publish"
         // affordance and toast.
         assert_eq!(
-            build_push_args("feature", &up("feat"), "origin", true, false, false, None, None),
-            vec!["push", "-u", "origin", "refs/heads/feature:refs/heads/feature"]
+            build_push_args_today(
+                "feature",
+                &up("feat"),
+                "origin",
+                true,
+                false,
+                false,
+                None,
+                None
+            ),
+            vec![
+                "push",
+                "-u",
+                "origin",
+                "refs/heads/feature:refs/heads/feature"
+            ]
         );
     }
 
@@ -7660,27 +8519,72 @@ and the repository exists.
     fn push_explicit_remote_branch_pins_the_destination_refspec() {
         // Untracked local branch, explicit remote + destination.
         assert_eq!(
-            build_push_args("local", &up(""), "", false, false, false, Some("fork"), Some("contrib")),
+            build_push_args_today(
+                "local",
+                &up(""),
+                "",
+                false,
+                false,
+                false,
+                Some("fork"),
+                Some("contrib")
+            ),
             vec!["push", "fork", "refs/heads/local:refs/heads/contrib"]
         );
         // A destination name never re-tracks, so `set_upstream` can't add `-u`.
         assert_eq!(
-            build_push_args("local", &up(""), "", false, true, false, Some("fork"), Some("contrib")),
+            build_push_args_today(
+                "local",
+                &up(""),
+                "",
+                false,
+                true,
+                false,
+                Some("fork"),
+                Some("contrib")
+            ),
             vec!["push", "fork", "refs/heads/local:refs/heads/contrib"]
         );
         // A gone upstream likewise can't drag the publish arm back in.
         assert_eq!(
-            build_push_args("local", &up("local"), "origin", true, false, false, Some("fork"), Some("contrib")),
+            build_push_args_today(
+                "local",
+                &up("local"),
+                "origin",
+                true,
+                false,
+                false,
+                Some("fork"),
+                Some("contrib")
+            ),
             vec!["push", "fork", "refs/heads/local:refs/heads/contrib"]
         );
         // Tracked elsewhere: the refspec still targets `contrib`, upstream untouched.
         assert_eq!(
-            build_push_args("local", &up("local"), "origin", false, false, false, Some("fork"), Some("contrib")),
+            build_push_args_today(
+                "local",
+                &up("local"),
+                "origin",
+                false,
+                false,
+                false,
+                Some("fork"),
+                Some("contrib")
+            ),
             vec!["push", "fork", "refs/heads/local:refs/heads/contrib"]
         );
         // `force` keeps its position ahead of the target, as in every other arm.
         assert_eq!(
-            build_push_args("local", &up(""), "", false, false, true, Some("fork"), Some("contrib")),
+            build_push_args_today(
+                "local",
+                &up(""),
+                "",
+                false,
+                false,
+                true,
+                Some("fork"),
+                Some("contrib")
+            ),
             vec![
                 "push",
                 "--force-with-lease",
@@ -7691,14 +8595,26 @@ and the repository exists.
         );
     }
 
+    /// The routing rule: explicit, else configured, else the live upstream's remote, else
+    /// origin.
     #[test]
-    fn resolve_push_target_prefers_request_then_tracked_then_origin() {
-        // Explicit request wins; else the tracked-and-not-gone remote; else origin
-        // (untracked, or gone).
-        assert_eq!(resolve_push_target(Some("fork"), "upstream", false), "fork");
-        assert_eq!(resolve_push_target(None, "upstream", false), "upstream");
-        assert_eq!(resolve_push_target(None, "", false), "origin");
-        assert_eq!(resolve_push_target(None, "upstream", true), "origin");
+    fn resolve_push_target_prefers_request_then_configured_then_tracked_then_origin() {
+        for (requested, configured, remotename, gone, want) in [
+            (Some("x"), Some("fork"), "upstream", false, "x"),
+            (Some("x"), None, "upstream", false, "x"),
+            (None, Some("fork"), "upstream", false, "fork"),
+            (None, Some("fork"), "upstream", true, "fork"),
+            (None, Some("fork"), "", false, "fork"),
+            (None, None, "upstream", false, "upstream"),
+            (None, None, "", false, "origin"),
+            (None, None, "upstream", true, "origin"),
+        ] {
+            assert_eq!(
+                resolve_push_target(requested, configured, remotename, gone),
+                want,
+                "{requested:?} {configured:?} {remotename:?} gone={gone}"
+            );
+        }
     }
 
     #[test]
@@ -7769,7 +8685,7 @@ and the repository exists.
         assert_eq!(parsed, Some((Upstream::NotABranch, "origin".into(), false)));
         let (upstream, remotename, gone) = parsed.unwrap();
         assert_eq!(
-            build_push_args(
+            build_push_args_today(
                 "pr-7",
                 &upstream,
                 &remotename,
@@ -7792,7 +8708,7 @@ and the repository exists.
         assert_eq!(parsed, Some((up("main"), ".".into(), false)));
         let (upstream, remotename, gone) = parsed.unwrap();
         assert_eq!(
-            build_push_args("x", &upstream, &remotename, gone, false, false, None, None),
+            build_push_args_today("x", &upstream, &remotename, gone, false, false, None, None),
             vec!["push", ".", "refs/heads/x:refs/heads/main"]
         );
     }
@@ -7805,6 +8721,1440 @@ and the repository exists.
         assert_eq!(
             parse_upstream_tracking("refs/heads/feat/sub\0\0\0\n", "refs/heads/feat"),
             None
+        );
+    }
+
+    // --- Push routing, pins and leases (the push package). ---
+
+    /// Today's 8-input argv: no configured push remote, never the create-only lease.
+    #[allow(clippy::too_many_arguments)] // the decision table's flat inputs
+    fn build_push_args_today(
+        branch: &str,
+        upstream: &Upstream,
+        remotename: &str,
+        gone: bool,
+        set_upstream: bool,
+        force: bool,
+        requested: Option<&str>,
+        remote_branch: Option<&str>,
+    ) -> Vec<String> {
+        let route = super::NamedRoute {
+            branch,
+            upstream,
+            remotename,
+            gone,
+            set_upstream,
+            requested,
+            configured: None,
+            remote_branch,
+        };
+        super::build_push_args(&route, force, super::CreateLease::NONE)
+    }
+
+    /// `git_push_core` with today's seven inputs: no pins, no recorded create.
+    async fn git_push_core_unpinned(
+        state: &AppState,
+        repo_path: String,
+        set_upstream: bool,
+        force: bool,
+        branch: Option<String>,
+        remote: Option<String>,
+        remote_branch: Option<String>,
+    ) -> crate::error::AppResult<super::PushGuardWire> {
+        super::git_push_core(
+            state,
+            repo_path,
+            set_upstream,
+            force,
+            branch,
+            remote,
+            remote_branch,
+            None,
+            false,
+        )
+        .await
+    }
+
+    fn pins(branch: &str, head: Option<&str>) -> super::PushPins {
+        super::PushPins::from_wire(Some(branch.to_string()), head.map(str::to_string))
+            .unwrap()
+            .expect("a branch pin")
+    }
+
+    fn sv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The named-push routing table. Mark `u`: the create-only lease when the destination's
+    /// tracking ref is unproven or on `creates`; `c`: only on `creates`; `-`: never.
+    /// Each row also runs [`super::NamedPushRouting::destination`] against the argv.
+    #[test]
+    fn named_push_routing_table_and_its_destination_agree() {
+        use super::NamedPushDestination::{Refused, To};
+        let b = |n: &str| Upstream::Branch(n.to_string());
+        let lease = "--force-with-lease=refs/heads/b:";
+        #[rustfmt::skip]
+        #[allow(clippy::type_complexity)] // one flat tuple per table row
+        let rows: Vec<(&str, Upstream, &str, bool, bool, bool, Option<&str>, Option<&str>, Option<&str>, Vec<&str>, char)> = vec![
+            ("tracked same, none", b("b"), "origin", false, false, false, None, None, None, vec!["push", "origin", "refs/heads/b:refs/heads/b"], 'c'),
+            ("tracked same, fork", b("b"), "origin", false, false, false, None, Some("fork"), None, vec!["push", "fork", "refs/heads/b:refs/heads/b"], 'c'),
+            ("tracked other, fork", b("other"), "origin", false, false, false, None, Some("fork"), None, vec!["push", "fork", "refs/heads/b:refs/heads/b"], 'c'),
+            ("tracked other, origin", b("other"), "origin", false, false, false, None, Some("origin"), None, vec!["push", "origin", "refs/heads/b:refs/heads/other"], 'c'),
+            ("tracked other, none", b("other"), "origin", false, false, false, None, None, None, vec!["push", "origin", "refs/heads/b:refs/heads/other"], 'c'),
+            ("untracked, fork", Upstream::Untracked, "", false, false, false, None, Some("fork"), None, vec!["push", "-u", "fork", "refs/heads/b:refs/heads/b"], 'u'),
+            ("untracked, none", Upstream::Untracked, "", false, false, false, None, None, None, vec!["push", "-u", "origin", "refs/heads/b:refs/heads/b"], 'u'),
+            ("gone, none", b("b"), "fork", true, false, false, None, None, None, vec!["push", "-u", "origin", "refs/heads/b:refs/heads/b"], 'u'),
+            ("gone, fork", b("b"), "origin", true, false, false, None, Some("fork"), None, vec!["push", "-u", "fork", "refs/heads/b:refs/heads/b"], 'u'),
+            ("set_upstream up/main", b("main"), "up", false, true, false, None, None, None, vec!["push", "-u", "up", "refs/heads/b:refs/heads/b"], 'u'),
+            ("set_upstream same, fork", b("b"), "origin", false, true, false, None, Some("fork"), None, vec!["push", "-u", "fork", "refs/heads/b:refs/heads/b"], 'u'),
+            ("non-branch, fork", Upstream::NotABranch, "origin", false, false, false, None, Some("fork"), None, vec!["push", "fork", "refs/heads/b:refs/heads/b"], 'c'),
+            ("non-branch, none", Upstream::NotABranch, "origin", false, false, false, None, None, None, vec!["push", "origin", "refs/heads/b:refs/heads/b"], 'c'),
+            ("explicit X", b("b"), "origin", false, false, false, Some("up"), None, None, vec!["push", "up", "refs/heads/b:refs/heads/b"], 'c'),
+            ("explicit = configured", b("b"), "origin", false, false, false, Some("fork"), None, None, vec!["push", "fork", "refs/heads/b:refs/heads/b"], 'c'),
+            ("explicit + rb", b("b"), "origin", false, false, false, Some("fork"), None, Some("rb"), vec!["push", "fork", "refs/heads/b:refs/heads/rb"], 'c'),
+            ("local ., fork", b("main"), ".", false, false, false, None, Some("fork"), None, vec!["push", "fork", "refs/heads/b:refs/heads/b"], 'c'),
+            ("force", b("b"), "origin", false, false, true, None, None, None, vec!["push", "--force-with-lease", "--force-if-includes", "origin", "refs/heads/b:refs/heads/b"], '-'),
+            ("force publish", Upstream::Untracked, "", false, false, true, None, Some("fork"), None, vec!["push", "--force-with-lease", "--force-if-includes", "-u", "fork", "refs/heads/b:refs/heads/b"], '-'),
+        ];
+        let remotes = sv(&["origin", "fork", "up"]);
+        for (
+            label,
+            upstream,
+            remotename,
+            gone,
+            set,
+            force,
+            requested,
+            configured,
+            rb,
+            want,
+            mark,
+        ) in rows
+        {
+            let route = super::NamedRoute {
+                branch: "b",
+                upstream: &upstream,
+                remotename,
+                gone,
+                set_upstream: set,
+                requested,
+                configured,
+                remote_branch: rb,
+            };
+            let with_lease = |argv: &[&str]| {
+                let mut v = sv(argv);
+                v.insert(1, lease.to_string());
+                v
+            };
+            let leased = with_lease(&want);
+            let lease_of = |creates, dest_tracked| {
+                route.argv(
+                    force,
+                    super::CreateLease {
+                        creates,
+                        dest_tracked,
+                    },
+                )
+            };
+            let leased = if rb.is_some() {
+                let mut v = sv(&want);
+                v.insert(1, "--force-with-lease=refs/heads/rb:".to_string());
+                v
+            } else if label.starts_with("tracked other, origin") || label == "tracked other, none" {
+                let mut v = sv(&want);
+                v.insert(1, "--force-with-lease=refs/heads/other:".to_string());
+                v
+            } else {
+                leased
+            };
+            assert_eq!(lease_of(false, true), sv(&want), "{label}: no lease");
+            let untracked = lease_of(false, false);
+            let created = lease_of(true, true);
+            match mark {
+                'u' => {
+                    assert_eq!(untracked, leased, "{label}: unproven tracking");
+                    assert_eq!(created, leased, "{label}: creates");
+                }
+                'c' => {
+                    assert_eq!(untracked, sv(&want), "{label}: unproven tracking");
+                    assert_eq!(created, leased, "{label}: creates");
+                }
+                _ => {
+                    assert_eq!(untracked, sv(&want), "{label}: force");
+                    assert_eq!(created, sv(&want), "{label}: force");
+                }
+            }
+            // The destination answers only for no explicit remote, no retrack.
+            if requested.is_some() || set {
+                continue;
+            }
+            let listing = match configured {
+                Some(c) => format!("branch.b.pushremote\n{c}\0"),
+                None => String::new(),
+            };
+            let routing = super::NamedPushRouting {
+                config: crate::git::status::PushConfig::from_listing(&listing),
+                remotes: remotes.clone(),
+            };
+            let target = want[want.len() - 2].to_string();
+            let dest = want[want.len() - 1]
+                .rsplit_once(":refs/heads/")
+                .unwrap()
+                .1
+                .to_string();
+            assert_eq!(
+                routing.destination("b", &upstream, remotename, gone),
+                To {
+                    remote: target,
+                    branch: dest
+                },
+                "{label}: destination"
+            );
+        }
+
+        // The routing refusals, each answered `Refused` and refused by the call the push
+        // makes there: `v` validate_ref_name, `s` the session check, `c` the configured
+        // push remote's check, `r` the route's own refusals.
+        let mirror = "remote.fork.mirror\ntrue\0branch.b.pushremote\nfork\0";
+        #[rustfmt::skip]
+        let refused: Vec<(&str, &str, &str, Upstream, &str, char)> = vec![
+            ("local . upstream", "b", "", b("main"), ".", 'r'),
+            ("mirror push remote", "b", mirror, Upstream::Untracked, "", 'r'),
+            ("unusable push remote", "b", "branch.b.pushremote\nnope\0", Upstream::Untracked, "", 'c'),
+            ("unlisted upstream remote", "b", "", b("b"), "ghost", 'r'),
+            ("dash-named upstream remote", "b", "", b("b"), "-x", 'r'),
+            ("destination holding a colon", "b", "", b("a:b"), "origin", 'r'),
+            ("session destination", "b", "", b("gd/session/x"), "origin", 'r'),
+            ("invalid branch name", "bad:name", "", Upstream::Untracked, "", 'v'),
+            ("session branch", "gd/session/x", "", Upstream::Untracked, "", 's'),
+        ];
+        let remotes = sv(&["origin", "fork", "up", "-x"]);
+        for (label, branch, listing, upstream, remotename, push_side) in refused {
+            let routing = super::NamedPushRouting {
+                config: crate::git::status::PushConfig::from_listing(listing),
+                remotes: remotes.clone(),
+            };
+            assert_eq!(
+                routing.destination(branch, &upstream, remotename, false),
+                Refused,
+                "{label}"
+            );
+            let config = &routing.config;
+            let refusal = match push_side {
+                'v' => crate::git::branches::validate_ref_name(branch).err(),
+                's' => super::refuse_publishing_session_branch(branch).err(),
+                'c' => super::configured_push_remote_checked(config, &remotes, branch).err(),
+                _ => {
+                    let configured =
+                        super::configured_push_remote_checked(config, &remotes, branch).unwrap();
+                    let route = super::NamedRoute {
+                        branch,
+                        upstream: &upstream,
+                        remotename,
+                        gone: false,
+                        set_upstream: false,
+                        requested: None,
+                        configured,
+                        remote_branch: None,
+                    };
+                    route
+                        .refuse(config, &remotes, super::CrossNameUpstream::Follow)
+                        .err()
+                }
+            };
+            assert!(refusal.is_some(), "{label}: the push's own check");
+        }
+
+        // A destination with a leading dash is a valid ref behind `refs/heads/`: it routes.
+        let dashed = b("-x");
+        let routing = super::NamedPushRouting {
+            config: crate::git::status::PushConfig::from_listing(""),
+            remotes: remotes.clone(),
+        };
+        assert_eq!(
+            routing.destination("b", &dashed, "origin", false),
+            To {
+                remote: "origin".to_string(),
+                branch: "-x".to_string()
+            }
+        );
+        let route = super::NamedRoute {
+            branch: "b",
+            upstream: &dashed,
+            remotename: "origin",
+            gone: false,
+            set_upstream: false,
+            requested: None,
+            configured: None,
+            remote_branch: None,
+        };
+        assert_eq!(
+            route.argv(false, super::CreateLease::NONE),
+            sv(&["push", "origin", "refs/heads/b:refs/heads/-x"])
+        );
+    }
+
+    /// An unusable configured push remote names the key that won, for each key and shape.
+    #[test]
+    fn an_unusable_configured_push_remote_names_its_key() {
+        let remotes = sv(&["origin", "fork"]);
+        let own = "branch.b.pushRemote";
+        let pd = "remote.pushDefault";
+        #[rustfmt::skip]
+        let rows = [
+            ("branch.b.pushremote\n\0", own, ""),
+            ("branch.b.pushremote\nbad:name\0", own, "bad:name"),
+            ("branch.b.pushremote\nghost\0", own, "ghost"),
+            ("remote.pushdefault\n\0", pd, ""),
+            ("remote.pushdefault\nbad:name\0", pd, "bad:name"),
+            ("remote.pushdefault\nghost\0", pd, "ghost"),
+            ("remote.pushdefault\nfork\0branch.b.pushremote\n\0", own, ""),
+        ];
+        for (listing, key, value) in rows {
+            let config = crate::git::status::PushConfig::from_listing(listing);
+            match super::configured_push_remote_checked(&config, &remotes, "b") {
+                Err(AppError::PushRemoteUnusable {
+                    branch,
+                    key: k,
+                    value: v,
+                }) => {
+                    assert_eq!((branch.as_str(), k.as_str(), v.as_str()), ("b", key, value))
+                }
+                other => panic!("{listing:?}: {other:?}"),
+            }
+        }
+        let config = crate::git::status::PushConfig::from_listing("remote.pushdefault\nfork\0");
+        assert_eq!(
+            super::configured_push_remote_checked(&config, &remotes, "b").unwrap(),
+            Some("fork")
+        );
+        let none = crate::git::status::PushConfig::from_listing("");
+        assert_eq!(
+            super::configured_push_remote_checked(&none, &remotes, "b").unwrap(),
+            None
+        );
+    }
+
+    /// The remote a HEAD push authenticates against: git's own routing for the bare push
+    /// (None for an empty winner), the configured push remote else origin for `-u`.
+    #[test]
+    fn head_push_remote_follows_the_route() {
+        use super::HeadRoute::{Bare, Publish};
+        let remotes = sv(&["origin", "fork"]);
+        let on = |listing: &str, route, head: Option<&str>| {
+            let config = crate::git::status::PushConfig::from_listing(listing);
+            super::head_push_remote(&config, route, head, &remotes)
+        };
+        let some = |r: &str| Some(r.to_string());
+        assert_eq!(
+            on("remote.solo.url\nu\0", Bare, Some("feat")).unwrap(),
+            some("solo")
+        );
+        for push_default in ["simple", "current", "upstream", "matching"] {
+            let triangular = format!(
+                "push.default\n{push_default}\0branch.feat.remote\norigin\0branch.feat.pushremote\nfork\0"
+            );
+            assert_eq!(
+                on(&triangular, Bare, Some("feat")).unwrap(),
+                some("fork"),
+                "{push_default}"
+            );
+        }
+        assert_eq!(
+            on(
+                "remote.pushdefault\nfork\0branch.feat.remote\norigin\0",
+                Bare,
+                Some("feat")
+            )
+            .unwrap(),
+            some("fork")
+        );
+        assert_eq!(
+            on("remote.pushdefault\n\0", Bare, Some("feat")).unwrap(),
+            None
+        );
+        assert_eq!(
+            on("remote.pushdefault\nfork\0", Bare, None).unwrap(),
+            some("fork")
+        );
+        assert_eq!(
+            on("remote.pushdefault\nfork\0", Publish, Some("feat")).unwrap(),
+            some("fork")
+        );
+        assert_eq!(
+            on("remote.pushdefault\nfork\0", Publish, None).unwrap(),
+            some("origin")
+        );
+        assert_eq!(on("", Publish, Some("feat")).unwrap(), some("origin"));
+        assert!(matches!(
+            on("branch.feat.pushremote\nnope\0", Publish, Some("feat")),
+            Err(AppError::PushRemoteUnusable { .. })
+        ));
+    }
+
+    #[test]
+    fn push_guard_wire_serializes_to_the_camel_case_wire_values() {
+        use super::PushGuardWire;
+        for (guard, wire) in [
+            (PushGuardWire::LeaseAndIncludes, "leaseAndIncludes"),
+            (PushGuardWire::LeaseOnlyOldGit, "leaseOnlyOldGit"),
+            (PushGuardWire::LeaseOnlyNoReflog, "leaseOnlyNoReflog"),
+            (
+                PushGuardWire::LeasePinnedNoTrackingReflog,
+                "leasePinnedNoTrackingReflog",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&guard).unwrap(),
+                serde_json::Value::String(wire.to_string()),
+            );
+        }
+        assert_eq!(
+            PushGuardWire::from(PushGuard::LeaseOnlyOldGit),
+            PushGuardWire::LeaseOnlyOldGit
+        );
+    }
+
+    #[test]
+    fn push_pins_parse_the_wire_form() {
+        use super::PushPins;
+        let hex40 = "A".repeat(40);
+        let hex64 = "b".repeat(64);
+        assert!(PushPins::from_wire(None, None).unwrap().is_none());
+        assert!(PushPins::from_wire(Some("HEAD".into()), None)
+            .unwrap()
+            .is_some());
+        assert!(PushPins::from_wire(Some("feat".into()), Some(hex40))
+            .unwrap()
+            .is_some());
+        assert!(
+            PushPins::from_wire(Some("feat".into()), Some(hex64.clone()))
+                .unwrap()
+                .is_some()
+        );
+        for (branch, head) in [
+            (None, Some(hex64)),
+            (Some("feat".to_string()), Some("abc".to_string())),
+            (Some("feat".to_string()), Some("g".repeat(40))),
+        ] {
+            assert!(matches!(
+                PushPins::from_wire(branch, head),
+                Err(AppError::InvalidArgument(_))
+            ));
+        }
+        assert_eq!(
+            super::create_lease_arg("feat"),
+            "--force-with-lease=refs/heads/feat:"
+        );
+        assert_eq!(
+            super::pinned_lease_arg("a", "0123"),
+            "--force-with-lease=refs/heads/a:0123"
+        );
+    }
+
+    /// Adds a bare `fork` remote beside `seeded_origin`'s origin; returns its path.
+    async fn add_fork(base: &std::path::Path, work: &str) -> String {
+        let base_s = base.to_string_lossy().into_owned();
+        run(&base_s, &["init", "-q", "--bare", "-b", "main", "fork.git"]).await;
+        let fork = base.join("fork.git").to_string_lossy().into_owned();
+        let url = format!("file://{}", fork.replace('\\', "/"));
+        run(work, &["remote", "add", "fork", &url]).await;
+        run(work, &["config", "remote.fork.mirror", "false"]).await;
+        fork
+    }
+
+    async fn tip_of(repo: &str, full_ref: &str) -> Option<String> {
+        run_git_raw(
+            Some(repo),
+            &["rev-parse", "--verify", "--quiet", full_ref],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .ok()
+        .filter(|o| o.code == 0)
+        .map(|o| o.stdout_lossy().trim().to_string())
+    }
+
+    /// The MCP core follows the configured push remote for a same-name push, and keeps the
+    /// cross-name refusal when its push remote is another remote or a mirror.
+    #[tokio::test]
+    async fn mcp_named_push_follows_the_push_remote_but_keeps_the_cross_name_refusal() {
+        let (_guard, base, origin, _url) = seeded_origin("mcp-push-remote").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let fork = add_fork(&base, &work).await;
+        let state = AppState::default();
+        run(&work, &["checkout", "-q", "-b", "x"]).await;
+        run(&work, &["push", "-q", "-u", "origin", "x"]).await;
+        run(&work, &["commit", "-qm", "on x", "--allow-empty"]).await;
+        run(&work, &["config", "branch.x.pushRemote", "fork"]).await;
+        let origin_x = tip_of(&origin, "refs/heads/x").await;
+        git_push_same_name_core(&state, work.clone(), false, Some("x".into()), None)
+            .await
+            .expect("a same-name push follows the push remote");
+        assert_eq!(
+            tip_of(&fork, "refs/heads/x").await,
+            tip_of(&work, "refs/heads/x").await
+        );
+        assert_eq!(tip_of(&origin, "refs/heads/x").await, origin_x);
+        assert_eq!(
+            run(&work, &["config", "branch.x.remote"]).await.trim(),
+            "origin"
+        );
+
+        run(&work, &["checkout", "-q", "-b", "y", "origin/main"]).await;
+        run(&work, &["commit", "-qm", "on y", "--allow-empty"]).await;
+        run(&work, &["config", "branch.y.pushRemote", "fork"]).await;
+        let main = tip_of(&origin, "refs/heads/main").await;
+        for mirror in [false, true] {
+            run(
+                &work,
+                &["config", "remote.fork.mirror", &mirror.to_string()],
+            )
+            .await;
+            let err = git_push_same_name_core(&state, work.clone(), false, Some("y".into()), None)
+                .await
+                .expect_err("a cross-name push refuses");
+            assert!(
+                matches!(&err, AppError::PushUpstreamNameMismatch { remote_branch, .. } if remote_branch == "main"),
+                "mirror={mirror}: {err:?}"
+            );
+            assert_eq!(tip_of(&origin, "refs/heads/main").await, main);
+            assert_eq!(tip_of(&fork, "refs/heads/y").await, None);
+        }
+    }
+
+    /// The HEAD `-u` publish goes to the configured push remote and tracks it; an
+    /// unusable one refuses with nothing pushed anywhere.
+    #[tokio::test]
+    async fn head_publish_follows_the_configured_push_remote() {
+        let (_guard, base, origin, _url) = seeded_origin("head-publish-remote").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let fork = add_fork(&base, &work).await;
+        let state = AppState::default();
+        run(&work, &["checkout", "-q", "-b", "b"]).await;
+        run(&work, &["commit", "-qm", "on b", "--allow-empty"]).await;
+        run(&work, &["config", "remote.pushDefault", "fork"]).await;
+        git_push_same_name_core(&state, work.clone(), true, None, None)
+            .await
+            .expect("the HEAD publish lands on the push remote");
+        assert_eq!(
+            tip_of(&fork, "refs/heads/b").await,
+            tip_of(&work, "refs/heads/b").await
+        );
+        assert_eq!(tip_of(&origin, "refs/heads/b").await, None);
+        assert_eq!(
+            run(&work, &["config", "branch.b.remote"]).await.trim(),
+            "fork"
+        );
+
+        run(&work, &["checkout", "-q", "-b", "c"]).await;
+        run(&work, &["config", "branch.c.pushRemote", "nope"]).await;
+        let err = git_push_same_name_core(&state, work.clone(), true, None, None)
+            .await
+            .expect_err("an unusable push remote refuses");
+        assert!(
+            matches!(&err, AppError::PushRemoteUnusable { key, value, .. } if key == "branch.c.pushRemote" && value == "nope"),
+            "{err:?}"
+        );
+        assert_eq!(tip_of(&fork, "refs/heads/c").await, None);
+        assert_eq!(tip_of(&origin, "refs/heads/c").await, None);
+    }
+
+    /// An empty `remote.pushDefault` leaves a bare push no destination: no credentials
+    /// are built and git's own refusal stands.
+    #[tokio::test]
+    async fn an_empty_push_default_bare_push_is_gits_refusal() {
+        let (_guard, base, _origin, _url) = seeded_origin_unpinned_push_default("empty-pd").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        run(&work, &["config", "remote.pushDefault", ""]).await;
+        run(&work, &["commit", "-qm", "more", "--allow-empty"]).await;
+        let state = AppState::default();
+        match git_push_core_unpinned(&state, work, false, false, None, None, None).await {
+            Err(AppError::Git { stderr, .. }) => assert!(
+                stderr.contains("No configured push destination"),
+                "{stderr}"
+            ),
+            other => panic!("expected git's refusal, got {other:?}"),
+        }
+    }
+
+    /// Runs `git <args>` in `repo` synchronously, for a hook.
+    fn git_sync(repo: &str, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .test_git_env()
+            .current_dir(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// A pinned push re-reads HEAD at spawn: HEAD moved to another branch while the push
+    /// waits on the network lock refuses the bare and the force push; one more commit on
+    /// the same branch lands the plain push and refuses the force push's tip pin. Unpinned,
+    /// the moved-HEAD bare push still runs (the negative control).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pinned_pushes_recheck_head_and_tip_at_spawn() {
+        let (_guard, base, origin, _url) = seeded_origin("pinned-recheck").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        run(&work, &["branch", "other"]).await;
+        let state = AppState::default();
+        for force in [false, true] {
+            run(&work, &["commit", "-qm", "next", "--allow-empty"]).await;
+            let tip = tip_of(&work, "refs/heads/main").await.unwrap();
+            let published = tip_of(&origin, "refs/heads/main").await;
+            let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+                let work = work.clone();
+                move || git_sync(&work, &["symbolic-ref", "HEAD", "refs/heads/other"])
+            });
+            let head = force.then_some(tip.as_str());
+            let push = super::git_push_core(
+                &state,
+                work.clone(),
+                false,
+                force,
+                None,
+                None,
+                None,
+                Some(pins("main", head)),
+                false,
+            );
+            let result = NETWORK_LOCK_WAIT_HOOK.scope(hook, push).await;
+            assert!(
+                matches!(&result, Err(AppError::PushHeadMoved { expected }) if expected == "main"),
+                "force={force}: {result:?}"
+            );
+            assert_eq!(tip_of(&origin, "refs/heads/main").await, published);
+            run(&work, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
+        }
+
+        // One more commit on the same branch during the wait.
+        let hook = || -> std::sync::Arc<dyn Fn() + Send + Sync> {
+            let work = work.clone();
+            std::sync::Arc::new(move || {
+                git_sync(&work, &["commit", "-qm", "late", "--allow-empty"])
+            })
+        };
+        let tip = tip_of(&work, "refs/heads/main").await.unwrap();
+        let published = tip_of(&origin, "refs/heads/main").await;
+        let push = super::git_push_core(
+            &state,
+            work.clone(),
+            false,
+            true,
+            None,
+            None,
+            None,
+            Some(pins("main", Some(&tip))),
+            false,
+        );
+        let result = NETWORK_LOCK_WAIT_HOOK.scope(hook(), push).await;
+        assert!(
+            matches!(&result, Err(AppError::PushTipMoved { branch }) if branch == "main"),
+            "{result:?}"
+        );
+        assert_eq!(tip_of(&origin, "refs/heads/main").await, published);
+        let push = super::git_push_core(
+            &state,
+            work.clone(),
+            false,
+            false,
+            None,
+            None,
+            None,
+            Some(pins("main", None)),
+            false,
+        );
+        NETWORK_LOCK_WAIT_HOOK
+            .scope(hook(), push)
+            .await
+            .expect("a branch-only pin lands a commit made on the same branch");
+        assert_eq!(
+            tip_of(&origin, "refs/heads/main").await,
+            tip_of(&work, "refs/heads/main").await
+        );
+
+        // Negative control: unpinned, the moved-HEAD push runs (and pushes `other`).
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+            let work = work.clone();
+            move || git_sync(&work, &["symbolic-ref", "HEAD", "refs/heads/other"])
+        });
+        let push = git_push_core_unpinned(&state, work.clone(), false, false, None, None, None);
+        let result = NETWORK_LOCK_WAIT_HOOK.scope(hook, push).await;
+        assert!(
+            !matches!(result, Err(AppError::PushHeadMoved { .. })),
+            "an unpinned push never answers PushHeadMoved: {result:?}"
+        );
+    }
+
+    /// The no-local-reflog degrade retry is a second spawn, so it re-checks the pins: HEAD
+    /// moved on the hook's SECOND firing refuses it and nothing lands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_degrade_retry_rechecks_the_pins() {
+        let (_guard, base, origin_s, url) = seeded_origin("degrade-recheck").await;
+        let base_s = base.to_string_lossy().into_owned();
+        run(
+            &base_s,
+            &[
+                "-c",
+                "core.autocrlf=false",
+                "clone",
+                "-q",
+                "-c",
+                "core.logAllRefUpdates=false",
+                &url,
+                "nolog",
+            ],
+        )
+        .await;
+        let clone_s = base.join("nolog").to_string_lossy().into_owned();
+        run(&clone_s, &["config", "user.email", "t@t.local"]).await;
+        run(&clone_s, &["config", "user.name", "T"]).await;
+        run(&clone_s, &["branch", "other"]).await;
+        run(
+            &clone_s,
+            &["commit", "-q", "--allow-empty", "--amend", "-m", "amended"],
+        )
+        .await;
+        let amended = tip_of(&clone_s, "refs/heads/main").await.unwrap();
+        let published = tip_of(&origin_s, "refs/heads/main").await;
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+            let (fired, clone_s) = (std::sync::Arc::clone(&fired), clone_s.clone());
+            move || {
+                if fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                    git_sync(&clone_s, &["symbolic-ref", "HEAD", "refs/heads/other"]);
+                }
+            }
+        });
+        let state = AppState::default();
+        let push = super::git_push_core(
+            &state,
+            clone_s.clone(),
+            false,
+            true,
+            None,
+            None,
+            None,
+            Some(pins("main", Some(&amended))),
+            false,
+        );
+        let result = NETWORK_LOCK_WAIT_HOOK.scope(hook, push).await;
+        assert_eq!(
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "{result:?}"
+        );
+        assert!(
+            matches!(&result, Err(AppError::PushHeadMoved { .. })),
+            "{result:?}"
+        );
+        assert_eq!(tip_of(&origin_s, "refs/heads/main").await, published);
+    }
+
+    /// The ambient-credential retry re-checks the pins: the injected run's rejecting hook
+    /// moves HEAD, so the retry refuses; unpinned (the negative control) it lands.
+    #[tokio::test]
+    async fn the_ambient_retry_rechecks_the_pins() {
+        let (_guard, work, origin) = keep_local_origin("pinned-ambient").await;
+        run(&work, &["branch", "other"]).await;
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "next"]).await;
+        let dir = std::path::Path::new(&work).with_file_name("reject-and-move");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("pre-push");
+        std::fs::write(
+            &file,
+            "#!/bin/sh\ngit symbolic-ref HEAD refs/heads/other\necho 'fatal: Authentication failed for origin' >&2\nexit 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let moving = vec![format!(
+            "core.hooksPath={}",
+            dir.to_string_lossy().replace('\\', "/")
+        )];
+        let argv = ["push", "origin", "refs/heads/feat/x:refs/heads/feat/x"];
+        let published = feat_x_tip(&origin).await;
+        let pinned = pins("feat/x", None);
+        let recheck = Some(super::SpawnRecheck {
+            route: super::RecheckRoute::Named("feat/x"),
+            pins: Some(&pinned),
+        });
+        let result =
+            super::run_git_with_creds_rechecked(&work, &moving, &argv, NETWORK_TIMEOUT, recheck)
+                .await;
+        assert!(
+            matches!(&result, Err(AppError::PushHeadMoved { expected }) if expected == "feat/x"),
+            "{:?}",
+            result.map(|o| o.code)
+        );
+        assert_eq!(feat_x_tip(&origin).await, published);
+
+        run(&work, &["symbolic-ref", "HEAD", "refs/heads/feat/x"]).await;
+        let recheck = Some(super::SpawnRecheck::named("feat/x"));
+        let out =
+            super::run_git_with_creds_rechecked(&work, &moving, &argv, NETWORK_TIMEOUT, recheck)
+                .await
+                .unwrap();
+        assert_eq!(
+            out.code,
+            0,
+            "unpinned ambient retry: {}",
+            out.full_failure_text()
+        );
+        assert_eq!(feat_x_tip(&origin).await, feat_x_tip(&work).await);
+    }
+
+    /// Puts `sha` on `remote`'s `refs/heads/feat` and drops this clone's tracking ref, so
+    /// the destination exists unfetched.
+    async fn plant_unfetched(work: &str, remote: &str, sha: &str) {
+        run(work, &["branch", "-f", "plant", sha]).await;
+        run(work, &["push", "-q", "-f", remote, "plant:feat"]).await;
+        let tracking = format!("refs/remotes/{remote}/feat");
+        let _ = run_git_raw(
+            Some(work),
+            &["update-ref", "-d", &tracking],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await;
+        assert_eq!(tip_of(work, &tracking).await, None);
+    }
+
+    /// The `-u` arm's create-only lease, one row per remote state: absent creates; the
+    /// same commit is clean; an unfetched ancestor or unrelated tip is refused with the
+    /// remote unchanged (and, as the negative control, the same push without the lease
+    /// fast-forwards the ancestor); a fetched branch takes no lease.
+    #[tokio::test]
+    async fn the_publish_arm_carries_the_create_only_lease() {
+        let (_guard, base, origin, _url) = seeded_origin("create-lease").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let state = AppState::default();
+        let main = tip_of(&work, "refs/heads/main").await.unwrap();
+        run(&work, &["checkout", "-q", "-b", "feat"]).await;
+        run(&work, &["commit", "-qm", "feat", "--allow-empty"]).await;
+        let feat = tip_of(&work, "refs/heads/feat").await.unwrap();
+        let tree = run(&work, &["rev-parse", "feat^{tree}"])
+            .await
+            .trim()
+            .to_string();
+        let unrelated = run(&work, &["commit-tree", &tree, "-m", "unrelated"])
+            .await
+            .trim()
+            .to_string();
+        let publish = || {
+            git_push_core_unpinned(
+                &state,
+                work.clone(),
+                false,
+                false,
+                Some("feat".into()),
+                None,
+                None,
+            )
+        };
+        let reset = |work: String| async move {
+            let _ = run_git_raw(
+                Some(&work),
+                &["config", "--unset", "branch.feat.remote"],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await;
+            let _ = run_git_raw(
+                Some(&work),
+                &["config", "--unset", "branch.feat.merge"],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await;
+            let _ = run_git_raw(
+                Some(&work),
+                &["push", "-q", "origin", ":refs/heads/feat"],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await;
+            let _ = run_git_raw(
+                Some(&work),
+                &["update-ref", "-d", "refs/remotes/origin/feat"],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await;
+        };
+
+        publish().await.expect("an absent destination is created");
+        assert_eq!(
+            tip_of(&origin, "refs/heads/feat").await.as_deref(),
+            Some(feat.as_str())
+        );
+        assert_eq!(
+            run(&work, &["config", "branch.feat.remote"]).await.trim(),
+            "origin"
+        );
+
+        reset(work.clone()).await;
+        plant_unfetched(&work, "origin", &feat).await;
+        publish().await.expect("the same commit exits clean");
+        assert_eq!(
+            run(&work, &["config", "branch.feat.remote"]).await.trim(),
+            "origin"
+        );
+
+        for (row, planted) in [("ancestor", &main), ("unrelated", &unrelated)] {
+            reset(work.clone()).await;
+            plant_unfetched(&work, "origin", planted).await;
+            let err = publish().await.expect_err(row);
+            assert!(
+                matches!(&err, AppError::PushDestinationExists { branch, remote, dest } if branch == "feat" && remote == "origin" && dest == "feat"),
+                "{row}: {err:?}"
+            );
+            assert_eq!(
+                tip_of(&origin, "refs/heads/feat").await.as_deref(),
+                Some(planted.as_str()),
+                "{row}"
+            );
+        }
+        // Negative control: the same argv without the lease fast-forwards the ancestor.
+        reset(work.clone()).await;
+        plant_unfetched(&work, "origin", &main).await;
+        run(
+            &work,
+            &[
+                "push",
+                "-q",
+                "-u",
+                "origin",
+                "refs/heads/feat:refs/heads/feat",
+            ],
+        )
+        .await;
+        assert_eq!(
+            tip_of(&origin, "refs/heads/feat").await.as_deref(),
+            Some(feat.as_str())
+        );
+
+        // A fetched existing branch: no lease, a fast-forward.
+        reset(work.clone()).await;
+        run(&work, &["branch", "-f", "plant", &main]).await;
+        run(&work, &["push", "-q", "origin", "plant:feat"]).await;
+        assert!(tip_of(&work, "refs/remotes/origin/feat").await.is_some());
+        publish().await.expect("a fetched branch fast-forwards");
+        assert_eq!(
+            tip_of(&origin, "refs/heads/feat").await.as_deref(),
+            Some(feat.as_str())
+        );
+    }
+
+    /// The copy arm leases only on `creates`: without it an unfetched ancestor on the
+    /// other remote fast-forwards (the recorded consequence); with it, it is refused.
+    #[tokio::test]
+    async fn the_copy_arm_leases_only_on_creates() {
+        let (_guard, base, _origin, _url) = seeded_origin("copy-lease").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let fork = add_fork(&base, &work).await;
+        let state = AppState::default();
+        let main = tip_of(&work, "refs/heads/main").await.unwrap();
+        run(&work, &["checkout", "-q", "-b", "feat"]).await;
+        run(&work, &["push", "-q", "-u", "origin", "feat"]).await;
+        run(&work, &["commit", "-qm", "feat", "--allow-empty"]).await;
+        let feat = tip_of(&work, "refs/heads/feat").await.unwrap();
+        for creates in [true, false] {
+            plant_unfetched(&work, "fork", &main).await;
+            let result = super::git_push_core(
+                &state,
+                work.clone(),
+                false,
+                false,
+                Some("feat".into()),
+                Some("fork".into()),
+                None,
+                None,
+                creates,
+            )
+            .await;
+            if creates {
+                assert!(
+                    matches!(&result, Err(AppError::PushDestinationExists { remote, .. }) if remote == "fork"),
+                    "{result:?}"
+                );
+                assert_eq!(
+                    tip_of(&fork, "refs/heads/feat").await.as_deref(),
+                    Some(main.as_str())
+                );
+            } else {
+                result.expect("no create recorded: the copy fast-forwards");
+                assert_eq!(
+                    tip_of(&fork, "refs/heads/feat").await.as_deref(),
+                    Some(feat.as_str())
+                );
+            }
+        }
+    }
+
+    /// A bare origin whose `a` is one commit past `main`, cloned fresh, `a` switched to and
+    /// amended: (guard, base, origin, url, clone, amended tip).
+    async fn fresh_clone_amended(
+        tag: &str,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        String,
+        String,
+        String,
+        String,
+    ) {
+        let (guard, base, origin, url) = seeded_origin(tag).await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        run(&work, &["checkout", "-q", "-b", "a"]).await;
+        run(&work, &["commit", "-qm", "on a", "--allow-empty"]).await;
+        run(&work, &["push", "-q", "origin", "a"]).await;
+        let base_s = base.to_string_lossy().into_owned();
+        run(
+            &base_s,
+            &["-c", "core.autocrlf=false", "clone", "-q", &url, "fresh"],
+        )
+        .await;
+        let fresh = base.join("fresh").to_string_lossy().into_owned();
+        run(&fresh, &["config", "user.email", "t@t.local"]).await;
+        run(&fresh, &["config", "user.name", "T"]).await;
+        run(&fresh, &["config", "remote.origin.mirror", "false"]).await;
+        run(&fresh, &["switch", "-q", "a"]).await;
+        run(
+            &fresh,
+            &[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "--amend",
+                "-m",
+                "rewritten",
+            ],
+        )
+        .await;
+        let amended = tip_of(&fresh, "refs/heads/a").await.unwrap();
+        (guard, base, origin, url, fresh, amended)
+    }
+
+    /// The three legs of the tracking-reflog degrade retry, on fixtures, independent of
+    /// whether this git reproduces the false refusal.
+    #[tokio::test]
+    async fn the_tracking_reflog_retry_needs_all_three_legs() {
+        let (_guard, _base, _origin, _url, fresh, _amended) = fresh_clone_amended("fii-legs").await;
+        let tracking = "refs/remotes/origin/a";
+        let pre = tip_of(&fresh, tracking).await.unwrap();
+        let main = tip_of(&fresh, "refs/remotes/origin/main").await.unwrap();
+        let allowed = |pre: String| {
+            let fresh = fresh.clone();
+            async move {
+                super::tracking_reflog_retry_allowed(&fresh, "refs/heads/a", tracking, &pre).await
+            }
+        };
+        let entries = run(
+            &fresh,
+            &["reflog", "show", "-n", "1", "--format=%H", tracking],
+        )
+        .await;
+        if entries.trim().is_empty() {
+            assert!(allowed(pre.clone()).await, "fresh clone + amend");
+        } else {
+            eprintln!(
+                "this git writes a reflog for a cloned tracking ref; the fresh-clone row is moot"
+            );
+        }
+        assert!(
+            !allowed(main.clone()).await,
+            "tracking ref moved since the pre-read"
+        );
+
+        // A branch re-pointed at a tip its reflog never held.
+        run(&fresh, &["branch", "c", "origin/main"]).await;
+        run(&fresh, &["branch", "-q", "--set-upstream-to=origin/a", "c"]).await;
+        assert!(
+            !super::tracking_reflog_retry_allowed(&fresh, "refs/heads/c", tracking, &pre).await,
+            "--set-upstream-to at an unheld tip"
+        );
+
+        run(
+            &fresh,
+            &[
+                "update-ref",
+                "--create-reflog",
+                "-m",
+                "away",
+                tracking,
+                &main,
+            ],
+        )
+        .await;
+        run(&fresh, &["update-ref", "-m", "back", tracking, &pre]).await;
+        assert!(
+            !allowed(pre.clone()).await,
+            "a tracking reflog with one entry"
+        );
+        run(&fresh, &["reflog", "expire", "--expire=now", tracking]).await;
+        assert!(
+            run(&fresh, &["reflog", "show", "--format=%H", tracking])
+                .await
+                .trim()
+                .is_empty(),
+            "the expired reflog has no entries"
+        );
+        assert!(allowed(pre).await, "a tracking reflog with zero entries");
+    }
+
+    /// The pinned force push lands on a fresh clone whatever this git does about the
+    /// missing tracking reflog; a remote moved by another clone and not fetched is still
+    /// refused; the MCP core, on a fixture of its own, never takes the arm.
+    #[tokio::test]
+    async fn a_pinned_force_push_lands_on_a_fresh_clone() {
+        let state = AppState::default();
+        let (_mcp_guard, _, mcp_origin, _, mcp_fresh, mcp_amended) =
+            fresh_clone_amended("fii-mcp").await;
+        match super::git_force_push_head_core(&state, mcp_fresh).await {
+            Ok(guard) => {
+                eprintln!("the MCP core landed with {guard:?}: this git no longer refuses");
+                assert_eq!(
+                    tip_of(&mcp_origin, "refs/heads/a").await.as_deref(),
+                    Some(mcp_amended.as_str())
+                );
+            }
+            Err(AppError::Git { stderr, .. }) => {
+                assert_rejection_reason(&stderr, IF_INCLUDES_REJECTION)
+            }
+            Err(other) => panic!("the MCP core: {other:?}"),
+        }
+
+        let (_guard, base, origin, url, fresh, amended) = fresh_clone_amended("fii-e2e").await;
+        let guard = super::git_push_core(
+            &state,
+            fresh.clone(),
+            false,
+            true,
+            None,
+            None,
+            None,
+            Some(pins("a", Some(&amended))),
+            false,
+        )
+        .await
+        .expect("the pinned force push lands");
+        eprintln!("the pinned force push reported {guard:?}");
+        assert!(matches!(
+            guard,
+            super::PushGuardWire::LeaseAndIncludes
+                | super::PushGuardWire::LeasePinnedNoTrackingReflog
+        ));
+        assert_eq!(
+            tip_of(&origin, "refs/heads/a").await.as_deref(),
+            Some(amended.as_str())
+        );
+
+        // Moved by another clone, not fetched: the first attempt's own lease is stale and
+        // refuses it, so the degrade arm never runs; the remote is unchanged.
+        let base_s = base.to_string_lossy().into_owned();
+        run(
+            &base_s,
+            &["-c", "core.autocrlf=false", "clone", "-q", &url, "other"],
+        )
+        .await;
+        let other = base.join("other").to_string_lossy().into_owned();
+        run(&other, &["config", "user.email", "t@t.local"]).await;
+        run(&other, &["config", "user.name", "T"]).await;
+        run(&other, &["switch", "-q", "a"]).await;
+        run(&other, &["commit", "-qm", "theirs", "--allow-empty"]).await;
+        run(&other, &["push", "-q", "origin", "a"]).await;
+        let theirs = tip_of(&origin, "refs/heads/a").await;
+        run(
+            &fresh,
+            &["commit", "-q", "--allow-empty", "--amend", "-m", "again"],
+        )
+        .await;
+        let again = tip_of(&fresh, "refs/heads/a").await.unwrap();
+        let result = super::git_push_core(
+            &state,
+            fresh.clone(),
+            false,
+            true,
+            None,
+            None,
+            None,
+            Some(pins("a", Some(&again))),
+            false,
+        )
+        .await;
+        match &result {
+            Err(AppError::Git { stderr, .. }) => {
+                assert_rejection_reason(stderr, STALE_LEASE_REJECTION)
+            }
+            other => panic!("the moved remote: {other:?}"),
+        }
+        assert_eq!(tip_of(&origin, "refs/heads/a").await, theirs);
+    }
+
+    /// The degrade retry's argv is the pinned lease alone; every other HEAD force push
+    /// takes the bare lease plus `--force-if-includes`.
+    #[test]
+    fn the_head_force_argv_takes_one_lease_or_the_pair() {
+        let sha = "c".repeat(40);
+        let pin = super::LeasePin {
+            dest: "a".to_string(),
+            sha: sha.clone(),
+        };
+        let pinned = format!("--force-with-lease=refs/heads/a:{sha}");
+        assert_eq!(
+            super::head_push_argv(true, Some(&pin)),
+            sv(&["push", &pinned])
+        );
+        assert_eq!(
+            super::head_push_argv(true, None),
+            sv(&["push", "--force-with-lease", FORCE_IF_INCLUDES])
+        );
+        assert_eq!(super::head_push_argv(false, Some(&pin)), sv(&["push"]));
+        assert_eq!(super::head_push_argv(false, None), sv(&["push"]));
+    }
+
+    /// The degrade retry runs under the lease pinned to the pre-read tracking tip: a
+    /// commit another clone pushes between the first attempt and the retry (the hook's
+    /// SECOND firing) refuses the retry and stays on the remote.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_degrade_retry_keeps_its_pinned_lease() {
+        let (_guard, base, origin, url, fresh, amended) = fresh_clone_amended("fii-race").await;
+        let base_s = base.to_string_lossy().into_owned();
+        run(
+            &base_s,
+            &["-c", "core.autocrlf=false", "clone", "-q", &url, "other"],
+        )
+        .await;
+        let other = base.join("other").to_string_lossy().into_owned();
+        run(&other, &["config", "user.email", "t@t.local"]).await;
+        run(&other, &["config", "user.name", "T"]).await;
+        run(&other, &["switch", "-q", "a"]).await;
+        run(&other, &["commit", "-qm", "theirs", "--allow-empty"]).await;
+        let theirs = tip_of(&other, "refs/heads/a").await.unwrap();
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+            let (fired, other) = (std::sync::Arc::clone(&fired), other.clone());
+            move || {
+                if fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                    git_sync(&other, &["push", "-q", "origin", "a"]);
+                }
+            }
+        });
+        assert!(
+            super::branch_has_reflog(&fresh, "a").await,
+            "the degrade arm needs a branch reflog"
+        );
+        let state = AppState::default();
+        let push = super::git_push_core(
+            &state,
+            fresh.clone(),
+            false,
+            true,
+            None,
+            None,
+            None,
+            Some(pins("a", Some(&amended))),
+            false,
+        );
+        let result = NETWORK_LOCK_WAIT_HOOK.scope(hook, push).await;
+        let firings = fired.load(std::sync::atomic::Ordering::SeqCst);
+        if firings == 1 && result.is_ok() {
+            eprintln!("the first attempt landed on this git; the retry row is moot");
+            return;
+        }
+        assert_eq!(firings, 2, "{result:?}");
+        match &result {
+            Err(AppError::Git { stderr, .. }) => {
+                assert_rejection_reason(stderr, STALE_LEASE_REJECTION)
+            }
+            other => panic!("the retry over a moved remote: {other:?}"),
+        }
+        assert_eq!(
+            tip_of(&origin, "refs/heads/a").await.as_deref(),
+            Some(theirs.as_str())
+        );
+    }
+
+    /// The HEAD `-u` publish carries the create-only lease: an unfetched ancestor on the
+    /// destination is refused and the remote is unchanged.
+    #[tokio::test]
+    async fn the_head_publish_carries_the_create_only_lease() {
+        let (_guard, base, origin, _url) = seeded_origin("head-create-lease").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let state = AppState::default();
+        let main = tip_of(&work, "refs/heads/main").await.unwrap();
+        run(&work, &["checkout", "-q", "-b", "feat"]).await;
+        run(&work, &["commit", "-qm", "feat", "--allow-empty"]).await;
+        plant_unfetched(&work, "origin", &main).await;
+        let err = super::git_push_same_name_core(&state, work.clone(), true, None, None)
+            .await
+            .expect_err("an unfetched ancestor");
+        assert!(
+            matches!(&err, AppError::PushDestinationExists { branch, remote, dest } if branch == "feat" && remote == "origin" && dest == "feat"),
+            "{err:?}"
+        );
+        assert_eq!(
+            tip_of(&origin, "refs/heads/feat").await.as_deref(),
+            Some(main.as_str())
+        );
+    }
+
+    /// A pinned push whose HEAD moved to a branch carrying a refusal of its own (Keep
+    /// local) answers `PushHeadMoved`, never the other branch's refusal.
+    #[tokio::test]
+    async fn a_moved_head_outranks_the_other_branch_refusal() {
+        let (_guard, work, origin) = keep_local_origin("pin-precedence").await;
+        run(&work, &["branch", "other"]).await;
+        crate::git::branches::set_branch_keep_local_core(&work, "other", true)
+            .await
+            .unwrap();
+        run(&work, &["symbolic-ref", "HEAD", "refs/heads/other"]).await;
+        let published = feat_x_tip(&origin).await;
+        let state = AppState::default();
+        for force in [false, true] {
+            let result = super::git_push_core(
+                &state,
+                work.clone(),
+                false,
+                force,
+                None,
+                None,
+                None,
+                Some(pins("feat/x", None)),
+                false,
+            )
+            .await;
+            assert!(
+                matches!(&result, Err(AppError::PushHeadMoved { expected }) if expected == "feat/x"),
+                "force={force}: {result:?}"
+            );
+            assert_eq!(feat_x_tip(&origin).await, published);
+        }
+    }
+
+    /// The spawn recheck compares the pins after the route's reads, on both routes (the
+    /// bare push rechecks HEAD, the `-u` publish its named branch): HEAD moved between
+    /// them (the hook) refuses the push and nothing lands.
+    #[tokio::test]
+    async fn the_spawn_recheck_compares_the_pins_last() {
+        let (_guard, base, origin, _url) = seeded_origin("pin-order").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        run(&work, &["branch", "other"]).await;
+        run(&work, &["commit", "-qm", "next", "--allow-empty"]).await;
+        let published = tip_of(&origin, "refs/heads/main").await;
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+            let work = work.clone();
+            move || git_sync(&work, &["symbolic-ref", "HEAD", "refs/heads/other"])
+        });
+        let state = AppState::default();
+        for set_upstream in [false, true] {
+            run(&work, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
+            let push = super::git_push_core(
+                &state,
+                work.clone(),
+                set_upstream,
+                false,
+                None,
+                None,
+                None,
+                Some(pins("main", None)),
+                false,
+            );
+            let result = super::RECHECK_PINS_HOOK.scope(hook.clone(), push).await;
+            assert!(
+                matches!(&result, Err(AppError::PushHeadMoved { expected }) if expected == "main"),
+                "set_upstream={set_upstream}: {result:?}"
+            );
+            assert_eq!(
+                tip_of(&origin, "refs/heads/main").await,
+                published,
+                "set_upstream={set_upstream}"
+            );
+        }
+    }
+
+    /// A named push of a branch tracking a remote named `-x` (a live upstream through its
+    /// fetch refspec) is refused as an unknown remote before anything is spawned toward it.
+    #[tokio::test]
+    async fn a_dash_named_upstream_remote_is_refused() {
+        let (_guard, base, _origin, _url) =
+            seeded_origin_unpinned_push_default("dash-remote").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let base_s = base.to_string_lossy().into_owned();
+        run(&base_s, &["init", "-q", "--bare", "-b", "main", "dash.git"]).await;
+        let dash = base.join("dash.git").to_string_lossy().into_owned();
+        let url = format!("file://{}", dash.replace('\\', "/"));
+        run(&work, &["remote", "add", "--", "-x", &url]).await;
+        run(&work, &["config", "remote.-x.mirror", "false"]).await;
+        assert_eq!(
+            run(&work, &["config", "--get", "remote.-x.fetch"])
+                .await
+                .trim(),
+            "+refs/heads/*:refs/remotes/-x/*"
+        );
+        run(&work, &["branch", "feat"]).await;
+        run(
+            &work,
+            &["update-ref", "refs/remotes/-x/feat", "refs/heads/feat"],
+        )
+        .await;
+        run(
+            &work,
+            &["config", "--replace-all", "branch.feat.remote", "-x"],
+        )
+        .await;
+        run(&work, &["config", "branch.feat.merge", "refs/heads/feat"]).await;
+        let format = "--format=%(upstream:remotename)|%(upstream:remoteref)";
+        assert_eq!(
+            run(&work, &["for-each-ref", format, "refs/heads/feat"])
+                .await
+                .trim(),
+            "-x|refs/heads/feat",
+            "a live upstream on the dash-named remote"
+        );
+        let state = AppState::default();
+        let push = || {
+            git_push_core_unpinned(
+                &state,
+                work.clone(),
+                false,
+                false,
+                Some("feat".into()),
+                None,
+                None,
+            )
+        };
+        let result = push().await;
+        assert!(
+            matches!(&result, Err(AppError::InvalidArgument(m)) if m == "unknown remote: -x"),
+            "{result:?}"
+        );
+        assert_eq!(tip_of(&dash, "refs/heads/feat").await, None);
+    }
+
+    /// A `HEAD` pin matches only a detached HEAD and a branch pin never does; over an
+    /// unborn HEAD the pinned tip's read is that read's error.
+    #[tokio::test]
+    async fn push_pins_compare_a_detached_head() {
+        let moved = |result: crate::error::AppResult<()>, want: &str| {
+            assert!(
+                matches!(&result, Err(AppError::PushHeadMoved { expected }) if expected == want),
+                "{want}: {result:?}"
+            );
+        };
+        let head = pins("HEAD", None);
+        moved(head.check("", Some("refs/heads/main")).await, "HEAD");
+        head.check("", None).await.expect("detached, as pinned");
+        moved(pins("main", None).check("", None).await, "main");
+
+        let (_guard, base) = temp_base("pins-unborn");
+        let repo = base.to_string_lossy().into_owned();
+        run(&repo, &["init", "-q", "-b", "main"]).await;
+        let tip = "a".repeat(40);
+        let result = pins("main", Some(&tip)).check_now(&repo).await;
+        assert!(
+            matches!(&result, Err(AppError::Git { .. })),
+            "an unborn HEAD's tip read: {result:?}"
         );
     }
 
@@ -7935,7 +10285,7 @@ and the repository exists.
             (Some("local".to_string()), None),
             (None, Some("fork".to_string())),
         ] {
-            let err = git_push_core(
+            let err = git_push_core_unpinned(
                 &state,
                 "/definitely/not/a/repo".into(),
                 false,
@@ -7974,7 +10324,7 @@ and the repository exists.
 
         let state = AppState::default();
         for bad in ["a*b", "a?b", "a[b", "a:b", "a b"] {
-            let err = git_push_core(
+            let err = git_push_core_unpinned(
                 &state,
                 repo_s.clone(),
                 false,
@@ -7996,7 +10346,7 @@ and the repository exists.
             .trim()
             .is_empty());
 
-        git_push_core(
+        git_push_core_unpinned(
             &state,
             repo_s.clone(),
             false,

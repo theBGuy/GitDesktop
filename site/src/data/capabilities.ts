@@ -141,7 +141,12 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "Push or publish a branch to any remote — no checkout needed, with its progress on the branch's row; publishing a new branch asks first and names where it's going",
+      "Push or publish a branch to any remote — no checkout needed, following Git's push-remote settings, with its progress on the branch's row; publishing a new branch asks first and names where it's going",
+  },
+  {
+    group: "Branches & history",
+    label:
+      "Rename a branch on its remote too — open pull or merge requests on the old name are listed before you confirm",
   },
   {
     group: "Branches & history",

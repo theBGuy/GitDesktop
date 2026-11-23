@@ -557,7 +557,14 @@ export function PrActivityFeed({
     entries.push({
       date: ev.date,
       sortKey: 3,
-      node: <TimelineEventRow key={`event-${i}`} event={ev} ghHost={ghHost} />,
+      node: (
+        <TimelineEventRow
+          key={`event-${i}`}
+          event={ev}
+          ghHost={ghHost}
+          provider={providerKey}
+        />
+      ),
     });
   }
 

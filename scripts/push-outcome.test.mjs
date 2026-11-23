@@ -211,7 +211,7 @@ function switcherProblems(text) {
   if (/willPublish\(branch\)/.test(run) || /publishing\s*\?/.test(run)) {
     problems.push("runPushBranch: labels from willPublish");
   }
-  if (!run.includes("`Pushed ${branch.name} to ${branch.upstream}${away}`")) {
+  if (!run.includes("`Pushed ${branch.name} to ${pushedTo}${away}`")) {
     problems.push("runPushBranch: tracked toast without away");
   }
   return problems;
@@ -232,8 +232,8 @@ test("mutants restoring the old labels are caught", () => {
       `${run}\n    const publishing = willPublish(branch);\n    toast.success(publishing ? "a" : "b");`,
     ),
     switcher.replace(
-      "`Pushed ${branch.name} to ${branch.upstream}${away}`",
-      "`Pushed ${branch.name} to ${branch.upstream}`",
+      "`Pushed ${branch.name} to ${pushedTo}${away}`",
+      "`Pushed ${branch.name} to ${pushedTo}`",
     ),
   ];
   for (const mutant of switcherMutants) {

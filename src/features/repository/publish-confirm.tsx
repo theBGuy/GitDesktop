@@ -1,8 +1,15 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ReactNode, useCallback, useLayoutEffect, useRef } from "react";
+import { toast } from "sonner";
 import { normPath } from "@/lib/git/path";
+import type { ForkPrMatch } from "@/lib/git/types";
+import { prRef } from "@/lib/pulls/pr-state";
 import { slugFromRemoteUrl } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { type ConfirmRequest, useConfirm } from "@/lib/stores/confirm";
+import { landedIn } from "@/lib/stores/notifications";
+import { useUiStore } from "@/lib/stores/ui";
+import { toastError } from "@/lib/toast";
 import {
   destinationSlug,
   publishConfirmBody,
@@ -22,6 +29,50 @@ export const PUBLISH_FORK_CHECK_NOTE =
   "The check for a fork pull request hasn't finished.";
 /** How long an unsettled fork-PR check may hold Publish. */
 export const PUBLISH_FORK_CHECK_BOUND_MS = 10_000;
+
+/** The late fork-match notice's one action. */
+export const LATE_FORK_MATCH_ACTION = "View pull request";
+
+/** Fork detection is GitHub-only, so the number reads as a GitHub reference. */
+export function lateForkMatchCopy(
+  match: ForkPrMatch,
+  branch: string,
+  remote: string,
+): { title: string; description: string } {
+  return {
+    title: `${branch} is also the head of ${prRef("github", match.number)}`,
+    description: `Publish made a separate copy on ${remote}; the pull request from ${match.headRepoOwner}/${match.headRepoName} was not updated.`,
+  };
+}
+
+/** Announces a fork-PR match that settled after Publish was answered, once
+ *  both the push and the check have: only for a push that ran, and only while
+ *  no repository switch (away and back included) happened since this call. */
+export function noticeLateForkMatch(opts: {
+  ran: Promise<boolean>;
+  check: Promise<ForkPrMatch | null>;
+  repo: string;
+  branch: string;
+  remote: string;
+}): void {
+  let switched = false;
+  const unsubscribe = useUiStore.subscribe((s, prev) => {
+    if (normPath(s.repoPath ?? "") !== normPath(prev.repoPath ?? ""))
+      switched = true;
+  });
+  void Promise.all([opts.ran, opts.check]).then(([ran, m]) => {
+    unsubscribe();
+    if (!ran || m === null || switched || !landedIn(opts.repo).live) return;
+    const copy = lateForkMatchCopy(m, opts.branch, opts.remote);
+    toast.info(copy.title, {
+      description: copy.description,
+      action: {
+        label: LATE_FORK_MATCH_ACTION,
+        onClick: () => void openUrl(m.url).catch(toastError),
+      },
+    });
+  });
+}
 
 /** Shows the shared confirm before a push that would create `branch` on
  *  `remote`; resolves true = publish. Cancel takes the initial focus (rendered

@@ -291,6 +291,7 @@ describe("a branch tracking the remote's default branch under another name", () 
         "feat",
         "origin",
         undefined,
+        { expectedBranch: undefined, expectedHead: undefined, creates: true },
       ),
     );
   });
@@ -316,6 +317,7 @@ describe("a branch tracking the remote's default branch under another name", () 
         "feat",
         "origin",
         undefined,
+        { expectedBranch: undefined, expectedHead: undefined, creates: false },
       ),
     );
     expect(useConfirm.getState().request).toBeNull();
@@ -491,5 +493,49 @@ describe("a start-point row whose own name the remote already has", () => {
       "feat tracks up/main, where it started. up/feat exists, so track it from its context menu",
     );
     expect(pushSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("recency order across UTC offsets", () => {
+  // Text order puts the +05:00 date first; as instants it is the older one.
+  const OLDER = "2026-11-01T10:00:00+05:00";
+  const NEWER = "2026-11-01T08:00:00-02:00";
+  const rowOrder = (names: readonly string[]) =>
+    [...document.querySelectorAll<HTMLElement>("[data-row]")]
+      .map((el) => el.dataset.row ?? "")
+      .filter((n) => names.includes(n));
+
+  // Control: either sort back on the ISO text turns its order around.
+  it("orders local rows by instant, the default branch first and an empty date last", async () => {
+    reads.branches = [
+      trackingRow("alpha", "origin", "alpha", { lastCommitDate: OLDER }),
+      trackingRow("undated", "origin", "undated", { lastCommitDate: "" }),
+      trackingRow("main", "origin", "main", {
+        isCurrent: true,
+        upstreamIsRemoteDefault: true,
+        lastCommitDate: "2026-01-01T00:00:00Z",
+      }),
+      trackingRow("beta", "origin", "beta", { lastCommitDate: NEWER }),
+    ];
+    const { user } = renderSwitcher();
+    await openList(user);
+    await rowButton("undated");
+    expect(rowOrder(["main", "alpha", "beta", "undated"])).toEqual([
+      "main",
+      "beta",
+      "alpha",
+      "undated",
+    ]);
+  });
+
+  it("orders remote-only rows by instant", async () => {
+    reads.remoteBranches = [
+      { name: "r-alpha", remote: "origin", lastCommitDate: OLDER },
+      { name: "r-beta", remote: "origin", lastCommitDate: NEWER },
+    ];
+    const { user } = renderSwitcher();
+    await openList(user);
+    await rowButton("r-alpha");
+    expect(rowOrder(["r-alpha", "r-beta"])).toEqual(["r-beta", "r-alpha"]);
   });
 });

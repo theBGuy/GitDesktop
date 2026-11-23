@@ -1,10 +1,11 @@
 // Pins the sync bar's derivation: what each button is called, whether it is
 // held and why, and which hotkeys fire, across the loading and settled states.
 // The contract under test: nothing that acts on the branch is offered before
-// the status has measured it ("Publish branch" sends `-u origin`), holds are
-// ranked busy > offline > unknown read > the state's own description (save
-// the Pull-options caret, which offline never holds: its network items carry
-// their own offline holds), and every disabled control carries a reason.
+// the status has measured it ("Publish branch" sends `-u` to the branch's
+// routed remote), holds are ranked busy > offline > unknown read > the state's
+// own description (save the Pull-options caret, which offline never holds: its
+// network items carry their own offline holds), and every disabled control
+// carries a reason.
 //
 // The import below reaches straight into `src/` and relies on Node's default
 // type stripping (>= 23.6), which resolves no bundler aliases, so
@@ -27,6 +28,8 @@ import {
   REMOTES_FAILED_REASON,
   REMOTES_PENDING_REASON,
   rowNameMismatch,
+  rowPushItem,
+  rowPushTarget,
   rowSyncIndicator,
   SESSION_PULL_REASON,
   STATUS_PENDING_REASON,
@@ -1218,6 +1221,87 @@ test("rowNameMismatch: only a live upstream on a configured remote under another
     ),
     { remote: "up", remoteBranch: "epic/x", isRemoteDefault: false },
   );
+});
+
+test("rowPushTarget: the backend's routing alone decides, never a remotes list", () => {
+  const routed = (over = {}) =>
+    rowFacts({ namedPushRemote: "fork", namedPushBranch: "feat", ...over });
+  // `fork` is in no list the caller holds: the backend named it, so it counts.
+  assert.deepEqual(rowPushTarget(routed()), {
+    kind: "to",
+    remote: "fork",
+    branch: "feat",
+    toUpstream: false,
+  });
+  assert.deepEqual(
+    rowPushTarget(
+      routed({ namedPushRemote: "origin", namedPushBranch: "main" }),
+    ),
+    { kind: "to", remote: "origin", branch: "main", toUpstream: true },
+  );
+  assert.equal(
+    rowPushTarget(
+      routed({
+        namedPushRemote: "origin",
+        namedPushBranch: "main",
+        upstreamGone: true,
+      }),
+    ).toUpstream,
+    false,
+  );
+  assert.deepEqual(rowPushTarget(routed({ namedPushRefused: true })), {
+    kind: "refused",
+  });
+  for (const [what, over] of [
+    ["no fields", {}],
+    ["no branch", { namedPushRemote: "fork" }],
+    ["null remote", { namedPushRemote: null, namedPushBranch: "feat" }],
+  ])
+    assert.deepEqual(rowPushTarget(rowFacts(over)), { kind: "unknown" }, what);
+});
+
+test("rowPushItem: offered when tracked and ahead, never into a different-name default", () => {
+  const same = { upstream: "origin/feat", upstreamBranch: "feat" };
+  const rows = [
+    ["in sync", same, "none"],
+    ["ahead", { ...same, upstreamAhead: 1 }, "live"],
+    [
+      "ahead and behind",
+      { ...same, upstreamAhead: 1, upstreamBehind: 1 },
+      "held",
+    ],
+    ["gone", { ...same, upstreamAhead: 1, upstreamGone: true }, "none"],
+    [
+      "removed remote",
+      {
+        upstream: "old/feat",
+        upstreamRemote: "old",
+        upstreamBranch: "feat",
+        upstreamAhead: 1,
+      },
+      "none",
+    ],
+    // The start point on the remote's default: only the publish is offered.
+    ["different-name default", { upstreamAhead: 1 }, "none"],
+    [
+      "same, routed to the upstream itself",
+      { upstreamAhead: 1, namedPushRemote: "origin", namedPushBranch: "main" },
+      "none",
+    ],
+    [
+      "different-name, not the default",
+      { upstreamAhead: 1, upstreamIsRemoteDefault: false },
+      "live",
+    ],
+    // A push routed off the upstream's remote copies the branch: no mismatch.
+    [
+      "different-name default, routed elsewhere",
+      { upstreamAhead: 1, namedPushRemote: "fork", namedPushBranch: "feat" },
+      "live",
+    ],
+  ];
+  for (const [what, over, want] of rows)
+    assert.equal(rowPushItem(rowFacts(over), REMOTES), want, what);
 });
 
 const START =

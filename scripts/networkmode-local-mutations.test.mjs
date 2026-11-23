@@ -212,6 +212,8 @@ const NETWORK_CALLEES = [
   "gitPush",
   "gitPushTag",
   "gitDeleteRemoteBranch",
+  // Renames here, then pushes the new name and deletes the old one on the remote.
+  "gitRenameBranchRemote",
   "gitDeleteTagOnOrigin",
   "gitSubmoduleUpdate",
   "gitSubmoduleAdd",

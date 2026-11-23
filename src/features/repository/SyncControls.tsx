@@ -34,6 +34,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import {
   forgeDetectForkPrForBranch,
+  gitBranches,
   gitRemotePushUrl,
   gitRemoteUrl,
   type PullMode,
@@ -44,18 +45,24 @@ import {
   useFetchStatusStore,
   useLastFetchedAt,
 } from "@/lib/git/auto-fetch";
+import { upstreamBranchName } from "@/lib/git/push-tracking";
 import {
+  beginHeaderDetection,
   branchPushHoldItemReason,
   branchPushHoldReason,
   branchRewriteStatusOptions,
   carriesAllLocalCommits,
+  endHeaderDetection,
+  headerDetectionFor,
   refuseWhileBranchPushes,
   refuseWhilePushRuns,
   remoteBranchesOptions,
   repoStatusOptions,
+  setHeaderDetectionRemote,
   useBranchRewriteStatus,
   useFetchRemote,
   useHardResetToCommit,
+  useHeaderDetection,
   useKeptLocalHead,
   usePendingBranchPushes,
   usePendingPublishes,
@@ -79,6 +86,7 @@ import {
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
+import { slugFromRemoteUrl } from "@/lib/repo-lens/queries";
 import { useSettings } from "@/lib/settings/queries";
 import { type ConfirmRequest, useConfirm } from "@/lib/stores/confirm";
 import {
@@ -95,6 +103,7 @@ import { toastError, toastErrorWithNote } from "@/lib/toast";
 import {
   type PushOutcome,
   presenceUnderUrls,
+  publishUpdatesForkPr,
   pushOutcome,
   pushSuccessCopy,
   pushWouldCreate,
@@ -113,6 +122,7 @@ import {
 } from "./PublishRepoControl";
 import {
   askPublishConfirm,
+  noticeLateForkMatch,
   PUBLISH_FORK_CHECK_BOUND_MS,
   PUBLISH_FORK_CHECK_NOTE,
   PUBLISH_FORK_CHECK_REASON,
@@ -128,6 +138,7 @@ import {
   keptLocalReason,
   type MismatchMenu,
   type MismatchMenuItem,
+  rowPushTarget,
   SYNC_BUSY_REASON,
   sessionBranchPushReason,
 } from "./sync-controls-state";
@@ -147,6 +158,9 @@ const FORCE_PUSH_DEGRADED: Record<PushGuard, string | undefined> = {
     "Protected by the lease alone: this Git predates --force-if-includes.",
   leaseOnlyNoReflog:
     "Protected by the lease alone: the branch has no reflog for --force-if-includes to check.",
+  // GUI-only: the MCP force_push core never returns it, so it has no twin there.
+  leasePinnedNoTrackingReflog:
+    "Protected by a lease on the remote tip from your last fetch: this clone has no fetch history for --force-if-includes to check.",
 };
 
 /** Reset to upstream's refusals when the confirm-time re-read no longer matches
@@ -160,6 +174,10 @@ const LOCAL_MOVED_NOTICE = (branch: string) =>
   `${branch} changed since you opened this, so nothing was reset. Reopen the Pull menu to see where it stands now.`;
 const UNCONFIRMED_NOTICE = (upstream: string, branch: string) =>
   `Couldn't confirm that ${upstream} still has every commit on ${branch}, so nothing was reset. Reopen the Pull menu to check again.`;
+
+/** doPush's per-call extras: the publish's explicit remote, and the tip a force
+ *  push's confirm showed (sent as its `expectedHead` pin). */
+type DoPushOpts = { remote?: string; expectedHead?: string };
 
 export function SyncControls({ repoPath }: { repoPath: string }) {
   const status = useRepoStatus(repoPath);
@@ -240,6 +258,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     repo: string;
     match: ForkPrMatch;
     branch: string;
+    /** The remote the publish goes to, as the guard names it. */
+    destination: string;
     open: boolean;
   } | null>(null);
   const forkGuardSeq = useRef(0);
@@ -262,7 +282,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     detectionsRef.current = next;
     setDetections(next);
   };
-  const detecting = (detections[repoPath] ?? 0) > 0;
+  // The store entry outlives an unmount, so a remounted bar still holds Push
+  // while an earlier instance's press is deciding.
+  const storedDetection = useHeaderDetection(repoPath);
+  const detecting = (detections[repoPath] ?? 0) > 0 || storedDetection !== null;
   // The mismatch Push menu, controlled so the push hotkey and the palette open
   // it too. Its destinations are pinned when it opens, with the repo they belong
   // to: a status poll under the open menu can't change what a click pushes.
@@ -457,6 +480,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   useEffect(() => {
     headNameRef.current = head?.name;
   }, [head?.name]);
+  // The HEAD push's branch pin, from the status of the press: `HEAD` only for a
+  // status that answered detached, none while it is unread or names no branch.
+  const headPin = (() => {
+    if (head === undefined) return undefined;
+    if (head.detached) return "HEAD";
+    return head.name ?? undefined;
+  })();
 
   const fetchTitle =
     lastFetchedAt === undefined
@@ -749,12 +779,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // decided before an await that HEAD may have moved across. A named push
   // leaves `-u` to the backend, which reads THAT branch's tracking (untracked
   // or gone publishes with `-u`, tracked never retracks): `hasUpstream`
-  // describes HEAD, which may no longer be that branch.
+  // describes HEAD, which may no longer be that branch. Resolves true only when
+  // the push mutation resolved; every refusal and failure resolves false.
   async function doPush(
     force: boolean,
     branch?: string,
     outcome?: PushOutcome,
-  ) {
+    opts?: DoPushOpts,
+  ): Promise<boolean> {
     // The force confirm and the fork-PR guard can both sit open across a
     // disconnect, and each lands here. Some routes also arrive after an await (a
     // status read, a fork-PR detection) another surface's push can start in.
@@ -763,8 +795,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       refuseWhilePushing() ||
       refuseWhilePublishing(queryClient, repoPath)
     )
-      return;
-    if (refuseWhileSiblingPush(branch)) return;
+      return false;
+    if (refuseWhileSiblingPush(branch)) return false;
     let guard: PushGuard | undefined;
     // The push starts here, outside the try: the compiler refuses its
     // variables' value blocks inside one, and the push scans read them inline.
@@ -773,10 +805,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         setUpstream: branch === undefined && !hasUpstream,
         force,
         branch,
+        remote: opts?.remote,
         source: "header",
         // A HEAD push names no branch, so it records the one it starts on, which
         // keeps that branch held after a checkout; the current one is held too.
         startedOn: branch === undefined ? headNameRef.current : undefined,
+        // ...and pins it, so a HEAD that moved before git resolves it refuses.
+        expectedBranch: branch === undefined ? headPin : undefined,
+        expectedHead: force ? opts?.expectedHead : undefined,
         creates: outcome === "created",
       });
     })();
@@ -786,7 +822,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       onError(e);
       closeForceConfirm();
     }
-    if (guard === undefined) return;
+    if (guard === undefined) return false;
     const { away } = landedIn(repoPath);
     // The outcome toast claims only the pre-push decision (the push IPC
     // reports no create signal); the force toast's two degraded guard values
@@ -799,21 +835,21 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       const copy = pushSuccessCopy({
         outcome,
         branch,
-        remote: "origin",
+        remote: opts?.remote ?? "origin",
         tracks: true,
         away,
       });
       if (copy) toast.success(copy.title, { description: copy.description });
     }
     closeForceConfirm();
+    return true;
   }
 
-  // HEAD can move while the confirm sits open; the branch it opened on is the
-  // only one its divergence verdict described. A move the status poll has seen
-  // refuses at once; one it hasn't is caught by a direct status read before the
-  // push. The push stays on the HEAD path: a named push would bypass git's
-  // pushRemote / pushDefault / push.default routing and could rewrite the
-  // upstream's branch in a fork workflow.
+  // HEAD can move while the confirm sits open; the branch and tip it opened on
+  // are the only ones its divergence verdict described. A move the status poll
+  // has seen refuses at once; one it hasn't is caught by a direct status read
+  // before the push. The push stays on the HEAD path (git's own push routing)
+  // and carries both as pins, which the backend re-checks before every spawn.
   async function confirmForcePush() {
     // A click during the closing dialog's exit transition: nothing to confirm.
     if (!forceConfirm?.open) return;
@@ -828,14 +864,24 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     const confirmRepo = repoPath;
     const confirm = forceConfirm;
     const branch = confirm.branch;
+    // The tip the confirm's evidence described, as rendered at the click.
+    const tip = head?.oid ?? null;
+    if (tip === null) {
+      toast.info("Couldn't confirm the current branch — nothing was pushed.");
+      closeForceConfirm();
+      return;
+    }
     forceChecking.current = true;
     setForceReading(true);
     let readName: string | null | undefined;
+    let readTip: string | null = null;
     await (async () => {
       try {
         // The factory's queryFn straight, never fetchQuery: that joins an
         // in-flight poll, which may have been spawned before the click.
-        readName = (await repoStatusOptions(confirmRepo).queryFn()).branch.name;
+        const read = (await repoStatusOptions(confirmRepo).queryFn()).branch;
+        readName = read.name;
+        readTip = read.oid;
       } catch {
         toast.info("Couldn't confirm the current branch — nothing was pushed.");
         if (forceConfirmRef.current === confirm) closeForceConfirm();
@@ -854,9 +900,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       closeForceConfirm();
       return;
     }
-    // A checkout between this read and the push's spawn remains, including any
-    // wait on the repo's network lock.
-    void doPush(true);
+    if (readTip !== tip) {
+      toast.info(
+        `${branch ?? "HEAD"} changed while the dialog was open — nothing was pushed.`,
+      );
+      closeForceConfirm();
+      return;
+    }
+    void doPush(true, undefined, undefined, { expectedHead: tip });
   }
 
   function openForceConfirm() {
@@ -885,7 +936,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     head?.name && isSessionBranchName(head.name) ? head.name : null;
 
   // Publishing an untracked branch that is really a local copy of a fork PR's
-  // head pushes a separate copy to origin and leaves the PR untouched — check
+  // head pushes a separate copy to its destination and leaves the PR untouched — check
   // for that before publishing, and let the guard offer the fork instead. Purely
   // advisory: a detection failure is indistinguishable from no match and falls
   // through to the publish confirm. Pushes to a tracked upstream (and force
@@ -894,6 +945,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     if (refuseWhileOffline()) return;
     // A repeat press before the held Push renders: the press in flight owns it.
     if ((detectionsRef.current[repoPath] ?? 0) > 0) return;
+    // A press from an earlier mount of the bar, which this instance never counted.
+    if (headerDetectionFor(repoPath) !== null) return;
     const branch = head?.name;
     const facts = {
       upstream: head?.upstream ?? null,
@@ -935,10 +988,15 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     // first; once per press, so the per-repo count can't drop twice.
     let marked = true;
     shiftDetections(pushedIn, 1);
+    // The module-store twin of the mark: the branch switcher paints and holds
+    // the branch's row from it, and its token-checked release still lands after
+    // an unmount or a newer press.
+    const detection = beginHeaderDetection(pushedIn, branch);
     const releaseMark = () => {
       if (!marked) return;
       marked = false;
       shiftDetections(pushedIn, -1);
+      endHeaderDetection(detection);
     };
     // Every route from here pushes `branch` by name, so a HEAD that moved
     // during the round-trip changes nothing: the match still describes it.
@@ -949,14 +1007,21 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         repo: pushedIn,
         match,
         branch,
+        destination: route.destination,
         open: true,
       });
     };
     // A match lands only on this press's own prompt, still showing, in the repo
-    // it was asked in; anything later is dropped without a word.
+    // it was asked in; a later one is announced once the push lands.
+    // The publish destination's push URL, once read: a match whose head
+    // repository and branch ARE that destination is no separate copy, since
+    // the publish updates that pull request, so it counts as no match.
+    const route = { pushUrl: null as string | null, destination: "origin" };
+    const updatesForkPr = (m: ForkPrMatch) =>
+      publishUpdatesForkPr(m, route.pushUrl, branch, slugFromRemoteUrl);
     const onPromptSettle = (m: ForkPrMatch | null) => {
       clearTimeout(timer);
-      if (m === null) {
+      if (m === null || updatesForkPr(m)) {
         useConfirm.getState().setRequestHold(asked, {});
         return;
       }
@@ -978,15 +1043,16 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         if (asked !== null) onPromptSettle(m);
         return m;
       });
-    // The HEAD arm publishes to origin. A branch origin already has (as of the
-    // last fetch) only fast-forwards and tracks, so only a create asks first;
-    // the list mirrors origin's FETCH side, so a differing push URL asks too.
-    const [list, fetchUrl, pushUrl] = await Promise.all([
+    // Publish goes where the backend routes this branch: its row of a fresh
+    // branch list, matched by NAME (a HEAD move during the read still publishes
+    // the branch pressed). A branch the destination already has (as of the last
+    // fetch) only fast-forwards and tracks, so only a create asks first; the
+    // list mirrors the FETCH side, so a differing push URL asks too.
+    const [list, rows] = await Promise.all([
       queryClient
         .fetchQuery(remoteBranchesOptions(pushedIn))
         .catch(() => undefined),
-      gitRemoteUrl(pushedIn, "origin").catch(() => null),
-      gitRemotePushUrl(pushedIn, "origin").catch(() => null),
+      gitBranches(pushedIn).catch(() => undefined),
     ]);
     // The prompt stamps whichever repo is live when it asks.
     if (
@@ -999,94 +1065,155 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       releaseMark();
       return;
     }
-    // A push that started during the reads refuses before any prompt.
-    if (refuseWhilePushing() || refuseWhilePublishing(queryClient, repoPath)) {
+    const row = rows?.find((r) => r.name === branch);
+    if (row === undefined) {
       releaseMark();
-      return;
-    }
-    if (refuseWhileSiblingPush(branch)) {
-      releaseMark();
-      return;
-    }
-    const presence = presenceUnderUrls(
-      remoteHasBranch(list, "origin", branch),
-      fetchUrl,
-      pushUrl,
-    );
-    const create = willCreateOnRemote({
-      ...facts,
-      remoteHasSameName: presence,
-    });
-    if (create) {
-      // The decision point: nothing awaits between here and the ask.
-      releaseMark();
-      if (probe.settled && probe.found) {
-        // A repeat press can match while this bar's own publish prompt is
-        // still up; the guard replaces it rather than stacking over it.
-        withdrawPublishConfirm(publishAsk);
-        openGuard(probe.found);
-        return;
-      }
-      const answer = askPublishConfirm(
-        {
-          branch,
-          remote: "origin",
-          pushUrl,
-          visibility: visibilityApplies("origin", fetchUrl, pushUrl)
-            ? recordedVisibility(settings.data?.recentRepos, pushedIn)
-            : null,
-          goneUpstream: facts.upstreamGone,
-          upstreamRemote: head?.upstreamRemote ?? null,
-          upstreamBranch: head?.upstreamBranch ?? null,
-          heldReason: probe.settled ? undefined : PUBLISH_FORK_CHECK_REASON,
-        },
-        publishAsk,
+      toast.info(
+        `Couldn't confirm where ${branch} publishes — nothing was published.`,
       );
-      asked = publishAsk.current;
-      // Past the bound Publish frees with a note; the hold's identity pin
-      // makes a fire on a gone prompt a no-op.
-      if (!probe.settled) {
-        timer = setTimeout(() => {
-          if (!probe.settled)
-            useConfirm
-              .getState()
-              .setRequestHold(asked, { note: PUBLISH_FORK_CHECK_NOTE });
-        }, PUBLISH_FORK_CHECK_BOUND_MS);
-        void answer.finally(() => clearTimeout(timer));
+      return;
+    }
+    const target = rowPushTarget({
+      ...row,
+      upstreamBranch: upstreamBranchName(row.upstreamRemoteRef),
+    });
+    // A refused target gets no confirm and no guard: the push names no remote,
+    // so the backend's typed refusal answers before any network.
+    const destination = (() => {
+      switch (target.kind) {
+        case "to":
+          return target.remote;
+        case "unknown":
+          return "origin";
+        case "refused":
+          return undefined;
       }
-      const ok = await answer;
-      if (!ok) return;
-    } else {
-      // No prompt to hold, so the check decides before the push, and the
-      // refusals re-run after it: it can take the backend's whole bound.
-      const match = await check;
-      releaseMark();
-      // `push` follows the live repo, while the branch name, the fork match and
-      // the decision to publish all belong to the old one: a switch during the
-      // round-trip refuses rather than publish there.
-      const { live, away } = landedIn(pushedIn);
-      if (!live) {
-        toast.info(
-          `Didn't publish ${branch}${away} — you switched repositories before the push started.`,
+    })();
+    let outcome: PushOutcome | undefined;
+    if (destination === undefined) releaseMark();
+    else {
+      setHeaderDetectionRemote(detection, destination);
+      route.destination = destination;
+      const [fetchUrl, pushUrl] = await Promise.all([
+        gitRemoteUrl(pushedIn, destination).catch(() => null),
+        gitRemotePushUrl(pushedIn, destination).catch(() => null),
+      ]);
+      if (
+        refuseIfSwitched(
+          pushedIn,
+          "nothing was published",
+          "before the push started",
+        )
+      ) {
+        releaseMark();
+        return;
+      }
+      // A push that started during the reads refuses before any prompt.
+      if (
+        refuseWhilePushing() ||
+        refuseWhilePublishing(queryClient, repoPath)
+      ) {
+        releaseMark();
+        return;
+      }
+      if (refuseWhileSiblingPush(branch)) {
+        releaseMark();
+        return;
+      }
+      route.pushUrl = pushUrl;
+      const presence = presenceUnderUrls(
+        remoteHasBranch(list, destination, branch),
+        fetchUrl,
+        pushUrl,
+      );
+      const create = willCreateOnRemote({
+        ...facts,
+        remoteHasSameName: presence,
+      });
+      outcome = pushOutcome({ willPublish: true, create, presence });
+      if (create) {
+        // The decision point: nothing awaits between here and the ask.
+        releaseMark();
+        if (probe.settled && probe.found) {
+          // A repeat press can match while this bar's own publish prompt is
+          // still up; the guard replaces it rather than stacking over it.
+          if (!updatesForkPr(probe.found)) {
+            withdrawPublishConfirm(publishAsk);
+            openGuard(probe.found);
+            return;
+          }
+        }
+        const answer = askPublishConfirm(
+          {
+            branch,
+            remote: destination,
+            pushUrl,
+            visibility: visibilityApplies(destination, fetchUrl, pushUrl)
+              ? recordedVisibility(settings.data?.recentRepos, pushedIn)
+              : null,
+            goneUpstream: facts.upstreamGone,
+            upstreamRemote: head?.upstreamRemote ?? null,
+            upstreamBranch: head?.upstreamBranch ?? null,
+            heldReason: probe.settled ? undefined : PUBLISH_FORK_CHECK_REASON,
+          },
+          publishAsk,
         );
-        return;
-      }
-      if (refuseWhilePushing() || refuseWhilePublishing(queryClient, repoPath))
-        return;
-      if (refuseWhileSiblingPush(branch)) return;
-      if (match) {
-        withdrawPublishConfirm(publishAsk);
-        openGuard(match);
-        return;
+        asked = publishAsk.current;
+        // Past the bound Publish frees with a note; the hold's identity pin
+        // makes a fire on a gone prompt a no-op.
+        if (!probe.settled) {
+          timer = setTimeout(() => {
+            if (!probe.settled)
+              useConfirm
+                .getState()
+                .setRequestHold(asked, { note: PUBLISH_FORK_CHECK_NOTE });
+          }, PUBLISH_FORK_CHECK_BOUND_MS);
+          void answer.finally(() => clearTimeout(timer));
+        }
+        const ok = await answer;
+        if (!ok) return;
+      } else {
+        // No prompt to hold, so the check decides before the push, and the
+        // refusals re-run after it: it can take the backend's whole bound.
+        const match = await check;
+        releaseMark();
+        // `push` follows the live repo, while the branch name, the fork match
+        // and the decision to publish all belong to the old one: a switch
+        // during the round-trip refuses rather than publish there.
+        const { live, away } = landedIn(pushedIn);
+        if (!live) {
+          toast.info(
+            `Didn't publish ${branch}${away} — you switched repositories before the push started.`,
+          );
+          return;
+        }
+        if (
+          refuseWhilePushing() ||
+          refuseWhilePublishing(queryClient, repoPath)
+        )
+          return;
+        if (refuseWhileSiblingPush(branch)) return;
+        if (match && !updatesForkPr(match)) {
+          withdrawPublishConfirm(publishAsk);
+          openGuard(match);
+          return;
+        }
       }
     }
     // Pushes `branch` by name: a HEAD that moved under the prompt publishes the
     // branch it named. doPush re-checks offline and running pushes itself.
-    void doPush(
-      false,
+    const ran = doPush(false, branch, outcome, { remote: destination });
+    // Only a match the guard would have offered counts as late; a refused
+    // route names no destination to announce.
+    noticeLateForkMatch({
+      ran,
+      check: check.then((m) =>
+        m === null || updatesForkPr(m) || destination === undefined ? null : m,
+      ),
+      repo: pushedIn,
       branch,
-      pushOutcome({ willPublish: true, create, presence }),
-    );
+      remote: destination ?? "origin",
+    });
   }
 
   // A tracked branch whose bare push git sends somewhere other than its upstream
@@ -1159,6 +1286,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     if (refuseWhileSiblingPush(branch)) return;
     const destination =
       pushBranch === branch ? {} : { remoteBranch: pushBranch };
+    const outcome = pushOutcome({ willPublish: true, create, presence });
     try {
       // Sets no upstream, exactly like the bare push it stands in for.
       await push.mutateAsync({
@@ -1167,9 +1295,12 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         remote: pushRemote,
         remoteBranch: pushBranch,
         source: "header",
+        // Leases on a create only when the list read the destination absent: an
+        // unknown presence (push URL elsewhere) may be an unfetched ancestor.
+        creates: outcome === "created",
       });
       const copy = pushSuccessCopy({
-        outcome: pushOutcome({ willPublish: true, create, presence }),
+        outcome,
         branch,
         remote: pushRemote,
         ...destination,
@@ -1189,9 +1320,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     setPushMenuOpen(true);
   }
 
-  // Each item pushes the destination the menu showed when it opened, by name:
-  // never the HEAD arm, whose bare push git refuses here and whose `-u` names
-  // origin. "Publish" retracks to the SAME remote; the tracked push never does.
+  // Each item pushes the destination the menu showed when it opened, by name and
+  // pinned to the branch it opened on: never the HEAD arm, whose bare push git
+  // refuses here. "Publish" retracks to the SAME remote; the tracked push never
+  // does.
   async function pushFromMenu(target: "tracked" | "publish") {
     const capture = pushMenuCapture;
     if (!capture) return;
@@ -1221,6 +1353,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           branch,
           remote,
           remoteBranch,
+          expectedBranch: branch,
           source: "header",
         });
         toast.success(
@@ -1290,6 +1423,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           branch,
           remote,
           source: "header",
+          expectedBranch: branch,
           creates: outcome === "created",
         });
         const { away } = landedIn(capture.repo);
@@ -1777,6 +1911,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           repoPath={forkGuard.repo}
           match={forkGuard.open ? forkGuard.match : null}
           branch={forkGuard.branch}
+          destination={forkGuard.destination}
           onClose={() => closeForkGuard(forkGuard.token)}
           onPublishAnyway={() => {
             // Refused before the dialog closes, so it stays to retry from.
@@ -1804,6 +1939,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                 create: undefined,
                 presence: undefined,
               }),
+              { remote: forkGuard.destination },
             );
           }}
         />

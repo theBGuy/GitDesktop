@@ -5,6 +5,7 @@ import {
   usePrList,
 } from "@/lib/git/queries";
 import type { LocalPrStatus } from "./local";
+import { prRef } from "./pr-state";
 import { useLocalPrs } from "./queries";
 
 /** PR lifecycle states — the same vocabulary the branch picker badges use. */
@@ -12,7 +13,8 @@ export type PrAuditState = "open" | "draft" | "merged" | "closed";
 
 export interface PrAudit {
   state: PrAuditState;
-  /** "#123" for a GitHub PR, "local" for a local-only one. */
+  /** "#123" for a pull request, "!123" for a GitLab merge request, "local"
+   *  for a local-only one. */
   label: string;
 }
 
@@ -84,6 +86,7 @@ export function usePrAuditByBranch(
   // fork/upstream lens is a PR/Issues-tab affordance.
   const openPrs = usePrList(repo, remote, "open", undefined, "origin");
   const closedPrs = usePrList(repo, remote, "closed", undefined, "origin");
+  const provider = forge.data?.provider;
 
   return useMemo(() => {
     const map = new Map<string, PrAudit>();
@@ -101,7 +104,7 @@ export function usePrAuditByBranch(
         pr.isDraft && pr.state === "OPEN"
           ? "draft"
           : (REMOTE_AUDIT_STATE[pr.state] ?? "open");
-      consider(pr.headRefName, { state, label: `#${pr.number}` });
+      consider(pr.headRefName, { state, label: prRef(provider, pr.number) });
     }
     for (const pr of localPrs.data ?? []) {
       consider(pr.head, {
@@ -110,5 +113,5 @@ export function usePrAuditByBranch(
       });
     }
     return map;
-  }, [openPrs.data, closedPrs.data, localPrs.data]);
+  }, [openPrs.data, closedPrs.data, localPrs.data, provider]);
 }

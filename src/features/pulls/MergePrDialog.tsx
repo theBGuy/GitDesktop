@@ -39,6 +39,7 @@ import {
 } from "@/lib/git/types";
 import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { ACT_PENDING_REASON } from "@/lib/offline-writes";
+import { type PrNoun, prRefForNoun } from "@/lib/pulls/pr-state";
 import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
@@ -56,7 +57,7 @@ import {
 } from "./merge-message";
 
 type MergeTarget =
-  | { kind: "remote"; number: number; host: string; prNoun: string }
+  | { kind: "remote"; number: number; host: string; prNoun: PrNoun }
   | { kind: "local" };
 
 /** Why the head can't be deleted from the dialog: a branch rule, or an
@@ -431,7 +432,7 @@ function MergeDialogBody({
   const title =
     target.kind === "local"
       ? "Merge local pull request?"
-      : `${verb} ${target.prNoun} #${target.number}?`;
+      : `${verb} ${target.prNoun} ${prRefForNoun(target.prNoun, target.number)}?`;
   const head = <span className="font-mono break-all">{headRefName}</span>;
   const base = <span className="font-mono break-all">{baseRefName}</span>;
 

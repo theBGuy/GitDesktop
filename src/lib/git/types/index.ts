@@ -18,6 +18,7 @@ export * from "./projects";
 export * from "./prs";
 export * from "./reactions";
 export * from "./remote-lens";
+export * from "./remote-rename";
 export * from "./remotes";
 export * from "./repo";
 export * from "./repo-access";

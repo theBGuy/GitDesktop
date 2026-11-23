@@ -280,7 +280,19 @@ const REFSPEC_ALLOWLIST = [
     file: "git/remote.rs",
     fn: "build_push_args",
     rationale:
-      "the push-refspec chokepoint; its only caller (git_push_with_policy) validates every interpolated name first",
+      "the push-refspec chokepoint; reached only through NamedRoute::argv, whose route git_push_with_policy builds from names it validated first",
+  },
+  {
+    file: "git/remote.rs",
+    fn: "create_lease_arg",
+    rationale:
+      "the create-only lease's chokepoint; its dest is a NamedRoute destination (the branch, the remote branch, or the config-derived tracked upstream's name), refused in NamedRoute::refuse before the argv is built when empty or wherever the full ref refs/heads/<dest> would fail validate_ref_name (so `:` `*` `?` `[` `\\` space and controls are refused, a leading dash is not), or HEAD's branch after validate_ref_name",
+  },
+  {
+    file: "git/remote.rs",
+    fn: "pinned_lease_arg",
+    rationale:
+      "the pinned lease's chokepoint; its dest is git's own %(push) destination for the pinned branch, re-validated with validate_ref_name in tracking_degrade_preread, and its sha is git's rev-parse output",
   },
   {
     file: "git/remote.rs",

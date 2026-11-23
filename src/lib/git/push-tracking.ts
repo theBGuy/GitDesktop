@@ -37,6 +37,9 @@ export function rowTrackingMatches(fresh: Branch, listed: Branch): boolean {
     fresh.upstream === listed.upstream &&
     fresh.upstreamGone === listed.upstreamGone &&
     fresh.upstreamRemote === listed.upstreamRemote &&
-    fresh.upstreamRemoteRef === listed.upstreamRemoteRef
+    fresh.upstreamRemoteRef === listed.upstreamRemoteRef &&
+    (fresh.namedPushRemote ?? null) === (listed.namedPushRemote ?? null) &&
+    (fresh.namedPushBranch ?? null) === (listed.namedPushBranch ?? null) &&
+    (fresh.namedPushRefused === true) === (listed.namedPushRefused === true)
   );
 }

@@ -4,7 +4,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import * as api from "../api";
@@ -19,23 +19,31 @@ import {
   BRANCH_PUSH_KEY,
   type BranchPushState,
   branchPushKey,
+  type HeaderDetection,
+  headerDetectionFor,
   type PushVars,
   pendingBranchPushesFor,
   pushesBranch,
   recheckRunsAfterPush,
+  subscribeHeaderDetections,
 } from "./push-writes";
 
 export {
   BRANCH_PUSH_ACTIVE_MESSAGE,
   BRANCH_PUSH_ELSEWHERE_MESSAGE,
   type BranchPushState,
+  beginHeaderDetection,
   branchPreparingLabel,
   branchPushHoldItemReason,
   branchPushHoldReason,
   branchPushLabel,
+  endHeaderDetection,
+  type HeaderDetection,
+  headerDetectionFor,
   nextPushLatch,
   type PushVars,
   recheckRunsAfterPush,
+  setHeaderDetectionRemote,
 } from "./push-writes";
 
 /** Fetch, pull and switch here are `localOnly`: they move HEAD, refs or the working
@@ -298,9 +306,9 @@ export function useSetSubmoduleBranch(repo: string) {
 /** Keyed per repo with the branch in the variables: {@link usePendingBranchPushes}
  *  reads every push in flight, whichever mount fired it. The key also carries the
  *  repository identity once resolved, so a sibling worktree's
- *  {@link refuseWhileBranchPushes} sees the push. The client-only vars (`source`,
- *  `startedOn`) stay on the client; the backend gets exactly the push's own
- *  arguments. */
+ *  {@link refuseWhileBranchPushes} sees the push. `source` and `startedOn` stay on
+ *  the client; the push's own arguments, its HEAD pins (`expectedBranch`,
+ *  `expectedHead`) and `creates` are forwarded. */
 export function usePush(repo: string) {
   const queryClient = useQueryClient();
   const identity = useRepoIdentity(repo).data;
@@ -314,6 +322,11 @@ export function usePush(repo: string) {
         args.branch,
         args.remote,
         args.remoteBranch,
+        {
+          expectedBranch: args.expectedBranch,
+          expectedHead: args.expectedHead,
+          creates: args.creates,
+        },
       ),
     {
       identity: branchPushKey(repo, identity),
@@ -333,22 +346,51 @@ export function usePush(repo: string) {
 const NO_PENDING_BRANCH_PUSHES: BranchPushState[] = [];
 
 /** The pushes of `repo` in flight, read from the mutation cache, so a remount or
- *  a switch back still sees a push an earlier mount started. */
-export function usePendingBranchPushes(repo: string): BranchPushState[] {
+ *  a switch back still sees a push an earlier mount started. `foreign` also
+ *  returns another worktree's pushes of the same repository, marked `foreign`
+ *  (none while this checkout's identity is unresolved). */
+export function usePendingBranchPushes(
+  repo: string,
+  opts: { foreign?: boolean } = {},
+): BranchPushState[] {
+  const foreign = opts.foreign === true;
+  const identity = useRepoIdentity(repo).data;
+  const matchIdentity = foreign ? identity : undefined;
   const select = useCallback(
     (cache: MutationCache) =>
-      pendingBranchPushesFor(
-        pendingMutationEntries(
-          cache.findAll({
-            mutationKey: branchPushKey(repo),
-            status: "pending",
-          }),
-        ),
-        repo,
-      ),
-    [repo],
+      matchIdentity === undefined
+        ? pendingBranchPushesFor(
+            pendingMutationEntries(
+              cache.findAll({
+                mutationKey: branchPushKey(repo),
+                status: "pending",
+              }),
+            ),
+            repo,
+          )
+        : pendingBranchPushesFor(
+            withLearnedIdentities(
+              pendingMutationEntries(
+                cache.findAll({
+                  mutationKey: BRANCH_PUSH_KEY,
+                  status: "pending",
+                }),
+              ),
+            ),
+            repo,
+            matchIdentity,
+          ),
+    [repo, matchIdentity],
   );
   return useMutationCacheSnapshot(select, NO_PENDING_BRANCH_PUSHES);
+}
+
+/** The sync bar's publish check in flight for `repo` (the module store in
+ *  push-writes.ts), read so a remount and the branch switcher both see it. */
+export function useHeaderDetection(repo: string): HeaderDetection | null {
+  return useSyncExternalStore(subscribeHeaderDetections, () =>
+    headerDetectionFor(repo),
+  );
 }
 
 const NO_PENDING_PUSH_IDS: number[] = [];
@@ -412,7 +454,9 @@ function withLearnedIdentities(
  *  only, while a push filed before its identity resolved is matched once the memo
  *  holds it ({@link withLearnedIdentities}). `alsoHeld` adds a hold
  *  the caller tracks itself; `message` overrides the toast, and
- *  `elsewhereMessage` overrides it when only another worktree's push holds. */
+ *  `elsewhereMessage` overrides it when only another worktree's push holds.
+ *  `exceptOwnRename` lets this checkout's own remote renames through (opening
+ *  the rename dialog, which shows that run); every other push still holds. */
 export function refuseWhileBranchPushes(
   queryClient: QueryClient,
   repo: string,
@@ -422,6 +466,7 @@ export function refuseWhileBranchPushes(
     message?: string;
     elsewhereMessage?: string;
     alsoHeld?: boolean;
+    exceptOwnRename?: boolean;
   } = {},
 ): boolean {
   const pushes = pendingBranchPushesFor(
@@ -435,7 +480,11 @@ export function refuseWhileBranchPushes(
     repo,
     peekRepoIdentity(repo),
   );
-  const holding = pushes.filter((p) => pushesBranch([p], branch, currentName));
+  const holding = pushes.filter(
+    (p) =>
+      !(opts.exceptOwnRename === true && p.renaming && !p.foreign) &&
+      pushesBranch([p], branch, currentName),
+  );
   if (opts.alsoHeld !== true && holding.length === 0) return false;
   const onlyElsewhere =
     opts.alsoHeld !== true && holding.every((p) => p.foreign);

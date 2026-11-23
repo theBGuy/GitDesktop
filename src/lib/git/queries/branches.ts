@@ -1,10 +1,12 @@
 import {
+  type MutationCache,
+  type QueryClient,
   type UseQueryResult,
   useQueries,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { reloadLocalPrs } from "@/lib/pulls/local";
 import {
   REPO_SHELL_GC_TIME,
@@ -14,10 +16,18 @@ import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useUiStore } from "@/lib/stores/ui";
 import * as api from "../api";
 import type { Branch, BranchRewriteStatus, RepoStatus } from "../types";
-import { repoKeys, settlesOnRepoWrite } from "./core";
-import { useRepoMutation } from "./internal";
+import { repoKeys, settlesOnRepoWrite, useRepoIdentity } from "./core";
+import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
 import { localPrWriteKey } from "./pr-writes";
-import { recheckListsLater } from "./push-writes";
+import {
+  branchPushKey,
+  type RemoteRenameVars,
+  recheckListsLater,
+  recheckRunsAfterPush,
+} from "./push-writes";
+
+export type { RemoteRenameVars };
+
 import { repoStatusOptions } from "./status";
 
 /** Shared by the hook and the shell warm-up, so the branch menu's local list is
@@ -133,6 +143,36 @@ export function useDefaultBranch(repo: string) {
   return useQuery(defaultBranchOptions(repo));
 }
 
+/** What a landed local rename owes the app's own stores: both rename hooks call
+ *  it, so a remote rename that renamed the branch here moves the same state. */
+function followLocalRename(
+  queryClient: QueryClient,
+  repo: string,
+  args: { oldName: string; newName: string },
+) {
+  // Re-key the branch's commit draft before the status refetch reports the new
+  // name, so the draft (and any generation streaming into it) survives.
+  // Renames from outside the app (MCP, a terminal `git branch -m`) have no such
+  // hook and still lose the draft when the ambient poll flips the key.
+  useUiStore.getState().migrateCommitDraft(repo, args.oldName, args.newName);
+  // The backend moved the branch's reviewer note on disk as part of the rename;
+  // reload the in-memory store BEFORE invalidating (the focus bridge's pattern in
+  // App.tsx) so the Create-PR dialog reads the note under the new name without
+  // waiting for a focus cycle. Fire-and-forget — this callback must stay sync.
+  void reloadReviewNotes()
+    .then(() => queryClient.invalidateQueries({ queryKey: ["review-notes"] }))
+    .catch(() => {
+      // Best-effort: a failed reload just leaves the last known state.
+    });
+  // The same for the local pull requests the backend moved to the new name,
+  // so an open local-PR view acts on the new head.
+  void reloadLocalPrs()
+    .then(() => queryClient.invalidateQueries({ queryKey: ["local-prs"] }))
+    .catch(() => {
+      // Best-effort, as above.
+    });
+}
+
 export function useRenameBranch(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
@@ -140,39 +180,124 @@ export function useRenameBranch(repo: string) {
     (args: { oldName: string; newName: string }) =>
       api.gitRenameBranch(repo, args.oldName, args.newName),
     {
-      onSuccess: (_data, args) => {
-        // Re-key the branch's commit draft before the status refetch reports the new
-        // name, so the draft (and any generation streaming into it) survives.
-        // Renames from outside the app (MCP, a terminal `git branch -m`) have no such
-        // hook and still lose the draft when the ambient poll flips the key.
-        useUiStore
-          .getState()
-          .migrateCommitDraft(repo, args.oldName, args.newName);
-        // The backend moved the branch's reviewer note on disk as part of the rename;
-        // reload the in-memory store BEFORE invalidating (the focus bridge's pattern in
-        // App.tsx) so the Create-PR dialog reads the note under the new name without
-        // waiting for a focus cycle. Fire-and-forget — this callback must stay sync.
-        void reloadReviewNotes()
-          .then(() =>
-            queryClient.invalidateQueries({ queryKey: ["review-notes"] }),
-          )
-          .catch(() => {
-            // Best-effort: a failed reload just leaves the last known state.
-          });
-        // The same for the local pull requests the backend moved to the new name,
-        // so an open local-PR view acts on the new head.
-        void reloadLocalPrs()
-          .then(() =>
-            queryClient.invalidateQueries({ queryKey: ["local-prs"] }),
-          )
-          .catch(() => {
-            // Best-effort, as above.
-          });
-      },
+      // Pinned: the rename dialog survives a repo switch.
+      identity: ["rename-branch", repo],
+      onSuccess: (_data, args) => followLocalRename(queryClient, repo, args),
       // Local branch write — never park it offline.
       networkMode: "always",
     },
   );
+}
+
+/** The live check of a remote rename: reads the remote, so it parks offline
+ *  (the default network mode) and is never served from cache. */
+export function remoteRenameCheckOptions(
+  repo: string,
+  remote: string,
+  oldName: string,
+  newName: string | null,
+) {
+  return {
+    queryKey: [
+      "repo",
+      repo,
+      "remote-rename-check",
+      remote,
+      oldName,
+      newName,
+    ] as const,
+    queryFn: () => api.gitRemoteRenameCheck(repo, oldName, newName, remote),
+    staleTime: 0,
+    gcTime: 0,
+    retry: false,
+  };
+}
+
+/** Open pull or merge requests headed on a remote branch, read live. */
+export function remoteBranchPullsOptions(
+  repo: string,
+  remote: string,
+  branch: string,
+) {
+  return {
+    queryKey: ["repo", repo, "remote-branch-pulls", remote, branch] as const,
+    queryFn: () => api.forgePrsOnRemoteBranch(repo, remote, branch),
+    staleTime: 0,
+    gcTime: 0,
+    retry: false,
+  };
+}
+
+/** The pull request reads a remote branch's deletion owes a delayed re-read:
+ *  GitHub closes a pull request whose head branch is deleted asynchronously. */
+const headDeletePrListKeys = (repo: string) =>
+  [
+    repoKeys.prList(repo),
+    repoKeys.prReviewState(repo),
+    ["repo", repo, "prs"],
+  ] as const;
+
+/** Renames a branch here and on its upstream remote. Every status but
+ *  `refused` renamed it here; `renamed` and `oldKept` pushed the new name. */
+export function useRenameBranchOnRemote(repo: string) {
+  const queryClient = useQueryClient();
+  const identity = useRepoIdentity(repo).data;
+  return useRepoMutation(
+    repo,
+    (args: RemoteRenameVars) =>
+      api.gitRenameBranchRemote(
+        repo,
+        args.oldName,
+        args.newName,
+        args.remote,
+        args.expectedOldTip,
+      ),
+    {
+      // A member of the branch-push family while it runs (it pushes the new name
+      // and deletes the old one), so every push hold covers it; the dialog's
+      // running state is read from the same entries (usePendingRemoteRenames).
+      identity: branchPushKey(repo, identity),
+      onSuccess: (data, args) => {
+        if (data.status === "refused") return;
+        followLocalRename(queryClient, repo, args);
+        if (data.status === "renamed" || data.status === "oldKept") {
+          recheckRunsAfterPush(queryClient, repo);
+        }
+        if (data.status === "renamed") {
+          recheckListsLater(queryClient, repo, headDeletePrListKeys(repo));
+        }
+      },
+    },
+  );
+}
+
+export interface PendingRemoteRename {
+  oldName: string;
+  newName: string;
+  remote: string;
+}
+
+const NO_PENDING_REMOTE_RENAMES: PendingRemoteRename[] = [];
+
+/** The repository's remote renames in flight, from the mutation cache, so a
+ *  dismissed and reopened dialog reads the same running state: this checkout's
+ *  branch-push entries whose variables name a rename. */
+export function usePendingRemoteRenames(repo: string): PendingRemoteRename[] {
+  const select = useCallback(
+    (cache: MutationCache) =>
+      cache
+        .findAll({ mutationKey: branchPushKey(repo), status: "pending" })
+        .flatMap((m): PendingRemoteRename[] => {
+          const v = m.state.variables as Partial<RemoteRenameVars> | undefined;
+          return typeof v?.oldName === "string" &&
+            typeof v.newName === "string" &&
+            typeof v.remote === "string"
+            ? [{ oldName: v.oldName, newName: v.newName, remote: v.remote }]
+            : [];
+        }),
+    [repo],
+  );
+  return useMutationCacheSnapshot(select, NO_PENDING_REMOTE_RENAMES);
 }
 
 export function useSetBranchArchived(repo: string) {
@@ -241,11 +366,7 @@ export function useDeleteBranch(repo: string) {
  *  contract); the CI and mergeability maps re-key on the new rows. */
 export function useDeleteRemoteBranch(repo: string) {
   const queryClient = useQueryClient();
-  const prListKeys = [
-    repoKeys.prList(repo),
-    repoKeys.prReviewState(repo),
-    ["repo", repo, "prs"],
-  ] as const;
+  const prListKeys = headDeletePrListKeys(repo);
   return useRepoMutation(
     repo,
     (args: { remote: string; name: string }) =>

@@ -46,10 +46,80 @@ export interface PushVars {
    *  checkout. Null or absent on a detached HEAD. usePush's mutationFn never
    *  forwards it. */
   startedOn?: string | null;
-  /** Client-only: the starter's pre-push check found the branch absent on the
-   *  remote, so this push creates it there (the row reads "Publishing"). usePush's
-   *  mutationFn never forwards it. */
+  /** Forwarded: the branch HEAD must still be on (`"HEAD"` = detached); the
+   *  backend refuses before every spawn when it moved. Absent = not pinned. */
+  expectedBranch?: string;
+  /** Forwarded: the commit id HEAD must still be at (a force push's confirmed
+   *  tip); needs `expectedBranch`. */
+  expectedHead?: string;
+  /** Forwarded: the starter's pre-push check found the branch absent on the
+   *  remote, so this push creates it there (the row reads "Publishing") and the
+   *  backend refuses it if the destination appeared at another commit. */
   creates?: boolean;
+}
+
+/** A remote rename's variables (useRenameBranchOnRemote's args type). Filed
+ *  under {@link branchPushKey} while it runs: it pushes the new name and deletes
+ *  the old one, so the family's holds cover it. */
+export interface RemoteRenameVars {
+  oldName: string;
+  newName: string;
+  remote: string;
+  expectedOldTip: string | null;
+}
+
+/** The sync bar's publish check in flight for one repository: the branch it was
+ *  pressed on and, once the row read named it, the remote it checks. */
+export interface HeaderDetection {
+  token: object;
+  branch: string;
+  remote: string | null;
+}
+
+/** Module store, so an entry outlives the SyncControls mount that wrote it and
+ *  the branch switcher can paint and hold that branch's row from it. */
+const headerDetections = new Map<string, HeaderDetection>();
+const headerDetectionListeners = new Set<() => void>();
+const notifyHeaderDetections = () => {
+  for (const l of headerDetectionListeners) l();
+};
+
+/** Starts `repo`'s header check (replacing any older one) and returns the token
+ *  its later writes must present. */
+export function beginHeaderDetection(repo: string, branch: string): object {
+  const token = {};
+  headerDetections.set(repo, { token, branch, remote: null });
+  notifyHeaderDetections();
+  return token;
+}
+
+const entryOfToken = (token: object): [string, HeaderDetection] | undefined =>
+  [...headerDetections].find(([, d]) => d.token === token);
+
+/** Compare-and-set: a late read from an older press never writes a newer entry. */
+export function setHeaderDetectionRemote(token: object, remote: string): void {
+  const found = entryOfToken(token);
+  if (found === undefined) return;
+  headerDetections.set(found[0], { ...found[1], remote });
+  notifyHeaderDetections();
+}
+
+/** Compare-and-clear: an older press's settle never clears a newer entry. */
+export function endHeaderDetection(token: object): void {
+  const found = entryOfToken(token);
+  if (found === undefined) return;
+  headerDetections.delete(found[0]);
+  notifyHeaderDetections();
+}
+
+export const headerDetectionFor = (repo: string): HeaderDetection | null =>
+  headerDetections.get(repo) ?? null;
+
+export function subscribeHeaderDetections(listener: () => void): () => void {
+  headerDetectionListeners.add(listener);
+  return () => {
+    headerDetectionListeners.delete(listener);
+  };
 }
 
 /** One push in flight. `branch` null is a HEAD push (no branch in the vars):
@@ -68,6 +138,9 @@ export interface BranchPushState {
   foreign: boolean;
   /** The starter recorded that this push creates the branch on the remote. */
   creates: boolean;
+  /** A remote rename, read back as two states (its old name and its new one),
+   *  since the row carries the old name until the local rename lands. */
+  renaming: boolean;
 }
 
 /** The refusal for two kinds of route started while a push is in flight: one
@@ -102,7 +175,9 @@ export const branchPushHoldItemReason = (paused: boolean): string =>
  *  variables are read through PushVars' own keys (a renamed field fails to
  *  compile here) but never trusted. Non-object variables are no push this hook
  *  sent, and are dropped. An array, not a branch-keyed record, so a branch named
- *  like an `Object.prototype` member can't read as present. */
+ *  like an `Object.prototype` member can't read as present. A remote rename
+ *  (string `oldName`, `newName` and `remote`) reads back as two states that push
+ *  `newName` to its remote, one per name, so one mutation id can appear twice. */
 export function pendingBranchPushesFor(
   entries: readonly PendingMutationEntry[],
   repo: string,
@@ -116,6 +191,34 @@ export function pendingBranchPushesFor(
     if (foreign && (identity === undefined || keyIdentity !== identity))
       continue;
     if (typeof e.vars !== "object" || e.vars === null) continue;
+    const mutationId = typeof e.mutationId === "number" ? e.mutationId : null;
+    const paused = e.paused === true;
+    const {
+      oldName,
+      newName,
+      remote: renameRemote,
+    } = e.vars as Partial<Record<keyof RemoteRenameVars, unknown>>;
+    if (
+      typeof oldName === "string" &&
+      typeof newName === "string" &&
+      typeof renameRemote === "string"
+    ) {
+      for (const name of [oldName, newName])
+        out.push({
+          mutationId,
+          branch: name,
+          startedOn: null,
+          remote: renameRemote,
+          remoteBranch: newName,
+          setUpstream: true,
+          paused,
+          fromHeader: false,
+          foreign,
+          creates: false,
+          renaming: true,
+        });
+      continue;
+    }
     const {
       setUpstream,
       branch,
@@ -126,16 +229,17 @@ export function pendingBranchPushesFor(
       creates,
     } = e.vars as Partial<Record<keyof PushVars, unknown>>;
     out.push({
-      mutationId: typeof e.mutationId === "number" ? e.mutationId : null,
+      mutationId,
       branch: typeof branch === "string" ? branch : null,
       startedOn: typeof startedOn === "string" ? startedOn : null,
       remote: typeof remote === "string" ? remote : null,
       remoteBranch: typeof remoteBranch === "string" ? remoteBranch : null,
       setUpstream: setUpstream === true,
-      paused: e.paused === true,
+      paused,
       fromHeader: source === "header",
       foreign,
       creates: creates === true,
+      renaming: false,
     });
   }
   return out;
@@ -145,10 +249,10 @@ export function pendingBranchPushesFor(
  *  (`branch` null) and counts as both the branch it recorded starting on
  *  (`startedOn`) and the current branch, or ANY branch while the current name is
  *  unknown, failing toward refusal: the hold costs one toast, a miss moves the ref
- *  mid-send. The current branch holds because the backend pins (`-u`) the HEAD it
- *  reads when the IPC call lands, which a checkout outside the app can move before
- *  the app's status re-read. It holds for a bare push too, which resolves HEAD only
- *  at spawn, after the network-lock wait. A `foreign` HEAD push (another worktree's)
+ *  mid-send. The current branch holds because the backend resolves HEAD itself,
+ *  after the app's last status read, so a checkout outside the app can move it
+ *  first; the push's `expectedBranch` pin then refuses rather than send another
+ *  branch, but only once git runs. A `foreign` HEAD push (another worktree's)
  *  holds only its recorded start: `currentName` describes THIS checkout's HEAD.
  *  Limit: two checkouts during one push waiting on that lock (A to B to C) leave
  *  the branch git sends (B) unheld. */
@@ -180,18 +284,29 @@ export const branchPublishLabel = (remote: string | null): string =>
 export const branchPreparingLabel = (remote: string | null): string =>
   remote === null ? "Preparing to push" : `Preparing to push to ${remote}`;
 
-/** The row spinner's label, arms in precedence order: a cross-name push names
- *  its exact destination, only a push its starter recorded as creating the
- *  branch publishes, a HEAD push (a bare `git push`) names none, a push that
- *  keeps a live upstream targets it, and otherwise the push's own remote. */
+/** The row spinner's label, arms in precedence order: a remote rename names its
+ *  remote, a cross-name push names its exact destination, only a push its
+ *  starter recorded as creating the branch publishes, a HEAD push (a bare
+ *  `git push`) names none, a push to the row's resolved destination (`target`,
+ *  from the backend's routing) names it, a push that keeps a live upstream
+ *  targets it, and otherwise the push's own remote. */
 export function branchPushLabel(
   push: BranchPushState,
   row: { upstream: string | null; upstreamGone: boolean },
+  target: { remote: string; branch: string } | null,
 ): string {
+  if (push.renaming && push.remote !== null)
+    return `Renaming on ${push.remote}`;
   if (push.remote !== null && push.remoteBranch !== null)
     return `Pushing to ${push.remote}/${push.remoteBranch}`;
   if (push.creates) return branchPublishLabel(push.remote);
   if (push.branch === null) return "Pushing";
+  if (
+    !push.setUpstream &&
+    target !== null &&
+    (push.remote === null || push.remote === target.remote)
+  )
+    return `Pushing to ${target.remote}/${target.branch}`;
   if (row.upstream !== null && !row.upstreamGone && !push.setUpstream)
     return `Pushing to ${row.upstream}`;
   if (push.remote !== null) return `Pushing to ${push.remote}`;
@@ -232,13 +347,13 @@ export function nextPushLatch(
 /** How long after an armed write the runs are read once more: the forge can
  *  surface the run, or flip its status, after the settle-time read. Armed writes
  *  are those whose own default trigger starts CI for the code they touch: pushing
- *  commits or tags; opening or reopening a pull request, landing it on the origin
- *  lens, or updating its branch; publishing or deleting a release; publishing a
- *  repository; creating a linked branch on the origin lens; dispatching a
- *  workflow; and re-running, playing or approving a run. Out of scope:
- *  non-default activity types (ready-for-review) and other events (labels,
- *  comments, reviews, Pages builds). Deletion pushes and cancel are reasoned
- *  exclusions. */
+ *  commits or tags; renaming a branch on its remote; opening or reopening a pull
+ *  request, landing it on the origin lens, or updating its branch; publishing or
+ *  deleting a release; publishing a repository; creating a linked branch on the
+ *  origin lens; dispatching a workflow; and re-running, playing or approving a
+ *  run. Out of scope: non-default activity types (ready-for-review) and other
+ *  events (labels, comments, reviews, Pages builds). Deletion pushes and cancel
+ *  are reasoned exclusions. */
 export const PUSH_RUN_RECHECK_MS = 8_000;
 
 /** A read such a write owes the same delayed re-read as the run lists (a PR's

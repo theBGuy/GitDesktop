@@ -239,6 +239,34 @@ fn remote_is_mirror(config: &[ConfigEntry], remote: &str) -> bool {
 /// every check of that decision.
 pub(crate) struct PushConfig(Vec<ConfigEntry>);
 
+impl PushConfig {
+    /// `branch`'s configured push remote ([`configured_push_remote`]) with the key that
+    /// won: `branch.<b>.pushRemote` whenever it is set, empty included, else
+    /// `remote.pushDefault`. None when neither key is set.
+    pub(crate) fn push_remote_setting(&self, branch: &str) -> Option<(String, &str)> {
+        let value = configured_push_remote(&self.0, Some(branch))?;
+        let own = format!("branch.{branch}.pushRemote");
+        let key = if config_last(&self.0, &own).is_some() {
+            own
+        } else {
+            "remote.pushDefault".to_string()
+        };
+        Some((key, value))
+    }
+
+    /// The remote git routes a bare push of `head` to ([`bare_push_remote`]); None when
+    /// the winning value is empty, where git has no push destination at all.
+    pub(crate) fn bare_push_remote(&self, head: Option<&str>) -> Option<&str> {
+        Some(bare_push_remote(&self.0, head)).filter(|r| !r.is_empty())
+    }
+
+    /// A listing parsed from `git config -z --list` text, for pure tests.
+    #[cfg(test)]
+    pub(crate) fn from_listing(text: &str) -> Self {
+        PushConfig(parse_config_list(text))
+    }
+}
+
 /// The push config listing, strict: a failed listing is that error, never "no mirror".
 pub(crate) async fn push_config_strict(repo_path: &str) -> AppResult<PushConfig> {
     let out = run_git(
@@ -366,10 +394,9 @@ fn triangular_simple_destination(
 /// both ends already have, so it never creates one; triangular `simple` lands where the
 /// atoms resolve nothing. The remote must be a configured one (a pushRemote can name a
 /// URL) and no mirror (every app push to one is refused, [`refuse_mirror_push`]); a
-/// failed listing claims nothing. Still out of reach, counted on the owner's 109 repos:
-/// a push remote's own push refspecs (0), several pushurls (0), narrow or remapped fetch
-/// refspecs (1, a fixture), a git without the `%(push)` atoms, force pushes (their own
-/// confirm), and presence as last-fetch remote-tracking state (no network read here).
+/// failed listing claims nothing. The shapes still out of reach are the push-destination
+/// contract's six classes (`resolve_push_target`, git/remote.rs); this read claims
+/// nothing for any of them.
 fn configured_destination(
     config: Option<&[ConfigEntry]>,
     name: &str,
@@ -1514,6 +1541,89 @@ mod tests {
         git(&work, &["branch", "-m", "feat/x", "feat/y"]).await;
         commit_one(&work, "work.txt").await;
         work
+    }
+
+    /// The configured push remote names the key that won: a set `pushRemote`, empty
+    /// included, decides alone; otherwise `remote.pushDefault`.
+    #[test]
+    fn push_remote_setting_names_the_winning_key() {
+        let on = |text: &str| {
+            PushConfig::from_listing(text)
+                .push_remote_setting("feat")
+                .map(|(k, v)| (k, v.to_string()))
+        };
+        let pair = |k: &str, v: &str| Some((k.to_string(), v.to_string()));
+        assert_eq!(on(""), None);
+        assert_eq!(on("branch.other.pushremote\nx\0"), None);
+        assert_eq!(
+            on("remote.pushdefault\nfork\0"),
+            pair("remote.pushDefault", "fork")
+        );
+        assert_eq!(
+            on("remote.pushdefault\nfork\0branch.feat.pushremote\nmine\0"),
+            pair("branch.feat.pushRemote", "mine")
+        );
+        assert_eq!(
+            on("remote.pushdefault\nfork\0branch.feat.pushremote\n\0"),
+            pair("branch.feat.pushRemote", "")
+        );
+        assert_eq!(on("remote.pushdefault\n\0"), pair("remote.pushDefault", ""));
+    }
+
+    /// A bare push's remote is None only when the winning value is empty.
+    #[test]
+    fn bare_push_remote_is_none_only_for_an_empty_winner() {
+        let on = |text: &str, head: Option<&str>| {
+            PushConfig::from_listing(text)
+                .bare_push_remote(head)
+                .map(str::to_string)
+        };
+        assert_eq!(on("remote.pushdefault\n\0", Some("feat")), None);
+        assert_eq!(on("branch.feat.pushremote\n\0", Some("feat")), None);
+        assert_eq!(
+            on(
+                "remote.pushdefault\n\0branch.feat.pushremote\nfork\0",
+                Some("feat")
+            ),
+            Some("fork".into())
+        );
+        assert_eq!(
+            on(
+                "remote.origin.url\nu\0branch.feat.remote\norigin\0",
+                Some("feat")
+            ),
+            Some("origin".into())
+        );
+        assert_eq!(on("remote.pushdefault\nfork\0", None), Some("fork".into()));
+        assert_eq!(on("remote.pushdefault\n\0", None), None);
+    }
+
+    /// An empty `remote.pushDefault` gives a bare push no destination, so the status read
+    /// claims none.
+    #[tokio::test]
+    async fn an_empty_push_default_claims_no_push_destination() {
+        let (_guard, base) = temp_base("empty-pd");
+        let work = renamed_branch_fixture(&base, "w").await;
+        if !all_unset(
+            &work,
+            "the empty pushDefault check",
+            &["branch.topic.pushRemote", "remote.origin.push"],
+        )
+        .await
+        {
+            return;
+        }
+        git(&work, &["config", "remote.pushDefault", ""]).await;
+        git(
+            &work,
+            &["switch", "-q", "-c", "topic", "--track", "origin/main"],
+        )
+        .await;
+        commit_one(&work, "topic.txt").await;
+        let head = status_core(&work).await.unwrap().branch;
+        assert_eq!(head.upstream_branch.as_deref(), Some("main"));
+        assert_eq!(head.push_remote, None);
+        assert_eq!(head.push_branch, None);
     }
 
     async fn commit_one(repo: &str, file: &str) {

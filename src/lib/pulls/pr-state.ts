@@ -29,6 +29,42 @@ export const PR_NOUN: Record<ForgeProvider, PrNoun> = {
   bitbucket: "pull request",
 };
 
+/** The character before a pull or merge request number on each forge. */
+export const PR_SIGIL: Record<ForgeProvider, "#" | "!"> = {
+  github: "#",
+  gitlab: "!",
+  bitbucket: "#",
+};
+
+/** `#12` / `!12`. An unknown or unloaded provider reads as GitHub, as labels
+ *  do. Issue numbers never use this: an issue is `#` on every forge. */
+export function prRef(
+  provider: ForgeProvider | null | undefined,
+  number: number,
+): string {
+  return `${PR_SIGIL[provider ?? "github"]}${number}`;
+}
+
+/** For a site that holds only the noun: "merge request" is GitLab's alone. */
+export function prRefForNoun(noun: PrNoun, number: number): string {
+  return prRef(noun === "merge request" ? "gitlab" : "github", number);
+}
+
+/** What deleting a request's head branch does to it, per forge: GitHub and
+ *  GitLab close the request; Bitbucket leaves it open without its source
+ *  (measured on the three fixtures, 2026-11-23). */
+export const PR_HEAD_DELETED: Record<
+  ForgeProvider,
+  { item: string; would: string }
+> = {
+  github: { item: "will be closed", would: "would be closed" },
+  gitlab: { item: "will be closed", would: "would be closed" },
+  bitbucket: {
+    item: "loses its source branch",
+    would: "would lose its source branch",
+  },
+};
+
 /**
  * The one PR-state table every surface draws from. Each arm carries its own
  * SHAPE so no two states differ by colour alone. CLOSED is XCircle + destructive

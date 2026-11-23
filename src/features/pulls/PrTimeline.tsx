@@ -30,8 +30,9 @@ import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { RelativeTime } from "@/components/relative-time";
 import type { CommitRow } from "@/features/conversations/CommitsList";
 import { clipTitle } from "@/lib/clip-title";
-import type { ForgeTimelineEvent } from "@/lib/git/types";
+import type { ForgeProvider, ForgeTimelineEvent } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { PR_SIGIL } from "@/lib/pulls/pr-state";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
@@ -355,15 +356,19 @@ function ReferenceChip({
   chip,
   onOpenRef,
   selfRepo,
+  provider,
 }: {
   chip: ReferenceChipData;
   onOpenRef?: (kind: "pr" | "issue", number: number) => void;
   selfRepo?: string;
+  provider?: ForgeProvider | null;
 }) {
   const sameRepo =
     chip.repo === "" || chip.repo.toLowerCase() === selfRepo?.toLowerCase();
   const kind = chip.kind === "pr" || chip.kind === "issue" ? chip.kind : null;
-  const ref = `${sameRepo ? "" : chip.repo}#${chip.number}`;
+  // Only a request takes its forge's sigil: an issue is `#` on every forge.
+  const sigil = kind === "pr" ? PR_SIGIL[provider ?? "github"] : "#";
+  const ref = `${sameRepo ? "" : chip.repo}${sigil}${chip.number}`;
   const body = (
     <>
       <span className="shrink-0 font-mono">{ref}</span>
@@ -398,6 +403,7 @@ export function TimelineEventRow({
   ghHost,
   onOpenRef,
   selfRepo,
+  provider,
 }: {
   event: ForgeTimelineEvent;
   /** GitHub host for the actor's login-derived avatar (`null` off GitHub). Resolved
@@ -410,6 +416,8 @@ export function TimelineEventRow({
   /** The viewed repo's `owner/name`, so a cross-repo reference can be told apart
    *  from a local one and rendered non-interactive. */
   selfRepo?: string;
+  /** The timeline's forge, for a request chip's sigil; unset reads as GitHub. */
+  provider?: ForgeProvider | null;
 }) {
   const { Icon, tone, label, colorDot, refChip } = eventPresentation(event);
   return (
@@ -445,6 +453,7 @@ export function TimelineEventRow({
             chip={refChip}
             onOpenRef={onOpenRef}
             selfRepo={selfRepo}
+            provider={provider}
           />
         )}
         {parseableDate(event.date) && (

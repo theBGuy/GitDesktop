@@ -31,21 +31,34 @@ const PINS = [
     name: "rename submit",
     file: `${R}RenameBranchDialog.tsx`,
     anchor: "onSubmit: async ({ value }) =>",
+    // The remote step's offline and push refusals are conditional; the publish
+    // refusal holds a local rename of the checked-out branch, and every remote
+    // step, each right before its own write.
     seq: [
       "if (!target) return;",
       "refuseWhileBranchPushes(queryClient, repoPath, target, currentName)",
       "promotionBlocksCheckout(repoPath)",
+      "remoteStep && refuseWhileOffline()",
+      "remoteStep && refuseWhilePushRuns(queryClient, repoPath)",
+      "const isHead = target === currentName;",
+      "isHead && refuseWhilePublishing(queryClient, repoPath)",
       "await renameBranch.mutateAsync",
+      "if (refuseWhilePublishing(queryClient, repoPath)) return;",
+      "await renameOnRemote.mutateAsync",
     ],
     mutate: [
       "refuseWhileBranchPushes(queryClient, repoPath, target, currentName)",
+      "remoteStep && refuseWhileOffline()",
+      "remoteStep && refuseWhilePushRuns(queryClient, repoPath)",
+      "isHead && refuseWhilePublishing(queryClient, repoPath)",
+      "if (refuseWhilePublishing(queryClient, repoPath)) return;",
     ],
   },
   {
     name: "shared helper",
     file: SYNC,
     anchor:
-      "    elsewhereMessage?: string;\n    alsoHeld?: boolean;\n  } = {},\n): boolean {",
+      "    elsewhereMessage?: string;\n    alsoHeld?: boolean;\n    exceptOwnRename?: boolean;\n  } = {},\n): boolean {",
     seq: [
       'findAll({ mutationKey: BRANCH_PUSH_KEY, status: "pending" })',
       "peekRepoIdentity(repo)",
@@ -138,11 +151,13 @@ const PINS = [
       "message,",
       "elsewhereMessage,",
       "detect.branch === branch",
+      "headerDetectionFor(repoPath)?.branch === branch",
       "branchPushing(branch)",
     ],
     mutate: [
       "elsewhereMessage,",
       "detect.branch === branch",
+      "headerDetectionFor(repoPath)?.branch === branch",
       "branchPushing(branch)",
     ],
   },
@@ -853,6 +868,25 @@ const BARE_BRANCH = {
   [`${R}SyncControls.tsx`]: ["beginBarePush", "pushFromMenu"],
   [`${R}ForkPrPublishGuard.tsx`]: ["pushToFork"],
 };
+// A production push that names its branch says whether it creates it (`creates`,
+// the create-only lease), except these sites, matched by function and the
+// literal's `setUpstream` text. src/test pushes reach no backend and are exempt
+// from this and the two pin rules (`startedOn` needs `expectedBranch`, `force`
+// needs `expectedHead`).
+const NO_CREATES = [
+  {
+    file: `${R}SyncControls.tsx`,
+    fn: "pushFromMenu",
+    setUpstream: "false",
+    reason: "Push to tracked: onto the live upstream, which exists",
+  },
+  {
+    file: `${R}ForkPrPublishGuard.tsx`,
+    fn: "pushToFork",
+    setUpstream: "false",
+    reason: "onto the pull request's head branch, which exists",
+  },
+];
 const READ_MEMBERS = ["isPending", "isPaused"];
 const USE_PUSH_MODULES = new Set([
   "src/lib/git/queries/sync",
@@ -958,10 +992,15 @@ function keyStrength(keys, name) {
 
 /** Failures for the usePush call scan over `sources` (src-relative path ->
  *  text); empty means every call names its branch or records its start. */
-function checkPushCalls(sources, bareBranch = BARE_BRANCH) {
+function checkPushCalls(
+  sources,
+  bareBranch = BARE_BRANCH,
+  noCreates = NO_CREATES,
+) {
   const fails = [];
   let calls = 0;
   const used = new Set();
+  const usedNoCreates = new Set();
   for (const [file, raw] of Object.entries(sources)) {
     const text = raw.replace(/\r\n/g, "\n");
     const { code, bare } = lex(text);
@@ -1079,6 +1118,23 @@ function checkPushCalls(sources, bareBranch = BARE_BRANCH) {
           fails.push(`${where}: an entry it can't read`);
           continue;
         }
+        if (!file.startsWith("src/test/")) {
+          const has = (name) => keys.some((k) => k.key === name);
+          if (has("startedOn") && !has("expectedBranch"))
+            fails.push(
+              `${where}: records startedOn without an expectedBranch pin`,
+            );
+          if (has("force") && !has("expectedHead"))
+            fails.push(`${where}: a force key without an expectedHead pin`);
+          if (has("branch") && !has("creates")) {
+            const up = keys.find((k) => k.key === "setUpstream")?.value ?? null;
+            const row = noCreates.find(
+              (r) => r.file === file && r.fn === fn && r.setUpstream === up,
+            );
+            if (row) usedNoCreates.add(row);
+            else fails.push(`${where}: names its branch without a creates key`);
+          }
+        }
         const branch = keyStrength(keys, "branch");
         const started = keyStrength(keys, "startedOn");
         if (branch === "strong" || started === "strong") continue;
@@ -1095,6 +1151,9 @@ function checkPushCalls(sources, bareBranch = BARE_BRANCH) {
     for (const fn of fns)
       if (!used.has(`${file}#${fn}`))
         fails.push(`stale bare-branch entry: ${file}#${fn}`);
+  for (const row of noCreates)
+    if (!usedNoCreates.has(row))
+      fails.push(`stale no-creates entry: ${row.file}#${row.fn}`);
   if (calls === 0) fails.push("no usePush calls found");
   return fails;
 }
@@ -1117,8 +1176,14 @@ test("every usePush call names its branch or records its start", () => {
 
 test("the usePush call scan fails closed on every shape it can't prove", () => {
   const sources = walkSrc();
-  const scanFailsWith = (srcs, fragment, bareBranch, label = fragment) => {
-    const fails = checkPushCalls(srcs, bareBranch);
+  const scanFailsWith = (
+    srcs,
+    fragment,
+    bareBranch,
+    label = fragment,
+    noCreates = undefined,
+  ) => {
+    const fails = checkPushCalls(srcs, bareBranch, noCreates);
     assert.ok(
       fails.some((f) => f.includes(fragment)),
       `${label}: expected a failure naming ${fragment}, got ${JSON.stringify(fails)}`,
@@ -1228,6 +1293,70 @@ test("the usePush call scan fails closed on every shape it can't prove", () => {
     ...BARE_BRANCH,
     [sc]: [...BARE_BRANCH[sc], "noSuchFunction"],
   });
+
+  // The pin and lease rules (production files only).
+  const pinLine = "expectedBranch: branch === undefined ? headPin : undefined,";
+  const tipLine = "expectedHead: force ? opts?.expectedHead : undefined,";
+  assert.ok(sources[sc].includes(pinLine) && sources[sc].includes(tipLine));
+  scanFailsWith(
+    { ...sources, [sc]: sources[sc].replace(pinLine, () => "") },
+    "in doPush: records startedOn without an expectedBranch pin",
+  );
+  scanFailsWith(
+    { ...sources, [sc]: sources[sc].replace(tipLine, () => "") },
+    "in doPush: a force key without an expectedHead pin",
+  );
+  for (const [body, fragment] of [
+    [
+      "await push.mutateAsync({ setUpstream: false, branch: x.name, startedOn: x.name, creates: false });",
+      "in probe: records startedOn without an expectedBranch pin",
+    ],
+    [
+      "await push.mutateAsync({ setUpstream: false, branch: x.name, force: true, expectedBranch: x.name, creates: false });",
+      "in probe: a force key without an expectedHead pin",
+    ],
+    [
+      "await push.mutateAsync({ setUpstream: true, branch: x.name });",
+      "in probe: names its branch without a creates key",
+    ],
+  ])
+    scanFailsWith(probe(body), fragment, undefined, body);
+  // An allowlist row covers only its own function and setUpstream text.
+  const probeRow = { file: fg, fn: "probe", setUpstream: "false", reason: "" };
+  const withRow = [...NO_CREATES, probeRow];
+  scanFailsWith(
+    probe("await push.mutateAsync({ setUpstream: true, branch: x.name });"),
+    "in probe: names its branch without a creates key",
+    undefined,
+    "allowlist, other setUpstream",
+    withRow,
+  );
+  assert.ok(
+    !checkPushCalls(
+      probe("await push.mutateAsync({ setUpstream: false, branch: x.name });"),
+      undefined,
+      withRow,
+    ).some((f) => f.includes("creates key")),
+  );
+  scanFailsWith(
+    sources,
+    "stale no-creates entry",
+    undefined,
+    "stale no-creates entry",
+    withRow,
+  );
+  // A src/test harness push takes none of the three rules.
+  const harness = {
+    ...sources,
+    "src/test/probe.test.tsx": [
+      'import { usePush } from "@/lib/git/queries";',
+      "function Probe() {",
+      '  const p = usePush("r");',
+      '  p.mutate({ setUpstream: false, branch: "a", startedOn: "a", force: true });',
+      "}",
+    ].join("\n"),
+  };
+  assert.deepEqual(checkPushCalls(harness), []);
 });
 
 // Non-BMP text and identifier spellings, one test per shape. Fixture text is
@@ -1243,7 +1372,7 @@ const failsNaming = (fails, fragment) =>
   );
 const NO_BRANCH = "p.mutate in Probe: names no branch and records no start";
 const UNSAFE = "{ setUpstream: false }";
-const SAFE = "{ setUpstream: false, branch: b.name }";
+const SAFE = "{ setUpstream: false, branch: b.name, creates: false }";
 const pushProbe = (alias, vars, lead = []) => [
   ...lead,
   alias === "usePush"

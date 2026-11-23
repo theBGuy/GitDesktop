@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 import { maybeFireSync } from "@/lib/automations/sync";
-import { gitBranchTips, tipOf } from "@/lib/git/api";
+import { gitBranchTips } from "@/lib/git/api";
+import { branchTipPairs, tipInPairs } from "@/lib/git/branch-tip-pairs";
 import { useLocalPrs } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 
@@ -30,7 +31,7 @@ export function useWatchPrHeads(repoPath: string) {
 
   const tips = useQuery({
     queryKey: ["branch-tips", repoPath, headBranches],
-    queryFn: () => gitBranchTips(repoPath, headBranches),
+    queryFn: () => gitBranchTips(repoPath, headBranches).then(branchTipPairs),
     enabled: Boolean(repoPath) && headBranches.length > 0 && aiEnabled,
     refetchInterval: 10_000,
     refetchIntervalInBackground: false,
@@ -45,7 +46,7 @@ export function useWatchPrHeads(repoPath: string) {
     const data = tips.data;
     if (!data) return;
     for (const pr of openPrs) {
-      const head = tipOf(data, pr.head);
+      const head = tipInPairs(data, pr.head);
       if (!head) continue;
       maybeFireSync({
         repoPath,

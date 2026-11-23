@@ -42,6 +42,8 @@ const ROSTER = {
 const ROW_ALLOWLIST = {
   "src/features/settings/McpServersSection.tsx":
     "settings section header with a card's actions, not a PR/issue detail header",
+  "src/features/repository/RenameBranchDialog.tsx":
+    "a checkbox label with its reason wrapping under it, not a PR/issue detail header",
 };
 
 const ROW_TOKENS = ["flex", "flex-wrap", "items-start"];

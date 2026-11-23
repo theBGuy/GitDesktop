@@ -81,7 +81,7 @@ import {
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { reloadLocalPrs } from "@/lib/pulls/local";
-import { PR_NOUN, type PrNoun, prStateWord } from "@/lib/pulls/pr-state";
+import { PR_NOUN, type PrNoun, prRef, prStateWord } from "@/lib/pulls/pr-state";
 import {
   LOCAL_PR_RECORD_WRITES_FAMILY,
   localPrKey,
@@ -1616,7 +1616,7 @@ export function PullRequestsPanel({
               className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground"
               onMouseEnter={clipTitleFromText}
             >
-              #{pr.number}
+              {prRef(shown, pr.number)}
               {/* Indicators lead this line: truncation eats the tail first, so
                   the age and author drop before the glyphs. Text carries the
                   meaning; the label is self-contained so the glyph reads alone. */}

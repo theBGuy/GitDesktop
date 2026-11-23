@@ -96,7 +96,7 @@ import {
   forgetDeletedBranch,
 } from "@/lib/deleted-branches/store";
 import { presentError } from "@/lib/error-summary";
-import { tipOf } from "@/lib/git/api";
+import { tipInPairs } from "@/lib/git/branch-tip-pairs";
 import { normPath } from "@/lib/git/path";
 import {
   useBranches,
@@ -754,7 +754,7 @@ function DeletedBranchesSection({
     if (!branches.data?.some((b) => b.name === entry.name)) return "restorable";
     if (nameTips.isError) return "nameCheckFailed";
     return nameTips.isSuccess &&
-      tipOf(nameTips.data, entry.name)?.toLowerCase() ===
+      tipInPairs(nameTips.data, entry.name)?.toLowerCase() ===
         entry.tip.toLowerCase()
       ? "alreadyBack"
       : "nameExists";
