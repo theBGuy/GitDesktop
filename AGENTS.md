@@ -52,7 +52,9 @@ either in the tree.
 - `pnpm run checks` — the repo guard scripts CI runs.
 - While iterating, SCOPED tests only: Rust
   `cargo test --manifest-path src-tauri/Cargo.toml <module path>::` for each
-  edited module plus the modules that call each changed item; frontend
+  edited module plus the modules that call each changed item (from
+  `git grep -n "<item>" -- src-tauri/src`; a source-scan test that only names
+  the item counts); frontend
   `pnpm exec vitest related --run <changed src files> <edited test files>`.
 - Before reporting done, the FULL suites ONCE through the lock wrapper:
   `pnpm test:rust:full` (Rust changed), `pnpm test:vitest:full` (frontend

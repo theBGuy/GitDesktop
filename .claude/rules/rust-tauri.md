@@ -30,7 +30,9 @@ paths:
 - Tests: iterate SCOPED with
   `cargo test --manifest-path src-tauri/Cargo.toml <module path>::` for each edited
   module plus the modules that call each changed item
-  (`git grep -n "<item>" -- src-tauri/src`; several modules go after `--`). Before
+  (`git grep -n "<item>" -- src-tauri/src`; several modules go after `--`). A test
+  that only names the item counts (source-scan rosters such as `repo_meta.rs`'s), so
+  take the module set from the grep's output, never from memory. Before
   done, run the full suite ONCE through the wrapper, `pnpm test:rust:full`
   (`pnpm test:all:full` when the frontend changed too), in the background. A raw
   unfiltered `cargo test` is the violation: full suites overlapping across sessions

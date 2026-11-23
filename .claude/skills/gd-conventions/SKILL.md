@@ -69,7 +69,11 @@ the length of the run; its exit code is the suite's.
   after `--`:
   `cargo test --manifest-path src-tauri/Cargo.toml -- git::branches:: git::remote::`),
   plus the modules that CALL each changed item, found with
-  `git grep -n "<item>" -- src-tauri/src`. Frontend:
+  `git grep -n "<item>" -- src-tauri/src`. A test that only NAMES the item
+  counts as a caller: source-scan rosters (`include_str!` over a sibling file,
+  such as `github/repo_meta.rs`'s timeout-hedge roster) find a write by text
+  inside its function, so moving that text into a helper reds them. Take the
+  module set from the grep's output, never from memory. Frontend:
   `pnpm exec vitest related --run <changed src files> <edited test files>`,
   plus `node scripts/check-banned-patterns.mjs` on every frontend step: it
   scans `src/test/` too, and tsc, biome and vitest all pass code it fails; the
