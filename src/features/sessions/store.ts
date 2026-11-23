@@ -86,7 +86,8 @@ export interface AgentSession {
   base: string;
   /** Latest checkpoint commit (= base until the first turn commits). */
   headHash: string;
-  /** Claude session uuid: `--session-id` on turn 1, `--resume` after; also the cancel key. */
+  /** Claude session uuid: `--session-id` on turn 1, `--resume` after. Every turn
+   *  cancels by its own run id (`turnRunIds`), never this. */
   claudeSessionId: string;
   /** Current model for the next turn ("" = account default). Changeable mid-session. */
   model: string;
@@ -265,8 +266,15 @@ function markInterrupted(s: AgentSession): AgentSession {
   return { ...s, running: false, turns };
 }
 
+/** Session id → the run id of its latest requested turn, the key `cancel` sends.
+ *  Set only by `send` and `start`, at the turn's request (the backend's cancel ids
+ *  are single-use, so each turn needs its own), and deleted by `removeSession`;
+ *  never persisted. */
+const turnRunIds = new Map<string, string>();
+
 /** Removes a session from the list, moving `activeId` to a survivor (or null). */
 function removeSession(get: Get, set: SetState, id: string) {
+  turnRunIds.delete(id);
   const remaining = get().sessions.filter((s) => s.id !== id);
   const activeId =
     get().activeId === id
@@ -287,6 +295,7 @@ async function runTurn(
   id: string,
   prompt: string,
   resume: boolean,
+  runId: string,
 ) {
   const find = () => get().sessions.find((s) => s.id === id);
   const s0 = find();
@@ -397,7 +406,14 @@ async function runTurn(
   // id. Run-local on purpose: a failed reset turn must not leave it armed for the next
   // run, and another run's notice must never arm this one.
   let replaceArmed = false;
-  setSession((s) => ({ ...s, running: true }));
+  // A Stop during the setup reads already marked the turn and freed the session:
+  // persist that result and spawn nothing.
+  const sNow = find();
+  if (!sNow) return;
+  if (sNow.turns[turnIndex]?.status !== "running") {
+    endTurn();
+    return;
+  }
   try {
     await runAgentSession({
       binPath: null,
@@ -407,6 +423,7 @@ async function runTurn(
       userPrompt: prompt,
       worktreePath,
       sessionId: claudeSessionId,
+      runId,
       resume,
       readOnly: false,
       isolation,
@@ -693,10 +710,13 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         ? mcpServers
         : undefined,
       ensembleId,
-      running: false,
+      // Running from creation: the first turn's MCP setup reads come before its spawn.
+      running: true,
       kept: false,
       turns: [newTurn(task)],
     };
+    const runId = crypto.randomUUID();
+    turnRunIds.set(wt.id, runId);
     set({
       creating: false,
       sessions: [...get().sessions, session],
@@ -720,7 +740,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     persist(appendTurn(wt.id, 0, task, model));
     // Fire the first turn in the background and return the new session id so a caller (e.g.
     // the plan "Implement") can link to it.
-    void runTurn(get, set, wt.id, task, false);
+    void runTurn(get, set, wt.id, task, false, runId);
     return wt.id;
   },
 
@@ -763,13 +783,19 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     const task = prompt.trim();
     if (!task) return;
     const seq = s.turns.length;
+    // One synchronous block: the turn is cancellable by its own id and holds the
+    // session before runTurn's first await.
+    const runId = crypto.randomUUID();
+    turnRunIds.set(id, runId);
     set({
       sessions: get().sessions.map((x) =>
-        x.id === id ? { ...x, turns: [...x.turns, newTurn(task)] } : x,
+        x.id === id
+          ? { ...x, running: true, turns: [...x.turns, newTurn(task)] }
+          : x,
       ),
     });
     persist(appendTurn(id, seq, task, s.model));
-    await runTurn(get, set, id, task, true);
+    await runTurn(get, set, id, task, true, runId);
   },
 
   setModel: (id, model) => {
@@ -800,11 +826,14 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   cancel: async (id) => {
     const s = get().sessions.find((x) => x.id === id);
     if (!s || !s.running) return;
+    const runId = turnRunIds.get(id);
     try {
-      await cancelAgentSession(s.claudeSessionId);
+      if (runId) await cancelAgentSession(runId);
     } catch (e) {
       toastError(e);
     }
+    // A newer turn started while the cancel was in flight: it is not ours to stop.
+    if (turnRunIds.get(id) !== runId) return;
     set({
       sessions: get().sessions.map((x) => {
         if (x.id !== id) return x;

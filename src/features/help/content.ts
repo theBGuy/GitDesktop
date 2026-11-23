@@ -3958,7 +3958,7 @@ research** to flesh out the direction you chose — the whole conversation carri
 agent keeps everything it already explored. Keep refining with follow-up messages; the agent
 keeps its sources in context. When a report is ready you can **Turn it into a Plan** (it
 distills the whole session into a plan-ready brief to hand the planner, falling back to the
-full session if distillation is unavailable) or **Save report** as a local Markdown
+full session if distillation is unavailable or stopped) or **Save report** as a local Markdown
 file (written to \`.gitdesktop/research/\` for you to review and commit — never committed for
 you). It searches and reads, and outside opencode it never changes your code. Pick any agent
 (**Claude**, **Codex**, **GitHub Copilot**, or **opencode**; the picker opens on your
@@ -3993,8 +3993,9 @@ empty for your account's default. The agent works in an **isolated git worktree*
 throwaway branch (\`gd/session/…\`) that never touches your working tree, and commits a
 **checkpoint** each turn. It works in the open: the conversation shows a **step-by-step
 transcript** of each file it reads, edits, searches, and command it runs, interleaved
-with its narration. When GitDesktop can tell an opencode conversation can't be
-continued, the turn starts a fresh one and the timeline says so.
+with its narration. When GitDesktop can tell a conversation can't be continued (the
+agent doesn't have it, or the installed opencode can't continue it), the turn starts a
+fresh one and the timeline says so.
 **Expand any edit step** to see that file's diff inline, watch its
 **live changes** mid-turn, or read the cumulative diff under **Changes**. If a step's diff
 fails to refresh, the last one stays with a line saying it couldn't refresh and a

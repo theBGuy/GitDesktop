@@ -9,6 +9,7 @@ import {
   WarningIcon,
 } from "@phosphor-icons/react";
 import { useLayoutEffect, useRef, useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
@@ -39,7 +40,17 @@ import { useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import { useToastClearance } from "@/lib/use-toast-clearance";
 import {
+  PLAN_BUTTON_LABEL,
+  PLAN_BUTTON_REASON,
+  SEND_HOLD_REASON,
+  type SendHold,
+  STOP_SLOT_LABEL,
+  STOP_SLOT_REASON,
+} from "./distill-copy";
+import {
   assembleSessionReport,
+  type DistillPhase,
+  distillPhase,
   type ResearchDepth,
   type ResearchHistoryTurn,
   type ResearchRun,
@@ -392,9 +403,22 @@ function ResearchResult({ run }: { run: ResearchRun }) {
   const distillPlanBrief = useResearchStore((s) => s.distillPlanBrief);
   const setPendingPlanSeed = usePlanStore((s) => s.setPendingPlanSeed);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const stopRef = useRef<HTMLButtonElement>(null);
+  const planRef = useRef<HTMLButtonElement>(null);
   const [saving, setSaving] = useState(false);
 
-  const distilling = run.distilling ?? false;
+  const phase = distillPhase(run);
+
+  // The Stop slot hides when the distill settles; if it held focus, hand it to
+  // the plan button, or the hidden node would drop focus to <body>.
+  useLayoutEffect(() => {
+    if (
+      phase === "idle" &&
+      stopRef.current &&
+      document.activeElement === stopRef.current
+    )
+      planRef.current?.focus();
+  }, [phase]);
 
   const {
     generating,
@@ -428,7 +452,8 @@ function ResearchResult({ run }: { run: ResearchRun }) {
   // the raw assembly (never blocks the handoff). Recording originResearchId archives
   // this run's sidebar row once the plan exists.
   const turnIntoPlan = async () => {
-    if (!report || run.distilling) return;
+    const fresh = useResearchStore.getState().runs.find((r) => r.id === run.id);
+    if (!fresh?.report || fresh.distilling) return;
     // Snapshot the agent-surface selection AT CLICK, so on completion we can tell
     // whether the user has since navigated to another run/plan/session.
     const selectionAtClick = captureAgentSelection();
@@ -596,32 +621,42 @@ function ResearchResult({ run }: { run: ResearchRun }) {
                     <FloppyDiskIcon className="size-3.5" />
                     {reportPath ? "Re-save" : "Save report"}
                   </Button>
-                  {/* Always rendered to reserve its slot so the row doesn't reflow
-                      when distillation starts/ends. When idle: `invisible`
-                      (visibility:hidden) already removes it from the tab order + a11y
-                      tree, and pointer-events-none makes the reserved slot unclickable
-                      — `tabIndex={-1}` + `aria-hidden` make that explicit and hold even
-                      if the hiding mechanism later changes. */}
-                  <Button
+                  {/* Always rendered so the row never reflows; idle hides it through
+                      the wrapper, with `tabIndex`/`aria-hidden` holding even if that
+                      hiding mechanism changes. */}
+                  <DisabledReasonButton
+                    ref={stopRef}
                     variant="outline"
                     size="sm"
                     onClick={() => cancel(run.id)}
-                    tabIndex={distilling ? undefined : -1}
-                    aria-hidden={!distilling}
-                    className={
-                      distilling ? undefined : "invisible pointer-events-none"
+                    disabled={phase === "stopping"}
+                    reason={STOP_SLOT_REASON[phase] ?? null}
+                    tabIndex={phase === "idle" ? -1 : undefined}
+                    aria-hidden={phase === "idle"}
+                    wrapperClassName={
+                      phase === "idle"
+                        ? "invisible pointer-events-none"
+                        : undefined
                     }
                   >
                     <StopIcon weight="fill" />
-                    Stop
-                  </Button>
-                  <Button
+                    <SizedLabel
+                      label={STOP_SLOT_LABEL[phase]}
+                      all={STOP_SLOT_LABEL}
+                    />
+                  </DisabledReasonButton>
+                  <DisabledReasonButton
+                    ref={planRef}
                     size="sm"
                     onClick={() => void turnIntoPlan()}
-                    disabled={distilling}
+                    disabled={phase !== "idle"}
+                    reason={PLAN_BUTTON_REASON[phase] ?? null}
                   >
-                    {distilling ? "Distilling…" : "Turn into a Plan"}
-                  </Button>
+                    <SizedLabel
+                      label={PLAN_BUTTON_LABEL[phase]}
+                      all={PLAN_BUTTON_LABEL}
+                    />
+                  </DisabledReasonButton>
                 </div>
               )}
             </div>
@@ -653,8 +688,13 @@ function ResearchFollowUp({ run }: { run: ResearchRun }) {
   const [model, setModel] = useState(run.model);
   const ref = useRef<HTMLTextAreaElement>(null);
 
+  const hold = sendHold(run);
+
+  // Reads the run fresh: an Enter can land before the render that shows a
+  // just-started distill. A held send keeps the text.
   const submit = () => {
-    if (!text.trim() || run.generating) return;
+    const fresh = useResearchStore.getState().runs.find((r) => r.id === run.id);
+    if (!text.trim() || !fresh || sendHold(fresh) !== null) return;
     sendFollowUp(run.id, text, depth, model);
     setText("");
   };
@@ -700,15 +740,50 @@ function ResearchFollowUp({ run }: { run: ResearchRun }) {
         <span className="hidden truncate text-[11px] text-muted-foreground sm:inline">
           ↵ send · ⇧↵ newline
         </span>
-        <Button
+        <DisabledReasonButton
           size="sm"
-          className="ml-auto min-w-16"
-          disabled={!text.trim() || run.generating}
+          wrapperClassName="ml-auto"
+          className="min-w-16"
+          disabled={!text.trim() || hold !== null}
+          reason={hold ? SEND_HOLD_REASON[hold] : null}
           onClick={submit}
         >
           Send
-        </Button>
+        </DisabledReasonButton>
       </div>
     </div>
+  );
+}
+
+/** Why the follow-up can't be sent right now, or null when it can. */
+function sendHold(run: ResearchRun): SendHold | null {
+  if (run.generating) return "generating";
+  const phase = distillPhase(run);
+  if (phase !== "idle") return phase;
+  return null;
+}
+
+/** A label that sizes its button to the widest of `all`, so a label swap never
+ *  moves the row; the sizers are invisible and out of the accessible name. */
+function SizedLabel({
+  label,
+  all,
+}: {
+  label: string;
+  all: Record<DistillPhase, string>;
+}) {
+  return (
+    <span className="grid justify-items-center">
+      <span className="col-start-1 row-start-1">{label}</span>
+      {[...new Set(Object.values(all))].map((sizer) => (
+        <span
+          key={sizer}
+          aria-hidden
+          className="invisible col-start-1 row-start-1"
+        >
+          {sizer}
+        </span>
+      ))}
+    </span>
   );
 }

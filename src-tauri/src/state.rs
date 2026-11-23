@@ -39,11 +39,48 @@ impl CancelEntry {
     }
 
     /// A tombstone past the adoption window — its permit belongs to a run that has
-    /// already ended.
+    /// already ended or never started.
     fn is_stale_tombstone(&self) -> bool {
         self.tombstoned_at
             .is_some_and(|at| at.elapsed() > TOMBSTONE_ADOPTION_WINDOW)
     }
+}
+
+/// Session id → its container gate. A blocking mutex: every critical section is one
+/// lookup or count update, never held across an await.
+type SessionContainers = SyncMutex<HashMap<String, SessionGate>>;
+
+/// One session's container gate. `refs` counts every hold and every pending wait, so
+/// the entry leaves the map exactly when the last of them drops, abandoned waits
+/// included: a fresh entry minted while an old holder still runs would admit a turn.
+struct SessionGate {
+    lock: Arc<Mutex<()>>,
+    refs: usize,
+}
+
+/// One counted reference to a session's gate, released on drop.
+struct SessionGateRef<'a> {
+    gates: &'a SessionContainers,
+    id: String,
+}
+
+impl Drop for SessionGateRef<'_> {
+    fn drop(&mut self) {
+        let mut map = self.gates.lock().unwrap_or_else(|p| p.into_inner());
+        if let Entry::Occupied(mut e) = map.entry(std::mem::take(&mut self.id)) {
+            e.get_mut().refs = e.get().refs.saturating_sub(1);
+            if e.get().refs == 0 {
+                e.remove();
+            }
+        }
+    }
+}
+
+/// A held session container gate. The guard field is declared first so it releases
+/// before the reference count drops, which keeps a newcomer on the same mutex.
+pub(crate) struct SessionContainerHold<'a> {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    _gate: SessionGateRef<'a>,
 }
 
 /// The label of whatever currently holds a domain's lock, readable WITHOUT holding
@@ -121,6 +158,9 @@ pub struct AppState {
     /// without an async accessor. The `Arc` lets that sweep task outlive the borrow of
     /// `self` that scheduled it.
     agent_cancels: Arc<AgentCancels>,
+    /// One gate per agent session, held by a container turn for its whole container
+    /// lifetime, since every turn of a session runs under one container name.
+    session_containers: SessionContainers,
     /// Whether closing the window hides the app to the tray (keeping it running)
     /// instead of quitting. Mirrors the user's setting, pushed from the frontend;
     /// defaults to true so the first close behaves correctly before that sync.
@@ -144,6 +184,7 @@ impl Default for AppState {
             shared_domains: Mutex::new(HashMap::new()),
             git_info: OnceCell::new(),
             agent_cancels: Arc::new(SyncMutex::new(HashMap::new())),
+            session_containers: SyncMutex::new(HashMap::new()),
             close_to_tray: AtomicBool::new(true),
             parked_writes: AtomicBool::new(false),
             quit_prompt_emitted_ms: AtomicU64::new(0),
@@ -309,8 +350,8 @@ impl AppState {
     /// aimed at still stops. That race is sub-second, since registration is the
     /// command's first statement. A tombstone past `TOMBSTONE_ADOPTION_WINDOW` is
     /// REPLACED instead, permit discarded: it can only be a Stop aimed at a run that
-    /// already ended, and session turns reuse one id, so adopting it would silently
-    /// blank the next turn.
+    /// already ended or never started, so its permit must never reach a run registering
+    /// under that id.
     pub fn register_agent_cancel(&self, id: &str) -> Arc<Notify> {
         let mut map = self
             .agent_cancels
@@ -371,6 +412,45 @@ impl AppState {
                 sweep_unadopted_tombstone(&registry, &id);
             });
         }
+    }
+
+    /// Waits until no other turn of `session_id` holds its container gate, then holds
+    /// it until the returned value drops. Dropping this future mid-wait releases its
+    /// place in the count like a dropped hold.
+    pub(crate) async fn hold_session_container(
+        &self,
+        session_id: &str,
+    ) -> SessionContainerHold<'_> {
+        let (lock, gate) = {
+            let mut map = self
+                .session_containers
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let entry = map
+                .entry(session_id.to_string())
+                .or_insert_with(|| SessionGate {
+                    lock: Arc::new(Mutex::new(())),
+                    refs: 0,
+                });
+            entry.refs += 1;
+            let gate = SessionGateRef {
+                gates: &self.session_containers,
+                id: session_id.to_string(),
+            };
+            (Arc::clone(&entry.lock), gate)
+        };
+        SessionContainerHold {
+            _guard: lock.lock_owned().await,
+            _gate: gate,
+        }
+    }
+
+    #[cfg(test)]
+    fn session_container_entries(&self) -> usize {
+        self.session_containers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
     }
 
     pub fn close_to_tray(&self) -> bool {
@@ -454,9 +534,9 @@ pub fn monotonic_ms() -> u64 {
 }
 
 /// How long a cancel-created tombstone stays adoptable. The race it exists for is
-/// sub-second — registration is the run command's first statement — while a Stop
-/// clicked between two turns of one session (same id, still-enabled button) lands with
-/// no run registered too, and its permit must never reach the next turn.
+/// sub-second — registration is the run command's first statement — while a Stop for
+/// a run that already ended or never started lands with no run registered too, and its
+/// permit must never reach a later registration under that id.
 const TOMBSTONE_ADOPTION_WINDOW: Duration = Duration::from_secs(5);
 
 /// A tombstone that outlived adoptability has no reason to live, so sweep and window
@@ -983,9 +1063,9 @@ mod agent_cancel_tests {
         state.clear_agent_cancel(id);
     }
 
-    /// The counter-case: a Stop clicked in the gap between two turns of one session
-    /// (turn N's guard already dropped, turn N+1 not yet started — the same cancel id
-    /// throughout) must NOT carry into the next turn, which would complete it blank.
+    /// The counter-case: a Stop for a run whose guard already dropped leaves a
+    /// tombstone that, once past the adoption window, must NOT carry into a later
+    /// registration under the same id, which would complete that run blank.
     #[tokio::test]
     async fn stale_tombstone_is_not_adopted() {
         let state = AppState::default();
@@ -1133,5 +1213,120 @@ mod quit_guard_tests {
     #[test]
     fn the_monotonic_clock_never_reads_as_no_prompt() {
         assert!(monotonic_ms() > 0);
+    }
+}
+
+#[cfg(test)]
+mod session_container_tests {
+    use super::*;
+
+    const SHORT: Duration = Duration::from_millis(50);
+    const LONG: Duration = Duration::from_secs(5);
+
+    /// A hold of `id` taken in its own task, released when `release` fires; `acquired`
+    /// fires once the hold is taken.
+    fn spawn_hold(
+        state: &Arc<AppState>,
+        id: &'static str,
+        acquired: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> tokio::task::JoinHandle<()> {
+        let state = Arc::clone(state);
+        tokio::spawn(async move {
+            let _hold = state.hold_session_container(id).await;
+            let _ = acquired.send(());
+            let _ = release.await;
+        })
+    }
+
+    /// A second turn of one session waits for the first one's hold to drop.
+    #[tokio::test]
+    async fn session_container_hold_serializes_one_session() {
+        let state = Arc::new(AppState::default());
+        let a = state.hold_session_container("s1").await;
+        let (acquired, mut acquired_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let b = spawn_hold(&state, "s1", acquired, release_rx);
+        assert!(tokio::time::timeout(SHORT, &mut acquired_rx).await.is_err());
+        drop(a);
+        tokio::time::timeout(LONG, acquired_rx)
+            .await
+            .expect("b acquires once a drops")
+            .expect("b's sender");
+        let _ = release.send(());
+        b.await.expect("b's task");
+    }
+
+    /// Holds of different sessions never wait on each other.
+    #[tokio::test]
+    async fn session_container_holds_of_other_sessions_never_wait() {
+        let state = AppState::default();
+        let _a = state.hold_session_container("s1").await;
+        assert!(
+            tokio::time::timeout(LONG, state.hold_session_container("s2"))
+                .await
+                .is_ok()
+        );
+    }
+
+    /// The map holds a session only while a hold or a wait references it: a dropped
+    /// hold, an aborted waiter (parked, or already woken) and a waiter that acquired and
+    /// let go each leave no entry behind, and the gate still admits the next turn.
+    #[tokio::test]
+    async fn session_container_entries_leave_with_their_last_reference() {
+        let state = Arc::new(AppState::default());
+
+        // (i) A lone hold.
+        drop(state.hold_session_container("s1").await);
+        assert_eq!(state.session_container_entries(), 0, "(i)");
+
+        // (iv) A waiter woken by A's release, aborted before it runs again (this
+        // current-thread runtime does not poll it between the drop and the abort).
+        // Checked ahead of (ii) so a lost abandoned-wait release reds this row first.
+        let a = state.hold_session_container("s1").await;
+        let (acquired, mut acquired_rx) = tokio::sync::oneshot::channel();
+        let (_release, release_rx) = tokio::sync::oneshot::channel();
+        let b = spawn_hold(&state, "s1", acquired, release_rx);
+        assert!(tokio::time::timeout(SHORT, &mut acquired_rx).await.is_err());
+        drop(a);
+        b.abort();
+        assert!(b.await.is_err_and(|e| e.is_cancelled()));
+        assert_eq!(state.session_container_entries(), 0, "(iv)");
+        let next = tokio::time::timeout(LONG, state.hold_session_container("s1")).await;
+        assert!(next.is_ok(), "(iv) the gate still admits the next turn");
+        drop(next);
+        assert_eq!(
+            state.session_container_entries(),
+            0,
+            "(iv) after the next turn"
+        );
+
+        // (ii) A parked waiter aborted while A holds.
+        let a = state.hold_session_container("s1").await;
+        let (acquired, mut acquired_rx) = tokio::sync::oneshot::channel();
+        let (_release, release_rx) = tokio::sync::oneshot::channel();
+        let b = spawn_hold(&state, "s1", acquired, release_rx);
+        assert!(tokio::time::timeout(SHORT, &mut acquired_rx).await.is_err());
+        b.abort();
+        assert!(b.await.is_err_and(|e| e.is_cancelled()));
+        assert_eq!(state.session_container_entries(), 1, "(ii) a still holds");
+        drop(a);
+        assert_eq!(state.session_container_entries(), 0, "(ii)");
+
+        // (iii) A waiter that acquires after A, then lets go.
+        let a = state.hold_session_container("s1").await;
+        let (acquired, mut acquired_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let b = spawn_hold(&state, "s1", acquired, release_rx);
+        assert!(tokio::time::timeout(SHORT, &mut acquired_rx).await.is_err());
+        drop(a);
+        tokio::time::timeout(LONG, acquired_rx)
+            .await
+            .expect("b acquires once a drops")
+            .expect("b's sender");
+        assert_eq!(state.session_container_entries(), 1, "(iii) b holds");
+        let _ = release.send(());
+        b.await.expect("b's task");
+        assert_eq!(state.session_container_entries(), 0, "(iii)");
     }
 }

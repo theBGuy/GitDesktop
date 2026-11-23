@@ -1912,6 +1912,40 @@ const NOTICE_RESET_V1: &str = "This conversation has turns from opencode 2, and 
 
 const NOTICE_RESET_GENERIC: &str = "GitDesktop could not continue the earlier opencode conversation, so this turn started a new one. The agent does not remember the earlier turns.";
 
+/// The reset note for a host turn that starts fresh; one template with
+/// `NOTICE_RESET_GENERIC` and the frontend's `resumeMissNote`.
+fn fresh_start_note(kind: AgentKind) -> String {
+    format!(
+        "GitDesktop could not continue the earlier {} conversation, so this turn started a new one. The agent does not remember the earlier turns.",
+        kind.label()
+    )
+}
+
+/// Whether a resume turn must start a new conversation: a host Codex or opencode 1.x
+/// turn with no captured id would otherwise ask for "the latest" one, which can be
+/// another conversation of the repository. A container home holds only this session's.
+fn resume_starts_fresh(
+    kind: AgentKind,
+    container: bool,
+    resume: bool,
+    native: Option<&str>,
+) -> bool {
+    resume
+        && !container
+        && matches!(kind, AgentKind::Codex | AgentKind::Opencode)
+        && native.is_none_or(|id| id.trim().is_empty())
+}
+
+/// A turn-1 prompt on stdin or `-p`: the system prompt ahead of the user's, or the
+/// user's alone when the system prompt is blank.
+fn turn_one_prompt(system: &str, user: &str) -> String {
+    if system.trim().is_empty() {
+        user.to_string()
+    } else {
+        format!("{system}\n\n{user}")
+    }
+}
+
 /// Code of the notice sent right before a re-keyed turn's first `NativeSession`; its
 /// text is empty.
 const NOTICE_SESSION_REKEY: &str = "nativeSessionRekey";
@@ -2123,9 +2157,15 @@ async fn capture_tree(req: CaptureRequest<'_>) -> AppResult<Captured> {
 }
 
 /// Whether the turn's cancel already fired, checked right before a 2.x turn spawns its
-/// run. A fired permit is spent here, so the caller ends the turn; a cancel that lands
-/// after the check stays stored for the run's own wait.
+/// run.
 fn opencode2_cancel_fired(cancel: &Notify) -> bool {
+    turn_cancel_fired(cancel)
+}
+
+/// Whether a session turn's cancel already fired, checked right before a spawn. A fired
+/// permit is spent here, so the caller ends the turn; a cancel that lands after the
+/// check stays stored for the run's own wait.
+fn turn_cancel_fired(cancel: &Notify) -> bool {
     std::pin::pin!(cancel.notified()).enable()
 }
 
@@ -2595,10 +2635,10 @@ struct ResumePlan {
     reset: bool,
 }
 
-/// A resume with no stored id starts a new conversation, since 2.x is never asked for
-/// "the latest" one, which can be another conversation. A raw id is resumed as it is; a
-/// token of the other turn kind, or one that does not parse, starts a new conversation
-/// with a note.
+/// A resume with no stored id starts a new conversation with a note, since 2.x is never
+/// asked for "the latest" one, which can be another conversation. A raw id is resumed as
+/// it is; a token of the other turn kind, or one that does not parse, also starts a new
+/// conversation with a note.
 fn opencode2_resume_plan(resume: bool, native: &NativeRef, turn: TurnKind) -> ResumePlan {
     let fresh = |reset| ResumePlan {
         session_id: String::new(),
@@ -2614,7 +2654,7 @@ fn opencode2_resume_plan(resume: bool, native: &NativeRef, turn: TurnKind) -> Re
         return fresh(false);
     }
     match native {
-        NativeRef::Absent => fresh(false),
+        NativeRef::Absent => fresh(true),
         NativeRef::V1 { id } => resumed(id),
         NativeRef::V2 { id, kind } if *kind == turn => resumed(id),
         NativeRef::V2 { .. } | NativeRef::Unusable => fresh(true),
@@ -3598,8 +3638,11 @@ fn claude_session_args(
     } else {
         args.push("--session-id".into());
         args.push(session_id.into());
-        args.push("--system-prompt".into());
-        args.push(system_prompt.into());
+        // A blank prompt keeps Claude's default rather than replacing it with nothing.
+        if !system_prompt.trim().is_empty() {
+            args.push("--system-prompt".into());
+            args.push(system_prompt.into());
+        }
     }
     if !model.trim().is_empty() {
         args.push("--model".into());
@@ -3616,8 +3659,8 @@ fn claude_session_args(
 /// - **Container:** the kernel is the boundary, so full-bypass is safe there.
 ///
 /// Task on stdin (`-`); `--skip-git-repo-check` because the worktree's `.git` is
-/// a pointer file. Each session has its own home + cwd, so `exec resume --last`
-/// continues it without tracking a thread id.
+/// a pointer file. A container session has its own home, so `exec resume --last`
+/// continues it; a host resume always names the thread captured on turn 1.
 fn codex_session_args(
     model: &str,
     resume: bool,
@@ -3633,8 +3676,8 @@ fn codex_session_args(
     if resume {
         args.push("resume".into());
         // A container session has a dedicated home, so `--last` is unambiguous. A
-        // host session shares `~/.codex`, so resume the *specific* thread captured
-        // from turn 1 — `--last` could grab a concurrent session.
+        // host session shares `~/.codex`, so it resumes the thread captured on turn 1;
+        // a host turn without one starts fresh (`resume_starts_fresh`) and never gets here.
         match (container, thread_id) {
             (false, Some(id)) => args.push(id.into()),
             _ => args.push("--last".into()),
@@ -3916,12 +3959,8 @@ fn opencode_session_args(
     }
     if resume && !session_id.trim().is_empty() {
         // opencode generated the id on turn 1; we captured it from the stream.
-        // (If capture somehow failed, fall through to "continue last" rather than
-        // passing an empty `--session`.)
         args.push("--session".into());
         args.push(session_id.into());
-    } else if resume {
-        args.push("--continue".into());
     }
     if !model.trim().is_empty() {
         args.push("-m".into());
@@ -5549,14 +5588,33 @@ fn parse_claude_line(
                 .and_then(|s| s.as_str())
                 .unwrap_or_default()
                 .to_string();
+            let is_error = claude_result_is_error(&v, &text, synthetic_error.as_deref());
             Some(ReviewEvent::Done {
-                is_error: claude_result_is_error(&v, &text, synthetic_error.as_deref()),
-                text,
+                text: claude_result_text(&v, text, is_error),
+                is_error,
                 cost_usd: v.get("total_cost_usd").and_then(|c| c.as_f64()),
             })
         }
         _ => None,
     }
+}
+
+/// A failed `result` line with a blank `result` carries its reason in `errors`
+/// (a resume of an unknown session id does), joined one per line; strings only.
+fn claude_result_text(v: &serde_json::Value, text: String, is_error: bool) -> String {
+    if !is_error || !text.trim().is_empty() {
+        return text;
+    }
+    v.get("errors")
+        .and_then(|e| e.as_array())
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or(text)
 }
 
 /// Longest body the error-shape net will judge. Three copies must agree: this one,
@@ -5770,6 +5828,21 @@ impl<'a> AgentCancelGuard<'a> {
 impl Drop for AgentCancelGuard<'_> {
     fn drop(&mut self) {
         self.state.clear_agent_cancel(&self.id);
+    }
+}
+
+/// Holds the session's container gate, waiting out a previous turn that still owns
+/// the shared container name; `None` once the turn is stopped, including by a permit
+/// stored before the wait (the cancel arm is polled first).
+async fn wait_for_session_container<'a>(
+    state: &'a AppState,
+    session_id: &str,
+    cancel: &Notify,
+) -> Option<crate::state::SessionContainerHold<'a>> {
+    tokio::select! {
+        biased;
+        () = cancel.notified() => None,
+        hold = state.hold_session_container(session_id) => Some(hold),
     }
 }
 
@@ -6281,8 +6354,10 @@ pub async fn agent_review_cancel(
 /// Runs one turn of a write-capable agent session: the CLI implements
 /// `user_prompt` full-auto inside `worktree_path` (a throwaway worktree — the
 /// sandbox boundary). `resume = false` starts, `true` continues. Streams the
-/// same `ReviewEvent`s as a review; cancel via `agent_review_cancel` with the
-/// same `session_id`.
+/// same `ReviewEvent`s as a review; cancel via `agent_review_cancel` with this
+/// turn's `run_id`, a fresh id per call because the registry assumes single-use
+/// keys. `session_id` still names the conversation (Claude's `--session-id` /
+/// `--resume`), the container and the MCP config file.
 ///
 /// `agent` picks the CLI; each runs worktree-confined on the **host** (see its
 /// `*_session_args` doc for the mechanism) or in a **container** (kernel
@@ -6305,6 +6380,8 @@ pub async fn agent_session(
     user_prompt: String,
     worktree_path: String,
     session_id: String,
+    // This turn's cancel-registry key, minted per call by the frontend.
+    run_id: String,
     resume: bool,
     // Claude-only: forks a resumed conversation to a throwaway session id
     // (`--fork-session`) so this turn never pollutes the original transcript. Used by
@@ -6336,10 +6413,13 @@ pub async fn agent_session(
     if !valid_cancel_id(&session_id) {
         return Err(AppError::InvalidArgument("invalid session id".into()));
     }
+    if !valid_cancel_id(&run_id) {
+        return Err(AppError::InvalidArgument("invalid run id".into()));
+    }
     // Register BEFORE the setup below (the container path runs several runtime
     // probes): a racing cancel then lands its permit on this entry — or leaves a
     // tombstone this register adopts. The guard clears the entry on every exit path.
-    let cancel = AgentCancelGuard::register(&state, &session_id);
+    let cancel = AgentCancelGuard::register(&state, &run_id);
 
     // Strict: reject an unknown agent rather than silently coercing it.
     let kind = match agent.as_str() {
@@ -6429,6 +6509,8 @@ pub async fn agent_session(
     } else {
         (resume, native_session_id)
     };
+    let fresh_start = resume_starts_fresh(kind, container, resume, native_session_id.as_deref());
+    let resume = resume && !fresh_start;
     // Per-CLI MCP config plumbing (`mcp_config_path` holds whatever this CLI needs):
     //  - Claude: JSON via `--mcp-config` (strict) + a `mcp__<server>` allowlist;
     //    host = a host path, container = the mounted `/home/node/.claude/mcp.json`.
@@ -6532,7 +6614,7 @@ pub async fn agent_session(
             if resume {
                 user_prompt
             } else {
-                format!("{system_prompt}\n\n{user_prompt}")
+                turn_one_prompt(&system_prompt, &user_prompt)
             },
         ),
         // Copilot takes the prompt as an arg (`-p`), not stdin, so stdin is empty.
@@ -6540,7 +6622,7 @@ pub async fn agent_session(
             let prompt = if resume {
                 user_prompt
             } else {
-                format!("{system_prompt}\n\n{user_prompt}")
+                turn_one_prompt(&system_prompt, &user_prompt)
             };
             let add_dir = run_dir(container, &worktree_path);
             (
@@ -6567,7 +6649,7 @@ pub async fn agent_session(
             let prompt = if resume {
                 user_prompt
             } else {
-                format!("{system_prompt}\n\n{user_prompt}")
+                turn_one_prompt(&system_prompt, &user_prompt)
             };
             let dir = run_dir(container, &worktree_path);
             (
@@ -6679,6 +6761,13 @@ pub async fn agent_session(
                 "worktree path must not contain '..'".to_string(),
             ));
         }
+        // Every turn of a session runs under one container name: wait for the previous
+        // turn's container to be gone, held until this call returns.
+        let Some(_container_hold) =
+            wait_for_session_container(&state, &session_id, &cancel.notify).await
+        else {
+            return Ok(None);
+        };
         // A container opencode turn always leaves here: the image gate admits only an
         // image labelled for opencode 2, so the opencode arms further down this branch are
         // never reached.
@@ -6814,6 +6903,19 @@ pub async fn agent_session(
     } else {
         Vec::new()
     };
+    // A stopped turn tells of nothing, so the cancel check comes first.
+    if fresh_start {
+        if turn_cancel_fired(&cancel.notify) {
+            return Ok(None);
+        }
+        EventSink::send(
+            &on_event,
+            ReviewEvent::Notice {
+                code: NOTICE_SESSION_RESET,
+                text: fresh_start_note(kind),
+            },
+        );
+    }
     stream_agent(
         cancel.notify.clone(),
         kind,
@@ -9551,6 +9653,104 @@ opencode/x-preview-f-free
         }
     }
 
+    /// Claude 2.1.311's answer to `--resume <unknown id>` (probed 2026-11-22), abridged:
+    /// no `result` key, the reason only in `errors`.
+    const CL_RESUME_MISS: &str = r#"{"type":"result","subtype":"error_during_execution","duration_ms":0,"is_error":true,"num_turns":0,"stop_reason":null,"session_id":"d81ccead-3501-4eb3-bf30-7ee29543d3b2","total_cost_usd":0,"errors":["No conversation found with session ID: d81ccead-3501-4eb3-bf30-7ee29543d3b2"],"result_index":0}"#;
+
+    #[test]
+    fn claude_result_carries_errors_without_a_result() {
+        assert_eq!(
+            claude_done(&[CL_RESUME_MISS]),
+            (
+                "No conversation found with session ID: d81ccead-3501-4eb3-bf30-7ee29543d3b2"
+                    .to_string(),
+                true
+            )
+        );
+        let two = r#"{"type":"result","is_error":true,"errors":["first",7,"second"]}"#;
+        assert_eq!(claude_done(&[two]), ("first\nsecond".to_string(), true));
+        let with_result =
+            r#"{"type":"result","is_error":true,"result":"the reason","errors":["other"]}"#;
+        assert_eq!(
+            claude_done(&[with_result]),
+            ("the reason".to_string(), true)
+        );
+        let blank_result = r#"{"type":"result","is_error":true,"result":"  ","errors":["other"]}"#;
+        assert_eq!(claude_done(&[blank_result]), ("other".to_string(), true));
+        let not_error = r#"{"type":"result","is_error":false,"terminal_reason":"completed","errors":["ignored"]}"#;
+        assert_eq!(claude_done(&[not_error]), (String::new(), false));
+    }
+
+    #[test]
+    fn turn_one_omits_a_blank_system_prompt() {
+        assert_eq!(turn_one_prompt("", "u"), "u");
+        assert_eq!(turn_one_prompt("  ", "u"), "u");
+        assert_eq!(turn_one_prompt("sys", "u"), "sys\n\nu");
+        for blank in ["", "  "] {
+            let args = claude_session_args("", blank, "sid", false, false, false, false, None, &[]);
+            assert!(!args.iter().any(|a| a == "--system-prompt"), "{args:?}");
+            assert!(
+                args.windows(2).any(|w| w == ["--session-id", "sid"]),
+                "{args:?}"
+            );
+        }
+        let args = claude_session_args("", "sys", "sid", false, false, false, false, None, &[]);
+        assert!(
+            args.windows(4)
+                .any(|w| w == ["--session-id", "sid", "--system-prompt", "sys"]),
+            "{args:?}"
+        );
+        // A resume never carries the system prompt, blank or not.
+        for prompt in ["", "sys"] {
+            let args = claude_session_args("", prompt, "sid", true, false, false, false, None, &[]);
+            assert!(!args.iter().any(|a| a == "--system-prompt"), "{args:?}");
+            assert!(
+                args.windows(2).any(|w| w == ["--resume", "sid"]),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_resume_without_native_id_starts_fresh() {
+        for kind in [AgentKind::Codex, AgentKind::Opencode] {
+            for container in [false, true] {
+                for native in [None, Some(""), Some("  "), Some("id")] {
+                    for resume in [false, true] {
+                        let want =
+                            resume && !container && native.is_none_or(|n| n.trim().is_empty());
+                        assert_eq!(
+                            resume_starts_fresh(kind, container, resume, native),
+                            want,
+                            "{kind:?} container={container} native={native:?} resume={resume}"
+                        );
+                    }
+                }
+            }
+        }
+        for kind in [AgentKind::Claude, AgentKind::Copilot] {
+            for container in [false, true] {
+                for native in [None, Some(""), Some("id")] {
+                    assert!(!resume_starts_fresh(kind, container, true, native));
+                }
+            }
+        }
+        let args = opencode_session_args("m", "", true, "", false, false, "C:/wt/gd-session-1");
+        assert!(
+            !args.iter().any(|a| a == "--session" || a == "--continue"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn fresh_start_note_reads_like_the_reset_note() {
+        assert_eq!(fresh_start_note(AgentKind::Opencode), NOTICE_RESET_GENERIC);
+        assert_eq!(
+            fresh_start_note(AgentKind::Codex),
+            NOTICE_RESET_GENERIC.replace("opencode", "Codex")
+        );
+    }
+
     #[test]
     fn claude_probed_success_line_is_not_an_error() {
         let (text, is_error) = claude_done(&[CL_SUCCESS]);
@@ -11412,10 +11612,10 @@ opencode/x-preview-f-free
         // What a resumed turn does with each stored value; a turn that does not resume is
         // always fresh.
         let cases = [
-            (None, write, fresh(false)),
-            (None, pinned, fresh(false)),
-            (Some(""), write, fresh(false)),
-            (Some(""), pinned, fresh(false)),
+            (None, write, fresh(true)),
+            (None, pinned, fresh(true)),
+            (Some(""), write, fresh(true)),
+            (Some(""), pinned, fresh(true)),
             (Some("ses_abc"), write, resumed()),
             (Some("ses_abc"), pinned, resumed()),
             (Some("oc2:w:ses_abc"), write, resumed()),
@@ -15037,6 +15237,204 @@ opencode/x-preview-f-free
                 1,
             ),
             body.replacen("child.id().is_none()", "true", 1),
+        ] {
+            assert_ne!(mutant, body);
+            assert!(!pinned(&mutant), "{mutant}");
+        }
+    }
+
+    const SESSION_ID_CHECK: &str = "if!valid_cancel_id(&session_id){returnErr(AppError::InvalidArgument(\"invalidsessionid\".into()));}";
+    const RUN_ID_CHECK: &str = "if!valid_cancel_id(&run_id){returnErr(AppError::InvalidArgument(\"invalidrunid\".into()));}";
+    const RUN_ID_REGISTER: &str = "letcancel=AgentCancelGuard::register(&state,&run_id);";
+
+    /// agent_session opens with both id checks and then its one registration, keyed on
+    /// the per-turn `run_id`: a session id is reused across turns, so a re-sent turn would
+    /// share the stopped turn's entry, whose guard then clears it and loses the next Stop.
+    #[test]
+    fn agent_session_registers_its_run_id() {
+        let body = stripped_fn_body(include_str!("agent.rs"), "pub async fn agent_session(")
+            .expect("agent_session's body");
+        let opening = format!("{SESSION_ID_CHECK}{RUN_ID_CHECK}{RUN_ID_REGISTER}");
+        let pinned = |b: &str| {
+            b.starts_with(&opening) && b.matches("AgentCancelGuard::register(").count() == 1
+        };
+        assert!(pinned(&body), "{body}");
+        let session_register = RUN_ID_REGISTER.replace("&run_id", "&session_id");
+        for mutant in [
+            body.replacen(RUN_ID_REGISTER, &session_register, 1),
+            body.replacen(RUN_ID_CHECK, "", 1),
+            body.replacen(SESSION_ID_CHECK, "", 1),
+            body.replacen(
+                &format!("{RUN_ID_CHECK}{RUN_ID_REGISTER}"),
+                &format!("{RUN_ID_REGISTER}{RUN_ID_CHECK}"),
+                1,
+            ),
+            format!("{body}{session_register}"),
+        ] {
+            assert_ne!(mutant, body);
+            assert!(!pinned(&mutant), "{mutant}");
+        }
+    }
+
+    /// A container turn's wait for the session gate ends on a Stop, fired during the
+    /// wait or stored before it, without disturbing the holder or the next waiter.
+    #[tokio::test]
+    async fn container_wait_ends_on_a_stop() {
+        const SHORT: Duration = Duration::from_millis(50);
+        const LONG: Duration = Duration::from_secs(5);
+        let state = Arc::new(AppState::default());
+        let waiter = |notify: Arc<Notify>| {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                wait_for_session_container(&state, "s1", &notify)
+                    .await
+                    .is_some()
+            })
+        };
+
+        // (i) A Stop fired mid-wait ends the wait while the holder still holds.
+        let holder = state.hold_session_container("s1").await;
+        let stop = Arc::new(Notify::new());
+        let mut stopped = waiter(Arc::clone(&stop));
+        assert!(tokio::time::timeout(SHORT, &mut stopped).await.is_err());
+        stop.notify_one();
+        let acquired = tokio::time::timeout(LONG, stopped)
+            .await
+            .expect("(i) the stopped wait ends")
+            .expect("(i) the waiter's task");
+        assert!(!acquired, "(i)");
+
+        // (iv) The next waiter still waits for the holder.
+        let mut next = waiter(Arc::new(Notify::new()));
+        assert!(
+            tokio::time::timeout(SHORT, &mut next).await.is_err(),
+            "(iv)"
+        );
+        drop(holder);
+        let acquired = tokio::time::timeout(LONG, next)
+            .await
+            .expect("(iv) the next wait ends once the holder drops")
+            .expect("(iv) the waiter's task");
+        assert!(acquired, "(iv)");
+
+        // (ii) A free gate with a stored permit: the turn was stopped.
+        let stored = Notify::new();
+        stored.notify_one();
+        assert!(
+            wait_for_session_container(&state, "s2", &stored)
+                .await
+                .is_none(),
+            "(ii)"
+        );
+        // (iii) A free gate and no Stop.
+        assert!(
+            wait_for_session_container(&state, "s2", &Notify::new())
+                .await
+                .is_some(),
+            "(iii)"
+        );
+    }
+
+    const CONTAINER_WAIT: &str = "letSome(_container_hold)=wait_for_session_container(&state,&session_id,&cancel.notify).awaitelse{returnOk(None);};";
+    const OPENCODE_CONTAINER_DISPATCH: &str =
+        "ifkind==AgentKind::Opencode{returnBox::pin(opencode2_container_session(";
+
+    /// A container turn takes the session gate once, after the `..` refusal and before
+    /// the opencode dispatch and the home seeding, bound to a name so it is held until
+    /// agent_session returns; the host part never takes it.
+    #[test]
+    fn container_turns_wait_for_the_session_container() {
+        let body = stripped_fn_body(include_str!("agent.rs"), "pub async fn agent_session(")
+            .expect("agent_session's body");
+        let pinned = |b: &str| {
+            let (Some(at), Some(parent), Some(dispatch)) = (
+                b.find(CONTAINER_WAIT),
+                b.find("std::path::Component::ParentDir"),
+                b.find(OPENCODE_CONTAINER_DISPATCH),
+            ) else {
+                return false;
+            };
+            b.matches(CONTAINER_WAIT).count() == 1
+                && b.matches("wait_for_session_container(").count() == 1
+                && parent < at
+                && at < dispatch
+        };
+        assert!(pinned(&body), "{body}");
+        let seed = "lethome=crate::agent_sandbox::seed_session_home(";
+        let host = "letbinary=matchopencode_v1_binary";
+        assert!(body.contains(seed) && body.contains(host));
+        for mutant in [
+            body.replacen(CONTAINER_WAIT, "", 1).replacen(
+                seed,
+                &format!("{CONTAINER_WAIT}{seed}"),
+                1,
+            ),
+            body.replacen("letSome(_container_hold)=", "letSome(_)=", 1),
+            body.replacen(CONTAINER_WAIT, "", 1),
+            body.replacen(host, &format!("{CONTAINER_WAIT}{host}"), 1),
+        ] {
+            assert_ne!(mutant, body);
+            assert!(!pinned(&mutant), "{mutant}");
+        }
+    }
+
+    const RESTART_REBIND_TEXT: &str = "let(resume,native_session_id)=ifopencode_v1_restart{(false,None)}else{(resume,native_session_id)};";
+    const FRESH_START: &str =
+        "letfresh_start=resume_starts_fresh(kind,container,resume,native_session_id.as_deref());";
+    const FRESH_REBIND: &str = "letresume=resume&&!fresh_start;";
+    const FRESH_CANCEL: &str = "ifturn_cancel_fired(&cancel.notify){returnOk(None);}";
+    const FRESH_NOTE: &str = "EventSink::send(&on_event,ReviewEvent::Notice{code:NOTICE_SESSION_RESET,text:fresh_start_note(kind),});";
+
+    /// A host turn that starts fresh decides so right after the 1.x restart rebinding,
+    /// before the argv is built, and tells of it after the host env and right before the
+    /// host spawn, unless its cancel already fired.
+    #[test]
+    fn host_fresh_start_is_noted_before_its_spawn() {
+        let body = stripped_fn_body(include_str!("agent.rs"), "pub async fn agent_session(")
+            .expect("agent_session's body");
+        let block = format!("iffresh_start{{{FRESH_CANCEL}{FRESH_NOTE}}}");
+        let pinned = |b: &str| {
+            let (
+                Some(rebind),
+                Some(start),
+                Some(again),
+                Some(inner),
+                Some(env),
+                Some(at),
+                Some(spawn),
+            ) = (
+                b.find(RESTART_REBIND_TEXT),
+                b.find(FRESH_START),
+                b.find(FRESH_REBIND),
+                b.find("let(inner,stdin_text)"),
+                b.find("lethost_extra_env"),
+                b.find(&block),
+                b.rfind("stream_agent("),
+            )
+            else {
+                return false;
+            };
+            b.matches(FRESH_START).count() == 1
+                && b.matches(FRESH_REBIND).count() == 1
+                && b.matches(&block).count() == 1
+                && rebind < start
+                && start < again
+                && again < inner
+                && env < at
+                && at < spawn
+        };
+        assert!(pinned(&body), "{body}");
+        let host = "letbinary=matchopencode_v1_binary";
+        assert!(body.contains(host));
+        for mutant in [
+            body.replacen(&block, "", 1)
+                .replacen(host, &format!("{block}{host}"), 1),
+            body.replacen(FRESH_CANCEL, "", 1),
+            body.replacen(FRESH_START, "", 1).replacen(
+                RESTART_REBIND_TEXT,
+                &format!("{FRESH_START}{RESTART_REBIND_TEXT}"),
+                1,
+            ),
         ] {
             assert_ne!(mutant, body);
             assert!(!pinned(&mutant), "{mutant}");

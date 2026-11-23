@@ -11,6 +11,7 @@ import {
   ensureTranscriptText,
   extractContextPack,
   noticeEffect,
+  type ReviewEvent,
   runAgentSession,
   type TranscriptSegment,
 } from "@/lib/ai/agent";
@@ -28,6 +29,7 @@ import { norm } from "@/lib/repo-key";
 import { loadSettings } from "@/lib/settings/api";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { invoke } from "@/lib/tauri/invoke";
+import { toastError } from "@/lib/toast";
 import { loadPersistedResearch, savePersistedResearch } from "./persistence";
 
 /** Where a saved Research report is written, relative to the repo root: the app's committed
@@ -105,8 +107,8 @@ export interface ResearchRun {
   model: string;
   effort: string;
   depth: ResearchDepth;
-  /** The conversation's stable uuid: `--session-id` on turn 1, `--resume` after;
-   *  also the cancel key. */
+  /** The conversation's stable uuid: `--session-id` on turn 1, `--resume` after.
+   *  Every turn cancels by its own run id (its `TurnToken`), never this. */
   sessionId: string;
   /** The CLI's native resume id captured on turn 1; unset until then. */
   nativeSessionId: string | null;
@@ -122,10 +124,13 @@ export interface ResearchRun {
   currentPrompt?: string;
   generating: boolean;
   /** True while a "Turn into a Plan" handoff is running its one-shot distill turn
-   *  (resumes the conversation to synthesize a plan brief). Transient UI state only:
-   *  deliberately NOT persisted (see persistence.ts `toPersisted`), so a reload can
-   *  never resurrect a stuck flag on a run whose distill was interrupted. */
+   *  (resumes the conversation to synthesize a plan brief), and still true while a
+   *  stopped distill settles. Transient UI state only: deliberately NOT persisted (see
+   *  persistence.ts `toPersisted`), so a reload can never resurrect a stuck flag. */
   distilling?: boolean;
+  /** True from a Stop on the running distill until that distill's command settles,
+   *  when the raw report is handed off. Transient like `distilling`, never persisted. */
+  distillStopping?: boolean;
   /** The user stopped this run mid-turn (Stop). Idle but restartable; tells the
    *  canvas to offer Restart instead of treating partial output as a report. */
   stopped: boolean;
@@ -144,6 +149,17 @@ export interface ResearchRun {
   /** Repo-relative path of the saved report file once saved (null = unsaved). */
   reportPath: string | null;
   error: string | null;
+}
+
+/** Where a run's "Turn into a Plan" distill stands; "stopping" is a Stop waiting for
+ *  the distill's command to settle. The canvas and the sidebar both read this. */
+export type DistillPhase = "idle" | "distilling" | "stopping";
+
+export function distillPhase(
+  run: Pick<ResearchRun, "distilling" | "distillStopping">,
+): DistillPhase {
+  if (!run.distilling) return "idle";
+  return run.distillStopping ? "stopping" : "distilling";
 }
 
 interface ResearchState {
@@ -167,7 +183,8 @@ interface ResearchState {
   start: (args: ResearchGenerateArgs) => string;
   /** Send a free-form follow-up — resumes the conversation so the agent digs deeper. `depth`
    *  is the persona for this turn (switchable mid-session; a change re-injects it inline) and
-   *  `model` applies from this turn on. No-op if the run is missing, mid-turn, or blank. */
+   *  `model` applies from this turn on. No-op if the run is missing, mid-turn, distilling
+   *  (stopping included), or blank. */
   sendFollowUp: (
     id: string,
     message: string,
@@ -256,6 +273,21 @@ export function researchRunContextPack(run: ResearchRun): ContextPack {
   ]);
 }
 
+/** A turn's ownership token: its identity is the ownership check, its `runId` the
+ *  turn's own `agent_session` cancel id (backend cancel ids are single-use). */
+interface TurnToken {
+  readonly runId: string;
+}
+const newTurnToken = (): TurnToken => ({ runId: crypto.randomUUID() });
+
+/** A distill's own cancel id; kept apart from `TurnToken` so a distill never takes a
+ *  stopped turn's ownership. `cancelled` marks a Stop or Dismiss, so the distill hands
+ *  off raw even when its command still returns a terminal event. */
+interface DistillToken {
+  readonly runId: string;
+  cancelled: boolean;
+}
+
 /**
  * Read-only research surface: each run is a resumable web-enabled agent conversation (the
  * `agent_session` backend with `readOnly: true` + `web: true` — no worktree, runs in the live
@@ -266,8 +298,12 @@ export const useResearchStore = create<ResearchState>((set, get) => {
    *  (see `hydrate`). Lives in the factory closure, which runs exactly once. */
   let hydrating: Promise<void> | null = null;
   /** Run id to the token of the turn that owns it, set when the turn is requested; only
-   *  the owner may start a process or write to the run. */
-  const turnOwners = new Map<string, object>();
+   *  the owner may start a process or write to the run. The token also carries the
+   *  turn's own cancel id. */
+  const turnOwners = new Map<string, TurnToken>();
+  /** Run id to its running distill's token (the distill's cancel id); never read by
+   *  turn code. */
+  const distillOwners = new Map<string, DistillToken>();
 
   /** Patch one run by id — touches only that run, so concurrent runs streaming
    *  at once never clobber each other. */
@@ -282,11 +318,11 @@ export const useResearchStore = create<ResearchState>((set, get) => {
     system: string,
     userPrompt: string,
     resume: boolean,
-    owner?: object,
+    owner?: TurnToken,
   ) => {
     const run0 = get().runs.find((r) => r.id === id);
     if (!run0) return;
-    const token = owner ?? {};
+    const token = owner ?? newTurnToken();
     turnOwners.set(id, token);
     patch(id, {
       generating: true,
@@ -365,6 +401,7 @@ export const useResearchStore = create<ResearchState>((set, get) => {
         // Read-only: runs in the live repo, never a worktree, and can't write.
         worktreePath: run0.repoPath,
         sessionId: run0.sessionId,
+        runId: token.runId,
         resume,
         readOnly: true,
         // The web-enabled read-only profile — adds WebSearch/WebFetch, still no writes.
@@ -487,7 +524,7 @@ export const useResearchStore = create<ResearchState>((set, get) => {
     const { repoPath, topic, depth } = args;
     // Own the run before the awaited reads: whatever lands during them (Stop, Restart,
     // Dismiss, a newer turn) must find this turn's token, re-checked below.
-    const token = {};
+    const token = newTurnToken();
     turnOwners.set(id, token);
     const [repoInstructions, settings] = await Promise.all([
       readRepoInstructions(repoPath).catch(() => null),
@@ -645,26 +682,33 @@ export const useResearchStore = create<ResearchState>((set, get) => {
         run0.agent !== "claude"
       )
         return null;
-      patch(id, { distilling: true });
-      // Stale once the run is gone, its session was replaced (restart), it was
-      // stopped, or the distill flag was cleared (cancel) — mirrors runTurn's guard.
+      const token: DistillToken = {
+        runId: crypto.randomUUID(),
+        cancelled: false,
+      };
+      distillOwners.set(id, token);
+      patch(id, { distilling: true, distillStopping: false });
+      const owns = () => distillOwners.get(id) === token;
+      // Stale once this distill lost its token (Dismiss), was stopped (the cancelled
+      // mark), or the run is gone, restarted or stopped — mirrors runTurn's guard.
       const superseded = () => {
         const cur = get().runs.find((r) => r.id === id);
         return (
+          !owns() ||
+          token.cancelled ||
           !cur ||
           cur.sessionId !== run0.sessionId ||
-          cur.stopped ||
-          !cur.distilling
+          cur.stopped
         );
       };
       let finalText = "";
       let errored = false;
-      // Captured in `finally` BEFORE `distilling` is cleared: superseded() reads
-      // `cur.distilling`, so evaluating it after the clear would discard every successful
-      // distill (the raw fallback would mask it).
+      let result: ReviewEvent | null = null;
+      // Captured in `finally` BEFORE the token is released: superseded() reads
+      // ownership, so evaluating it after the release would discard every distill.
       let wasSuperseded = true;
       try {
-        await runAgentSession({
+        result = await runAgentSession({
           binPath: null,
           agent: run0.agent,
           model: run0.model,
@@ -674,6 +718,7 @@ export const useResearchStore = create<ResearchState>((set, get) => {
           userPrompt: buildResearchDistillPrompt(),
           worktreePath: run0.repoPath,
           sessionId: run0.sessionId,
+          runId: token.runId,
           resume: true,
           // Fork the resumed conversation to a throwaway session: the distill reads
           // the full research context but never appends to the original transcript,
@@ -693,8 +738,10 @@ export const useResearchStore = create<ResearchState>((set, get) => {
               // synthesized report — the terminal event's text is the authoritative answer.
               // Adopt it whenever present (deltas only for a degenerate empty terminal event).
               if (ev.text.trim()) finalText = ev.text;
-              // The distill IS the latest turn, so its cost is the run's latest cost.
-              if (ev.costUsd != null) patch(id, { costUsd: ev.costUsd });
+              // The distill IS the latest turn, so its cost is the run's latest cost;
+              // a stopped distill's cost is dropped, like a stopped turn's.
+              if (ev.costUsd != null && !superseded())
+                patch(id, { costUsd: ev.costUsd });
               if (ev.isError) errored = true;
             } else if (ev.kind === "error") {
               // A killed distill's `partialText` is deliberately dropped: the errored
@@ -704,14 +751,21 @@ export const useResearchStore = create<ResearchState>((set, get) => {
           },
         });
       } catch {
-        // A killed/failed process (incl. cancel) — fall through to the null return.
+        // A failed invoke rejects (a cancel resolves null instead) — fall through to
+        // the null return.
         errored = true;
       } finally {
-        // Capture the verdict BEFORE clearing the flag (clearing it makes superseded() true).
+        // Capture the verdict BEFORE the owner releases its token (releasing it makes
+        // superseded() true); only the owner clears the flags.
         wasSuperseded = superseded();
-        if (!wasSuperseded) patch(id, { distilling: false });
+        if (owns()) {
+          distillOwners.delete(id);
+          if (get().runs.some((r) => r.id === id))
+            patch(id, { distilling: false, distillStopping: false });
+        }
       }
-      if (wasSuperseded || errored) return null;
+      // A null return is a cancel (from here or elsewhere): hand off raw.
+      if (wasSuperseded || errored || result === null) return null;
       // Defensively strip a leading fence / pre-heading narration (cleanReportText
       // returns the text unchanged when there's no heading — the brief has no H1).
       const brief = cleanReportText(finalText);
@@ -720,16 +774,31 @@ export const useResearchStore = create<ResearchState>((set, get) => {
 
     cancel: (id) => {
       const run = get().runs.find((r) => r.id === id);
-      // Cancel covers both a streaming turn and a running distill. Killing the
-      // session makes the in-flight runAgentSession error → distillPlanBrief
-      // resolves null → the handoff proceeds with the raw fallback.
+      // Cancel covers both a streaming turn and a running distill. A stopped distill
+      // keeps the run busy (`distillStopping`, normally under a second, worst case
+      // about 50 s) until its command settles, then the handoff goes ahead with the
+      // raw report; a cancel IPC that fails gives the Stop back.
       if (run?.distilling) {
-        void cancelAgentSession(run.sessionId);
-        patch(id, { distilling: false });
+        const d = distillOwners.get(id);
+        if (!d) {
+          // A stuck flag no distill can settle: clear it.
+          patch(id, { distilling: false, distillStopping: false });
+          return;
+        }
+        d.cancelled = true;
+        if (!run.distillStopping) patch(id, { distillStopping: true });
+        cancelAgentSession(d.runId).catch((e) => {
+          // A Stop that never reached the backend gives the Stop back.
+          if (distillOwners.get(id) !== d) return;
+          d.cancelled = false;
+          patch(id, { distillStopping: false });
+          toastError(e);
+        });
         return;
       }
       if (!run?.generating) return;
-      void cancelAgentSession(run.sessionId);
+      const runId = turnOwners.get(id)?.runId;
+      if (runId) void cancelAgentSession(runId);
       // Settle to a clear stopped state right away; the in-flight turn sees
       // `stopped` when its killed process returns and bails without overwriting.
       patch(id, { generating: false, status: "", stopped: true });
@@ -764,8 +833,16 @@ export const useResearchStore = create<ResearchState>((set, get) => {
 
     remove: (id) => {
       const run = get().runs.find((r) => r.id === id);
-      if (run?.generating) void cancelAgentSession(run.sessionId);
+      const runId = turnOwners.get(id)?.runId;
+      if (run?.generating && runId) void cancelAgentSession(runId);
+      // Dismiss stops a distill too, distilling or stopping.
+      const d = distillOwners.get(id);
+      if (d) {
+        d.cancelled = true;
+        void cancelAgentSession(d.runId);
+      }
       turnOwners.delete(id);
+      distillOwners.delete(id);
       set({
         runs: get().runs.filter((r) => r.id !== id),
         activeResearchId:

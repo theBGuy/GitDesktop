@@ -1,15 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  distillPhase,
   type ResearchGenerateArgs,
   type ResearchRun,
   useResearchStore,
 } from "@/features/research/store";
 import {
   type AgentSessionArgs,
+  cancelAgentSession,
   type ReviewEvent,
   runAgentSession,
 } from "@/lib/ai/agent";
 import { readRepoInstructions } from "@/lib/git/api";
+import { toastError } from "@/lib/toast";
 
 vi.mock("@/lib/ai/agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/ai/agent")>()),
@@ -29,6 +32,10 @@ vi.mock("@/features/research/persistence", () => ({
   savePersistedResearch: vi.fn(async () => undefined),
 }));
 vi.mock("@/lib/notifications/emit", () => ({ emitNotification: vi.fn() }));
+vi.mock("@/lib/toast", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/toast")>()),
+  toastError: vi.fn(),
+}));
 vi.mock("@/features/sessions/watching", () => ({
   isWatchingAgentSurface: () => true,
 }));
@@ -39,7 +46,7 @@ const RESET =
 interface Run {
   args: AgentSessionArgs;
   emit: (ev: ReviewEvent) => void;
-  settle: () => void;
+  settle: (v?: ReviewEvent | null) => void;
 }
 
 let runs: Run[] = [];
@@ -120,10 +127,15 @@ async function startTurn(id: string): Promise<Turn> {
 
 beforeEach(() => {
   runs = [];
+  vi.mocked(cancelAgentSession).mockClear();
   vi.mocked(runAgentSession).mockImplementation(
     (args) =>
       new Promise<ReviewEvent | null>((resolve) => {
-        runs.push({ args, emit: args.onEvent, settle: () => resolve(null) });
+        runs.push({
+          args,
+          emit: args.onEvent,
+          settle: (v: ReviewEvent | null = null) => resolve(v),
+        });
       }),
   );
   // Reset, so a held read a failed test queued never leaks into the next.
@@ -531,5 +543,278 @@ describe("research store: notices and the stored conversation id", () => {
     await flush();
     expect(runs).toEqual([]);
     expect(find(id)?.generating).toBe(false);
+  });
+});
+
+describe("research store: every Stop and Dismiss cancels its own run id", () => {
+  const cancelCalls = () => vi.mocked(cancelAgentSession).mock.calls;
+
+  it("(21) [T4] a follow-up after a Stop during setup runs under a new run id", async () => {
+    const held = deferred<string | null>();
+    vi.mocked(readRepoInstructions).mockImplementationOnce(() => held.promise);
+    const id = useResearchStore.getState().start(ARGS);
+    useResearchStore.getState().cancel(id);
+    expect(cancelCalls()).toHaveLength(1);
+    const stoppedId = cancelCalls()[0][0];
+    expect(stoppedId).not.toBe(find(id)?.sessionId);
+    useResearchStore.getState().sendFollowUp(id, "Go deeper", "deep", "");
+    await vi.waitFor(() => expect(runs).toHaveLength(1));
+    expect(runs[0].args.runId).not.toBe(stoppedId);
+    held.resolve(null);
+    await flush();
+    runs[0].settle();
+  });
+
+  it("(22) [T5] Dismiss cancels the generating turn by its run id", async () => {
+    useResearchStore.setState({ runs: [research("a")] });
+    const turn = await startTurn("a");
+    useResearchStore.getState().remove("a");
+    expect(cancelCalls()).toEqual([[runs[0].args.runId]]);
+    expect(runs[0].args.runId).not.toBe("sid-a");
+    await turn.settleStale();
+  });
+
+  it("(23) [T7] Restart then Stop targets the new run", async () => {
+    useResearchStore.setState({ runs: [research("a")] });
+    const first = await startTurn("a");
+    useResearchStore.getState().cancel("a");
+    await first.settleStale();
+    useResearchStore.getState().restart("a");
+    await vi.waitFor(() => expect(runs).toHaveLength(2));
+    useResearchStore.getState().cancel("a");
+    expect(cancelCalls()).toEqual([[runs[0].args.runId], [runs[1].args.runId]]);
+    expect(runs[1].args.runId).not.toBe(runs[0].args.runId);
+    expect(runs[1].args.sessionId).not.toBe("sid-a");
+    expect(runs[1].args.sessionId).toBe(find("a")?.sessionId);
+    runs[1].settle();
+    await flush();
+  });
+
+  it("(24) [T6] a distill cancels by its own run id, and the next turn gets another", async () => {
+    useResearchStore.setState({
+      runs: [
+        {
+          ...research("a"),
+          agent: "claude",
+          report: { title: "T", report: BODY },
+        },
+      ],
+    });
+    const p = useResearchStore.getState().distillPlanBrief("a");
+    expect(runs).toHaveLength(1);
+    useResearchStore.getState().cancel("a");
+    expect(cancelCalls()).toEqual([[runs[0].args.runId]]);
+    expect(runs[0].args.runId).not.toBe("sid-a");
+    runs[0].settle();
+    await p;
+    await startTurn("a");
+    expect(runs[1].args.runId).not.toBe(runs[0].args.runId);
+    useResearchStore.getState().cancel("a");
+    expect(cancelAgentSession).toHaveBeenLastCalledWith(runs[1].args.runId);
+    runs[1].settle();
+    await flush();
+  });
+});
+
+describe("distill", () => {
+  const claudeRun: ResearchRun = {
+    ...research("a"),
+    agent: "claude",
+    report: { title: "T", report: BODY },
+  };
+  const store = () => useResearchStore.getState();
+  const cancelCalls = () => vi.mocked(cancelAgentSession).mock.calls;
+  const flags = () => ({
+    distilling: find("a")?.distilling,
+    distillStopping: find("a")?.distillStopping,
+  });
+  const IDLE = { distilling: false, distillStopping: false };
+  const done = (text: string, costUsd: number | null): ReviewEvent => ({
+    kind: "done",
+    text,
+    costUsd,
+    isError: false,
+  });
+
+  beforeEach(() => {
+    vi.mocked(cancelAgentSession).mockClear();
+    vi.mocked(toastError).mockClear();
+    useResearchStore.setState({ runs: [claudeRun] });
+  });
+
+  it("D1 a Stop holds the run until the stopped distill settles; a re-click starts nothing", async () => {
+    const p1 = store().distillPlanBrief("a");
+    runs[0].emit({ kind: "delta", text: "narr" });
+    store().cancel("a");
+    expect(flags()).toEqual({ distilling: true, distillStopping: true });
+    expect(cancelCalls()).toEqual([[runs[0].args.runId]]);
+    const p2 = store().distillPlanBrief("a");
+    expect(await p2).toBeNull();
+    expect(runs).toHaveLength(1);
+    runs[0].settle();
+    expect(await p1).toBeNull();
+    expect(flags()).toEqual(IDLE);
+  });
+
+  it("D2a a stopped distill that still returns a terminal event hands off raw", async () => {
+    const p = store().distillPlanBrief("a");
+    store().cancel("a");
+    const ev = done("BRIEF", 0.3);
+    runs[0].emit(ev);
+    runs[0].settle(ev);
+    expect(await p).toBeNull();
+    expect(find("a")?.costUsd).toBeNull();
+    expect(flags()).toEqual(IDLE);
+  });
+
+  it("D2b a distill whose command returns null with no Stop hands off raw", async () => {
+    const p = store().distillPlanBrief("a");
+    runs[0].emit({ kind: "delta", text: "narr" });
+    runs[0].settle(null);
+    expect(await p).toBeNull();
+    expect(flags()).toEqual(IDLE);
+  });
+
+  it("D3 a finished distill returns its brief", async () => {
+    const p = store().distillPlanBrief("a");
+    runs[0].emit({ kind: "delta", text: "narr" });
+    const ev = done("## Brief\n\nDo X.", 0.2);
+    runs[0].emit(ev);
+    runs[0].settle(ev);
+    expect(await p).toBe("## Brief\n\nDo X.");
+    expect(flags()).toEqual(IDLE);
+    expect(find("a")?.costUsd).toBe(0.2);
+  });
+
+  it("D3b an error event or a rejected invoke returns null without throwing", async () => {
+    const p1 = store().distillPlanBrief("a");
+    runs[0].emit({
+      kind: "error",
+      message: "boom",
+      partialText: null,
+      timedOut: false,
+    });
+    runs[0].settle(null);
+    expect(await p1).toBeNull();
+    expect(flags()).toEqual(IDLE);
+
+    vi.mocked(runAgentSession).mockImplementationOnce(() =>
+      Promise.reject(new Error("x")),
+    );
+    const p2 = store().distillPlanBrief("a");
+    expect(await p2).toBeNull();
+    expect(flags()).toEqual(IDLE);
+  });
+
+  it("D4 a follow-up during stopping starts nothing, and nothing is queued", async () => {
+    const p = store().distillPlanBrief("a");
+    store().cancel("a");
+    store().sendFollowUp("a", "more", "deep", "");
+    await flush();
+    expect(runs).toHaveLength(1);
+    runs[0].settle();
+    await p;
+    await flush();
+    expect(runs).toHaveLength(1);
+    store().sendFollowUp("a", "more", "deep", "");
+    await vi.waitFor(() => expect(runs).toHaveLength(2));
+    await flush();
+    expect(runs).toHaveLength(2);
+    runs[1].settle();
+    await flush();
+  });
+
+  it("D5a Dismiss stops a running distill", async () => {
+    const p = store().distillPlanBrief("a");
+    store().remove("a");
+    expect(cancelCalls()).toEqual([[runs[0].args.runId]]);
+    runs[0].settle();
+    expect(await p).toBeNull();
+    expect(find("a")).toBeUndefined();
+  });
+
+  it("D5b Dismiss after a Stop re-sends the cancel and the late settle writes nothing", async () => {
+    const p = store().distillPlanBrief("a");
+    store().cancel("a");
+    store().remove("a");
+    expect(cancelCalls()).toEqual([[runs[0].args.runId], [runs[0].args.runId]]);
+    runs[0].settle();
+    expect(await p).toBeNull();
+    expect(find("a")).toBeUndefined();
+  });
+
+  it("D6 a new distill after a stopped one settled works", async () => {
+    const p1 = store().distillPlanBrief("a");
+    store().cancel("a");
+    runs[0].settle();
+    await p1;
+    const p2 = store().distillPlanBrief("a");
+    expect(runs).toHaveLength(2);
+    expect(runs[1].args.runId).not.toBe(runs[0].args.runId);
+    expect(flags()).toEqual({ distilling: true, distillStopping: false });
+    const ev = done("BRIEF", null);
+    runs[1].emit(ev);
+    runs[1].settle(ev);
+    expect(await p2).toBe("BRIEF");
+    expect(flags()).toEqual(IDLE);
+  });
+
+  it("D9 a stuck distill flag with no owner clears on Stop", () => {
+    useResearchStore.setState({ runs: [{ ...claudeRun, distilling: true }] });
+    store().cancel("a");
+    expect(flags()).toEqual(IDLE);
+    expect(cancelCalls()).toEqual([]);
+  });
+
+  it("D10a a Stop whose cancel fails gives the Stop back", async () => {
+    const err = new Error("ipc down");
+    vi.mocked(cancelAgentSession).mockRejectedValueOnce(err);
+    const p = store().distillPlanBrief("a");
+    store().cancel("a");
+    expect(find("a")?.distillStopping).toBe(true);
+    await flush();
+    expect(flags()).toEqual({ distilling: true, distillStopping: false });
+    expect(distillPhase(find("a") ?? {})).toBe("distilling");
+    expect(toastError).toHaveBeenCalledTimes(1);
+    expect(toastError).toHaveBeenCalledWith(err);
+    store().cancel("a");
+    expect(cancelCalls()).toEqual([[runs[0].args.runId], [runs[0].args.runId]]);
+    expect(find("a")?.distillStopping).toBe(true);
+    await flush();
+    const ev = done("BRIEF", null);
+    runs[0].emit(ev);
+    runs[0].settle(ev);
+    expect(await p).toBeNull();
+    expect(flags()).toEqual(IDLE);
+    expect(toastError).toHaveBeenCalledTimes(1);
+  });
+
+  it("D10b a reverted Stop lets the distill return its brief", async () => {
+    vi.mocked(cancelAgentSession).mockRejectedValueOnce(new Error("ipc down"));
+    const p = store().distillPlanBrief("a");
+    store().cancel("a");
+    await flush();
+    const ev = done("BRIEF", null);
+    runs[0].emit(ev);
+    runs[0].settle(ev);
+    expect(await p).toBe("BRIEF");
+    expect(flags()).toEqual(IDLE);
+  });
+
+  it("D10c a cancel that fails after the distill settled changes nothing", async () => {
+    let reject!: (e: Error) => void;
+    const held = new Promise<void>((_, rej) => {
+      reject = rej;
+    });
+    vi.mocked(cancelAgentSession).mockImplementationOnce(() => held);
+    const p = store().distillPlanBrief("a");
+    store().cancel("a");
+    runs[0].settle();
+    expect(await p).toBeNull();
+    expect(flags()).toEqual(IDLE);
+    reject(new Error("late"));
+    await flush();
+    expect(flags()).toEqual(IDLE);
+    expect(toastError).not.toHaveBeenCalled();
   });
 });
