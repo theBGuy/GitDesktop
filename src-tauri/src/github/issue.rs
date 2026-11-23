@@ -991,8 +991,26 @@ pub async fn gh_issue_comment(
     })
 }
 
-/// Closes an issue. `reason` is "completed" or "not_planned" (GitHub's two
-/// close reasons); empty defaults to completed.
+/// gh's `--reason` enum spells this with a space, unlike the API's `not_planned`.
+const GH_CLOSE_REASON_NOT_PLANNED: &str = "not planned";
+
+/// Maps an API-spelled close reason to the value gh's `--reason` accepts.
+fn gh_close_reason(reason: &str) -> AppResult<&'static str> {
+    match reason {
+        "" | "completed" => Ok("completed"),
+        "not_planned" => Ok(GH_CLOSE_REASON_NOT_PLANNED),
+        _ => Err(AppError::InvalidArgument(format!(
+            "unknown close reason: {reason}"
+        ))),
+    }
+}
+
+fn issue_close_args<'a>(n: &'a str, slug: &'a str, gh_reason: &'a str) -> [&'a str; 7] {
+    ["issue", "close", n, "--repo", slug, "--reason", gh_reason]
+}
+
+/// Closes an issue. `reason` is "completed" or "not_planned" (the API's
+/// spellings; empty defaults to completed), translated to gh's spelling.
 pub async fn gh_issue_close(
     repo_path: String,
     number: u64,
@@ -1000,19 +1018,11 @@ pub async fn gh_issue_close(
     lens: Option<String>,
 ) -> AppResult<()> {
     let n = number.to_string();
-    let reason = match reason.as_str() {
-        "" | "completed" => "completed",
-        "not_planned" => "not_planned",
-        _ => {
-            return Err(AppError::InvalidArgument(format!(
-                "unknown close reason: {reason}"
-            )));
-        }
-    };
+    let gh_reason = gh_close_reason(&reason)?;
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let result = run_gh(
         Some(&repo_path),
-        &["issue", "close", &n, "--repo", &slug, "--reason", reason],
+        &issue_close_args(&n, &slug, gh_reason),
         GH_NETWORK_TIMEOUT,
     )
     .await;
@@ -1909,6 +1919,51 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::github::test_support::{gh_output, HELD_REST_STDERR};
+
+    #[test]
+    fn issue_close_args_spell_not_planned_the_way_gh_accepts() {
+        let reason = super::gh_close_reason("not_planned").unwrap();
+        let args = super::issue_close_args("7", "o/r", reason);
+        assert_eq!(
+            args,
+            [
+                "issue",
+                "close",
+                "7",
+                "--repo",
+                "o/r",
+                "--reason",
+                "not planned"
+            ]
+        );
+        let at = args.iter().position(|a| *a == "--reason").unwrap();
+        assert_eq!(args[at + 1], "not planned");
+        assert!(!args.contains(&"not_planned"), "{args:?}");
+    }
+
+    #[test]
+    fn issue_close_reason_defaults_to_completed() {
+        for input in ["", "completed"] {
+            assert_eq!(
+                super::gh_close_reason(input).unwrap(),
+                "completed",
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_close_reason_refuses_unknown_values() {
+        for input in ["duplicate", "not planned", "NOT_PLANNED"] {
+            assert!(
+                matches!(
+                    super::gh_close_reason(input),
+                    Err(AppError::InvalidArgument(_))
+                ),
+                "{input:?}"
+            );
+        }
+    }
 
     #[test]
     fn created_issue_ref_reads_each_field_on_its_own() {
