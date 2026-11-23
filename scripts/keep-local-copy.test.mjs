@@ -138,6 +138,19 @@ test("the guard dialog's installed, blocked and unread states", () => {
     "This repository keeps its hooks in a custom folder, so GitDesktop won't add a pre-push hook there.",
   );
   assert.equal(
+    copy.KEEP_LOCAL_HOOK_BLOCKED.linkedHook(null),
+    "This clone's pre-push hook is a link to a file that carries GitDesktop's guard. Installing or removing the guard here leaves a linked hook alone, so change or delete the link yourself.",
+  );
+  assert.deepEqual(copy.KEEP_LOCAL_HOOK_MANAGER_NOTE, {
+    lefthook:
+      "With lefthook, the check sees the pushed refs only in a command that sets use_stdin: true.",
+  });
+  for (const manager of ["husky", "pre-commit"])
+    assert.equal(
+      Object.hasOwn(copy.KEEP_LOCAL_HOOK_MANAGER_NOTE, manager),
+      false,
+    );
+  assert.equal(
     copy.KEEP_LOCAL_HOOK_UNREAD,
     "Couldn't check this clone's hooks.",
   );

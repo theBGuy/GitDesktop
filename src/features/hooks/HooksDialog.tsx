@@ -1,5 +1,6 @@
 import { CaretDownIcon } from "@phosphor-icons/react";
 import {
+  type KeyboardEvent,
   lazy,
   Suspense,
   useEffect,
@@ -33,7 +34,13 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { awaitFocusRelease } from "@/lib/await-focus-release";
-import { type HookDeleteOutcome, openWithDefault } from "@/lib/git/api";
+import { presentError } from "@/lib/error-summary";
+import { focusIsLost } from "@/lib/focus-lost";
+import {
+  type HookDeleteOutcome,
+  type HookWriteOutcome,
+  openWithDefault,
+} from "@/lib/git/api";
 import {
   useDeleteHook,
   useHookContent,
@@ -110,9 +117,17 @@ const SAVE_RUNNING_HELD = "A save is already running.";
 const SCRIPT_EMPTY_HELD = "The script is empty.";
 const NO_CHANGES_HELD = "No changes to save.";
 const TOGGLE_RUNNING_HELD = "A hook change is already running.";
+const SCRIPT_LOADING_HELD = "This hook's script is still loading.";
+const SCRIPT_UNREADABLE_HELD = "This hook's script couldn't be read.";
 
-const hookChangedNotice = (name: string) =>
-  `${name} changed since this list loaded — nothing was deleted.`;
+type HookWriteVerb = "deleted" | "saved" | "disabled" | "enabled";
+
+/** The one refusal notice for a write whose hook's managed state moved. */
+const hookChangedNotice = (name: string, verb: HookWriteVerb) =>
+  `${name} changed since this list loaded — nothing was ${verb}.`;
+
+const changedOnDiskLine = (name: string) =>
+  `${name} changed on disk while you were editing. Saving replaces it with your edit.`;
 
 export function HooksDialog({
   repoPath,
@@ -197,27 +212,168 @@ export function HooksDialog({
   const configName =
     managerConfig?.split(/[\\/]/).filter(Boolean).pop() ?? managerConfig;
 
-  // Seed the editor when a hook is selected and its content resolves (falling
-  // back to git's sample, then a bare shebang for a brand-new hook).
-  const seededFor = useRef<string | null>(null);
+  // The script on disk (falling back to git's sample, then a bare shebang for a
+  // brand-new hook), and the disk text the editor last took in for the hook it
+  // shows. Keyed on repo and name: the dialog survives a repo switch, and a
+  // draft is never compared against another repository's file.
+  const base = content.data ?? DEFAULT_HOOK;
+  // `replaced` is the disk text this dialog's own Save overwrote, still shown
+  // until the save's re-read arrives; it never reads as a change on disk.
+  const [seed, setSeed] = useState<{
+    repo: string;
+    name: string;
+    text: string;
+    replaced: string | null;
+  } | null>(null);
+  const seedMatches =
+    seed !== null && seed.repo === repoPath && seed.name === selected;
+
+  // A selected hook whose script read failed before it seeded. Kept through
+  // its own retry, which clears the query's error while it runs, so the
+  // failed state stays in place instead of flashing the previous draft.
+  const [readFailure, setReadFailure] = useState<{
+    repo: string;
+    name: string;
+    error: unknown;
+  } | null>(null);
+  if (
+    content.isError &&
+    selected !== null &&
+    !seedMatches &&
+    (readFailure === null ||
+      readFailure.error !== content.error ||
+      readFailure.repo !== repoPath ||
+      readFailure.name !== selected)
+  )
+    setReadFailure({ repo: repoPath, name: selected, error: content.error });
+
+  // What a hook (or repository) not seeded yet takes from its script. Taken
+  // during render when the read is already cached, so no frame paints the
+  // loading hold between two cached hooks; the effect below takes later reads.
+  const freshSeed = (repo: string, name: string, text: string) => {
+    setSeed({ repo, name, text, replaced: null });
+    setDraft(text);
+    setConfirmDelete(false);
+    setReadFailure(null);
+  };
+  if (selected !== null && content.isSuccess && !seedMatches)
+    freshSeed(repoPath, selected, base);
+  const failure =
+    !seedMatches &&
+    readFailure !== null &&
+    readFailure.repo === repoPath &&
+    readFailure.name === selected
+      ? readFailure
+      : null;
+  const readFailed = failure !== null;
+
+  // A data-arrival seed: a later read of the seeded hook replaces only an
+  // untouched draft, and an edit is kept (the line below offers Reload). Reads
+  // the draft at arrival, so typing never re-runs it. Every arrival for the
+  // seeded hook retires `replaced`.
+  const takeContent = useEffectEvent(
+    (repo: string, name: string, text: string) => {
+      if (seed === null || seed.repo !== repo || seed.name !== name) {
+        freshSeed(repo, name, text);
+        return;
+      }
+      const kept = seed.replaced === null ? seed : { ...seed, replaced: null };
+      if (seed.text === text) {
+        if (kept !== seed) setSeed(kept);
+        return;
+      }
+      if (draft === seed.text) setDraft(text);
+      if (draft === seed.text || draft === text) setSeed({ ...kept, text });
+      else if (kept !== seed) setSeed(kept);
+    },
+  );
+  // The repo is a dep: another repo's cached read can answer the same text.
   useEffect(() => {
     if (selected === null) {
-      seededFor.current = null;
+      setSeed(null);
       return;
     }
-    if (seededFor.current !== selected && content.isSuccess) {
-      seededFor.current = selected;
-      setDraft(content.data ?? DEFAULT_HOOK);
-      setConfirmDelete(false);
-    }
-  }, [selected, content.isSuccess, content.data]);
+    if (content.isSuccess)
+      takeContent(repoPath, selected, content.data ?? DEFAULT_HOOK);
+  }, [repoPath, selected, content.isSuccess, content.data]);
 
-  const original = content.data ?? DEFAULT_HOOK;
-  const dirty = draft !== original;
+  // Hidden once the hook is gone from disk: the read then answers the sample or
+  // nothing, which isn't a change to the user's file.
+  const changedOnDisk =
+    seedMatches &&
+    entry?.state !== "inactive" &&
+    typeof content.data === "string" &&
+    base !== seed.text &&
+    base !== seed.replaced &&
+    draft !== seed.text &&
+    draft !== base;
+  const reload = () => {
+    setDraft(base);
+    setSeed((s) => (s === null ? s : { ...s, text: base, replaced: null }));
+  };
+
+  // Reload and Retry pressed with Enter unmount under the key and focus lands
+  // in the editor, so the held key's repeats are dropped there (in the capture
+  // phase, ahead of CodeMirror's own listener) until it is released.
+  const landingEnterHeld = useRef(false);
+  const armLandingEnter = (e: KeyboardEvent) => {
+    if (e.key === "Enter" && !e.repeat) landingEnterHeld.current = true;
+  };
+  const dropHeldLandingEnter = (e: KeyboardEvent) => {
+    if (!e.repeat) landingEnterHeld.current = false;
+    if (!landingEnterHeld.current || e.key !== "Enter") return;
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  // The line's Reload and the failed read's Retry unmount with them (and a
+  // disk change converging with the draft hides the line under focus), so a
+  // lost focus lands on the editor's input, else the selected row. Focus
+  // anywhere else stays where it is.
+  const editorBoxRef = useRef<HTMLDivElement>(null);
+  const lineShown = useRef(false);
+  const failureShown = useRef(false);
+  useLayoutEffect(() => {
+    const was = { line: lineShown.current, failure: failureShown.current };
+    lineShown.current = changedOnDisk;
+    failureShown.current = readFailed;
+    if (!open) return;
+    const left = (was.line && !changedOnDisk) || (was.failure && !readFailed);
+    if (!left) return;
+    const popup = listRef.current?.closest('[role="dialog"]');
+    if (document.activeElement !== popup && !focusIsLost()) return;
+    const input = editorBoxRef.current?.querySelector<HTMLElement>(
+      '[contenteditable="true"], textarea',
+    );
+    const name = selectedRef.current;
+    const row =
+      name === null
+        ? null
+        : listRef.current?.querySelector<HTMLElement>(
+            `[data-hook="${CSS.escape(name)}"]`,
+          );
+    (input ?? row)?.focus();
+  }, [changedOnDisk, readFailed, open]);
+
+  const dirty = draft !== base;
   const isBlank = draft.trim() === "";
   const noShebang = !isBlank && !draft.startsWith("#!");
+  // Until the selected hook seeds, the draft may still be the previous hook's,
+  // so everything that writes or replaces it holds.
+  const seedHeld = (() => {
+    switch (true) {
+      case readFailed:
+        return SCRIPT_UNREADABLE_HELD;
+      case !seedMatches:
+        return SCRIPT_LOADING_HELD;
+      default:
+        return null;
+    }
+  })();
   const saveHeld = (() => {
     switch (true) {
+      case seedHeld !== null:
+        return seedHeld;
       case writeHook.isPending:
         return SAVE_RUNNING_HELD;
       case isBlank:
@@ -229,6 +385,7 @@ export function HooksDialog({
     }
   })();
   const toggleOf = entry === null ? null : TOGGLE[entry.state];
+  const toggleHeld = setEnabled.isPending ? TOGGLE_RUNNING_HELD : seedHeld;
 
   // The managed guard's writes ask first. Each handler captures what it writes
   // before the ask, so a list re-read under the open prompt can't change it.
@@ -250,31 +407,77 @@ export function HooksDialog({
     onOpenChange(next);
   };
 
+  // Save and the toggle carry the managed state the list showed at the press;
+  // a hook that changed since comes back unwritten, and the list re-reads.
   async function save() {
     if (!entry) return;
+    const firedIn = repoPath;
     const name = entry.name;
     const script = draft;
+    const pressed = seed;
+    const replaced = base;
+    const expectedManaged = entry.managed === true;
     if (entry.managed && !(await confirmManaged("save"))) return;
+    let outcome: HookWriteOutcome;
     try {
-      await writeHook.mutateAsync({ name, content: script });
+      outcome = await writeHook.mutateAsync({
+        name,
+        content: script,
+        expectedManaged,
+      });
     } catch (e) {
       toastError(e);
       return;
     }
+    if (outcome.status === "managedChanged") {
+      await writeRefused(name, firedIn, "saved");
+      return;
+    }
+    // The bytes sent are what the editor took in, and the text they replaced
+    // stays known until the re-read, so this dialog's own write never reads
+    // as a change on disk. Only the seed the press saw: one taken since (the
+    // hook re-selected) converges through its own re-read.
+    if (stillIn(firedIn))
+      setSeed((s) =>
+        s !== null && s === pressed ? { ...s, text: script, replaced } : s,
+      );
     toast.success(`Saved the ${name} hook`);
   }
 
   async function toggle(enabled: boolean) {
     if (!entry) return;
+    const firedIn = repoPath;
     const name = entry.name;
+    const expectedManaged = entry.managed === true;
     if (!enabled && entry.managed && !(await confirmManaged("disable"))) return;
+    let outcome: HookWriteOutcome;
     try {
-      await setEnabled.mutateAsync({ name, enabled });
+      outcome = await setEnabled.mutateAsync({
+        name,
+        enabled,
+        expectedManaged,
+      });
     } catch (e) {
       toastError(e);
       return;
     }
+    if (outcome.status === "managedChanged") {
+      await writeRefused(name, firedIn, enabled ? "enabled" : "disabled");
+      return;
+    }
     toast.success(`${enabled ? "Enabled" : "Disabled"} ${name}`);
+  }
+
+  async function writeRefused(
+    name: string,
+    firedIn: string,
+    verb: HookWriteVerb,
+  ) {
+    const what = `nothing was ${verb}`;
+    if (refuseIfSwitched(firedIn, what)) return;
+    await hooks.refetch();
+    if (refuseIfSwitched(firedIn, what)) return;
+    toast.info(hookChangedNotice(name, verb));
   }
 
   // The dialog survives a repo switch (RepositoryView is one instance), so a
@@ -332,7 +535,7 @@ export function HooksDialog({
     await hooks.refetch();
     if (refuseIfSwitched(firedIn, "nothing was deleted")) return;
     if (!managed) {
-      toast.info(hookChangedNotice(name));
+      toast.info(hookChangedNotice(name, "deleted"));
       return;
     }
     pendingDeleteAsk.current = { name, firedIn };
@@ -354,7 +557,7 @@ export function HooksDialog({
       entry === null ||
       entry.state === "inactive"
     ) {
-      toast.info(hookChangedNotice(ask.name));
+      toast.info(hookChangedNotice(ask.name, "deleted"));
       return;
     }
     void (async () => {
@@ -551,10 +754,15 @@ export function HooksDialog({
                       <DropdownMenu>
                         <DropdownMenuTrigger
                           render={
-                            <Button variant="outline" size="xs">
+                            <DisabledReasonButton
+                              variant="outline"
+                              size="xs"
+                              disabled={seedHeld !== null}
+                              reason={seedHeld}
+                            >
                               Templates
                               <CaretDownIcon data-icon="inline-end" />
-                            </Button>
+                            </DisabledReasonButton>
                           }
                         />
                         <DropdownMenuContent align="end" className="w-80">
@@ -574,22 +782,77 @@ export function HooksDialog({
                       </DropdownMenu>
                     )}
                   </div>
-                  <div className="relative min-h-0 flex-1">
-                    <div className="absolute inset-0">
-                      <Suspense
-                        fallback={
-                          <LazyPanelFallback
-                            name="the hook editor"
-                            className="p-0"
-                            rows={["h-full w-full"]}
-                          />
-                        }
+                  {failure !== null ? (
+                    <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
+                      <div
+                        role="alert"
+                        className="flex max-w-md flex-col items-center gap-1 text-center text-xs"
                       >
-                        <CodeEditor value={draft} onChange={setDraft} />
-                      </Suspense>
+                        <p className="text-foreground">{`Couldn't read ${entry.name}.`}</p>
+                        <p>{presentError(failure.error).summary}</p>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="cursor-pointer"
+                        aria-busy={content.isFetching || undefined}
+                        onKeyDown={armLandingEnter}
+                        onClick={() => void content.refetch()}
+                      >
+                        {content.isFetching ? "Retrying…" : "Retry"}
+                      </Button>
                     </div>
+                  ) : (
+                    <div className="relative min-h-0 flex-1">
+                      <div
+                        ref={editorBoxRef}
+                        className="absolute inset-0"
+                        onKeyDownCapture={dropHeldLandingEnter}
+                        onKeyUpCapture={() => {
+                          landingEnterHeld.current = false;
+                        }}
+                      >
+                        <Suspense
+                          fallback={
+                            <LazyPanelFallback
+                              name="the hook editor"
+                              className="p-0"
+                              rows={["h-full w-full"]}
+                            />
+                          }
+                        >
+                          <CodeEditor
+                            value={draft}
+                            onChange={setDraft}
+                            readOnly={!seedMatches}
+                          />
+                        </Suspense>
+                      </div>
+                    </div>
+                  )}
+                  {/* The status stays mounted so the line's appearance is
+                      announced; Reload sits outside it. */}
+                  <div
+                    className={cn(
+                      "flex items-center gap-2 text-xs",
+                      changedOnDisk && "mt-1.5",
+                    )}
+                  >
+                    <p role="status" className="min-w-0 flex-1 text-warning">
+                      {changedOnDisk ? changedOnDiskLine(entry.name) : null}
+                    </p>
+                    {changedOnDisk && (
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        onKeyDown={armLandingEnter}
+                        onClick={reload}
+                      >
+                        Reload
+                      </Button>
+                    )}
                   </div>
-                  {noShebang && (
+                  {noShebang && !readFailed && (
                     <p className="mt-1.5 text-xs text-warning">
                       No shebang line (e.g.{" "}
                       <span className="font-mono">#!/bin/sh</span>) — git may
@@ -612,8 +875,8 @@ export function HooksDialog({
                         size="sm"
                         onClick={() => void toggle(toggleOf.enable)}
                         onKeyDown={ignoreHeldEnter}
-                        disabled={setEnabled.isPending}
-                        reason={TOGGLE_RUNNING_HELD}
+                        disabled={toggleHeld !== null}
+                        reason={toggleHeld}
                       >
                         {toggleOf.label}
                       </DisabledReasonButton>

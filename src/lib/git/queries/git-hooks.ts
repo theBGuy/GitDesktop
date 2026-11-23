@@ -36,8 +36,8 @@ export function useWriteHook(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
-    (args: { name: string; content: string }) =>
-      api.gitHookWrite(repo, args.name, args.content),
+    (args: { name: string; content: string; expectedManaged?: boolean }) =>
+      api.gitHookWrite(repo, args.name, args.content, args.expectedManaged),
     {
       // Local hook write — never park it offline.
       networkMode: "always",
@@ -50,8 +50,13 @@ export function useSetHookEnabled(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
-    (args: { name: string; enabled: boolean }) =>
-      api.gitHookSetEnabled(repo, args.name, args.enabled),
+    (args: { name: string; enabled: boolean; expectedManaged?: boolean }) =>
+      api.gitHookSetEnabled(
+        repo,
+        args.name,
+        args.enabled,
+        args.expectedManaged,
+      ),
     {
       // Local hook write — never park it offline.
       networkMode: "always",

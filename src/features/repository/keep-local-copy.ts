@@ -90,7 +90,11 @@ export const KEEP_LOCAL_HOOK_NO_VERIFY = "git push --no-verify skips it.";
 export const KEEP_LOCAL_HOOK_ON_BODY =
   "A pre-push hook in this clone stops git push for branches marked Keep local. It covers this clone only, and git push --no-verify skips it.";
 
-type KeepLocalHookBlock = "hookManager" | "customHooksPath" | "foreignHook";
+type KeepLocalHookBlock =
+  | "hookManager"
+  | "customHooksPath"
+  | "foreignHook"
+  | "linkedHook";
 
 /** Why the hook can't be installed; `manager` is set for `hookManager` only. */
 export const KEEP_LOCAL_HOOK_BLOCKED: Record<
@@ -103,6 +107,17 @@ export const KEEP_LOCAL_HOOK_BLOCKED: Record<
     "This clone already has a pre-push hook, so GitDesktop won't replace it.",
   customHooksPath: () =>
     "This repository keeps its hooks in a custom folder, so GitDesktop won't add a pre-push hook there.",
+  linkedHook: () =>
+    "This clone's pre-push hook is a link to a file that carries GitDesktop's guard. Installing or removing the guard here leaves a linked hook alone, so change or delete the link yourself.",
+};
+
+/** The `hookManager` state's note on using the check under a manager, rendered
+ *  between its reason and the check's lead; a manager without an entry has none. */
+export const KEEP_LOCAL_HOOK_MANAGER_NOTE: Partial<
+  Record<"husky" | "pre-commit" | "lefthook", string>
+> = {
+  lefthook:
+    "With lefthook, the check sees the pushed refs only in a command that sets use_stdin: true.",
 };
 
 /** The can't-install state's lead-in to the check's code block. */
