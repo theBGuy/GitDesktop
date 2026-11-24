@@ -138,9 +138,10 @@ when he's ready.
 ## Or keep both names: move the clone to reftable
 
 The other way out is the command the message suggests.
-`git refs migrate --ref-format=reftable` moves the clone's branch names out
-of files and into reftable, a format that stores them in a table where case
-is part of the name:
+`git refs migrate --ref-format=reftable` moves the clone's branch names
+out of files and into reftable, a format that stores them in a table where
+case is part of the name. Run it on Git 2.51.1 or later, and read the limits
+after the example before you do:
 
 ```sh
 $ git refs migrate --ref-format=reftable
