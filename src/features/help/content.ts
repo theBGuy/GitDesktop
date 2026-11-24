@@ -177,20 +177,25 @@ what's inside.
   current branch; with \`none\` the submodule is left alone. It initializes the submodule
   and any nested submodules on the way, and **Update all** in the footer does the whole
   set.
-- **Update to latest** (on a row's ⋮, or **Update all to latest** in the footer's ⋮) moves
-  a submodule to the tip of the branch it tracks instead: the branch recorded in
-  \`.gitmodules\`, or the remote's default branch when none is recorded. Nested submodules
+- **Update to latest** (on a row's ⋮, or **Update all to latest** in the footer's ⋮)
+  updates a submodule from the tip of the branch it tracks instead: the branch recorded
+  in \`.gitmodules\`, or the remote's default branch when none is recorded. By default it
+  checks that tip out; with \`rebase\` your local commits are replayed on top of it, and
+  with \`merge\` it is merged into the submodule's current branch. Nested submodules
   follow to the commits the moved submodule records, not their own tips. That changes the
   commit your repo points at, so it arrives as a change to review and stage in **Changes**.
 - **Choose commit…** (on a row's ⋮) lists the history of a branch or tag inside the
   submodule; search the commit messages, or paste a commit id to reach any other commit.
   Arrow keys move through the commits, and {{key:enter}} on one, or **Check out and
   stage**, checks it out in the submodule and stages the new pointer together. Before you
-  apply, it says when the commit would overwrite local changes, leave commits behind,
-  isn't fetched yet, or isn't on a remote. Nothing reaches the network unless you press
-  **Fetch** or, on a shallow submodule, **Fetch full history**. *Choose submodule commit*
-  is a command palette entry that opens straight onto the picker when the repository has
-  one initialized submodule.
+  apply, it checks whether the commit would overwrite local changes or files in its way,
+  leave commits behind, isn't fetched yet, or isn't on a remote, and the checkout itself
+  never overwrites local changes or files in its way. **Fetch** reaches the network,
+  as does **Fetch full history** on a shallow submodule; in a partial clone, checking out
+  a commit can download its files, and looking up a pasted id can download the
+  repository's configured mailmap.
+  *Choose submodule commit* is a command palette entry that opens straight onto the
+  picker when the repository has one initialized submodule.
 - **Add submodule…** clones another repository into a folder of this one. Give it a URL;
   the folder defaults to the URL's last segment and the branch to the remote's default.
   *Add submodule* is a command palette entry of its own, and opens straight onto the form.

@@ -15,7 +15,12 @@ import { isWindows } from "@/lib/hotkeys/binding";
 import { isAppError } from "@/lib/tauri/invoke";
 import * as api from "../api";
 import { peekRepoIdentity } from "../repo-identity";
-import { keepPreviousDataForKeyAxes, repoKeys, useRepoIdentity } from "./core";
+import {
+  invalidateKeyHealingStraddles,
+  keepPreviousDataForKeyAxes,
+  repoKeys,
+  useRepoIdentity,
+} from "./core";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
 import { isLocalRepoQuery } from "./local-query-filter";
 import { prChecksRecheck } from "./pr-actions";
@@ -31,6 +36,7 @@ import {
   pushesBranch,
   recheckRunsAfterPush,
 } from "./push-writes";
+import { readStraddlesSettle, straddleOutcome } from "./write-settle";
 
 export {
   BRANCH_PUSH_ACTIVE_MESSAGE,
@@ -206,13 +212,56 @@ export function useUpdateFromUpstream(repo: string) {
   });
 }
 
+const submodulesKey = (repo: string) => ["repo", repo, "submodules"] as const;
+
+/** Whether a read of the submodule list is running now. */
+export function submodulesReadRunning(queryClient: QueryClient, repo: string) {
+  return (
+    queryClient.getQueryState(submodulesKey(repo))?.fetchStatus === "fetching"
+  );
+}
+
+/**
+ * Starts a list read, or joins one already running when `joinRunning`. A read
+ * running from before the caller's moment otherwise lands first and the read
+ * starts after it: a refetch joins a read with no rows instead of restarting it.
+ */
+export function rereadSubmodules(
+  queryClient: QueryClient,
+  repo: string,
+  joinRunning: boolean,
+) {
+  const queryKey = submodulesKey(repo);
+  const reread = () =>
+    void queryClient.refetchQueries(
+      { queryKey, exact: true },
+      { cancelRefetch: false },
+    );
+  const cache = queryClient.getQueryCache();
+  const running = cache.find({ queryKey, exact: true });
+  if (joinRunning || running?.state.fetchStatus !== "fetching") {
+    reread();
+    return;
+  }
+  const unsubscribe = cache.subscribe((event) => {
+    if (event.query !== running) return;
+    const outcome = straddleOutcome(event);
+    if (outcome === null) return;
+    unsubscribe();
+    // Never from inside the notification that reports the landing.
+    if (outcome === "landed") queueMicrotask(reread);
+  });
+}
+
 export function useSubmodules(repo: string) {
   return useQuery({
-    queryKey: ["repo", repo, "submodules"] as const,
+    queryKey: submodulesKey(repo),
     queryFn: () => api.gitSubmodules(repo),
     staleTime: 30_000,
-    // Re-read on every open: a submodule set up or repaired outside the app must
+    // Re-read on every mount: a submodule set up or repaired outside the app must
     // show, and Tauri never refetches on window focus. Cached rows paint meanwhile.
+    // The palette's resolver settles only on this mount re-read; the list also
+    // re-reads on each open edge, since a reopen mid exit-animation never remounts.
     refetchOnMount: "always",
     // A local read: react-query's default "online" mode would park it offline.
     networkMode: "always",
@@ -318,12 +367,52 @@ function submoduleSubtree(repo: string, path: string) {
   };
 }
 
+/**
+ * A submodule write's own settle: waits for the submodule's reads that straddle
+ * it ({@link readStraddlesSettle}) to land (its folder's and its picker's, keyed
+ * under the parent), so the invalidations after it re-read them instead of
+ * joining a pre-write read. No other parent read holds the write: those keep
+ * `localOnly`'s plain invalidation. A read that straddles the final
+ * invalidation (one whose observer left during the wait included) is healed
+ * after it lands, since that invalidation alone can't replace it.
+ */
+async function submoduleWriteSettled(
+  queryClient: QueryClient,
+  repo: string,
+  path: string,
+): Promise<void> {
+  const subRepo = submoduleSubtree(repo, path);
+  const cache = queryClient.getQueryCache();
+  const scoped = () => [
+    ...cache.findAll(subRepo),
+    ...cache.findAll({ queryKey: submodulePickKeys.all(repo, path) }),
+  ];
+  const waiting = new Set(scoped().filter(readStraddlesSettle));
+  if (waiting.size > 0)
+    await new Promise<void>((resolve) => {
+      const unsubscribe = cache.subscribe((event) => {
+        if (!waiting.has(event.query) || straddleOutcome(event) === null)
+          return;
+        waiting.delete(event.query);
+        if (waiting.size > 0) return;
+        unsubscribe();
+        resolve();
+      });
+    });
+  const straddling = new Set(scoped().filter(readStraddlesSettle));
+  for (const query of straddling)
+    void invalidateKeyHealingStraddles(queryClient, query.queryKey);
+  void queryClient.invalidateQueries({
+    ...subRepo,
+    predicate: (q) => !straddling.has(q) && subRepo.predicate(q),
+  });
+}
+
 /** Checks a commit out inside the submodule, then stages it. Keyed per repo and
  *  path so a pick holds only its own row's picker; callers await `mutateAsync`
  *  and read pending through {@link useSubmodulePickPending}. */
 export function useSetSubmoduleCommit(repo: string, path: string) {
   const queryClient = useQueryClient();
-  const subRepo = submoduleSubtree(repo, path);
   return useRepoMutation(
     repo,
     async (args: { sha: string; expectedIndexSha: string }) => {
@@ -335,7 +424,7 @@ export function useSetSubmoduleCommit(repo: string, path: string) {
           args.expectedIndexSha,
         );
       } finally {
-        void queryClient.invalidateQueries(subRepo);
+        await submoduleWriteSettled(queryClient, repo, path);
       }
     },
     {
@@ -347,21 +436,70 @@ export function useSetSubmoduleCommit(repo: string, path: string) {
   );
 }
 
+/** The fetch's mutation key: what the picker's fetch-pending reads match on. */
+const submoduleFetchKey = (repo: string, path: string) =>
+  ["submodule-fetch", repo, path] as const;
+
 /** Fetches inside the submodule. A network run: it parks offline, so its
- *  controls hold on `useOnline` instead. */
+ *  controls hold on `useOnline` instead. Callers await `mutateAsync` and read
+ *  pending through {@link useSubmoduleFetchPending}. */
 export function useFetchSubmodule(repo: string, path: string) {
   const queryClient = useQueryClient();
-  const subRepo = submoduleSubtree(repo, path);
   return useRepoMutation(
     repo,
     async (args: { unshallow: boolean }) => {
       try {
         return await api.gitSubmoduleFetch(repo, path, args.unshallow);
       } finally {
-        void queryClient.invalidateQueries(subRepo);
+        await submoduleWriteSettled(queryClient, repo, path);
       }
     },
-    { localOnly: true },
+    { localOnly: true, identity: submoduleFetchKey(repo, path) },
+  );
+}
+
+/** The running fetch for this row, from the mutation cache, so a remounted
+ *  picker still sees it: "full" when one completes history, else "fetch", or
+ *  null. Notifies a macrotask late; handlers ask {@link isSubmoduleFetchPending}. */
+export function useSubmoduleFetchPending(
+  repo: string,
+  path: string,
+): "fetch" | "full" | null {
+  const select = useCallback(
+    (cache: MutationCache) => {
+      const running = cache.findAll({
+        mutationKey: submoduleFetchKey(repo, path),
+        status: "pending",
+      });
+      if (running.length === 0) return null;
+      return running.some((m) => {
+        const v = m.state.variables;
+        return (
+          typeof v === "object" &&
+          v !== null &&
+          "unshallow" in v &&
+          v.unshallow === true
+        );
+      })
+        ? "full"
+        : "fetch";
+    },
+    [repo, path],
+  );
+  return useMutationCacheSnapshot(select, null);
+}
+
+/** Event-time twin of {@link useSubmoduleFetchPending}. */
+export function isSubmoduleFetchPending(
+  queryClient: QueryClient,
+  repo: string,
+  path: string,
+): boolean {
+  return (
+    queryClient.getMutationCache().findAll({
+      mutationKey: submoduleFetchKey(repo, path),
+      status: "pending",
+    }).length > 0
   );
 }
 

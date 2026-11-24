@@ -7,15 +7,16 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
+use crate::git::commit::short_oid;
 use crate::git::conflict::{
     conflict_rel_path, refuse_linked_path, unmerged_entries, UnmergedEntry, GITLINK_MODE,
     NOT_CONFLICTED_REFUSAL,
 };
 use crate::git::runner::{
     acquire_repo_lock, config_lock_busy, holder_label, is_config_lock_contention, run_git,
-    run_git_config_write, run_git_config_write_held, run_git_input, run_git_raw, run_git_raw_env,
-    run_git_raw_index_retry, run_git_raw_input, with_config_write_lock, GitOutput, DEFAULT_TIMEOUT,
-    LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    run_git_config_write, run_git_config_write_held, run_git_raw, run_git_raw_index_retry,
+    run_git_raw_input, with_config_write_lock, GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
+    NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{
     CommitSummary, Submodule, SubmoduleChanges, SubmoduleCheckout, SubmoduleCommit,
@@ -165,32 +166,32 @@ pub(crate) async fn list_submodules(repo_path: &str) -> AppResult<Vec<Submodule>
     // `git submodule status` prints "[ +-U]<sha> <path>[ (<describe>)]" per line.
     // The leading flag means: ' ' in sync, '-' not initialized, '+' the checked-
     // out commit differs from the one recorded, 'U' merge conflicts.
+    // Both reads walk the index in order, one line or record per gitlink path (a
+    // conflicted one once; measured, git 2.51.1), so they pair by position. The path is
+    // printed raw and may itself end in " (...)", so each line is read against its
+    // paired path ([`paired_status`]); any other pairing is a failed read (the index
+    // changed between the two reads), never a guess.
+    let gitlinks = gitlink_paths(repo_path).await?;
     let out = run_git(Some(repo_path), &["submodule", "status"], DEFAULT_TIMEOUT).await?;
     let entries = gitmodules_entries(repo_path).await?;
+    let status = out.stdout_lossy();
+    let lines: Vec<&str> = status.lines().filter(|line| !line.is_empty()).collect();
+    let changed = || {
+        AppError::InvalidArgument(
+            "Couldn't read the submodules: git's list didn't match the index.".into(),
+        )
+    };
+    if lines.len() != gitlinks.len() {
+        return Err(changed());
+    }
     let mut subs = Vec::new();
-    for line in out.stdout_lossy().lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let flag = line.as_bytes()[0];
-        let rest = &line[1..];
-        let mut parts = rest.splitn(2, ' ');
-        let sha = parts.next().unwrap_or("").to_string();
-        let remainder = parts.next().unwrap_or("");
-        let (path, describe) = match remainder.rfind(" (") {
-            Some(i) => (
-                remainder[..i].to_string(),
-                remainder[i + 2..].trim_end_matches(')').to_string(),
-            ),
-            None => (remainder.to_string(), String::new()),
-        };
-        if path.is_empty() {
-            continue;
-        }
+    for (line, path) in lines.into_iter().zip(gitlinks) {
+        let (flag, sha, describe) = paired_status(line, &path).ok_or_else(changed)?;
+        let (sha, describe) = (sha.to_string(), describe.to_string());
         let status = match flag {
-            b'-' => "uninitialized",
-            b'+' => "modified",
-            b'U' => "conflict",
+            '-' => "uninitialized",
+            '+' => "modified",
+            'U' => "conflict",
             _ => "ok",
         };
         let (name, url, branch) = match entries.get(&path) {
@@ -208,6 +209,51 @@ pub(crate) async fn list_submodules(repo_path: &str) -> AppResult<Vec<Submodule>
         });
     }
     Ok(subs)
+}
+
+/// The index's gitlink paths in index order, a conflicted one once. A path that isn't
+/// UTF-8 has no exact spelling here, and a caller would walk its lossy one: the read
+/// fails instead.
+async fn gitlink_paths(repo_path: &str) -> AppResult<Vec<String>> {
+    let listing = run_git_raw(Some(repo_path), &["ls-files", "-s", "-z"], DEFAULT_TIMEOUT)
+        .await?
+        .exit_verdict()?
+        .stdout;
+    let mut gitlinks: Vec<String> = Vec::new();
+    for record in listing.split(|byte| *byte == 0) {
+        if !record.starts_with(b"160000 ") {
+            continue;
+        }
+        let record = std::str::from_utf8(record).map_err(|_| {
+            AppError::InvalidArgument(
+                "Couldn't read the submodules: git listed a submodule path that isn't UTF-8."
+                    .into(),
+            )
+        })?;
+        gitlinks.extend(gitlink_records(record).map(|(path, _, _)| path.to_string()));
+    }
+    gitlinks.dedup();
+    Ok(gitlinks)
+}
+
+/// One `submodule status` line read against its paired index path: the flag, the sha
+/// and the describe. git prints a describe only on ' ' and '+' rows (builtin/
+/// submodule--helper.c `print_status`, v2.51.1), so there the rest is the path, or
+/// the path and " (<describe>)"; a '-' or 'U' row's rest is the path exactly. None is
+/// any other pairing, a flag git doesn't print included.
+fn paired_status<'a>(line: &'a str, path: &str) -> Option<(char, &'a str, &'a str)> {
+    let mut chars = line.chars();
+    let flag = chars.next()?;
+    let (sha, rest) = chars.as_str().split_once(' ')?;
+    let describe = match flag {
+        ' ' | '+' => match rest.strip_prefix(path)? {
+            "" => "",
+            after => after.strip_prefix(" (")?.strip_suffix(')')?,
+        },
+        '-' | 'U' if rest == path => "",
+        _ => return None,
+    };
+    Some((flag, sha, describe))
 }
 
 /// Lists the repo's submodules with their status. Empty for a repo without any.
@@ -279,33 +325,64 @@ pub(crate) async fn git_submodule_update_core(
     }
     update_registering_lost_init(&repo_path, spec.as_deref(), &args).await?;
 
+    #[cfg(test)]
+    if let Ok(settle) = UPDATE_SETTLE_HOOK.try_with(|hook| hook()) {
+        settle.await;
+    }
+
     // The settling legs register NESTED submodules in each child's own config, which
     // this repository's config-write mutex doesn't key and its repair doesn't cover.
+    // Recursing from inside each bumped child resolves its gitlinks against its NEW
+    // HEAD; the parent's own `--recursive` would re-walk the other siblings. Every leg
+    // runs pinned to the folder's own repository: from a folder emptied or re-pointed
+    // outside the app, git would answer for the parent and settle every sibling.
     match path.as_deref() {
-        // Recursing from inside the bumped child resolves its gitlinks against its
-        // NEW HEAD; the parent's own `--recursive` would re-walk the other siblings.
         Some(path) => {
-            let child = Path::new(&repo_path).join(path);
-            run_git(
-                Some(&child.to_string_lossy()),
-                &["submodule", "update", "--init", "--recursive"],
-                NETWORK_TIMEOUT,
-            )
-            .await?;
+            let worktree = Path::new(&repo_path).join(path);
+            let child =
+                ChildRepo::resolve(&repo_path, &worktree)
+                    .await
+                    .map_err(|(checkout, reason)| {
+                        AppError::InvalidArgument(format!(
+                            "Updated the submodule at {}, but not the submodules inside it: {}.",
+                            crate::git::ops::discard_shown(path),
+                            unusable_why(checkout, reason.as_deref())
+                        ))
+                    })?;
+            child
+                .run(
+                    &["submodule", "update", "--init", "--recursive"],
+                    NETWORK_TIMEOUT,
+                )
+                .await?
+                .exit_verdict()?;
         }
-        // `foreach` takes the whole trailing command as ONE argument and runs it in
-        // each bumped submodule's worktree.
+        // What `submodule foreach` walks: the parent's gitlinks in index order, folders
+        // that aren't checked out skipped, stopping at the first failure. Read from the
+        // index itself: `submodule status` dies on any path through a symlink (git 2.45.1+
+        // `validate_submodule_path`), which would abort the whole walk.
         None => {
-            run_git(
-                Some(&repo_path),
-                &[
-                    "submodule",
-                    "foreach",
-                    "git submodule update --init --recursive",
-                ],
-                NETWORK_TIMEOUT,
-            )
-            .await?;
+            for sub_path in gitlink_paths(&repo_path).await? {
+                let worktree = Path::new(&repo_path).join(&sub_path);
+                let child = match ChildRepo::resolve(&repo_path, &worktree).await {
+                    Ok(child) => child,
+                    Err((SubmoduleCheckout::Unreadable, reason)) => {
+                        return Err(AppError::InvalidArgument(format!(
+                            "Updated the submodules, but not the ones inside {}: {}.",
+                            crate::git::ops::discard_shown(&sub_path),
+                            unusable_why(SubmoduleCheckout::Unreadable, reason.as_deref())
+                        )))
+                    }
+                    Err(_) => continue,
+                };
+                child
+                    .run(
+                        &["submodule", "update", "--init", "--recursive"],
+                        NETWORK_TIMEOUT,
+                    )
+                    .await?
+                    .exit_verdict()?;
+            }
         }
     }
     Ok(())
@@ -550,20 +627,43 @@ pub(crate) async fn git_submodule_remove_core(
         // fatal (measured, git 2.51.1). A "conflict" row can't arrive here:
         // `refuse_mid_op_for` above fires first.
         let mut dirty = sub.status == "modified";
-        // Probe the submodule's OWN worktree only once it has one: an uninitialized
-        // gitlink is an empty directory, and git would walk up and answer with the
-        // PARENT repo's status instead (measured, git 2.51.1).
-        if !dirty && worktree.join(".git").exists() {
-            let dir = worktree.to_string_lossy().into_owned();
-            let out = run_git_raw(
-                Some(&dir),
-                &["status", "--porcelain", UNTRACKED_NORMAL],
-                DEFAULT_TIMEOUT,
-            )
-            .await?;
-            // A probe that fails refuses too: nothing has been mutated yet, and the
-            // user can still force.
-            dirty = out.code != 0 || !out.stdout_lossy().trim().is_empty();
+        // Probe the submodule's OWN worktree only once git takes it as one: elsewhere git
+        // would walk up and answer with the PARENT repo's status instead. A folder git
+        // can't read refuses, as a failed probe does.
+        // A folder git can't read is no evidence of local work, so no discard is
+        // offered on it: the refusal names why.
+        let (child, checkout, reason) = child_gate(&repo_path, &worktree).await;
+        if checkout == SubmoduleCheckout::Unreadable {
+            return Err(AppError::InvalidArgument(format!(
+                "Can't remove the submodule at {} \u{2014} {}. Nothing was removed.",
+                crate::git::ops::discard_shown(&path),
+                unusable_why(checkout, reason.as_deref())
+            )));
+        }
+        if let Some(child) = child.filter(|_| !dirty) {
+            let probed = child
+                .run(
+                    &["status", "--porcelain", UNTRACKED_NORMAL],
+                    DEFAULT_TIMEOUT,
+                )
+                .await;
+            // A probe that fails refuses with git's reason, never as dirty: it is no
+            // evidence of local work, so no discard is offered on it.
+            let why = match probed {
+                Ok(out) if out.code == 0 => {
+                    dirty = !out.stdout_lossy().trim().is_empty();
+                    None
+                }
+                Ok(out) => Some(unreadable_reason(&out.stderr, out.code)),
+                Err(e) => Some(nonempty_reason(e.to_string())),
+            };
+            if let Some(why) = why {
+                return Err(AppError::InvalidArgument(format!(
+                    "Can't remove the submodule at {} \u{2014} git couldn't read its status: \
+                     {why}. Nothing was removed.",
+                    crate::git::ops::discard_shown(&path)
+                )));
+            }
         }
         if dirty {
             return Ok(SubmoduleRemoveOutcome {
@@ -837,16 +937,13 @@ pub(crate) async fn git_submodule_changes_core(
         files_total: 0,
     };
 
-    // git inside a folder with no `.git` of its own walks up and answers for the
-    // PARENT (measured, git 2.51.1), so no git runs there unless one exists.
     let worktree = Path::new(repo_path).join(path);
-    (changes.checkout, changes.reason) =
-        checkout_from_probe(std::fs::symlink_metadata(&worktree), || {
-            worktree.join(".git").try_exists()
-        });
-    let dir = worktree.to_string_lossy().into_owned();
-    if changes.checkout == SubmoduleCheckout::Ok {
-        let read = run_git_raw(Some(&dir), &submodule_status_args(staged), DEFAULT_TIMEOUT).await;
+    let (child, checkout, reason) = child_gate(repo_path, &worktree).await;
+    (changes.checkout, changes.reason) = (checkout, reason);
+    if let Some(child) = &child {
+        let read = child
+            .run(&submodule_status_args(staged), DEFAULT_TIMEOUT)
+            .await;
         match read {
             Ok(out) if out.code == 0 => {
                 let status = crate::git::status::parse_status_v2(&out.stdout_lossy());
@@ -877,8 +974,10 @@ pub(crate) async fn git_submodule_changes_core(
     };
     if let (Some(from_sha), Some(to_sha)) = (&changes.from_sha, &changes.to_sha) {
         if from_sha != to_sha {
-            let walked = match changes.checkout {
-                SubmoduleCheckout::Ok => submodule_range(&dir, from_sha, to_sha).await,
+            let walked = match (&child, changes.checkout) {
+                (Some(child), SubmoduleCheckout::Ok) => {
+                    submodule_range(child, from_sha, to_sha).await
+                }
                 _ => None,
             };
             match walked {
@@ -893,8 +992,8 @@ pub(crate) async fn git_submodule_changes_core(
     Ok(changes)
 }
 
-/// The checkout state from an lstat of the gitlink path's final component (an
-/// intermediate junction is still traversed): git run through a link reads the
+/// The checkout state from an lstat of the gitlink path's final component (the
+/// resolver refuses a link on the way before it): git run through a link reads the
 /// link's target, a repository outside the parent. Only NotFound is missing; any
 /// other failure, the `.git` probe's included, is unreadable with its message.
 fn checkout_from_probe(
@@ -919,6 +1018,328 @@ fn checkout_from_probe(
         },
     }
 }
+
+use child_repo::ChildRepo;
+
+/// [`ChildRepo::resolve`] for the callers that report the checkout state: Some exactly
+/// when the state is `Ok`.
+async fn child_gate(
+    repo_path: &str,
+    worktree: &Path,
+) -> (Option<ChildRepo>, SubmoduleCheckout, Option<String>) {
+    match ChildRepo::resolve(repo_path, worktree).await {
+        Ok(child) => (Some(child), SubmoduleCheckout::Ok, None),
+        Err((checkout, reason)) => (None, checkout, reason),
+    }
+}
+
+/// A refusal's clause for a folder that didn't resolve to its own repository.
+fn unusable_why(checkout: SubmoduleCheckout, reason: Option<&str>) -> String {
+    match (checkout, reason) {
+        (SubmoduleCheckout::Unreadable, Some(reason)) => format!("git couldn't read it: {reason}"),
+        _ => "it isn't checked out here".to_string(),
+    }
+}
+
+/// The only home of child-side git: its fields are private to this module, so nothing
+/// else can build a [`ChildRepo`], and every spawn inside a submodule runs through its
+/// methods (`child_side_git_goes_through_child_repo` pins the rest of the file).
+mod child_repo {
+    use std::path::{Component, Path, PathBuf};
+    use std::time::Duration;
+
+    use super::{
+        checkout_from_probe, nonempty_reason, unreadable_reason, LOSSY, NOT_A_REPOSITORY,
+        NOT_UTF8_PATH, NO_LAZY_FETCH,
+    };
+    use crate::error::AppResult;
+    use crate::git::runner::{
+        run_git_raw, run_git_raw_env, run_git_raw_input_env, GitOutput, DEFAULT_TIMEOUT,
+    };
+    use crate::git::types::SubmoduleCheckout;
+
+    /// Why a folder isn't usable: its checkout state, and git's or the check's line.
+    pub(super) type Unusable = (SubmoduleCheckout, Option<String>);
+
+    /// The submodule folder's own repository: found by git's own discovery from the
+    /// folder (stopped at the folder's parent, so git's ownership and format checks
+    /// apply) and accepted only when it is not the parent's repository (another common
+    /// dir), git takes the folder as its work tree, and the repository names the folder
+    /// itself: its git dir is the folder's `.git` directory in place, or its own
+    /// `core.worktree` points back. A gitfile alone is the folder's claim, which any
+    /// folder can make about any repository. Every child-side git then runs pinned
+    /// (`--git-dir=<dir>/`, `--work-tree`) and never discovers. The trailing slash is
+    /// the guard: with a file at the pinned path git exits 128 instead of following it
+    /// as a gitfile (measured: git 2.51.1 on Windows; 2.39.5, 2.43.0 and 2.47.3 on
+    /// Linux). Resolved again after every lock wait, just before each checkout, and
+    /// by every report that says where the folder's checkout is. Out of reach by
+    /// design: a link or junction put in place of the pinned directory, or its contents
+    /// replaced in place, between a resolve and a spawn (git reads what is there); and an
+    /// inherited `GIT_DIR` / `GIT_WORK_TREE` in the app's own environment, which the
+    /// app-wide runner policy owns, not this module.
+    #[derive(Debug)]
+    pub(super) struct ChildRepo {
+        folder: String,
+        git_dir: String,
+        git_dir_arg: String,
+        work_tree_arg: String,
+    }
+
+    impl ChildRepo {
+        /// [`checkout_from_probe`], then the one discovering read, the only source of a
+        /// pin: a pinned call skips git's ownership check (measured, git 2.51.1). git's
+        /// discovery miss is `NotInitialized`; any other failure, and an answer naming
+        /// the parent's repository, another work tree, or a repository that doesn't name
+        /// the folder (V3), is `Unreadable` with its line. V3 costs a gitfile layout one
+        /// more spawn; the own `.git` directory needs none. A link or junction at any
+        /// component between the parent's root and the folder is `Replaced`, as one at
+        /// the folder is: either way the path doesn't reach a folder of the parent, and
+        /// git run through it reads the link's target. A path git prints that holds the
+        /// lossy decode's marker is `Unreadable`, never compared.
+        pub(super) async fn resolve(
+            repo_path: &str,
+            worktree: &Path,
+        ) -> Result<ChildRepo, Unusable> {
+            match linked_on_the_way(repo_path, worktree) {
+                Ok(false) => {}
+                Ok(true) => return Err((SubmoduleCheckout::Replaced, None)),
+                Err(e) => {
+                    return Err(unreadable(format!(
+                        "couldn't read the submodule's path: {e}"
+                    )))
+                }
+            }
+            let probed = checkout_from_probe(std::fs::symlink_metadata(worktree), || {
+                worktree.join(".git").try_exists()
+            });
+            if probed.0 != SubmoduleCheckout::Ok {
+                return Err(probed);
+            }
+            let folder = worktree.to_string_lossy().into_owned();
+            let ceiling = worktree
+                .parent()
+                .map(|parent| parent.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let env = [
+                ("GIT_CEILING_DIRECTORIES", ceiling.as_str()),
+                NO_LAZY_FETCH[0],
+            ];
+            let args = [
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-dir",
+                "--git-common-dir",
+                "--show-toplevel",
+            ];
+            let out = match run_git_raw_env(Some(&folder), &args, &env, DEFAULT_TIMEOUT).await {
+                Ok(out) if out.code == 0 => out,
+                Ok(out) if out.stderr.trim() == NOT_A_REPOSITORY => {
+                    return Err((SubmoduleCheckout::NotInitialized, None))
+                }
+                Ok(out) => return Err(unreadable(unreadable_reason(&out.stderr, out.code))),
+                Err(e) => return Err(unreadable(nonempty_reason(e.to_string()))),
+            };
+            let printed = out.stdout_lossy();
+            let lines: Vec<&str> = printed.lines().collect();
+            let &[git_dir, common_dir, toplevel] = lines.as_slice() else {
+                return Err(unreadable(format!(
+                    "git's answer for the folder couldn't be read: {}",
+                    printed.trim()
+                )));
+            };
+            let parent_args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+            let parent = match run_git_raw(Some(repo_path), &parent_args, DEFAULT_TIMEOUT).await {
+                Ok(out) if out.code == 0 => out.stdout_lossy(),
+                Ok(out) => return Err(unreadable(unreadable_reason(&out.stderr, out.code))),
+                Err(e) => return Err(unreadable(nonempty_reason(e.to_string()))),
+            };
+            let parent = parent.trim_end_matches(['\r', '\n']);
+            if [git_dir, common_dir, toplevel, parent]
+                .iter()
+                .any(|path| path.contains(LOSSY))
+            {
+                return Err(unreadable(NOT_UTF8_PATH.into()));
+            }
+            // The COMMON dir: the one compare that also catches the parent's linked
+            // worktree admin dirs, and both again when the parent is itself linked.
+            if same_dir(common_dir, parent)? {
+                return Err(unreadable(
+                    "its .git names this repository's own git directory".into(),
+                ));
+            }
+            if !same_dir(toplevel, &folder)? {
+                return Err(unreadable(format!(
+                    "its .git names a repository checked out at {toplevel}"
+                )));
+            }
+            let git_dir_arg = format!("--git-dir={}/", git_dir.trim_end_matches('/'));
+            // V3, asked without the folder's `.git` entry: from the parent's root, pinned
+            // to the git dir alone, git answers with the folder only when `core.worktree`
+            // names it; with none it answers with the cwd.
+            if !own_git_dir(git_dir, &folder)? {
+                let args = [
+                    git_dir_arg.as_str(),
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--show-toplevel",
+                ];
+                let named = match run_git_raw(Some(repo_path), &args, DEFAULT_TIMEOUT).await {
+                    Ok(out) if out.code == 0 => out.stdout_lossy(),
+                    Ok(out) => return Err(unreadable(unreadable_reason(&out.stderr, out.code))),
+                    Err(e) => return Err(unreadable(nonempty_reason(e.to_string()))),
+                };
+                let named = named.trim_end_matches(['\r', '\n']);
+                if named.contains(LOSSY) {
+                    return Err(unreadable(NOT_UTF8_PATH.into()));
+                }
+                if !same_dir(named, &folder)? {
+                    return Err(unreadable(NOT_ITS_WORK_TREE.into()));
+                }
+            }
+            Ok(ChildRepo {
+                git_dir_arg,
+                work_tree_arg: format!("--work-tree={folder}"),
+                git_dir: git_dir.to_string(),
+                folder,
+            })
+        }
+
+        /// The folder as the parent joined it: a lock key, a credential lookup's cwd,
+        /// an on-disk walk's root. Never a git cwd outside this module.
+        pub(super) fn folder(&self) -> &str {
+            &self.folder
+        }
+
+        /// The resolved git dir, absolute.
+        pub(super) fn git_dir(&self) -> &str {
+            &self.git_dir
+        }
+
+        /// Whether a later resolve found the same repository.
+        pub(super) fn same_repo(&self, other: &ChildRepo) -> bool {
+            self.git_dir == other.git_dir
+        }
+
+        /// `args` behind the pin, one argv element each, so no path can read as an
+        /// option. The git dir ends in a separator, so a file put where that directory
+        /// was is refused (exit 128) rather than followed as a gitfile.
+        fn argv<'a>(&'a self, args: &[&'a str]) -> Vec<&'a str> {
+            let mut argv = vec![self.git_dir_arg.as_str(), self.work_tree_arg.as_str()];
+            argv.extend_from_slice(args);
+            argv
+        }
+
+        /// A read under [`NO_LAZY_FETCH`].
+        pub(super) async fn read(&self, args: &[&str]) -> AppResult<GitOutput> {
+            self.run_env(args, None, &NO_LAZY_FETCH, DEFAULT_TIMEOUT)
+                .await
+        }
+
+        /// A raw run with no env of its own: the checkout, and the reads that never
+        /// took [`NO_LAZY_FETCH`]. The folder stays the cwd, which `submodule status`
+        /// and `submodule update` need even when pinned (measured).
+        pub(super) async fn run(&self, args: &[&str], timeout: Duration) -> AppResult<GitOutput> {
+            run_git_raw(Some(&self.folder), &self.argv(args), timeout).await
+        }
+
+        /// A raw run with stdin and env.
+        pub(super) async fn run_env(
+            &self,
+            args: &[&str],
+            input: Option<&str>,
+            env: &[(&str, &str)],
+            timeout: Duration,
+        ) -> AppResult<GitOutput> {
+            run_git_raw_input_env(Some(&self.folder), &self.argv(args), input, env, timeout).await
+        }
+
+        /// The fetch: `run_git_with_creds_once` puts its credential pairs ahead of this
+        /// argv and hands the same argv to its ambient retry, so both spawns carry the pin.
+        pub(super) async fn fetch(
+            &self,
+            cred: &[String],
+            args: &[&str],
+            timeout: Duration,
+        ) -> AppResult<GitOutput> {
+            crate::git::remote::run_git_with_creds_once(
+                &self.folder,
+                cred,
+                &self.argv(args),
+                timeout,
+            )
+            .await
+        }
+    }
+
+    /// V3's refusal clause.
+    const NOT_ITS_WORK_TREE: &str =
+        "its .git names a repository that doesn't name this folder as its work tree (core.worktree)";
+
+    fn unreadable(reason: String) -> Unusable {
+        (SubmoduleCheckout::Unreadable, Some(reason))
+    }
+
+    /// Both paths canonicalized, which folds Windows 8.3 names, case and junctions; a
+    /// path that can't be canonicalized refuses, never reads as "different".
+    fn same_dir(a: &str, b: &str) -> Result<bool, Unusable> {
+        Ok(canonical(a)? == canonical(b)?)
+    }
+
+    /// V3's arm (a): the git dir, canonicalized, is a `.git` directly inside the folder.
+    /// Never `canonicalize(folder/.git)`, which follows a link put there. The name is
+    /// compared exactly: canonicalize returns the on-disk spelling, and git creates
+    /// `.git`; any other spelling takes arm (b).
+    pub(super) fn own_git_dir(git_dir: &str, folder: &str) -> Result<bool, Unusable> {
+        let dir = canonical(git_dir)?;
+        let named = dir.file_name().is_some_and(|name| name == ".git");
+        Ok(named && dir.parent() == Some(canonical(folder)?.as_path()))
+    }
+
+    /// Whether a component between the parent's root and the folder, the folder itself
+    /// excluded (the probe's lstat answers for it), is a link or junction. A folder
+    /// that isn't a plain path below the root is an error, never "no link".
+    fn linked_on_the_way(repo_path: &str, worktree: &Path) -> std::io::Result<bool> {
+        let not_plain = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "it isn't a plain path inside the repository",
+            )
+        };
+        let rel = worktree.strip_prefix(repo_path).map_err(|_| not_plain())?;
+        let mut segments = Vec::new();
+        for component in rel.components() {
+            match component {
+                Component::Normal(segment) => {
+                    segments.push(segment.to_str().ok_or_else(not_plain)?)
+                }
+                _ => return Err(not_plain()),
+            }
+        }
+        crate::git::ops::linked_component(repo_path, &segments.join("/"), false)
+    }
+
+    fn canonical(path: &str) -> Result<PathBuf, Unusable> {
+        std::fs::canonicalize(path).map_err(|e| unreadable(format!("couldn't read {path}: {e}")))
+    }
+}
+
+/// git's discovery miss under the runner's LC_ALL=C (git 2.51.1). A `.git` file naming
+/// a missing directory prints its own line instead, which stays `Unreadable`.
+const NOT_A_REPOSITORY: &str =
+    "fatal: not a git repository (or any of the parent directories): .git";
+
+/// The lossy decode's replacement character. Output git printed that holds it has no
+/// exact spelling here, so it is never used as a path, argument, key or shown name; a
+/// genuine U+FFFD in a name degrades the same way, which is safe.
+const LOSSY: char = '\u{FFFD}';
+
+/// The resolver's refusal for a printed path holding [`LOSSY`].
+const NOT_UTF8_PATH: &str = "git printed a path that isn't UTF-8";
+
+/// A child-side read never fetches: a full id in a partial clone otherwise fetches from
+/// the promisor inside the read. Honoured from git 2.45.0 and the 2.39.4+ security
+/// releases, as in blob_sizes.rs. Never on the checkout or the fetch.
+const NO_LAZY_FETCH: [(&str, &str); 1] = [("GIT_NO_LAZY_FETCH", "1")];
 
 /// The inner status read. The staged side reads only HEAD and the branch, so it
 /// skips the untracked walk; either explicit mode overrides a
@@ -947,13 +1368,35 @@ pub(crate) async fn index_gitlink(
     )
     .await?
     .exit_verdict()?;
+    Ok(
+        gitlink_records(&out.stdout_lossy()).find_map(|(rec_path, sha, stage)| {
+            (rec_path == path && stage == "0").then(|| sha.to_string())
+        }),
+    )
+}
+
+/// Whether the index records a gitlink at exactly `path` at ANY stage: a conflicted
+/// submodule has stages 1-3 and no stage 0. A failed read is an Err.
+async fn gitlink_recorded(repo_path: &str, path: &str, spec: &str) -> AppResult<bool> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &["ls-files", "-s", "-z", "--", spec],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .exit_verdict()?;
+    Ok(gitlink_records(&out.stdout_lossy()).any(|(rec_path, _, _)| rec_path == path))
+}
+
+/// The gitlinks of an `ls-files -s -z` listing, as `(path, sha, stage)`.
+fn gitlink_records(listing: &str) -> impl Iterator<Item = (&str, &str, &str)> {
     // `<mode> <sha> <stage>\t<path>`
-    Ok(out.stdout_lossy().split('\0').find_map(|record| {
-        let (meta, rec_path) = record.split_once('\t')?;
+    listing.split('\0').filter_map(|record| {
+        let (meta, path) = record.split_once('\t')?;
         let mut meta = meta.split(' ');
         let (mode, sha, stage) = (meta.next()?, meta.next()?, meta.next()?);
-        (rec_path == path && mode == "160000" && stage == "0").then(|| sha.to_string())
-    }))
+        (mode == "160000").then_some((path, sha, stage))
+    })
 }
 
 /// HEAD's gitlink at exactly `path`. None for a HEAD tree without one, or when the
@@ -987,18 +1430,22 @@ struct SubmoduleRange {
 
 /// Walks `from_sha...to_sha` inside the submodule; None when any read fails (a sha
 /// its object store lacks exits 128), so a defaulted zero never reads as measured.
-async fn submodule_range(dir: &str, from_sha: &str, to_sha: &str) -> Option<SubmoduleRange> {
+async fn submodule_range(
+    child: &ChildRepo,
+    from_sha: &str,
+    to_sha: &str,
+) -> Option<SubmoduleRange> {
     if !is_full_oid(from_sha) || !is_full_oid(to_sha) {
         return None;
     }
     let range = format!("{from_sha}...{to_sha}");
-    let out = run_git_raw(
-        Some(dir),
-        &["rev-list", "--left-right", "--count", &range],
-        DEFAULT_TIMEOUT,
-    )
-    .await
-    .ok()?;
+    let out = child
+        .run(
+            &["rev-list", "--left-right", "--count", &range],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .ok()?;
     if out.code != 0 {
         return None;
     }
@@ -1009,12 +1456,12 @@ async fn submodule_range(dir: &str, from_sha: &str, to_sha: &str) -> Option<Subm
     let ahead_range = format!("{from_sha}..{to_sha}");
     let behind_range = format!("{to_sha}..{from_sha}");
     let ahead = if ahead_count > 0 {
-        submodule_log(dir, &ahead_range).await?
+        submodule_log(child, &ahead_range).await?
     } else {
         Vec::new()
     };
     let behind = if behind_count > 0 {
-        submodule_log(dir, &behind_range).await?
+        submodule_log(child, &behind_range).await?
     } else {
         Vec::new()
     };
@@ -1025,22 +1472,22 @@ async fn submodule_range(dir: &str, from_sha: &str, to_sha: &str) -> Option<Subm
 }
 
 /// The newest commits of a validated two-dot range, sha and subject each.
-async fn submodule_log(dir: &str, range: &str) -> Option<Vec<SubmoduleCommit>> {
+async fn submodule_log(child: &ChildRepo, range: &str) -> Option<Vec<SubmoduleCommit>> {
     let max = format!("--max-count={SUBMODULE_COMMITS_CAP}");
-    let out = run_git_raw(
-        Some(dir),
-        &[
-            "log",
-            "--no-color",
-            "--no-show-signature",
-            "--format=%H%x1f%s",
-            &max,
-            range,
-        ],
-        DEFAULT_TIMEOUT,
-    )
-    .await
-    .ok()?;
+    let out = child
+        .run(
+            &[
+                "log",
+                "--no-color",
+                "--no-show-signature",
+                "--format=%H%x1f%s",
+                &max,
+                range,
+            ],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .ok()?;
     if out.code != 0 {
         return None;
     }
@@ -1110,11 +1557,8 @@ pub(crate) async fn git_submodule_commits_core(
         return Err(AppError::InvalidArgument("invalid commit search".into()));
     }
 
-    // Probe before running git: without its own `.git`, this folder answers for the parent repo.
     let worktree = Path::new(repo_path).join(path);
-    let (checkout, reason) = checkout_from_probe(std::fs::symlink_metadata(&worktree), || {
-        worktree.join(".git").try_exists()
-    });
+    let (child, checkout, reason) = child_gate(repo_path, &worktree).await;
     let mut page = SubmoduleCommitPage {
         checkout,
         reason,
@@ -1122,11 +1566,9 @@ pub(crate) async fn git_submodule_commits_core(
         has_more: false,
         shallow: None,
     };
-    if checkout != SubmoduleCheckout::Ok {
+    let Some(child) = child else {
         return Ok(page);
-    }
-
-    let dir = worktree.to_string_lossy().into_owned();
+    };
     let limit = limit.clamp(1, SUBMODULE_PAGE_CAP);
     let max = format!("--max-count={}", limit + 1);
     let skip = format!("--skip={skip}");
@@ -1142,15 +1584,13 @@ pub(crate) async fn git_submodule_commits_core(
         args.extend(["-i", "-F", "--grep", q]);
     }
     args.extend(["--end-of-options", rev, "--"]);
-    let out = run_git_raw(Some(&dir), &args, DEFAULT_TIMEOUT)
-        .await?
-        .exit_verdict()?;
+    let out = child.read(&args).await?.exit_verdict()?;
     let mut rows = crate::git::history::parse_commit_log(&out.stdout_lossy());
     page.has_more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
     let shas = rows.iter().map(|row| row.hash.clone()).collect::<Vec<_>>();
-    page.shallow = submodule_is_shallow(&dir).await;
-    let reach = remote_reach(&dir, &shas, page.shallow).await;
+    page.shallow = submodule_is_shallow(&child).await;
+    let reach = remote_reach(&child, &shas, page.shallow).await;
     page.commits = rows
         .into_iter()
         .zip(reach)
@@ -1188,16 +1628,13 @@ fn validate_submodule_rev(rev: &str) -> AppResult<()> {
     }
 }
 
-async fn submodule_is_shallow(dir: &str) -> Option<bool> {
-    let out = run_git_raw(
-        Some(dir),
-        &["rev-parse", "--is-shallow-repository"],
-        DEFAULT_TIMEOUT,
-    )
-    .await
-    .ok()?
-    .exit_verdict()
-    .ok()?;
+async fn submodule_is_shallow(child: &ChildRepo) -> Option<bool> {
+    let out = child
+        .read(&["rev-parse", "--is-shallow-repository"])
+        .await
+        .ok()?
+        .exit_verdict()
+        .ok()?;
     out.stdout_lossy().trim().parse().ok()
 }
 
@@ -1206,7 +1643,13 @@ async fn submodule_is_shallow(dir: &str) -> Option<bool> {
 /// A ref containing garbage or naming a missing object fails the walk: every verdict is unknown.
 /// Shallow history or a warning makes printed commits inconclusive.
 /// Once the walk exceeds the cap, an omitted commit may still be unreached.
-async fn remote_reach(dir: &str, shas: &[String], shallow: Option<bool>) -> Vec<Option<bool>> {
+/// A printed commit is asked again of [`reached_from`]: under committer-date skew the
+/// walk prints reachable ones.
+async fn remote_reach(
+    child: &ChildRepo,
+    shas: &[String],
+    shallow: Option<bool>,
+) -> Vec<Option<bool>> {
     let max = format!("--max-count={}", SUBMODULE_UNREACHED_CAP + 1);
     let mut args = vec!["rev-list", &max];
     args.extend(
@@ -1218,14 +1661,15 @@ async fn remote_reach(dir: &str, shas: &[String], shallow: Option<bool>) -> Vec<
         return vec![None; shas.len()];
     }
     args.extend(["--not", "--remotes", "--tags", "--"]);
-    let Ok(out) = run_git_raw(Some(dir), &args, DEFAULT_TIMEOUT).await else {
+    let Ok(out) = child.read(&args).await else {
         return vec![None; shas.len()];
     };
     let stdout = out.stdout_lossy();
     let printed: std::collections::HashSet<_> = stdout.lines().collect();
     let capped = stdout.lines().count() > SUBMODULE_UNREACHED_CAP;
     let clean = out.stderr.trim().is_empty() && shallow == Some(false);
-    shas.iter()
+    let mut verdicts: Vec<Option<bool>> = shas
+        .iter()
         .map(|sha| {
             if is_full_oid(sha) {
                 reach_verdict(out.code == 0, clean, capped, printed.contains(sha.as_str()))
@@ -1233,7 +1677,82 @@ async fn remote_reach(dir: &str, shas: &[String], shallow: Option<bool>) -> Vec<
                 None
             }
         })
-        .collect()
+        .collect();
+    // One `--contains` read (any of them) over every printed sha: an empty answer proves
+    // them all unreached, so each is asked again only when it names a ref, which takes
+    // committer-date skew. A failed read leaves them unknown.
+    let contains: Vec<String> = shas
+        .iter()
+        .zip(&verdicts)
+        .filter(|(_, verdict)| **verdict == Some(false))
+        .map(|(sha, _)| format!("--contains={sha}"))
+        .collect();
+    if contains.is_empty() {
+        return verdicts;
+    }
+    const REFS: [&str; 2] = ["refs/remotes", "refs/tags"];
+    let mut args = vec!["for-each-ref", "--count=1", "--format=%(refname)"];
+    args.extend(contains.iter().map(String::as_str));
+    args.extend(REFS);
+    note_recheck();
+    let named = read_answer(child.read(&args).await).map(|listed| !listed.trim().is_empty());
+    for (sha, verdict) in shas.iter().zip(verdicts.iter_mut()) {
+        if *verdict == Some(false) {
+            *verdict = match &named {
+                Ok(false) => Some(false),
+                Ok(true) => {
+                    note_recheck();
+                    reached_from(child, sha, &[], &REFS).await.ok()
+                }
+                Err(_) => None,
+            };
+        }
+    }
+    verdicts
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Counts [`remote_reach`]'s `--contains` reads, so a test can pin the batch.
+    static RECHECKS: std::cell::Cell<usize>;
+}
+
+fn note_recheck() {
+    #[cfg(test)]
+    let _ = RECHECKS.try_with(|reads| reads.set(reads.get() + 1));
+}
+
+/// Whether `commit` is in the history of a `tips` commit or of a ref under `refs`, as
+/// `merge-base --is-ancestor` and `for-each-ref --contains` answer: both follow every
+/// parent, where a `rev-list --not` walk gives up early under committer-date skew and
+/// prints reachable commits (measured, git 2.51.1). Err carries the failed read's line.
+async fn reached_from(
+    child: &ChildRepo,
+    commit: &str,
+    tips: &[&str],
+    refs: &[&str],
+) -> Result<bool, String> {
+    for tip in tips {
+        let out = child
+            .read(&["merge-base", "--is-ancestor", commit, tip])
+            .await
+            .map_err(|e| nonempty_reason(e.to_string()))?;
+        match out.code {
+            0 => return Ok(true),
+            1 => {}
+            code => return Err(unreadable_reason(&out.stderr, code)),
+        }
+    }
+    let contains = format!("--contains={commit}");
+    let mut args = vec![
+        "for-each-ref",
+        "--count=1",
+        "--format=%(refname)",
+        &contains,
+    ];
+    args.extend_from_slice(refs);
+    let listed = read_answer(child.read(&args).await)?;
+    Ok(!listed.trim().is_empty())
 }
 
 fn reach_verdict(run_ok: bool, clean: bool, capped: bool, printed: bool) -> Option<bool> {
@@ -1442,22 +1961,22 @@ fn live_stages(entries: &[UnmergedEntry]) -> SubmoduleConflictStages {
     }
 }
 
-/// The submodule's folder and its checkout state. No git runs inside unless the
-/// probe found a `.git` of its own: git in a folder without one answers for the
-/// PARENT (measured, git 2.51.1). A failed status read is `Unreadable`, never clean.
-async fn submodule_checkout_state(repo_path: &str, path: &str) -> (String, SubmoduleCheckoutState) {
+/// The submodule's repository and its checkout state. No git runs inside unless
+/// [`ChildRepo::resolve`] accepted the folder. A failed status read is `Unreadable`,
+/// never clean.
+async fn submodule_checkout_state(
+    repo_path: &str,
+    path: &str,
+) -> (Option<ChildRepo>, SubmoduleCheckoutState) {
     let worktree = Path::new(repo_path).join(path);
-    let (checkout, _) = checkout_from_probe(std::fs::symlink_metadata(&worktree), || {
-        worktree.join(".git").try_exists()
-    });
-    let dir = worktree.to_string_lossy().into_owned();
+    let (child, checkout, _) = child_gate(repo_path, &worktree).await;
     let mut state = SubmoduleCheckoutState {
         checkout,
         head: None,
         detached: false,
         dirty: false,
     };
-    if checkout == SubmoduleCheckout::Ok {
+    if let Some(child) = &child {
         let args = [
             "status",
             "--porcelain=v2",
@@ -1465,7 +1984,7 @@ async fn submodule_checkout_state(repo_path: &str, path: &str) -> (String, Submo
             UNTRACKED_NORMAL,
             "-z",
         ];
-        match run_git_raw(Some(&dir), &args, DEFAULT_TIMEOUT).await {
+        match child.read(&args).await {
             Ok(out) if out.code == 0 => {
                 let status = crate::git::status::parse_status_v2(&out.stdout_lossy());
                 state.head = status.branch.oid;
@@ -1475,41 +1994,48 @@ async fn submodule_checkout_state(repo_path: &str, path: &str) -> (String, Submo
             _ => state.checkout = SubmoduleCheckout::Unreadable,
         }
     }
-    (dir, state)
+    (child, state)
 }
 
 /// Whether the submodule's object store has `sha` as a commit. Only a run that
 /// answered decides: a spawn error or timeout is an Err, never "absent".
-async fn commit_present(dir: &str, sha: &str) -> AppResult<bool> {
+async fn commit_present(child: &ChildRepo, sha: &str) -> AppResult<bool> {
     let object = format!("{sha}^{{commit}}");
-    let out = run_git_raw(Some(dir), &["cat-file", "-e", &object], DEFAULT_TIMEOUT).await?;
+    let out = child.read(&["cat-file", "-e", &object]).await?;
     Ok(out.code == 0)
 }
 
 /// Whether `sha` may be looked up inside an initialized submodule at all.
-async fn side_present(dir: &str, state: &SubmoduleCheckoutState, sha: &str) -> AppResult<bool> {
-    if state.checkout != SubmoduleCheckout::Ok || !is_full_oid(sha) {
-        return Ok(false);
+async fn side_present(
+    child: Option<&ChildRepo>,
+    state: &SubmoduleCheckoutState,
+    sha: &str,
+) -> AppResult<bool> {
+    match child {
+        Some(child) if state.checkout == SubmoduleCheckout::Ok && is_full_oid(sha) => {
+            commit_present(child, sha).await
+        }
+        _ => Ok(false),
     }
-    commit_present(dir, sha).await
 }
 
 /// A present commit's subject and committer date; a failed read is an Err, never
 /// a commit reported as missing.
-async fn conflict_commit(dir: &str, sha: &str) -> AppResult<SubmoduleConflictCommit> {
-    let out = run_git(
-        Some(dir),
-        &[
-            "log",
-            "--no-walk",
-            "--no-color",
-            "--no-show-signature",
-            "--format=%s%x1f%cI",
-            sha,
-        ],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
+async fn conflict_commit(child: &ChildRepo, sha: &str) -> AppResult<SubmoduleConflictCommit> {
+    let out = child
+        .run(
+            &[
+                "log",
+                "--no-walk",
+                "--no-color",
+                "--no-show-signature",
+                "--format=%s%x1f%cI",
+                sha,
+            ],
+            DEFAULT_TIMEOUT,
+        )
+        .await?
+        .exit_verdict()?;
     let line = out.stdout_lossy();
     let (subject, committed_at) = line
         .trim_end_matches(['\r', '\n'])
@@ -1524,14 +2050,18 @@ async fn conflict_commit(dir: &str, sha: &str) -> AppResult<SubmoduleConflictCom
 /// `ours...theirs` counted inside the submodule; any failure reads `Unknown`. A
 /// shallow submodule can read `Diverged` where full history would read contained,
 /// never the reverse.
-async fn conflict_relation(dir: &str, ours: &str, theirs: &str) -> SubmoduleConflictRelation {
+async fn conflict_relation(
+    child: &ChildRepo,
+    ours: &str,
+    theirs: &str,
+) -> SubmoduleConflictRelation {
     let range = format!("{ours}...{theirs}");
-    let counted = run_git_raw(
-        Some(dir),
-        &["rev-list", "--left-right", "--count", &range],
-        DEFAULT_TIMEOUT,
-    )
-    .await;
+    let counted = child
+        .run(
+            &["rev-list", "--left-right", "--count", &range],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
     let Ok(out) = counted else {
         return SubmoduleConflictRelation::Unknown;
     };
@@ -1580,7 +2110,7 @@ pub(crate) async fn git_submodule_conflict_core(
     if !entries.iter().any(|entry| entry.mode == GITLINK_MODE) {
         return Err(AppError::InvalidArgument(NOT_SUBMODULE_CONFLICT.into()));
     }
-    let (dir, state) = submodule_checkout_state(repo_path, &path).await;
+    let (child, state) = submodule_checkout_state(repo_path, &path).await;
     let recorded: Vec<&str> = entries.iter().map(|entry| entry.sha.as_str()).collect();
     let mut sides = [None, None];
     for (slot, stage) in sides.iter_mut().zip([2u8, 3]) {
@@ -1596,11 +2126,10 @@ pub(crate) async fn git_submodule_conflict_core(
             });
             continue;
         }
-        let present = side_present(&dir, &state, &entry.sha).await?;
-        let commit = if present {
-            Some(conflict_commit(&dir, &entry.sha).await?)
-        } else {
-            None
+        let present = side_present(child.as_ref(), &state, &entry.sha).await?;
+        let commit = match child.as_ref().filter(|_| present) {
+            Some(child) => Some(conflict_commit(child, &entry.sha).await?),
+            None => None,
         };
         *slot = Some(SubmoduleConflictSide {
             sha: entry.sha.clone(),
@@ -1610,9 +2139,9 @@ pub(crate) async fn git_submodule_conflict_core(
         });
     }
     let [ours, theirs] = sides;
-    let relation = match (&ours, &theirs) {
-        (Some(o), Some(t)) if o.commit.is_some() && t.commit.is_some() => {
-            conflict_relation(&dir, &o.sha, &t.sha).await
+    let relation = match (&ours, &theirs, &child) {
+        (Some(o), Some(t), Some(child)) if o.commit.is_some() && t.commit.is_some() => {
+            conflict_relation(child, &o.sha, &t.sha).await
         }
         _ => SubmoduleConflictRelation::Unknown,
     };
@@ -1733,14 +2262,13 @@ async fn accept_submodule_side_within(
 
     // A submodule opened as its own repository takes its own working-tree domain:
     // hold it too, parent then child (no path takes them the other way), so a
-    // switch there can't land between the plan and the checkout. Only a folder
-    // with its own `.git` has one; git resolves any other to the parent's checkout.
+    // switch there can't land between the plan and the checkout. Only a folder git
+    // takes as its own repository has one; git resolves any other to the parent's.
     let worktree = Path::new(repo_path).join(&path);
-    let has_git = worktree.join(".git").try_exists().unwrap_or(false);
-    let submodule_domain = if has_git {
-        Some(state.working_tree_lock(&worktree.to_string_lossy()).await)
-    } else {
-        None
+    let (decided, _, _) = child_gate(repo_path, &worktree).await;
+    let submodule_domain = match &decided {
+        Some(held) => Some(state.working_tree_lock(held.folder()).await),
+        None => None,
     }
     .filter(|child| !Arc::ptr_eq(&child.lock(), &domain.lock()));
     let _submodule_guard = match &submodule_domain {
@@ -1752,12 +2280,14 @@ async fn accept_submodule_side_within(
         None => None,
     };
 
-    let (dir, live) = submodule_checkout_state(repo_path, &path).await;
-    // A checkout that appeared after the hold was decided would be moved unheld.
-    if live.checkout == SubmoduleCheckout::Ok && !has_git {
+    let (child, live) = submodule_checkout_state(repo_path, &path).await;
+    // A checkout that appeared after the hold was decided, or another repository than
+    // the held one, would be moved unheld.
+    let replaced = matches!((&decided, &child), (Some(held), Some(now)) if !held.same_repo(now));
+    if replaced || (live.checkout == SubmoduleCheckout::Ok && decided.is_none()) {
         return Ok(SubmoduleAcceptOutcome::Changed);
     }
-    let present = side_present(&dir, &live, &sha).await?;
+    let present = side_present(child.as_ref(), &live, &sha).await?;
     let recorded: Vec<&str> = entries.iter().map(|entry| entry.sha.as_str()).collect();
     let plan = plan_checkout(&live, &sha, present, &recorded);
     // The pane said the checkout would stay: re-read and say the new truth before
@@ -1778,17 +2308,61 @@ async fn accept_submodule_side_within(
     }
     // A path, not a pathspec: git's spelling from the gate, passed raw.
     let info = format!("{GITLINK_MODE},{sha},{path}");
-    run_git_raw_index_retry(
-        repo_path,
-        &["update-index", "--cacheinfo", &info],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .exit_verdict()?;
+    let unchanged = || async {
+        let now = conflict_entries(repo_path, &path).await?;
+        Ok(!now.is_empty() && live_stages(&now) == *expected)
+    };
+    match stage_gitlink_write(repo_path, &info, unchanged).await {
+        StageWrite::Ran(out) => {
+            out?.exit_verdict()?;
+        }
+        StageWrite::Moved => return Ok(SubmoduleAcceptOutcome::Changed),
+        StageWrite::Unchecked(e) => return Err(e),
+    }
+    // Read back. The write exited 0, so "nothing was staged" is no longer true: a
+    // read-back that fails or differs is an Err saying what was staged and what the
+    // index reads now, never `Changed`.
+    let read_back = match conflict_entries(repo_path, &path).await {
+        Ok(now) if !now.is_empty() => Ok(Some("it as conflicted again".to_string())),
+        Ok(_) => index_gitlink(repo_path, &path, &crate::git::pathspec::literal(&path))
+            .await
+            .map(|staged| match staged {
+                Some(staged) if staged == sha => None,
+                Some(staged) => Some(format!("commit {}", short_oid(&staged))),
+                None => Some("no commit for it".to_string()),
+            }),
+        Err(e) => Err(e),
+    };
+    let left_as_is = "The submodule's checkout was left as it was.";
+    match read_back {
+        Ok(None) => {}
+        Ok(Some(reads)) => {
+            let why = format!("something changed it right after: the index now reads {reads}");
+            return Err(staged_but(
+                &sha,
+                &path,
+                &format!(", but {why}. {left_as_is}"),
+            ));
+        }
+        Err(e) => {
+            let why = format!("couldn't read it back: {}", error_line(&e));
+            return Err(staged_but(
+                &sha,
+                &path,
+                &format!(", but {why}. {left_as_is}"),
+            ));
+        }
+    }
 
     let left = |why| SubmoduleAcceptCheckout::Left { why, reason: None };
     let checkout = match plan {
-        SubmoduleCheckoutPlan::CheckOut => checkout_staged_commit(&dir, &sha).await,
+        SubmoduleCheckoutPlan::CheckOut => match &child {
+            Some(child) => {
+                let head = live.head.as_deref();
+                checkout_staged_commit(repo_path, &path, &worktree, child, &sha, head).await?
+            }
+            None => left(SubmoduleCheckoutLeft::Unusable),
+        },
         SubmoduleCheckoutPlan::AlreadyThere => SubmoduleAcceptCheckout::AlreadyThere,
         SubmoduleCheckoutPlan::NotInitialized => left(SubmoduleCheckoutLeft::NotInitialized),
         SubmoduleCheckoutPlan::Unusable => left(SubmoduleCheckoutLeft::Unusable),
@@ -1799,17 +2373,66 @@ async fn accept_submodule_side_within(
     Ok(SubmoduleAcceptOutcome::Staged { sha, checkout })
 }
 
-/// Detaches the submodule at the staged commit. A failure is an outcome, never an
-/// Err: the pointer is already staged and the caller must hear so.
-async fn checkout_staged_commit(dir: &str, sha: &str) -> SubmoduleAcceptCheckout {
-    let failed = |reason| SubmoduleAcceptCheckout::Left {
-        why: SubmoduleCheckoutLeft::Failed,
-        reason: Some(reason),
+/// Detaches the submodule at the staged commit. A checkout that didn't run or didn't
+/// exit 0 is an outcome, never an Err: the pointer is already staged and the caller
+/// must hear so. Just before the checkout the folder must still resolve to `child`
+/// with HEAD at `head`, the one the plan read. After an exit 0 the folder's HEAD is
+/// read back ([`head_read_back`]), since the pinned read answers for the held
+/// repository, which outlives the folder's checkout: anything but `sha` there is an
+/// Err, because the stage and the checkout both ran and "its checkout stays as is"
+/// would be false. Out of reach by design: the gap before git takes its own lock
+/// ([`detach_run`]) and the pinned directory swapped or replaced ([`ChildRepo`]).
+async fn checkout_staged_commit(
+    repo_path: &str,
+    path: &str,
+    worktree: &Path,
+    child: &ChildRepo,
+    sha: &str,
+    head: Option<&str>,
+) -> AppResult<SubmoduleAcceptCheckout> {
+    let failed = |reason| {
+        Ok(SubmoduleAcceptCheckout::Left {
+            why: SubmoduleCheckoutLeft::Failed,
+            reason: Some(reason),
+        })
     };
-    match detach_submodule_at(dir, sha).await {
-        Ok(out) if out.code == 0 => SubmoduleAcceptCheckout::CheckedOut,
-        Ok(out) => failed(unreadable_reason(&out.stderr, out.code)),
-        Err(e) => failed(nonempty_reason(e.to_string())),
+    pre_checkout_hook().await;
+    match head_read_back(repo_path, worktree, child).await {
+        now if now.reads(head) => {}
+        HeadRead::Unread(line) => return failed(format!("its HEAD couldn't be read: {line}")),
+        HeadRead::Gone(why) if why != NO_COMMIT => return failed(why.to_string()),
+        _ => return failed("its HEAD moved after it was read".to_string()),
+    }
+    match detach_run(repo_path, worktree, child, sha, head).await {
+        Ok(out) if out.code == 0 => {}
+        Ok(out) => return failed(unreadable_reason(&out.stderr, out.code)),
+        Err(e) => return failed(nonempty_reason(e.to_string())),
+    }
+    let why = match head_read_back(repo_path, worktree, child).await {
+        HeadRead::At(now) if now == sha => return Ok(SubmoduleAcceptCheckout::CheckedOut),
+        HeadRead::At(now) => format!("its HEAD reads {} now", short_oid(&now)),
+        HeadRead::Gone(why) => why.to_string(),
+        HeadRead::Unread(line) => format!("its HEAD couldn't be read: {line}"),
+    };
+    Err(staged_but(
+        sha,
+        path,
+        &format!(" and checked it out, but {why}."),
+    ))
+}
+
+/// The accept's sentence once its stage write exited 0, `rest` completing "Staged
+/// <short> for <shown>".
+fn staged_but(sha: &str, path: &str, rest: &str) -> AppError {
+    let shown = crate::git::ops::discard_shown(path);
+    AppError::InvalidArgument(format!("Staged {} for {shown}{rest}", short_oid(sha)))
+}
+
+/// An Err's one line for a sentence: git's first stderr line, else its message.
+fn error_line(e: &AppError) -> String {
+    match e {
+        AppError::Git { code, stderr } => unreadable_reason(stderr, *code),
+        e => nonempty_reason(e.to_string()),
     }
 }
 
@@ -1817,21 +2440,330 @@ async fn checkout_staged_commit(dir: &str, sha: &str) -> SubmoduleAcceptCheckout
 /// Err. Never `submodule update`, which fetches; `--no-overwrite-ignore` because a
 /// plain checkout replaces an ignored file the target tracks while status calls the
 /// tree clean (measured, git 2.51.1). `--no-recurse-submodules` keeps nested
-/// submodules where they are, whatever `submodule.recurse` says. The index.lock retry
-/// is safe: a refused lock exits 128 before git touches anything (measured).
-async fn detach_submodule_at(dir: &str, sha: &str) -> AppResult<GitOutput> {
-    run_git_raw_index_retry(
-        dir,
-        &[
-            "checkout",
-            "--no-recurse-submodules",
-            "--no-overwrite-ignore",
-            "--detach",
-            sha,
-        ],
-        WORKTREE_OP_TIMEOUT,
+/// submodules where they are, whatever `submodule.recurse` says. `<sha>^{commit}`,
+/// never the bare id, which `checkout` reads as a same-named branch first (measured).
+/// `head` is the HEAD the caller's pre-check just read in the folder. git's
+/// index.lock refusal waits, reads the folder's HEAD again ([`head_read_back`]) and
+/// retries per [`detach_retry`]. Out of reach by design: the one-spawn gap between a
+/// folder check and git taking its own lock, since `checkout` takes no expected HEAD.
+async fn detach_run(
+    repo_path: &str,
+    worktree: &Path,
+    child: &ChildRepo,
+    sha: &str,
+    head: Option<&str>,
+) -> AppResult<GitOutput> {
+    let target = format!("{sha}^{{commit}}");
+    let args = [
+        "checkout",
+        "--no-recurse-submodules",
+        "--no-overwrite-ignore",
+        "--detach",
+        &target,
+    ];
+    let mut out = child.run(&args, WORKTREE_OP_TIMEOUT).await?;
+    if out.code == 128 && out.stderr.contains("index.lock") {
+        tokio::time::sleep(INDEX_LOCK_RETRY_DELAY).await;
+        detach_wait_hook().await;
+        let after = head_read_back(repo_path, worktree, child).await;
+        if detach_retry(&out, head, &after) {
+            out = child.run(&args, WORKTREE_OP_TIMEOUT).await?;
+        }
+    }
+    Ok(out)
+}
+
+/// [`detach_run`], where exit 0 counts only with the folder's HEAD then at `sha` (a
+/// hook can move it, a deinit can empty the folder); anything else is returned as a
+/// failed run carrying that sentence.
+async fn detach_submodule_at(
+    repo_path: &str,
+    worktree: &Path,
+    child: &ChildRepo,
+    sha: &str,
+    head: Option<&str>,
+) -> AppResult<GitOutput> {
+    let out = detach_run(repo_path, worktree, child, sha, head).await?;
+    if out.code != 0 {
+        return Ok(out);
+    }
+    let after = head_read_back(repo_path, worktree, child).await;
+    Ok(detach_landed(out, sha, &after))
+}
+
+/// Pure: an exit-0 checkout judged by the folder's HEAD read after it. At `sha` it
+/// stands; a read that couldn't be made says the checkout couldn't be confirmed; any
+/// other answer says where HEAD isn't. Both refusals return as a failed run.
+fn detach_landed(out: GitOutput, sha: &str, after: &HeadRead) -> GitOutput {
+    let stderr = match after {
+        HeadRead::At(now) if now == sha => return out,
+        HeadRead::Unread(reason) => format!("couldn't confirm the checkout: {reason}"),
+        HeadRead::At(_) | HeadRead::Gone(_) => format!("HEAD isn't at {sha} after the checkout"),
+    };
+    GitOutput {
+        stdout: out.stdout,
+        stderr,
+        code: 1,
+    }
+}
+
+/// Pure: whether a checkout's index.lock refusal is retried. Only git's own refusal
+/// (exit 128) with the folder's HEAD read AFTER the wait as `head`, the one the
+/// pre-check read: whatever held the lock may have finished during it and left a
+/// commit the plan never judged, or emptied the folder. A refused lock stops git
+/// before it touches anything (measured), while a failing post-checkout hook can
+/// print the same text after HEAD moved, and a retry would run that hook again.
+fn detach_retry(out: &GitOutput, head: Option<&str>, after: &HeadRead) -> bool {
+    out.code == 128 && out.stderr.contains("index.lock") && after.reads(head)
+}
+
+/// The runner's index.lock retry delay, for the retries this module runs itself.
+const INDEX_LOCK_RETRY_DELAY: Duration = Duration::from_millis(300);
+
+/// The submodule's HEAD commit: Some(None) when git answered without one (unborn or
+/// unresolvable), None when git couldn't run.
+async fn head_now(child: &ChildRepo) -> Option<Option<String>> {
+    let out = child
+        .read(&["rev-parse", "--verify", "-q", "HEAD"])
+        .await
+        .ok()?;
+    Some((out.code == 0).then(|| out.stdout_lossy().trim().to_string()))
+}
+
+/// The folder's HEAD read back ([`head_read_back`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HeadRead {
+    /// HEAD names this commit.
+    At(String),
+    /// A confirmed absence, the clause saying which: the folder no longer holds that
+    /// repository's checkout, or its HEAD names no commit ([`NO_COMMIT`]).
+    Gone(&'static str),
+    /// A read that couldn't be made, with its line.
+    Unread(String),
+}
+
+/// [`HeadRead::Gone`]'s clause for a HEAD naming no commit (unborn or unresolvable).
+const NO_COMMIT: &str = "its HEAD names no commit";
+/// [`HeadRead::Gone`]'s clause for a folder that is missing, not initialized or replaced.
+const FOLDER_GONE: &str = "its folder no longer holds that checkout";
+
+impl HeadRead {
+    /// Whether this is the HEAD a plan read: that commit, or no commit for None.
+    fn reads(&self, head: Option<&str>) -> bool {
+        match (self, head) {
+            (HeadRead::At(now), Some(head)) => now == head,
+            (HeadRead::Gone(why), None) => *why == NO_COMMIT,
+            _ => false,
+        }
+    }
+}
+
+/// The folder's HEAD, not the held repository's: a deinit empties the folder and
+/// keeps the module's HEAD (measured), so the folder is resolved again first. `Gone`
+/// is a folder that no longer holds that repository's checkout (missing, not
+/// initialized, replaced, or another repository there), or a HEAD naming no commit;
+/// `Unread` is a read that couldn't be made: an identity refusal or an I/O failure in
+/// the resolve, git couldn't answer for HEAD, or HEAD names an object that isn't a
+/// commit this repository holds. That takes a second read: `-q HEAD^{commit}` exits
+/// 1 silently both on an unborn HEAD and on a missing object (measured, git 2.51.1),
+/// so HEAD is resolved first and its id then peeled.
+async fn head_read_back(repo_path: &str, worktree: &Path, held: &ChildRepo) -> HeadRead {
+    let now = match ChildRepo::resolve(repo_path, worktree).await {
+        Ok(now) if now.same_repo(held) => now,
+        Ok(_) => return HeadRead::Gone("its folder now holds another repository"),
+        Err((SubmoduleCheckout::Unreadable, reason)) => {
+            return HeadRead::Unread(reason.unwrap_or_else(|| "git couldn't read it".into()))
+        }
+        Err(_) => return HeadRead::Gone(FOLDER_GONE),
+    };
+    // The object id HEAD resolves to, never a name: the peel below reads that object.
+    let id = match now.read(&["rev-parse", "--verify", "-q", "HEAD"]).await {
+        Ok(out) if out.code == 0 => out.stdout_lossy().trim().to_string(),
+        Ok(out) if out.code == 1 && out.stderr.trim().is_empty() => {
+            return HeadRead::Gone(NO_COMMIT)
+        }
+        Ok(out) => return HeadRead::Unread(unreadable_reason(&out.stderr, out.code)),
+        Err(e) => return HeadRead::Unread(nonempty_reason(e.to_string())),
+    };
+    let peel = format!("{id}^{{commit}}");
+    let args = ["rev-parse", "--verify", "-q", "--end-of-options", &peel];
+    match now.read(&args).await {
+        Ok(out) if out.code == 0 && out.stdout_lossy().trim() == id => HeadRead::At(id),
+        Ok(out) if out.code == 0 => HeadRead::Unread("its HEAD names a tag, not a commit".into()),
+        // Silent: the object is missing; a tree or blob prints git's line.
+        Ok(out) if out.stderr.trim().is_empty() => HeadRead::Unread(format!(
+            "its HEAD names {}, which this repository doesn't hold",
+            short_oid(&id)
+        )),
+        Ok(out) => HeadRead::Unread(unreadable_reason(&out.stderr, out.code)),
+        Err(e) => HeadRead::Unread(nonempty_reason(e.to_string())),
+    }
+}
+
+/// What one gitlink stage write did.
+enum StageWrite {
+    Ran(AppResult<GitOutput>),
+    /// The compare before the retry found the pointer moved; nothing was written.
+    Moved,
+    /// The compare before the retry failed; nothing was written.
+    Unchecked(AppError),
+}
+
+/// The conflict accept's write: `update-index --cacheinfo` with one index.lock retry.
+/// `apply --cached` can't patch over unmerged stages (it answers "does not exist in
+/// index", measured), so the accept has no compare-and-swap: `unchanged` runs again
+/// right before the retry and a moved pointer is left alone.
+async fn stage_gitlink_write<F, Fut>(repo_path: &str, info: &str, unchanged: F) -> StageWrite
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = AppResult<bool>>,
+{
+    let args = ["update-index", "--cacheinfo", info];
+    let first = run_git_raw(Some(repo_path), &args, DEFAULT_TIMEOUT).await;
+    if !matches!(&first, Ok(out) if out.code != 0 && out.stderr.contains("index.lock")) {
+        return StageWrite::Ran(first);
+    }
+    tokio::time::sleep(INDEX_LOCK_RETRY_DELAY).await;
+    stage_retry_hook().await;
+    match unchanged().await {
+        Ok(true) => StageWrite::Ran(run_git_raw(Some(repo_path), &args, DEFAULT_TIMEOUT).await),
+        Ok(false) => StageWrite::Moved,
+        Err(e) => StageWrite::Unchecked(e),
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Awaited between a stage write's lock refusal and its retry, so a test can
+    /// release the lock and move the pointer there.
+    static STAGE_RETRY_HOOK: PickLandedHook;
+}
+
+#[cfg(test)]
+async fn stage_retry_hook() {
+    if let Ok(hook) = STAGE_RETRY_HOOK.try_with(|hook| hook()) {
+        hook.await;
+    }
+}
+
+#[cfg(not(test))]
+async fn stage_retry_hook() {}
+
+/// The pick's stage write, parent-side: [`gitlink_patch`] through `apply --cached` on
+/// stdin. apply takes index.lock, then checks the hunk's preimage against the staged
+/// gitlink and writes under that one hold (apply.c, git v2.51.1), so a moved pointer
+/// is refused, never overwritten, and the one retry after a lock refusal is blind.
+async fn stage_gitlink_cas(
+    repo_path: &str,
+    path: &str,
+    expected: &str,
+    sha: &str,
+) -> AppResult<GitOutput> {
+    let patch = gitlink_patch(path, expected, sha);
+    let args = ["apply", "--cached", "-"];
+    let first = run_git_raw_input(Some(repo_path), &args, Some(&patch), DEFAULT_TIMEOUT).await;
+    if !matches!(&first, Ok(out) if out.code != 0 && out.stderr.contains("index.lock")) {
+        return first;
+    }
+    tokio::time::sleep(INDEX_LOCK_RETRY_DELAY).await;
+    stage_retry_hook().await;
+    run_git_raw_input(Some(repo_path), &args, Some(&patch), DEFAULT_TIMEOUT).await
+}
+
+/// One gitlink hunk moving `path` from `expected` to `sha`, both paths C-quoted.
+fn gitlink_patch(path: &str, expected: &str, sha: &str) -> String {
+    let (a, b) = (
+        quote_patch_path(&format!("a/{path}")),
+        quote_patch_path(&format!("b/{path}")),
+    );
+    format!(
+        "diff --git {a} {b}\nindex {expected}..{sha} {GITLINK_MODE}\n--- {a}\n+++ {b}\n\
+         @@ -1 +1 @@\n-Subproject commit {expected}\n+Subproject commit {sha}\n"
     )
-    .await
+}
+
+/// A patch header's path, always in git's C-quoted form: `\` and `"` escaped, every
+/// byte below 0x20 and 0x7f as three octal digits, the rest raw. The unquoted form
+/// cuts a name at a tab (measured).
+fn quote_patch_path(path: &str) -> String {
+    let mut quoted = String::with_capacity(path.len() + 2);
+    quoted.push('"');
+    for c in path.chars() {
+        match c {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            c if c < ' ' || c == '\x7f' => quoted.push_str(&format!("\\{:03o}", c as u32)),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// Pure: the pick's outcome from its stage write and the two reads after it, first
+/// match wins. `wrote` is Err with the line of a write that didn't exit 0, `pointer`
+/// the stage-0 gitlink read back (Err with the read's line), and `head` the folder's
+/// HEAD read back ([`HeadRead`]). An `Unread` head, or an unread pointer under a head
+/// that isn't at `sha`, is `ReadBackFailed`.
+fn stage_verdict(
+    wrote: &Result<(), String>,
+    pointer: &Result<Option<String>, String>,
+    head: &HeadRead,
+    expected: &str,
+    sha: &str,
+    checkout: SubmodulePickMove,
+) -> SubmodulePickOutcome {
+    let unstaged = |why, reason: String| SubmodulePickOutcome::CheckedOutNotStaged {
+        sha: sha.to_string(),
+        why,
+        reason: Some(reason),
+    };
+    let read_back_failed = |reason: &str| SubmodulePickOutcome::ReadBackFailed {
+        sha: sha.to_string(),
+        reason: reason.to_string(),
+    };
+    if let HeadRead::Unread(reason) = head {
+        return read_back_failed(reason);
+    }
+    if !matches!(head, HeadRead::At(now) if now == sha) {
+        return match pointer {
+            Err(reason) => read_back_failed(reason),
+            Ok(pointer) => SubmodulePickOutcome::MovedAfter {
+                sha: sha.to_string(),
+                pointer: pointer.clone(),
+                head: match head {
+                    HeadRead::At(now) => Some(now.clone()),
+                    _ => None,
+                },
+            },
+        };
+    }
+    match pointer {
+        Ok(Some(pointer)) if pointer == sha => SubmodulePickOutcome::Set {
+            sha: sha.to_string(),
+            checkout,
+            nested_left: None,
+        },
+        Err(reason) => unstaged(SubmodulePickUnstaged::StageUnconfirmed, reason.clone()),
+        Ok(Some(pointer)) if pointer == expected => unstaged(
+            SubmodulePickUnstaged::StageFailed,
+            match wrote {
+                Err(line) => line.clone(),
+                Ok(()) => format!("the staged pointer still reads {}", short_oid(expected)),
+            },
+        ),
+        // Nothing this call moved and nothing it staged: what was decided moved.
+        Ok(_) if checkout == SubmodulePickMove::AlreadyThere && wrote.is_err() => {
+            SubmodulePickOutcome::Changed
+        }
+        Ok(pointer) => unstaged(
+            SubmodulePickUnstaged::PointerMoved,
+            format!(
+                "the recorded commit reads {} now",
+                pointer.as_deref().map_or("nothing", short_oid)
+            ),
+        ),
+    }
 }
 
 /// Every pick hold's label, the child's included: the user asked for one change.
@@ -1845,31 +2777,67 @@ const PREFIX_LOOKUP_CAP: usize = 20;
 /// Files in the way that a refusal lists.
 const PICK_PATHS_CAP: usize = 20;
 /// git's refusals that name the files in a checkout's way, each followed by
-/// tab-led path lines (LC_ALL=C, which the runner pins).
-const WOULD_OVERWRITE_HEADERS: [&str; 4] = [
-    "error: Your local changes to the following files would be overwritten by checkout:",
-    "error: The following untracked working tree files would be overwritten by checkout:",
-    "error: Updating the following directories would lose untracked files in them:",
-    "error: The following untracked working tree files would be removed by checkout:",
+/// tab-led path lines (LC_ALL=C, which the runner pins), with the kind each names.
+/// An ignored file in the way is listed under the untracked header: [`all_ignored`]
+/// tells them apart.
+const WOULD_OVERWRITE_HEADERS: [(&str, SubmodulePickBlock); 4] = [
+    (
+        "error: Your local changes to the following files would be overwritten by checkout:",
+        SubmodulePickBlock::WouldOverwrite,
+    ),
+    (
+        "error: The following untracked working tree files would be overwritten by checkout:",
+        SubmodulePickBlock::UntrackedInTheWay,
+    ),
+    (
+        "error: Updating the following directories would lose untracked files in them:",
+        SubmodulePickBlock::UntrackedInTheWay,
+    ),
+    (
+        "error: The following untracked working tree files would be removed by checkout:",
+        SubmodulePickBlock::UntrackedInTheWay,
+    ),
 ];
 /// `read-tree`'s would-overwrite errors (unpack-trees.c's plumbing templates, git
-/// v2.51.1) as prefix and suffix around the raw path, which carries no quoting.
-const DRY_RUN_REFUSALS: [(&str, &str); 5] = [
+/// v2.51.1) as prefix and suffix around the raw path, which carries no quoting, with
+/// the kind each names.
+const DRY_RUN_REFUSALS: [(&str, &str, SubmodulePickBlock); 5] = [
     (
         "error: Entry '",
         "' would be overwritten by merge. Cannot merge.",
+        SubmodulePickBlock::WouldOverwrite,
     ),
-    ("error: Entry '", "' not uptodate. Cannot merge."),
-    ("error: Updating '", "' would lose untracked files in it"),
+    (
+        "error: Entry '",
+        "' not uptodate. Cannot merge.",
+        SubmodulePickBlock::WouldOverwrite,
+    ),
+    (
+        "error: Updating '",
+        "' would lose untracked files in it",
+        SubmodulePickBlock::UntrackedInTheWay,
+    ),
     (
         "error: Untracked working tree file '",
         "' would be overwritten by merge.",
+        SubmodulePickBlock::UntrackedInTheWay,
     ),
     (
         "error: Untracked working tree file '",
         "' would be removed by merge.",
+        SubmodulePickBlock::UntrackedInTheWay,
     ),
 ];
+
+/// The overwrite kinds in precedence order, highest first: several kinds report as
+/// the highest one present.
+fn overwrite_rank(kind: SubmodulePickBlock) -> u8 {
+    match kind {
+        SubmodulePickBlock::WouldOverwrite => 0,
+        SubmodulePickBlock::UntrackedInTheWay => 1,
+        _ => 2,
+    }
+}
 
 /// One ref of the submodule's, for the commit picker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1928,7 +2896,12 @@ pub enum SubmodulePickBlock {
     NotACommit,
     DetachedOrphan,
     DetachedUnverified,
+    /// Tracked local changes the checkout would overwrite.
     WouldOverwrite,
+    /// Untracked files the checkout would overwrite or remove.
+    UntrackedInTheWay,
+    /// Ignored files at paths the target adds or deletes.
+    IgnoredInTheWay,
     CheckFailed,
 }
 
@@ -2018,6 +2991,17 @@ pub enum SubmodulePickOutcome {
         why: SubmodulePickUnstaged,
         reason: Option<String>,
     },
+    /// After the stage the folder's HEAD read `head`, not `sha` (None: the folder no
+    /// longer holds that checkout, or HEAD names no commit); `pointer` is the staged
+    /// gitlink as read back (None: none recorded).
+    MovedAfter {
+        sha: String,
+        pointer: Option<String>,
+        head: Option<String>,
+    },
+    /// The submodule was checked out at `sha`, but a read back after the stage couldn't
+    /// be made, so nothing is known about either value now; `reason` is that read's line.
+    ReadBackFailed { sha: String, reason: String },
 }
 
 /// The refusal sentence for a pick, `why` completing "— {why}".
@@ -2082,9 +3066,9 @@ fn invalid_commit_id(id: &str) -> AppError {
     AppError::InvalidArgument(format!("invalid commit id: {shown}"))
 }
 
-/// What the pick's gate measured: the folder probe and, only when it found the
-/// submodule's own `.git`, one status read. A failed read is `Unreadable` with its
-/// reason, never clean. `head` is None on an unborn branch.
+/// What the pick's gate measured: [`ChildRepo::resolve`] and, only when it accepted
+/// the folder, one status read. A failed read is `Unreadable` with its reason, never
+/// clean. `head` is None on an unborn branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PickGate {
     checkout: SubmoduleCheckout,
@@ -2094,12 +3078,9 @@ struct PickGate {
     detached: bool,
 }
 
-async fn pick_gate(repo_path: &str, path: &str) -> (String, PickGate) {
+async fn pick_gate(repo_path: &str, path: &str) -> (Option<ChildRepo>, PickGate) {
     let worktree = Path::new(repo_path).join(path);
-    let (checkout, reason) = checkout_from_probe(std::fs::symlink_metadata(&worktree), || {
-        worktree.join(".git").try_exists()
-    });
-    let dir = worktree.to_string_lossy().into_owned();
+    let (child, checkout, reason) = child_gate(repo_path, &worktree).await;
     let mut gate = PickGate {
         checkout,
         reason,
@@ -2107,9 +3088,9 @@ async fn pick_gate(repo_path: &str, path: &str) -> (String, PickGate) {
         branch: None,
         detached: false,
     };
-    if checkout != SubmoduleCheckout::Ok {
-        return (dir, gate);
-    }
+    let Some(found) = &child else {
+        return (child, gate);
+    };
     let args = [
         "status",
         "--porcelain=v2",
@@ -2117,7 +3098,7 @@ async fn pick_gate(repo_path: &str, path: &str) -> (String, PickGate) {
         "--untracked-files=no",
         "-z",
     ];
-    match run_git_raw(Some(&dir), &args, DEFAULT_TIMEOUT).await {
+    match found.read(&args).await {
         Ok(out) if out.code == 0 => {
             let status = crate::git::status::parse_status_v2(&out.stdout_lossy());
             gate.head = status.branch.oid;
@@ -2133,14 +3114,15 @@ async fn pick_gate(repo_path: &str, path: &str) -> (String, PickGate) {
             gate.reason = Some(nonempty_reason(e.to_string()));
         }
     }
-    (dir, gate)
+    (child, gate)
 }
 
 /// One mid-operation probe's answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MidOpFact {
     Clear,
-    /// The reason is the parent's refusal sentence; the submodule's arm carries none.
+    /// The parent's refusal sentence, or the submodule's operation as a short noun
+    /// phrase ("a merge", "unresolved conflicts"); None when the probe can't tell.
     Refused(Option<String>),
     Failed(String),
 }
@@ -2159,6 +3141,8 @@ enum PickTarget {
     NotACommit,
     NotFound,
     Ambiguous(String),
+    /// The type read failed some other way than a missing object; git's lines.
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2169,12 +3153,14 @@ enum OrphanFact {
     Unverified(Option<String>),
 }
 
-/// git's dry run of the checkout, for the plan read. `Clear` also covers a scratch
-/// index that couldn't be built: the setter's real checkout decides then.
+/// git's dry run of the checkout, for the plan read. `Clear` is a dry run and ignored
+/// check that found nothing in the way, including the degrades where the setter's real
+/// checkout decides instead: a scratch index that couldn't be built, a partial clone
+/// lacking the target's blobs, a sparse checkout, and an unanswered lstat. `Blocked` carries its [`SubmodulePickBlock`] overwrite kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OverwriteFact {
     Clear,
-    Blocked(Vec<String>),
+    Blocked(SubmodulePickBlock, Vec<String>),
     Failed(String),
 }
 
@@ -2284,6 +3270,7 @@ fn plan_pick(facts: &PickFacts) -> PickStep {
         Some(PickTarget::NotACommit) => return block(B::NotACommit, None),
         Some(PickTarget::NotFound) => return block(B::NotFound, None),
         Some(PickTarget::Ambiguous(reason)) => return block(B::Ambiguous, Some(reason)),
+        Some(PickTarget::Failed(reason)) => return block(B::CheckFailed, Some(reason)),
     };
     let head = facts.gate.head.as_deref();
     if head == Some(sha) {
@@ -2314,9 +3301,9 @@ fn plan_pick(facts: &PickFacts) -> PickStep {
     if facts.with_overwrite {
         match &facts.overwrite {
             None => return PickStep::Need(PickNeed::Overwrite),
-            Some(OverwriteFact::Blocked(paths)) => {
+            Some(OverwriteFact::Blocked(why, paths)) => {
                 return PickStep::Plan(SubmodulePickPlan::Blocked {
-                    why: B::WouldOverwrite,
+                    why: *why,
                     reason: None,
                     paths: paths.clone(),
                 })
@@ -2330,12 +3317,13 @@ fn plan_pick(facts: &PickFacts) -> PickStep {
     })
 }
 
-/// Reads the facts [`plan_pick`] asks for until it decides. A failed parent-side read
-/// and a failed resolution are Errs; a failed probe inside the submodule is data.
+/// Reads the facts [`plan_pick`] asks for until it decides. A failed pointer or HEAD
+/// tree read and a failed resolution are Errs; a failed parent mid-operation probe and
+/// a failed probe inside the submodule are data, read as a `checkFailed` plan.
 async fn settle_pick(
     repo_path: &str,
     path: &str,
-    dir: &str,
+    child: Option<&ChildRepo>,
     id: &str,
     facts: &mut PickFacts,
 ) -> AppResult<SubmodulePickPlan> {
@@ -2353,10 +3341,12 @@ async fn settle_pick(
                     .unwrap_or_else(|e| MidOpFact::Failed(nonempty_reason(e.to_string())));
                 facts.parent_mid_op = Some(fact);
             }
-            PickNeed::ChildMidOp => facts.child_mid_op = Some(submodule_mid_op(dir).await),
+            PickNeed::ChildMidOp => {
+                facts.child_mid_op = Some(submodule_mid_op(resolved(child)?).await)
+            }
             PickNeed::Target => {
                 let pointer_len = facts.pointer.clone().flatten().map_or(0, |p| p.len());
-                facts.target = Some(resolve_pick(dir, id, pointer_len).await?);
+                facts.target = Some(resolve_pick(resolved(child)?, id, pointer_len).await?);
             }
             PickNeed::HeadTreePointer => {
                 facts.head_tree_pointer = Some(head_gitlink(repo_path, path, &spec).await?);
@@ -2364,7 +3354,7 @@ async fn settle_pick(
             PickNeed::Orphan => {
                 let shallow = match facts.shallow {
                     Some(shallow) => shallow,
-                    None => submodule_is_shallow(dir).await,
+                    None => submodule_is_shallow(resolved(child)?).await,
                 };
                 facts.shallow = Some(shallow);
                 let head_sha = facts.gate.head.clone().unwrap_or_default();
@@ -2373,16 +3363,24 @@ async fn settle_pick(
                     .into_iter()
                     .filter_map(|gitlink| gitlink.clone().flatten())
                     .collect();
-                let orphan = orphan_probe(dir, path, &head_sha, &sha, &recorded, shallow).await;
+                let orphan =
+                    orphan_probe(resolved(child)?, path, &head_sha, &sha, &recorded, shallow).await;
                 facts.orphan = Some(orphan);
             }
             PickNeed::Overwrite => {
                 let sha = facts.target_sha().unwrap_or_default().to_string();
-                let overwrite = pick_dry_run(dir, facts.gate.head.as_deref(), &sha).await;
+                let child = resolved(child)?;
+                let overwrite = pick_dry_run(child, facts.gate.head.as_deref(), &sha).await;
                 facts.overwrite = Some(overwrite);
             }
         }
     }
+}
+
+/// The submodule a child-side fact reads. [`plan_pick`] asks for one only past a gate
+/// that resolved it, so None is a broken invariant, refused before anything moves.
+fn resolved(child: Option<&ChildRepo>) -> AppResult<&ChildRepo> {
+    child.ok_or_else(|| AppError::Command("the submodule's repository wasn't resolved".into()))
 }
 
 /// The parent's mid-operation gate, the one the update path runs: its refusal is a
@@ -2396,39 +3394,62 @@ async fn parent_mid_op(repo_path: &str) -> AppResult<MidOpFact> {
 }
 
 /// Unmerged entries or an operation in flight inside the submodule: a checkout there
-/// exits 0 mid-rebase and leaves `rebase-merge` behind (measured). Strict on the git
-/// dir, since the fail-open `op_state` reads an unresolvable one as "nothing".
-async fn submodule_mid_op(dir: &str) -> MidOpFact {
-    match crate::git::ops::has_unmerged(dir).await {
-        Ok(true) => return MidOpFact::Refused(None),
-        Ok(false) => {}
+/// exits 0 mid-rebase and leaves `rebase-merge` behind (measured). The markers are
+/// read at the resolved git dir, so they are the submodule's own. The refusal names
+/// what it found; a bisect isn't probed, so it never blocks.
+async fn submodule_mid_op(child: &ChildRepo) -> MidOpFact {
+    let unmerged = child
+        .read(&["ls-files", "--unmerged"])
+        .await
+        .and_then(GitOutput::exit_verdict);
+    match unmerged {
+        Ok(out) if !out.stdout_lossy().trim().is_empty() => {
+            return MidOpFact::Refused(Some("unresolved conflicts".into()))
+        }
+        Ok(_) => {}
         Err(e) => return MidOpFact::Failed(nonempty_reason(e.to_string())),
     }
-    match crate::git::ops::op_state_strict(dir).await {
-        Ok(state) if state.mid_op() => MidOpFact::Refused(None),
-        Ok(_) => MidOpFact::Clear,
-        Err(e) => MidOpFact::Failed(nonempty_reason(e.to_string())),
+    let state = crate::git::ops::op_state_at(Path::new(child.git_dir()));
+    if state.mid_op() {
+        MidOpFact::Refused(mid_op_name(&state).map(Into::into))
+    } else {
+        MidOpFact::Clear
     }
+}
+
+/// The operation an op state is in, as the plan's reason names it.
+fn mid_op_name(state: &crate::git::types::RepoOpState) -> Option<&'static str> {
+    [
+        (state.rebasing, "a rebase"),
+        (state.merging, "a merge"),
+        (state.cherry_picking, "a cherry-pick"),
+        (state.reverting, "a revert"),
+    ]
+    .into_iter()
+    .find_map(|(on, name)| on.then_some(name))
 }
 
 /// The id is full when it is as long as the store's hashes, a prefix when shorter,
 /// and refused when longer: a 64-hex id in a SHA-1 store exits 128 like an absent
 /// one (measured). A prefix is looked up as object ids, never as a ref name.
-async fn resolve_pick(dir: &str, id: &str, pointer_len: usize) -> AppResult<PickTarget> {
+async fn resolve_pick(child: &ChildRepo, id: &str, pointer_len: usize) -> AppResult<PickTarget> {
     if id.len() > pointer_len {
         return Err(invalid_commit_id(id));
     }
     if id.len() < pointer_len {
-        let found =
-            crate::git::history::git_find_commits_by_prefix(dir.to_string(), id.to_string())
-                .await?;
+        // Discovers from the folder (history.rs takes no pin); a plan read only.
+        let found = crate::git::history::git_find_commits_by_prefix(
+            child.folder().to_string(),
+            id.to_string(),
+        )
+        .await?;
         return Ok(prefix_target(
             id,
             found.into_iter().map(|found| found.commit).collect(),
         ));
     }
     // `cat-file -e <tag>^{commit}` exits 0, so the type is read instead (measured).
-    let out = run_git_raw(Some(dir), &["cat-file", "-t", id], DEFAULT_TIMEOUT).await?;
+    let out = child.read(&["cat-file", "-t", id]).await?;
     let kind = out.stdout_lossy();
     Ok(match (out.code, kind.trim()) {
         (0, "commit") => PickTarget::Commit {
@@ -2436,10 +3457,27 @@ async fn resolve_pick(dir: &str, id: &str, pointer_len: usize) -> AppResult<Pick
             row: None,
         },
         (0, _) => PickTarget::NotACommit,
-        _ => PickTarget::NotFetched {
+        _ if out.stderr.trim() == ABSENT_OBJECT => PickTarget::NotFetched {
             sha: id.to_string(),
         },
+        _ => PickTarget::Failed(git_lines(&out.stderr, out.code)),
     })
+}
+
+/// `cat-file -t`'s whole stderr for an object the store lacks, partial clones under
+/// [`NO_LAZY_FETCH`] included (LC_ALL=C, git 2.51.1). A corrupt object prints its own
+/// `error:` lines first.
+const ABSENT_OBJECT: &str = "fatal: git cat-file: could not get object info";
+
+/// Every non-empty stderr line, joined and capped; git's exit code when there's none.
+fn git_lines(stderr: &str, code: i32) -> String {
+    let joined = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    unreadable_reason(&joined, code)
 }
 
 fn prefix_target(prefix: &str, mut rows: Vec<CommitSummary>) -> PickTarget {
@@ -2474,7 +3512,7 @@ fn ref_commit(row: CommitSummary) -> SubmoduleRefCommit {
 /// would exit 128 `bad object` (both measured). Shallow history makes a printed
 /// commit inconclusive, with a reason only when the shallow probe itself failed.
 async fn orphan_probe(
-    dir: &str,
+    child: &ChildRepo,
     path: &str,
     head_sha: &str,
     sha: &str,
@@ -2486,39 +3524,51 @@ async fn orphan_probe(
     }
     let mut kept = Vec::new();
     for gitlink in recorded.iter().filter(|gitlink| is_full_oid(gitlink)) {
-        match commit_present(dir, gitlink).await {
+        match commit_present(child, gitlink).await {
             Ok(true) => kept.push(gitlink.as_str()),
             Ok(false) => {}
             Err(e) => return OrphanFact::Unverified(Some(nonempty_reason(e.to_string()))),
         }
     }
     let mut args = vec!["rev-list", "--max-count=1", head_sha, "--not", sha];
-    args.extend(kept);
+    args.extend(kept.iter().copied());
     args.extend(["--branches", "--tags", "--remotes", "--"]);
-    match run_git_raw(Some(dir), &args, DEFAULT_TIMEOUT).await {
-        Ok(out) if out.code == 0 => {
-            if out.stdout_lossy().trim().is_empty() {
-                OrphanFact::Named
-            } else {
-                match shallow {
-                    Some(false) => OrphanFact::Orphan,
-                    Some(true) => OrphanFact::Unverified(None),
-                    None => OrphanFact::Unverified(Some(format!(
-                        "couldn't tell whether {}'s history is shallow",
-                        crate::git::ops::discard_shown(path)
-                    ))),
-                }
-            }
-        }
-        Ok(out) => OrphanFact::Unverified(Some(unreadable_reason(&out.stderr, out.code))),
-        Err(e) => OrphanFact::Unverified(Some(nonempty_reason(e.to_string()))),
+    let printed = match child.read(&args).await {
+        Ok(out) if out.code == 0 => !out.stdout_lossy().trim().is_empty(),
+        Ok(out) => return OrphanFact::Unverified(Some(unreadable_reason(&out.stderr, out.code))),
+        Err(e) => return OrphanFact::Unverified(Some(nonempty_reason(e.to_string()))),
+    };
+    if !printed {
+        return OrphanFact::Named;
+    }
+    // Under committer-date skew the walk prints reachable commits: HEAD is unnamed only
+    // once `merge-base` and `for-each-ref --contains` agree.
+    let mut tips = vec![sha];
+    tips.extend(kept.iter().copied());
+    let refs = ["refs/heads", "refs/tags", "refs/remotes"];
+    match reached_from(child, head_sha, &tips, &refs).await {
+        Ok(true) => OrphanFact::Named,
+        Ok(false) => match shallow {
+            Some(false) => OrphanFact::Orphan,
+            Some(true) => OrphanFact::Unverified(None),
+            None => OrphanFact::Unverified(Some(format!(
+                "couldn't tell whether {}'s history is shallow",
+                crate::git::ops::discard_shown(path)
+            ))),
+        },
+        Err(reason) => OrphanFact::Unverified(Some(reason)),
     }
 }
 
 /// A raw read's answer: stdout on exit 0, else the line a blocked plan carries.
 fn read_answer(read: AppResult<GitOutput>) -> Result<String, String> {
+    bytes_answer(read).map(|stdout| String::from_utf8_lossy(&stdout).into_owned())
+}
+
+/// [`read_answer`] with stdout as git printed it.
+fn bytes_answer(read: AppResult<GitOutput>) -> Result<Vec<u8>, String> {
     match read {
-        Ok(out) if out.code == 0 => Ok(out.stdout_lossy()),
+        Ok(out) if out.code == 0 => Ok(out.stdout),
         Ok(out) => Err(unreadable_reason(&out.stderr, out.code)),
         Err(e) => Err(nonempty_reason(e.to_string())),
     }
@@ -2530,16 +3580,16 @@ fn read_answer(read: AppResult<GitOutput>) -> Result<String, String> {
 /// and never refreshes the real index. `read-tree` doesn't preserve ignored files,
 /// so a pass is followed by the ignored check. An unborn HEAD merges from the
 /// store's own empty tree.
-async fn pick_dry_run(dir: &str, head: Option<&str>, sha: &str) -> OverwriteFact {
+async fn pick_dry_run(child: &ChildRepo, head: Option<&str>, sha: &str) -> OverwriteFact {
     let from = match head {
         Some(head) => head.to_string(),
-        None => match empty_tree(dir).await {
+        None => match empty_tree(child).await {
             Ok(empty) => empty,
             Err(reason) => return OverwriteFact::Failed(reason),
         },
     };
     let index_path = ["rev-parse", "--path-format=absolute", "--git-path", "index"];
-    let index = match read_answer(run_git_raw(Some(dir), &index_path, DEFAULT_TIMEOUT).await) {
+    let index = match read_answer(child.read(&index_path).await) {
         Ok(text) => PathBuf::from(text.trim_end_matches(['\r', '\n'])),
         Err(reason) => return OverwriteFact::Failed(reason),
     };
@@ -2547,7 +3597,7 @@ async fn pick_dry_run(dir: &str, head: Option<&str>, sha: &str) -> OverwriteFact
         return OverwriteFact::Clear;
     };
     let scratch = scratch.to_string_lossy().into_owned();
-    let env = [("GIT_INDEX_FILE", scratch.as_str())];
+    let env = [("GIT_INDEX_FILE", scratch.as_str()), NO_LAZY_FETCH[0]];
     if copied {
         // `checkout` refreshes its index in memory first. No hook: a repo's
         // `post-index-change` would otherwise run on every highlight (measured).
@@ -2559,7 +3609,7 @@ async fn pick_dry_run(dir: &str, head: Option<&str>, sha: &str) -> OverwriteFact
             "--refresh",
         ];
         // Its exit code is not a verdict: an entry it can't refresh is the dry run's.
-        if let Err(e) = run_git_raw_env(Some(dir), &refresh, &env, DEFAULT_TIMEOUT).await {
+        if let Err(e) = child.run_env(&refresh, None, &env, DEFAULT_TIMEOUT).await {
             return OverwriteFact::Failed(nonempty_reason(e.to_string()));
         }
     }
@@ -2573,11 +3623,21 @@ async fn pick_dry_run(dir: &str, head: Option<&str>, sha: &str) -> OverwriteFact
         &from,
         sha,
     ];
-    match run_git_raw_env(Some(dir), &dry_run, &env, DEFAULT_TIMEOUT).await {
+    match child.run_env(&dry_run, None, &env, DEFAULT_TIMEOUT).await {
         Ok(out) if out.code == 0 => {}
+        // A partial clone lacking the target's blobs: the checkout fetches them, so it
+        // decides.
+        Ok(out)
+            if out
+                .stderr
+                .lines()
+                .any(|line| line.trim() == LAZY_FETCH_DISABLED) =>
+        {
+            return OverwriteFact::Clear
+        }
         Ok(out) => {
             return match dry_run_refusal(out.code, &out.stderr) {
-                Some(path) => OverwriteFact::Blocked(vec![path]),
+                Some((why, path)) => OverwriteFact::Blocked(why, vec![path]),
                 None => OverwriteFact::Failed(unreadable_reason(&out.stderr, out.code)),
             }
         }
@@ -2588,23 +3648,29 @@ async fn pick_dry_run(dir: &str, head: Option<&str>, sha: &str) -> OverwriteFact
     let added_from = if copied || head.is_none() {
         from
     } else {
-        match empty_tree(dir).await {
+        match empty_tree(child).await {
             Ok(empty) => empty,
             Err(reason) => return OverwriteFact::Failed(reason),
         }
     };
-    ignored_in_the_way(dir, &added_from, sha).await
+    ignored_in_the_way(child, &added_from, sha).await
 }
 
+/// git's warning when [`NO_LAZY_FETCH`] stopped a read that needed a missing object
+/// (LC_ALL=C, git 2.51.1).
+const LAZY_FETCH_DISABLED: &str =
+    "warning: lazy fetching disabled; some objects may not be available";
+
 /// The store's own empty tree id (its hash algorithm's).
-async fn empty_tree(dir: &str) -> Result<String, String> {
-    let empty = run_git_raw_input(
-        Some(dir),
-        &["hash-object", "-t", "tree", "--stdin"],
-        Some(""),
-        DEFAULT_TIMEOUT,
-    )
-    .await;
+async fn empty_tree(child: &ChildRepo) -> Result<String, String> {
+    let empty = child
+        .run_env(
+            &["hash-object", "-t", "tree", "--stdin"],
+            Some(""),
+            &[],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
     read_answer(empty).map(|text| text.trim().to_string())
 }
 
@@ -2692,9 +3758,10 @@ tokio::task_local! {
     static SCRATCH_INDEX_FAULT: Arc<std::sync::Mutex<Option<PathBuf>>>;
 }
 
-/// The path a `read-tree` refusal names, when its stderr is exactly one of git's
-/// would-overwrite errors (exit 128); anything else is not a would-overwrite.
-fn dry_run_refusal(code: i32, stderr: &str) -> Option<String> {
+/// The kind and path a `read-tree` refusal names, when its stderr is exactly one of
+/// git's would-overwrite errors (exit 128); anything else, a path holding [`LOSSY`]
+/// included, is not a would-overwrite, and the plan reads it as "couldn't check".
+fn dry_run_refusal(code: i32, stderr: &str) -> Option<(SubmodulePickBlock, String)> {
     if code != 128 {
         return None;
     }
@@ -2706,11 +3773,11 @@ fn dry_run_refusal(code: i32, stderr: &str) -> Option<String> {
     if lines.next().is_some() {
         return None;
     }
-    DRY_RUN_REFUSALS.iter().find_map(|(prefix, suffix)| {
+    DRY_RUN_REFUSALS.iter().find_map(|(prefix, suffix, why)| {
         line.strip_prefix(prefix)?
             .strip_suffix(suffix)
-            .filter(|path| !path.is_empty())
-            .map(str::to_string)
+            .filter(|path| !path.is_empty() && !path.contains(LOSSY))
+            .map(|path| (*why, path.to_string()))
     })
 }
 
@@ -2750,6 +3817,7 @@ fn ignored_candidates(
     disk: impl Fn(&Path, &str) -> std::io::Result<OnDisk>,
 ) -> std::io::Result<Vec<String>> {
     let mut candidates: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for (path, gitlink) in added {
         let mut found = None;
         for (at, _) in path.match_indices('/') {
@@ -2765,41 +3833,50 @@ fn ignored_candidates(
                 _ => None,
             };
         }
-        if let Some(found) = found.filter(|found| !candidates.contains(found)) {
+        if let Some(found) = found.filter(|found| seen.insert(found.clone())) {
             candidates.push(found);
         }
     }
     Ok(candidates)
 }
 
-/// Ignored files in the way of what the target adds, which `read-tree` replaces
-/// where the checkout (`--no-overwrite-ignore`) refuses. Skipped in a sparse
-/// checkout, where an untracked file at an excluded path the target adds went
-/// through (measured), and when a candidate's lstat went unanswered.
-async fn ignored_in_the_way(dir: &str, from: &str, sha: &str) -> OverwriteFact {
-    let sparse = run_git_raw(
-        Some(dir),
-        &["config", "--type=bool", "--get", "core.sparseCheckout"],
-        DEFAULT_TIMEOUT,
-    )
-    .await
-    .and_then(config_answer);
+/// Ignored files in the way of what the target adds or deletes, which `read-tree`
+/// replaces or removes where the checkout (`--no-overwrite-ignore`) refuses (both
+/// measured). Skipped in a sparse checkout, where an untracked file at an excluded
+/// path the target adds went through (measured), and when a candidate's lstat went
+/// unanswered. Sparse means `core.sparseCheckout` with a patterns file: without one
+/// git checks out the whole tree.
+async fn ignored_in_the_way(child: &ChildRepo, from: &str, sha: &str) -> OverwriteFact {
+    let sparse = child
+        .read(&["config", "--type=bool", "--get", "core.sparseCheckout"])
+        .await
+        .and_then(config_answer);
     match sparse {
-        Ok(Some(out)) if out.stdout_lossy().trim() == "true" => return OverwriteFact::Clear,
+        Ok(Some(out)) if out.stdout_lossy().trim() == "true" => {
+            match sparse_patterns(child).await {
+                Ok(true) => return OverwriteFact::Clear,
+                Ok(false) => {}
+                Err(reason) => return OverwriteFact::Failed(reason),
+            }
+        }
         Ok(_) => {}
         Err(e) => return OverwriteFact::Failed(nonempty_reason(e.to_string())),
     }
-    let adds = [
+    let changes = [
         "diff-tree",
         "-r",
         "--raw",
         "--no-renames",
-        "--diff-filter=A",
+        "--diff-filter=AD",
         "-z",
         from,
         sha,
     ];
-    let raw = match read_answer(run_git_raw(Some(dir), &adds, DEFAULT_TIMEOUT).await) {
+    // `-z` prints paths as bytes: one that isn't UTF-8 has no exact name to look up on
+    // disk or to match in a pathspec, and its lossy spelling would check another file.
+    let raw = match bytes_answer(child.read(&changes).await).and_then(|raw| {
+        String::from_utf8(raw).map_err(|_| "git listed a path that isn't UTF-8".to_string())
+    }) {
         Ok(raw) => raw,
         Err(reason) => return OverwriteFact::Failed(reason),
     };
@@ -2810,17 +3887,31 @@ async fn ignored_in_the_way(dir: &str, from: &str, sha: &str) -> OverwriteFact {
         let Some(meta) = meta.strip_prefix(':') else {
             break;
         };
-        let gitlink = meta.split(' ').nth(1) == Some(GITLINK_MODE);
+        // A deleted gitlink's folder stays too, so either side's mode counts.
+        let mut modes = meta.split(' ').take(2);
+        let gitlink = modes.any(|mode| mode == GITLINK_MODE);
         added.push((path.to_string(), gitlink));
     }
-    let base = PathBuf::from(dir);
+    let base = PathBuf::from(child.folder());
     let walked =
         tauri::async_runtime::spawn_blocking(move || ignored_candidates(&base, &added, on_disk))
             .await;
     let candidates = match walked {
-        Ok(Ok(candidates)) => candidates,
+        Ok(Ok(candidates)) if !candidates.is_empty() => candidates,
         _ => return OverwriteFact::Clear,
     };
+    // One index read: a candidate still in the index is tracked, which the checkout's
+    // own refusal names, so only the rest are listed below.
+    let index = match bytes_answer(child.read(&["ls-files", "-z"]).await) {
+        Ok(index) => index,
+        Err(reason) => return OverwriteFact::Failed(reason),
+    };
+    // Compared as bytes, so a path that isn't UTF-8 never stands in for a candidate.
+    let tracked: std::collections::HashSet<&[u8]> = index.split(|byte| *byte == 0).collect();
+    let candidates: Vec<&String> = candidates
+        .iter()
+        .filter(|path| !tracked.contains(path.as_bytes()))
+        .collect();
     let mut paths = Vec::new();
     // Chunked: one argv holds a bounded number of pathspecs.
     for chunk in candidates.chunks(100) {
@@ -2837,17 +3928,10 @@ async fn ignored_in_the_way(dir: &str, from: &str, sha: &str) -> OverwriteFact {
             "--",
         ];
         args.extend(specs.iter().map(String::as_str));
-        let listed = match read_answer(run_git_raw(Some(dir), &args, DEFAULT_TIMEOUT).await) {
-            Ok(listed) => listed,
+        match bytes_answer(child.read(&args).await).and_then(ignored_listed) {
+            Ok(listed) => paths.extend(listed),
             Err(reason) => return OverwriteFact::Failed(reason),
-        };
-        // An ignored nested repository lists as `nr/`; the checkout names it `nr`.
-        paths.extend(
-            listed
-                .split('\0')
-                .filter(|path| !path.is_empty())
-                .map(|path| path.strip_suffix('/').unwrap_or(path).to_string()),
-        );
+        }
         if paths.len() >= PICK_PATHS_CAP {
             break;
         }
@@ -2856,14 +3940,40 @@ async fn ignored_in_the_way(dir: &str, from: &str, sha: &str) -> OverwriteFact {
         return OverwriteFact::Clear;
     }
     paths.truncate(PICK_PATHS_CAP);
-    OverwriteFact::Blocked(paths)
+    OverwriteFact::Blocked(SubmodulePickBlock::IgnoredInTheWay, paths)
+}
+
+/// Pure: the paths of an `ls-files --others --ignored -z` listing. One that isn't
+/// UTF-8 fails the listing, as `diff-tree`'s does: its lossy spelling names another
+/// file. An ignored nested repository lists as `nr/`; the checkout names it `nr`.
+fn ignored_listed(listed: Vec<u8>) -> Result<Vec<String>, String> {
+    let listed =
+        String::from_utf8(listed).map_err(|_| "git listed a path that isn't UTF-8".to_string())?;
+    Ok(listed
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(|path| path.strip_suffix('/').unwrap_or(path).to_string())
+        .collect())
+}
+
+/// Whether the sparse patterns file exists; Err carries the failed read's line.
+async fn sparse_patterns(child: &ChildRepo) -> Result<bool, String> {
+    let args = [
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "info/sparse-checkout",
+    ];
+    let file = read_answer(child.read(&args).await)?;
+    let file = PathBuf::from(file.trim_end_matches(['\r', '\n']));
+    file.try_exists()
+        .map_err(|e| nonempty_reason(e.to_string()))
 }
 
 /// The commit's row for the plan read; a failed read is an Err.
-async fn pick_commit_row(dir: &str, sha: &str) -> AppResult<Option<SubmoduleRefCommit>> {
-    let out = run_git_raw(
-        Some(dir),
-        &[
+async fn pick_commit_row(child: &ChildRepo, sha: &str) -> AppResult<Option<SubmoduleRefCommit>> {
+    let out = child
+        .read(&[
             "log",
             "--no-walk",
             "--no-color",
@@ -2871,11 +3981,9 @@ async fn pick_commit_row(dir: &str, sha: &str) -> AppResult<Option<SubmoduleRefC
             crate::git::history::LOG_FORMAT,
             sha,
             "--",
-        ],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .exit_verdict()?;
+        ])
+        .await?
+        .exit_verdict()?;
     Ok(crate::git::history::parse_commit_log(&out.stdout_lossy())
         .into_iter()
         .next()
@@ -2885,7 +3993,7 @@ async fn pick_commit_row(dir: &str, sha: &str) -> AppResult<Option<SubmoduleRefC
 /// `pointer...sha` counted inside the submodule; any failure (a commit the store
 /// lacks exits 128) reads `Unknown`. Shallow history can read `Diverged` where full
 /// history would read contained, never the reverse.
-async fn pick_relation(dir: &str, pointer: &str, sha: &str) -> SubmodulePickRelation {
+async fn pick_relation(child: &ChildRepo, pointer: &str, sha: &str) -> SubmodulePickRelation {
     if pointer == sha {
         return SubmodulePickRelation::Same;
     }
@@ -2893,12 +4001,9 @@ async fn pick_relation(dir: &str, pointer: &str, sha: &str) -> SubmodulePickRela
         return SubmodulePickRelation::Unknown;
     }
     let range = format!("{pointer}...{sha}");
-    let Ok(out) = run_git_raw(
-        Some(dir),
-        &["rev-list", "--left-right", "--count", &range],
-        DEFAULT_TIMEOUT,
-    )
-    .await
+    let Ok(out) = child
+        .read(&["rev-list", "--left-right", "--count", &range])
+        .await
     else {
         return SubmodulePickRelation::Unknown;
     };
@@ -2938,36 +4043,42 @@ pub(crate) async fn git_submodule_pick_plan_core(
     if !(4..=64).contains(&id.len()) || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(invalid_commit_id(sha));
     }
-    let (dir, gate) = pick_gate(repo_path, path).await;
+    let (child, gate) = pick_gate(repo_path, path).await;
     let mut facts = PickFacts::new(gate, true);
-    let plan = settle_pick(repo_path, path, &dir, &id, &mut facts).await?;
+    let plan = settle_pick(repo_path, path, child.as_ref(), &id, &mut facts).await?;
 
     let pointer = match facts.pointer.take() {
         Some(pointer) => pointer,
         None => index_gitlink(repo_path, path, &crate::git::pathspec::literal(path)).await?,
     };
-    let shallow = match facts.shallow {
-        Some(shallow) => shallow,
-        None if facts.gate.checkout == SubmoduleCheckout::Ok => submodule_is_shallow(&dir).await,
-        None => None,
+    let child = child
+        .as_ref()
+        .filter(|_| facts.gate.checkout == SubmoduleCheckout::Ok);
+    let shallow = match (facts.shallow, child) {
+        (Some(shallow), _) => shallow,
+        (None, Some(child)) => submodule_is_shallow(child).await,
+        (None, None) => None,
     };
     let (sha, mut commit) = match facts.target.take() {
         Some(PickTarget::Commit { sha, row }) => {
-            let row = match row {
-                Some(row) => Some(row),
-                None => pick_commit_row(&dir, &sha).await?,
+            let row = match (row, child) {
+                (Some(row), _) => Some(row),
+                (None, Some(child)) => pick_commit_row(child, &sha).await?,
+                (None, None) => None,
             };
             (Some(sha), row)
         }
         Some(PickTarget::NotFetched { sha }) => (Some(sha), None),
         _ => (None, None),
     };
-    let relation = match (&pointer, &sha, &commit) {
-        (Some(pointer), Some(sha), Some(_)) => pick_relation(&dir, pointer, sha).await,
+    let relation = match (&pointer, &sha, &commit, child) {
+        (Some(pointer), Some(sha), Some(_), Some(child)) => {
+            pick_relation(child, pointer, sha).await
+        }
         _ => SubmodulePickRelation::Unknown,
     };
-    if let Some(commit) = commit.as_mut() {
-        commit.on_remote = remote_reach(&dir, std::slice::from_ref(&commit.sha), shallow)
+    if let (Some(commit), Some(child)) = (commit.as_mut(), child) {
+        commit.on_remote = remote_reach(child, std::slice::from_ref(&commit.sha), shallow)
             .await
             .pop()
             .flatten();
@@ -2988,9 +4099,16 @@ type PickLandedHook =
 
 #[cfg(test)]
 tokio::task_local! {
-    /// Awaited between a pick's landed checkout and its last pointer compare, so a
-    /// test can move the pointer there.
+    /// Awaited between a pick's landed checkout and its stage write, so a test can move
+    /// the pointer or the checkout there.
     static PICK_LANDED_HOOK: PickLandedHook;
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Awaited between an update's bump and its settling leg, so a test can deinit the
+    /// bumped submodule there.
+    static UPDATE_SETTLE_HOOK: PickLandedHook;
 }
 
 #[cfg(test)]
@@ -3002,6 +4120,49 @@ async fn pick_landed_hook() {
 
 #[cfg(not(test))]
 async fn pick_landed_hook() {}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Awaited just before a checkout's pre-write re-check, the pick's and the
+    /// accept's, before a pick's re-check when its HEAD is already there, and before an
+    /// already-current pick's re-check, so a test can move the checkout or the pointer
+    /// there.
+    static PRE_CHECKOUT_HOOK: PickLandedHook;
+}
+
+#[cfg(test)]
+async fn pre_checkout_hook() {
+    if let Ok(hook) = PRE_CHECKOUT_HOOK.try_with(|hook| hook()) {
+        hook.await;
+    }
+}
+
+#[cfg(not(test))]
+async fn pre_checkout_hook() {}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Awaited after a checkout's index.lock wait, before HEAD is read again, so a test
+    /// can release the lock and move HEAD there.
+    static DETACH_WAIT_HOOK: PickLandedHook;
+}
+
+#[cfg(test)]
+async fn detach_wait_hook() {
+    if let Ok(hook) = DETACH_WAIT_HOOK.try_with(|hook| hook()) {
+        hook.await;
+    }
+}
+
+#[cfg(not(test))]
+async fn detach_wait_hook() {}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Awaited once a fetch holds its network key, before its gates run again, so a
+    /// test can move the folder or the parent's record there.
+    static FETCH_WAITED_HOOK: PickLandedHook;
+}
 
 /// Checks `sha` (a full commit id) out inside the submodule at `path`, then stages
 /// the parent's pointer there, only once that checkout landed: a pointer-only stage
@@ -3037,10 +4198,27 @@ pub(crate) async fn git_submodule_set_commit_core(
 }
 
 /// The pick, with the bound on its wait for the submodule's own working tree as a
-/// parameter so a test can shorten it. git has no index compare-and-swap, so the
-/// pointer is compared three times under the hold: on entry, after the child wait
-/// and the probes, and right after the checkout landed. Once it landed nothing
-/// rolls back and no error escapes: each failure is `CheckedOutNotStaged`.
+/// parameter so a test can shorten it. git has no transaction across two
+/// repositories, so the pick is ordered and then observed. The pointer is compared
+/// before anything moves, and just before the checkout the folder must still resolve
+/// to the held repository with HEAD where the plan read it (either move answers
+/// `Changed`, nothing touched); the checkout lands; the stage is a preimage-checked
+/// patch (`apply --cached`), which compares
+/// the staged gitlink with `expected` and writes under one index.lock hold, so an
+/// outside stage is never overwritten and a lock retry needs no re-compare. The
+/// verdict is READ BACK, and each read is three-valued: a value, a confirmed absence,
+/// or a read that couldn't be made. `Set` means the staged gitlink and the FOLDER's
+/// HEAD (the folder resolved again, since the held repository outlives its checkout)
+/// each read `sha`. A confirmed other reading is returned as read (`MovedAfter`,
+/// `CheckedOutNotStaged`); a read that couldn't be made is never turned into an
+/// absence or a move (`ReadBackFailed`, `StageUnconfirmed` with the read's line).
+/// Still open: the two reads are not one snapshot, anything outside the app can move
+/// either value after them, and a hook the write runs is seen only by the read-back.
+/// Once a checkout landed nothing rolls back and no error escapes. Out of reach by
+/// design: the gap before git takes its own lock ([`detach_run`]), the pinned
+/// directory swapped or replaced ([`ChildRepo`]), an inherited `GIT_DIR` /
+/// `GIT_WORK_TREE` (the app's runner policy), and a path git prints that isn't UTF-8,
+/// which reads as "couldn't check".
 async fn set_submodule_commit_within(
     state: &AppState,
     repo_path: &str,
@@ -3067,32 +4245,18 @@ async fn set_submodule_commit_within(
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, PICK_HOLDER).await?;
     refuse_linked_submodule_path(repo_path, &path, pick_refusal).await?;
     let spec = crate::git::pathspec::literal(&path);
-    match index_gitlink(repo_path, &path, &spec).await? {
-        // A 64/64 pair against a SHA-1 store would otherwise read as moved.
-        Some(live) if live.len() != sha.len() => return Err(invalid_commit_id(&sha)),
-        Some(live) if live == expected => {}
-        _ => return Ok(SubmodulePickOutcome::Changed),
-    }
-    if let MidOpFact::Refused(reason) = parent_mid_op(repo_path).await? {
-        return Ok(SubmodulePickOutcome::Blocked {
-            why: SubmodulePickBlock::MidOperation,
-            reason,
-            paths: Vec::new(),
-        });
+    if let Some(stop) = pick_entry_gate(repo_path, &path, &spec, &sha, &expected).await? {
+        return Ok(stop);
     }
 
     // The submodule's own working-tree domain, parent then child as the accept takes
     // them. Only a folder the gate reads as checked out has one: any other spelling
     // resolves to the parent's checkout and would cache that key for the folder.
     let worktree = Path::new(repo_path).join(&path);
-    let (decided, _) = checkout_from_probe(std::fs::symlink_metadata(&worktree), || {
-        worktree.join(".git").try_exists()
-    });
-    let dir = worktree.to_string_lossy().into_owned();
-    let child_domain = if decided == SubmoduleCheckout::Ok {
-        Some(state.working_tree_lock(&dir).await)
-    } else {
-        None
+    let (decided, _, _) = child_gate(repo_path, &worktree).await;
+    let child_domain = match &decided {
+        Some(held) => Some(state.working_tree_lock(held.folder()).await),
+        None => None,
     }
     .filter(|child| !Arc::ptr_eq(&child.lock(), &domain.lock()));
     let _child_guard = match &child_domain {
@@ -3103,91 +4267,129 @@ async fn set_submodule_commit_within(
         }
         None => None,
     };
+    // An outside stage or a parent merge begun during the wait.
+    if let Some(stop) = pick_entry_gate(repo_path, &path, &spec, &sha, &expected).await? {
+        return Ok(stop);
+    }
 
-    let (_, gate) = pick_gate(repo_path, &path).await;
-    // A checkout that appeared after the hold was decided would be moved unheld.
-    if gate.checkout == SubmoduleCheckout::Ok && decided != SubmoduleCheckout::Ok {
+    let (child, gate) = pick_gate(repo_path, &path).await;
+    // A checkout that appeared after the hold was decided, or another repository than
+    // the held one, would be moved unheld.
+    let replaced = matches!((&decided, &child), (Some(held), Some(now)) if !held.same_repo(now));
+    if replaced || (gate.checkout == SubmoduleCheckout::Ok && decided.is_none()) {
         return Ok(SubmodulePickOutcome::Changed);
     }
     let head_before = gate.head.clone();
     let mut facts = PickFacts::new(gate, false);
     facts.pointer = Some(Some(expected.clone()));
     facts.parent_mid_op = Some(MidOpFact::Clear);
-    let checkout = match settle_pick(repo_path, &path, &dir, &sha, &mut facts).await? {
+    let checkout = match settle_pick(repo_path, &path, child.as_ref(), &sha, &mut facts).await? {
         SubmodulePickPlan::Blocked { why, reason, paths } => {
             return Ok(SubmodulePickOutcome::Blocked { why, reason, paths })
         }
         SubmodulePickPlan::Current => {
+            // Nothing to move, but `Set` still says the pointer and the folder's HEAD
+            // read `sha` now: either moved during the probes is `Changed`, and so is a
+            // HEAD read that couldn't be made (nothing was touched); a failed pointer
+            // read is an Err, as on the other arms.
+            pre_checkout_hook().await;
+            if index_gitlink(repo_path, &path, &spec).await?.as_deref() != Some(expected.as_str()) {
+                return Ok(SubmodulePickOutcome::Changed);
+            }
+            let Some(held) = child.as_ref() else {
+                return Ok(SubmodulePickOutcome::Changed);
+            };
+            if !head_read_back(repo_path, &worktree, held)
+                .await
+                .reads(head_before.as_deref())
+            {
+                return Ok(SubmodulePickOutcome::Changed);
+            }
             return Ok(SubmodulePickOutcome::Set {
                 checkout: SubmodulePickMove::AlreadyThere,
-                nested_left: nested_left(&dir).await,
+                nested_left: nested_left(child.as_ref(), head_before.as_deref(), &sha).await,
                 sha,
-            })
+            });
         }
         SubmodulePickPlan::Ready { checkout } => checkout,
     };
 
-    // Again after the child wait and the probes: git outside the app can move it.
+    // Again after the child wait and the probes: an early exit that keeps `Changed`'s
+    // promise (nothing touched). The stage's preimage check is the guarantee.
     if index_gitlink(repo_path, &path, &spec).await?.as_deref() != Some(expected.as_str()) {
         return Ok(SubmodulePickOutcome::Changed);
     }
+    // The pre-write re-check, on both arms: an outside commit on a detached HEAD since
+    // the plan's read would be orphaned, a folder deinit-ed meanwhile repopulated, and
+    // a pointer staged at a HEAD the folder no longer holds.
+    let held = resolved(child.as_ref())?;
+    pre_checkout_hook().await;
+    if !head_read_back(repo_path, &worktree, held)
+        .await
+        .reads(head_before.as_deref())
+    {
+        return Ok(SubmodulePickOutcome::Changed);
+    }
     if checkout == SubmodulePickMove::CheckOut {
-        let moved = detach_submodule_at(&dir, &sha).await;
+        let child = held;
+        let head = head_before.as_deref();
+        let moved = detach_submodule_at(repo_path, &worktree, child, &sha, head).await;
         if !matches!(&moved, Ok(out) if out.code == 0) {
-            return Ok(pick_checkout_verdict(&dir, head_before.as_deref(), moved).await);
+            return Ok(pick_checkout_verdict(child, head_before.as_deref(), moved).await);
         }
         pick_landed_hook().await;
-        // The last compare, right before the write. A moved pointer is left alone.
-        let unstaged = |why, reason| SubmodulePickOutcome::CheckedOutNotStaged {
-            sha: sha.clone(),
-            why,
-            reason,
-        };
-        match index_gitlink(repo_path, &path, &spec).await {
-            Ok(Some(live)) if live == expected => {}
-            Ok(_) => return Ok(unstaged(SubmodulePickUnstaged::PointerMoved, None)),
-            Err(e) => {
-                return Ok(unstaged(
-                    SubmodulePickUnstaged::StageFailed,
-                    Some(nonempty_reason(e.to_string())),
-                ))
-            }
-        }
     }
-    // A path, not a pathspec: git's spelling from the gate, passed raw. Never `--add`:
-    // the compares above proved a stage-0 gitlink is there.
-    let info = format!("{GITLINK_MODE},{sha},{path}");
-    let staged = run_git_raw_index_retry(
-        repo_path,
-        &["update-index", "--cacheinfo", &info],
-        DEFAULT_TIMEOUT,
-    )
-    .await;
-    let failed = match staged {
-        Ok(out) if out.code == 0 => None,
-        Ok(out) => Some((
-            SubmodulePickUnstaged::StageFailed,
-            unreadable_reason(&out.stderr, out.code),
-        )),
-        Err(e @ AppError::Timeout(_)) => {
-            Some((SubmodulePickUnstaged::StageUnconfirmed, e.to_string()))
+    // A pointer already at `sha` (only the checkout differed) needs no write.
+    let wrote = if sha == expected {
+        Ok(())
+    } else {
+        match stage_gitlink_cas(repo_path, &path, &expected, &sha).await {
+            Ok(out) if out.code == 0 => Ok(()),
+            Ok(out) => Err(unreadable_reason(&out.stderr, out.code)),
+            Err(e) => Err(nonempty_reason(e.to_string())),
         }
-        Err(e) => Some((
-            SubmodulePickUnstaged::StageFailed,
-            nonempty_reason(e.to_string()),
-        )),
     };
-    if let Some((why, reason)) = failed {
-        return Ok(SubmodulePickOutcome::CheckedOutNotStaged {
-            sha,
-            why,
-            reason: Some(reason),
-        });
+    let pointer = index_gitlink(repo_path, &path, &spec)
+        .await
+        .map_err(|e| nonempty_reason(e.to_string()));
+    let head = match child.as_ref() {
+        Some(child) => head_read_back(repo_path, &worktree, child).await,
+        None => HeadRead::Gone(FOLDER_GONE),
+    };
+    let mut outcome = stage_verdict(&wrote, &pointer, &head, &expected, &sha, checkout);
+    if let SubmodulePickOutcome::Set {
+        nested_left: left, ..
+    } = &mut outcome
+    {
+        *left = nested_left(child.as_ref(), head_before.as_deref(), &sha).await;
     }
-    Ok(SubmodulePickOutcome::Set {
-        checkout,
-        nested_left: nested_left(&dir).await,
-        sha,
+    Ok(outcome)
+}
+
+/// The setter's parent-side gate, run on entry and again after the child wait: the
+/// pointer still at `expected`, and no operation in progress in the parent. Some is
+/// the outcome that stops the pick: an early exit that keeps `Changed`'s promise, not
+/// the guarantee, which is the stage's preimage check.
+async fn pick_entry_gate(
+    repo_path: &str,
+    path: &str,
+    spec: &str,
+    sha: &str,
+    expected: &str,
+) -> AppResult<Option<SubmodulePickOutcome>> {
+    match index_gitlink(repo_path, path, spec).await? {
+        // A 64/64 pair against a SHA-1 store would otherwise read as moved.
+        Some(live) if live.len() != sha.len() => return Err(invalid_commit_id(sha)),
+        Some(live) if live == expected => {}
+        _ => return Ok(Some(SubmodulePickOutcome::Changed)),
+    }
+    Ok(match parent_mid_op(repo_path).await? {
+        MidOpFact::Refused(reason) => Some(SubmodulePickOutcome::Blocked {
+            why: SubmodulePickBlock::MidOperation,
+            reason,
+            paths: Vec::new(),
+        }),
+        _ => None,
     })
 }
 
@@ -3195,7 +4397,7 @@ async fn set_submodule_commit_within(
 /// where it was, is "in the way": a failing post-checkout hook can print a forged
 /// header after HEAD moved (measured), and tab-led lines alone decide nothing.
 async fn pick_checkout_verdict(
-    dir: &str,
+    child: &ChildRepo,
     head_before: Option<&str>,
     moved: AppResult<GitOutput>,
 ) -> SubmodulePickOutcome {
@@ -3207,20 +4409,28 @@ async fn pick_checkout_verdict(
             }
         }
     };
-    if let Some((header, paths)) = would_overwrite(&out.stderr) {
-        let head_after = run_git_raw(
-            Some(dir),
-            &["rev-parse", "--verify", "HEAD"],
-            DEFAULT_TIMEOUT,
-        )
-        .await
-        .ok()
-        .filter(|after| after.code == 0)
-        .map(|after| after.stdout_lossy().trim().to_string());
+    if let Some((why, header, paths)) = would_overwrite(&out.stderr) {
+        let head_after = head_now(child).await.flatten();
         if head_after.is_some() && head_after.as_deref() == head_before {
+            let listed = listed_paths(&out.stderr);
+            // lstat, never following a link: the listed name itself must be there.
+            let folder = PathBuf::from(child.folder());
+            let exists = |path: &str| folder.join(path).symlink_metadata().is_ok();
+            let (reason, paths, exact) = exact_listing(header, paths, &listed, exists);
+            // Untracked paths that are all ignored report as `IgnoredInTheWay`; one
+            // that isn't, or one with no exact spelling to ask about, keeps the
+            // untracked kind, which outranks it.
+            let why = match why {
+                SubmodulePickBlock::UntrackedInTheWay
+                    if exact && all_ignored(child, &listed).await == Some(true) =>
+                {
+                    SubmodulePickBlock::IgnoredInTheWay
+                }
+                why => why,
+            };
             return SubmodulePickOutcome::Blocked {
-                why: SubmodulePickBlock::WouldOverwrite,
-                reason: Some(header),
+                why,
+                reason: Some(reason),
                 paths,
             };
         }
@@ -3245,14 +4455,22 @@ fn checkout_failure_reason(stderr: &str, code: i32) -> String {
     unreadable_reason(line.unwrap_or(""), code)
 }
 
-/// The first of git's would-overwrite headers and the tab-led paths after each one.
-fn would_overwrite(stderr: &str) -> Option<(String, Vec<String>)> {
+/// The highest-ranked kind among git's would-overwrite headers, the first header, and
+/// the tab-led paths after each one.
+fn would_overwrite(stderr: &str) -> Option<(SubmodulePickBlock, String, Vec<String>)> {
     let mut header = None;
+    let mut why: Option<SubmodulePickBlock> = None;
     let mut paths = Vec::new();
     let mut listing = false;
     for line in stderr.lines() {
-        if WOULD_OVERWRITE_HEADERS.contains(&line) {
+        if let Some((_, kind)) = WOULD_OVERWRITE_HEADERS
+            .iter()
+            .find(|(text, _)| *text == line)
+        {
             header.get_or_insert_with(|| line.to_string());
+            if why.is_none_or(|seen| overwrite_rank(*kind) < overwrite_rank(seen)) {
+                why = Some(*kind);
+            }
             listing = true;
         } else if let Some(path) = line.strip_prefix('\t').filter(|_| listing) {
             if paths.len() < PICK_PATHS_CAP {
@@ -3262,26 +4480,135 @@ fn would_overwrite(stderr: &str) -> Option<(String, Vec<String>)> {
             listing = false;
         }
     }
-    header
-        .filter(|_| !paths.is_empty())
-        .map(|header| (header, paths))
+    Some((why?, header?, paths)).filter(|(_, _, paths)| !paths.is_empty())
 }
 
-/// Nested submodules the pick left at another commit than it records (`+` rows of
-/// `submodule status`); None when the read failed.
-async fn nested_left(dir: &str) -> Option<u32> {
-    let out = run_git_raw(Some(dir), &["submodule", "status"], DEFAULT_TIMEOUT)
+/// A refused checkout's reason, shown paths, and whether every listed path is exact:
+/// one holding [`LOSSY`], or one `exists` doesn't find in the folder, is left out of
+/// `paths`, and the reason says so. git prints each path raw up to a newline, so a
+/// name holding one arrives cut, naming nothing there.
+fn exact_listing(
+    header: String,
+    paths: Vec<String>,
+    listed: &[String],
+    exists: impl Fn(&str) -> bool,
+) -> (String, Vec<String>, bool) {
+    let is_exact = |path: &String| !path.contains(LOSSY) && exists(path);
+    let exact = listed.iter().all(is_exact);
+    let paths = paths.into_iter().filter(is_exact).collect();
+    let reason = if exact {
+        header
+    } else {
+        format!("{header} {LOSSY_PATHS_LEFT_OUT}")
+    };
+    (reason, paths, exact)
+}
+
+const LOSSY_PATHS_LEFT_OUT: &str = "(paths git printed that couldn't be read exactly are left out)";
+
+/// Every tab-led path after one of git's would-overwrite headers, uncapped.
+fn listed_paths(stderr: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut listing = false;
+    for line in stderr.lines() {
+        if WOULD_OVERWRITE_HEADERS
+            .iter()
+            .any(|(text, _)| *text == line)
+        {
+            listing = true;
+        } else if let Some(path) = line.strip_prefix('\t').filter(|_| listing) {
+            paths.push(path.to_string());
+        } else {
+            listing = false;
+        }
+    }
+    paths
+}
+
+/// Whether git's ignore rules match every one of `paths` (folder-relative): one
+/// `check-ignore --no-index --stdin -z` read, which answers for untracked paths and
+/// never consults the index. None when the read failed or there is nothing to ask.
+async fn all_ignored(child: &ChildRepo, paths: &[String]) -> Option<bool> {
+    if paths.is_empty() {
+        return None;
+    }
+    // check-ignore reads each input as a pathspec, so a name led by `:` reads as magic,
+    // and it refuses `--literal-pathspecs` (measured, git 2.51.1). A `./` lead makes
+    // every name a plain path, and git prints each input back as given.
+    let asked: Vec<String> = paths.iter().map(|path| format!("./{path}")).collect();
+    let input: String = asked.iter().map(|path| format!("{path}\0")).collect();
+    let args = ["check-ignore", "--no-index", "--stdin", "-z"];
+    let out = child
+        .run_env(&args, Some(&input), &NO_LAZY_FETCH, DEFAULT_TIMEOUT)
         .await
         .ok()?;
+    // Exit 1: nothing matched.
+    if !matches!(out.code, 0 | 1) {
+        return None;
+    }
+    let listed = out.stdout_lossy();
+    let ignored: std::collections::HashSet<&str> = listed.split('\0').collect();
+    Some(asked.iter().all(|path| ignored.contains(path.as_str())))
+}
+
+/// Nested submodules the pick left behind: the `+` rows of `submodule status` (checked
+/// out at another commit than it records), and the `-` rows (not checked out) only at
+/// gitlinks the pick added or changed against `before`, the pre-pick HEAD (None =
+/// unborn), so one the user left uninitialized counts only when the pick moved it.
+/// None when a read failed or a path it compares holds [`LOSSY`].
+async fn nested_left(child: Option<&ChildRepo>, before: Option<&str>, sha: &str) -> Option<u32> {
+    let child = child?;
+    let out = child.read(&["submodule", "status"]).await.ok()?;
     if out.code != 0 {
         return None;
     }
-    let left = out
-        .stdout_lossy()
-        .lines()
-        .filter(|line| line.starts_with('+'))
-        .count();
+    let status = out.stdout_lossy();
+    let (mut left, uninitialized) = nested_rows(&status)?;
+    if !uninitialized.is_empty() {
+        let from = match before {
+            Some(before) => before.to_string(),
+            None => empty_tree(child).await.ok()?,
+        };
+        let args = ["diff-tree", "-r", "--raw", "--no-renames", "-z", &from, sha];
+        let raw = read_answer(child.read(&args).await).ok()?;
+        let moved = moved_gitlinks(&raw)?;
+        left += uninitialized
+            .iter()
+            .filter(|path| moved.contains(path))
+            .count();
+    }
     u32::try_from(left).ok()
+}
+
+/// Pure: a `submodule status` listing's `+` row count and its `-` rows' paths. None
+/// when a `-` path holds [`LOSSY`]: it has no exact spelling to compare.
+fn nested_rows(status: &str) -> Option<(usize, Vec<&str>)> {
+    let changed = status.lines().filter(|line| line.starts_with('+')).count();
+    let uninitialized: Vec<&str> = status
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix('-')?
+                .split_once(' ')
+                .map(|(_, path)| path)
+        })
+        .collect();
+    (!uninitialized.iter().any(|path| path.contains(LOSSY))).then_some((changed, uninitialized))
+}
+
+/// Pure: the gitlink paths of a `diff-tree --raw -z` listing. None when one holds
+/// [`LOSSY`]: it has no exact spelling to compare.
+fn moved_gitlinks(raw: &str) -> Option<Vec<&str>> {
+    let mut fields = raw.split('\0');
+    let mut moved = Vec::new();
+    while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+        let Some(meta) = meta.strip_prefix(':') else {
+            break;
+        };
+        if meta.split(' ').nth(1) == Some(GITLINK_MODE) {
+            moved.push(path);
+        }
+    }
+    (!moved.iter().any(|path| path.contains(LOSSY))).then_some(moved)
 }
 
 /// The submodule's branches, remote branches and tags for the commit picker, with
@@ -3310,7 +4637,7 @@ async fn submodule_refs_capped(
     validate_repo_relative(path, "submodule path")?;
     let spec = crate::git::pathspec::literal(path);
     let pointer = index_gitlink(repo_path, path, &spec).await?;
-    let (dir, gate) = pick_gate(repo_path, path).await;
+    let (child, gate) = pick_gate(repo_path, path).await;
     let mut refs = SubmoduleRefs {
         checkout: gate.checkout,
         reason: gate.reason,
@@ -3326,27 +4653,24 @@ async fn submodule_refs_capped(
         truncated: false,
         broken_refs: 0,
     };
-    if refs.checkout != SubmoduleCheckout::Ok {
+    let (Some(child), SubmoduleCheckout::Ok) = (child, refs.checkout) else {
         return Ok(refs);
-    }
+    };
     (refs.head, refs.branch, refs.detached) = (gate.head, gate.branch, gate.detached);
 
-    let remotes = crate::git::remote::git_remotes(dir.clone()).await?;
-    let listed = run_git_raw(
-        Some(&dir),
-        &[
+    let remotes = child_remotes(&child).await?;
+    let listed = child
+        .read(&[
             "for-each-ref",
             "--sort=-version:refname",
             "--format=%(refname)%00%(objectname)%00%(symref)",
             "refs/heads",
             "refs/remotes",
             "refs/tags",
-        ],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .exit_verdict()?
-    .stdout_lossy();
+        ])
+        .await?
+        .exit_verdict()?
+        .stdout_lossy();
     let mut rows = Vec::new();
     let mut symrefs = Vec::new();
     for line in listed.lines() {
@@ -3355,7 +4679,8 @@ async fn submodule_refs_capped(
             continue;
         };
         let symref = fields.next().unwrap_or("");
-        if rev.is_empty() {
+        // A name with no exact spelling here would be offered as a rev git can't take.
+        if rev.is_empty() || rev.contains(LOSSY) || symref.contains(LOSSY) {
             continue;
         }
         if !symref.is_empty() {
@@ -3376,14 +4701,16 @@ async fn submodule_refs_capped(
             .iter()
             .map(|(_, oid)| format!("{oid}\n{oid}^{{commit}}\n"))
             .collect();
-        run_git_input(
-            Some(&dir),
-            &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
-            Some(&input),
-            DEFAULT_TIMEOUT,
-        )
-        .await?
-        .stdout_lossy()
+        child
+            .run_env(
+                &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+                Some(&input),
+                &NO_LAZY_FETCH,
+                DEFAULT_TIMEOUT,
+            )
+            .await?
+            .exit_verdict()?
+            .stdout_lossy()
     };
     let lines: Vec<&str> = typed.lines().collect();
     if lines.len() != rows.len() * 2 {
@@ -3437,11 +4764,11 @@ async fn submodule_refs_capped(
             refs.truncated = true;
         }
     }
-    refs.shallow = submodule_is_shallow(&dir).await;
+    refs.shallow = submodule_is_shallow(&child).await;
     refs.default_rev = default_rev(
         repo_path,
         path,
-        &dir,
+        &child,
         refs.branch.as_deref(),
         &refs.remote_branches,
         &symrefs,
@@ -3458,7 +4785,7 @@ async fn submodule_refs_capped(
 async fn default_rev(
     repo_path: &str,
     path: &str,
-    dir: &str,
+    child: &ChildRepo,
     branch: Option<&str>,
     remote_branches: &[SubmoduleRef],
     symrefs: &[(String, String)],
@@ -3477,8 +4804,9 @@ async fn default_rev(
         ),
         other => other,
     };
-    let remote = match branch {
-        Some(branch_name) => config_get(dir, &format!("branch.{branch_name}.remote"))
+    // A branch name with no exact spelling would ask about another key: `origin` decides.
+    let remote = match branch.filter(|name| !name.contains(LOSSY)) {
+        Some(branch_name) => child_config_get(child, &format!("branch.{branch_name}.remote"))
             .await?
             .unwrap_or_else(|| "origin".to_string()),
         None => "origin".to_string(),
@@ -3500,17 +4828,50 @@ async fn default_rev(
         .then_some(rev)
 }
 
-/// One `config --get`: Some(None) when unset; None when the read failed.
+/// One `config --get` in the parent: Some(None) when unset; None when the read failed.
 async fn config_get(repo: &str, key: &str) -> Option<Option<String>> {
-    let out = run_git_raw(Some(repo), &["config", "--get", key], DEFAULT_TIMEOUT)
-        .await
-        .ok()?;
-    let value = config_answer(out).ok()?;
+    config_value(run_git_raw(Some(repo), &["config", "--get", key], DEFAULT_TIMEOUT).await)
+}
+
+/// [`config_get`] inside the submodule.
+async fn child_config_get(child: &ChildRepo, key: &str) -> Option<Option<String>> {
+    config_value(child.read(&["config", "--get", key]).await)
+}
+
+fn config_value(read: AppResult<GitOutput>) -> Option<Option<String>> {
+    let value = config_answer(read.ok()?).ok()?;
     Some(value.map(|out| {
         out.stdout_lossy()
             .trim_end_matches(['\r', '\n'])
             .to_string()
     }))
+}
+
+/// The submodule's remote names, as `remote::git_remotes` lists a repository's.
+async fn child_remotes(child: &ChildRepo) -> AppResult<Vec<String>> {
+    let out = child.read(&["remote"]).await?.exit_verdict()?;
+    Ok(out
+        .stdout_lossy()
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
+/// The submodule's checked-out branch, as `branches::current_branch_name` reads a
+/// repository's: None when HEAD names no local branch.
+async fn child_branch(child: &ChildRepo) -> AppResult<Option<String>> {
+    let out = child.read(&["symbolic-ref", "-q", "HEAD"]).await?;
+    // `-q` exits 1, silently, exactly when HEAD is not a symbolic ref.
+    if out.code == 1 {
+        return Ok(None);
+    }
+    let full = out.exit_verdict()?.stdout_lossy();
+    Ok(full
+        .trim_end_matches(['\r', '\n'])
+        .strip_prefix("refs/heads/")
+        .filter(|name| !name.is_empty())
+        .map(str::to_string))
 }
 
 /// A remote-tracking ref past `refs/remotes/`, split at the longest configured remote
@@ -3532,68 +4893,128 @@ fn split_remote_ref<'a>(rest: &'a str, remotes: &[String]) -> Option<(&'a str, &
     (!remote.is_empty() && !name.is_empty()).then_some((remote, name))
 }
 
-/// Fetches the submodule at `path` from its `origin`, the plain fetch the app runs
-/// elsewhere; `unshallow` also completes a shallow history.
+/// What a submodule fetch left: the history's shallowness measured after it, None
+/// when that read failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmoduleFetchResult {
+    pub shallow: Option<bool>,
+}
+
+/// Fetches the submodule at `path` from the remote a plain `git fetch` there would
+/// choose (the checked-out branch's `branch.<b>.remote`, else `origin`), named in the
+/// argv; the plain fetch the app runs elsewhere. `unshallow` also completes a shallow
+/// history.
 #[tauri::command]
 pub async fn git_submodule_fetch(
     state: State<'_, AppState>,
     repo_path: String,
     path: String,
     unshallow: bool,
-) -> AppResult<()> {
+) -> AppResult<SubmoduleFetchResult> {
     git_submodule_fetch_core(&state, &repo_path, &path, unshallow).await
 }
 
 /// The parent's hold covers the gate and the network key's resolve, so the key is
 /// minted only for a folder that is the submodule's own checkout; it is dropped before
-/// the network wait, so the gate runs again last. Shallowness is measured under the
-/// network hold, so a second concurrent unshallow becomes a plain fetch.
+/// the network wait, so the gate runs again after it and must find the same
+/// repository, and the parent must still record a gitlink at the path both times: a
+/// folder the parent no longer records is not this repository's submodule, whatever
+/// repository it holds. Shallowness is measured under the network hold, so a second
+/// concurrent unshallow becomes a plain fetch.
 pub(crate) async fn git_submodule_fetch_core(
     state: &AppState,
     repo_path: &str,
     path: &str,
     unshallow: bool,
-) -> AppResult<()> {
+) -> AppResult<SubmoduleFetchResult> {
     let path = fetch_rel_path(path)?;
     let domain = state.working_tree_lock(repo_path).await;
     let guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a submodule fetch").await?;
     refuse_linked_submodule_path(repo_path, &path, fetch_refusal).await?;
-    let worktree = Path::new(repo_path).join(&path);
-    let dir = worktree.to_string_lossy().into_owned();
-    let checked_out = || {
-        let probe = std::fs::symlink_metadata(&worktree);
-        checkout_from_probe(probe, || worktree.join(".git").try_exists()).0 == SubmoduleCheckout::Ok
-    };
-    if !checked_out() {
-        return Err(fetch_refusal(&path, "it isn't checked out here"));
+    let spec = crate::git::pathspec::literal(&path);
+    let unrecorded = || fetch_refusal(&path, "this repository records no submodule there");
+    if !gitlink_recorded(repo_path, &path, &spec).await? {
+        return Err(unrecorded());
     }
-    let cred = crate::forge::credential_config_for_remote(&dir, "origin").await?;
-    let network = state.network_lock(&dir).await;
+    let worktree = Path::new(repo_path).join(&path);
+    let unusable = |(checkout, reason): (SubmoduleCheckout, Option<String>)| {
+        fetch_refusal(&path, &unusable_why(checkout, reason.as_deref()))
+    };
+    let child = ChildRepo::resolve(repo_path, &worktree)
+        .await
+        .map_err(unusable)?;
+    let network = state.network_lock(child.folder()).await;
     drop(guard);
     let _network =
         acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, holder_label("fetch")).await?;
-    let shallow = submodule_is_shallow(&dir).await;
-    // A deinit during the wait would let git answer for the parent.
-    if !checked_out() {
-        return Err(fetch_refusal(&path, "it isn't checked out here"));
+    #[cfg(test)]
+    if let Ok(waited) = FETCH_WAITED_HOOK.try_with(|hook| hook()) {
+        waited.await;
     }
-    let args = fetch_args(unshallow, shallow).ok_or_else(|| {
+    // A deinit or a re-pointed .git during the wait: the fetch would reach another
+    // repository than the one whose network key it holds.
+    let now = ChildRepo::resolve(repo_path, &worktree)
+        .await
+        .map_err(unusable)?;
+    if !now.same_repo(&child) {
+        return Err(fetch_refusal(
+            &path,
+            "its repository changed while it waited",
+        ));
+    }
+    if !gitlink_recorded(repo_path, &path, &spec).await? {
+        return Err(unrecorded());
+    }
+    // Chosen after the wait: a branch switched during it changes the remote.
+    let remote = fetch_remote(&now)
+        .await
+        .ok_or_else(|| fetch_refusal(&path, "its remote couldn't be read"))?;
+    // Discovers from the folder (forge/mod.rs takes no pin); a config read only.
+    let cred = crate::forge::credential_config_for_remote(now.folder(), &remote).await?;
+    let shallow = submodule_is_shallow(&now).await;
+    let mut args = fetch_args(unshallow, shallow).ok_or_else(|| {
         AppError::InvalidArgument(format!(
             "couldn't tell whether {}'s history is shallow; nothing was fetched",
             crate::git::ops::discard_shown(&path)
         ))
     })?;
-    crate::git::remote::run_git_with_creds_once(&dir, &cred, &args, NETWORK_TIMEOUT)
+    args.push(&remote);
+    now.fetch(&cred, &args, NETWORK_TIMEOUT)
         .await?
         .exit_verdict()?;
-    Ok(())
+    Ok(SubmoduleFetchResult {
+        shallow: submodule_is_shallow(&now).await,
+    })
+}
+
+/// The remote a plain `git fetch` in the submodule reads: the checked-out branch's
+/// `branch.<b>.remote`, else the only remote when there is exactly one, else `origin`
+/// (a detached HEAD included; measured, git 2.51.1). Each step counts only when its
+/// names are exact (no [`LOSSY`]), else the next one decides. None when a read failed
+/// or the name would reach git as an option.
+async fn fetch_remote(child: &ChildRepo) -> Option<String> {
+    let exact = |name: &String| !name.contains(LOSSY);
+    let branch = child_branch(child).await.ok()?;
+    let configured = match branch.filter(exact) {
+        Some(branch) => child_config_get(child, &format!("branch.{branch}.remote")).await?,
+        None => None,
+    };
+    let remote = match configured.filter(exact) {
+        Some(remote) => remote,
+        None => match child_remotes(child).await.ok()?.as_slice() {
+            [only] if exact(only) => only.clone(),
+            _ => "origin".to_string(),
+        },
+    };
+    (!remote.is_empty() && !remote.starts_with('-')).then_some(remote)
 }
 
 /// `git_fetch_core`'s argv plus `--no-recurse-submodules`; `--unshallow` only on
 /// history measured shallow (git refuses it on a complete repository, measured). None
 /// when an unshallow was asked and the measure failed: a plain fetch would leave the
 /// history cut while the call succeeds.
-fn fetch_args(unshallow: bool, shallow: Option<bool>) -> Option<Vec<&'static str>> {
+fn fetch_args<'a>(unshallow: bool, shallow: Option<bool>) -> Option<Vec<&'a str>> {
     let mut args = vec![
         "fetch",
         "--prune",
@@ -3681,7 +5102,7 @@ async fn stage_gitmodules(repo_path: &str) -> AppResult<()> {
 mod tests {
     use super::*;
     use crate::git::repo::clone_repo_core;
-    use crate::git::runner::{hold_config_lock, lock_events, TEST_GIT_HANG_GUARD};
+    use crate::git::runner::{hold_config_lock, lock_events, run_git_raw_env, TEST_GIT_HANG_GUARD};
 
     /// git refuses `file` transport for submodule clones by default
     /// (`fatal: transport 'file' not allowed`), and the block lives in the CHILD
@@ -5578,6 +6999,975 @@ mod tests {
         git(repo, &["rev-parse", "HEAD"]).await.trim().to_string()
     }
 
+    /// The submodule at `sub` as the app resolves it, its parent the folder above.
+    async fn child_at(sub: &str) -> ChildRepo {
+        let folder = Path::new(sub);
+        let parent = folder.parent().unwrap().to_string_lossy().into_owned();
+        ChildRepo::resolve(&parent, folder).await.unwrap()
+    }
+
+    /// [`detach_submodule_at`] in the folder `sub`, resolved as [`child_at`] does, from
+    /// the HEAD it reads now (None when unborn).
+    async fn detach_in(sub: &str, child: &ChildRepo, sha: &str) -> AppResult<GitOutput> {
+        let folder = Path::new(sub);
+        let parent = folder.parent().unwrap().to_string_lossy().into_owned();
+        let args = ["rev-parse", "--verify", "-q", "HEAD"];
+        let head = run_git_raw(Some(sub), &args, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
+        let head = (head.code == 0).then(|| head.stdout_lossy().trim().to_string());
+        detach_submodule_at(&parent, folder, child, sha, head.as_deref()).await
+    }
+
+    /// `--path-format=absolute` `flag` read in `repo`.
+    async fn abs_git_path(repo: &str, flag: &str) -> String {
+        git(repo, &["rev-parse", "--path-format=absolute", flag])
+            .await
+            .trim_end_matches(['\r', '\n'])
+            .to_string()
+    }
+
+    /// Points the folder's `.git` file at `gitdir`.
+    fn point_gitfile(folder: &str, gitdir: &str) {
+        std::fs::write(
+            Path::new(folder).join(".git"),
+            format!("gitdir: {gitdir}\n"),
+        )
+        .unwrap();
+    }
+
+    async fn resolve_refusal(host: &str, folder: &str) -> (SubmoduleCheckout, Option<String>) {
+        ChildRepo::resolve(host, Path::new(folder))
+            .await
+            .expect_err("the folder must not resolve")
+    }
+
+    #[tokio::test]
+    async fn child_repo_refuses_a_gitfile_naming_the_parent() {
+        let f = gitlink_fixture("child-repo-parent").await;
+        point_gitfile(&f.sub, &abs_git_path(&f.host, "--git-dir").await);
+        assert_eq!(
+            resolve_refusal(&f.host, &f.sub).await,
+            (
+                SubmoduleCheckout::Unreadable,
+                Some("its .git names this repository's own git directory".into())
+            )
+        );
+        let refs = git_submodule_refs_core(&f.host, "libs/dep").await.unwrap();
+        assert_eq!(refs.checkout, SubmoduleCheckout::Unreadable);
+        let read = pick_read(&f.host, &f.c1).await;
+        assert!(
+            matches!(
+                &read.plan,
+                SubmodulePickPlan::Blocked {
+                    why: SubmodulePickBlock::Unusable,
+                    ..
+                }
+            ),
+            "{:?}",
+            read.plan
+        );
+        let outcome = pick(&f.host, &f.c1, &f.c0).await.unwrap();
+        assert!(
+            matches!(
+                &outcome,
+                SubmodulePickOutcome::Blocked {
+                    why: SubmodulePickBlock::Unusable,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            git(&f.host, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/main"
+        );
+        let fetch = git_submodule_fetch_core(&AppState::default(), &f.host, "libs/dep", false)
+            .await
+            .unwrap_err();
+        assert!(fetch.to_string().contains("own git directory"), "{fetch}");
+    }
+
+    #[tokio::test]
+    async fn child_repo_refuses_the_parents_linked_worktree_admin_dir() {
+        let f = gitlink_fixture("child-repo-admin").await;
+        let wt = Path::new(&f.host).parent().unwrap().join("wt");
+        git(
+            &f.host,
+            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+        )
+        .await;
+        let admin = abs_git_path(&wt.to_string_lossy(), "--git-dir").await;
+        assert!(admin.contains("/worktrees/"), "fixture: {admin}");
+        point_gitfile(&f.sub, &admin);
+        assert_eq!(
+            resolve_refusal(&f.host, &f.sub).await,
+            (
+                SubmoduleCheckout::Unreadable,
+                Some("its .git names this repository's own git directory".into())
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn child_repo_refuses_a_gitfile_naming_a_sibling_module() {
+        let f = gitlink_fixture("child-repo-sibling").await;
+        git_submodule_add_core(
+            &AppState::default(),
+            f.host.clone(),
+            "../dep".into(),
+            Some("libs/b".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        let b = Path::new(&f.host)
+            .join("libs/b")
+            .to_string_lossy()
+            .into_owned();
+        point_gitfile(&f.sub, &abs_git_path(&b, "--git-dir").await);
+        let (checkout, reason) = resolve_refusal(&f.host, &f.sub).await;
+        assert_eq!(checkout, SubmoduleCheckout::Unreadable);
+        let reason = reason.unwrap();
+        assert!(
+            reason.starts_with("its .git names a repository checked out at ")
+                && reason.ends_with("libs/b"),
+            "{reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_repo_accepts_an_own_git_directory_and_a_linked_worktree_parent() {
+        let (dir, host, dep) = host_with_submodule("child-repo-accepts").await;
+        git(&host, &["clone", "-q", &dep, "libs/own"]).await;
+        git(&host, &["submodule", "add", "-q", &dep, "libs/own"]).await;
+        let own = Path::new(&host).join("libs/own");
+        assert!(
+            own.join(".git").is_dir(),
+            "fixture: an un-absorbed submodule"
+        );
+        let child = ChildRepo::resolve(&host, &own).await.unwrap();
+        assert!(
+            child.git_dir().ends_with("libs/own/.git"),
+            "{}",
+            child.git_dir()
+        );
+        // Absorbed by git: the git dir moves under the parent's and names the folder back.
+        git(&host, &["submodule", "absorbgitdirs", "--", "libs/own"]).await;
+        let child = ChildRepo::resolve(&host, &own).await.unwrap();
+        assert!(child.git_dir().contains("/modules/"), "{}", child.git_dir());
+
+        let wt = dir.path().join("wt").to_string_lossy().into_owned();
+        git(&host, &["worktree", "add", "-q", "--detach", &wt]).await;
+        git(
+            &wt,
+            &["submodule", "update", "--init", "-q", "--", "libs/dep"],
+        )
+        .await;
+        let child = ChildRepo::resolve(&wt, &Path::new(&wt).join("libs/dep"))
+            .await
+            .unwrap();
+        assert!(
+            child.git_dir().contains("/worktrees/"),
+            "{}",
+            child.git_dir()
+        );
+        let out = child.read(&["rev-parse", "--show-toplevel"]).await.unwrap();
+        assert_eq!(out.code, 0, "{}", out.stderr);
+    }
+
+    const V3_REFUSAL: &str =
+        "its .git names a repository that doesn't name this folder as its work tree (core.worktree)";
+
+    #[tokio::test]
+    async fn child_repo_refuses_a_gitfile_naming_an_ordinary_clone() {
+        let f = gitlink_fixture("child-repo-clone").await;
+        let sib = Path::new(&f.host)
+            .parent()
+            .unwrap()
+            .join("sib")
+            .to_string_lossy()
+            .into_owned();
+        git(&f.host, &["clone", "-q", &f.dep, &sib]).await;
+        point_gitfile(&f.sub, &abs_git_path(&sib, "--git-dir").await);
+        assert_eq!(
+            resolve_refusal(&f.host, &f.sub).await,
+            (SubmoduleCheckout::Unreadable, Some(V3_REFUSAL.into()))
+        );
+        let read = pick_read(&f.host, &f.c1).await;
+        assert!(
+            matches!(
+                &read.plan,
+                SubmodulePickPlan::Blocked {
+                    why: SubmodulePickBlock::Unusable,
+                    ..
+                }
+            ),
+            "{:?}",
+            read.plan
+        );
+        let outcome = pick(&f.host, &f.c1, &f.c0).await.unwrap();
+        assert!(
+            matches!(
+                &outcome,
+                SubmodulePickOutcome::Blocked {
+                    why: SubmodulePickBlock::Unusable,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        let fetch = git_submodule_fetch_core(&AppState::default(), &f.host, "libs/dep", false)
+            .await
+            .unwrap_err();
+        assert!(fetch.to_string().contains("core.worktree"), "{fetch}");
+        assert_eq!(
+            git(&sib, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/main"
+        );
+        assert_eq!(git(&sib, &["status", "--porcelain"]).await, "");
+    }
+
+    #[tokio::test]
+    async fn child_repo_refuses_a_sibling_module_that_lost_its_work_tree() {
+        let f = gitlink_fixture("child-repo-unset").await;
+        git_submodule_add_core(
+            &AppState::default(),
+            f.host.clone(),
+            "../dep".into(),
+            Some("libs/b".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        let b = Path::new(&f.host)
+            .join("libs/b")
+            .to_string_lossy()
+            .into_owned();
+        let b_git = abs_git_path(&b, "--git-dir").await;
+        let config = format!("{b_git}/config");
+        git(
+            &f.host,
+            &["config", "-f", &config, "--unset", "core.worktree"],
+        )
+        .await;
+        point_gitfile(&f.sub, &b_git);
+        assert_eq!(
+            resolve_refusal(&f.host, &f.sub).await,
+            (SubmoduleCheckout::Unreadable, Some(V3_REFUSAL.into()))
+        );
+    }
+
+    /// `link` made a directory link to `target`: a junction on Windows, a symlink elsewhere.
+    fn link_dir(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        crate::test_junction::make_junction(link, target);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[tokio::test]
+    async fn child_repo_refuses_a_git_directory_reached_through_a_link() {
+        let f = gitlink_fixture("child-repo-link").await;
+        let sib = Path::new(&f.host).parent().unwrap().join("sib");
+        git(&f.host, &["clone", "-q", &f.dep, &sib.to_string_lossy()]).await;
+        let dot_git = Path::new(&f.sub).join(".git");
+        std::fs::remove_file(&dot_git).unwrap();
+        link_dir(&dot_git, &sib.join(".git"));
+        assert_eq!(
+            resolve_refusal(&f.host, &f.sub).await,
+            (SubmoduleCheckout::Unreadable, Some(V3_REFUSAL.into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn child_repo_wants_a_back_link_from_a_separate_git_dir() {
+        let (dir, host, dep) = host_with_submodule("child-repo-sep").await;
+        let sep = dir.path().join("sepgit").to_string_lossy().into_owned();
+        let folder = Path::new(&host).join("libs/sep");
+        let shown = folder.to_string_lossy().into_owned();
+        git(
+            &host,
+            &["clone", "-q", "--separate-git-dir", &sep, &dep, &shown],
+        )
+        .await;
+        assert_eq!(
+            resolve_refusal(&host, &shown).await,
+            (SubmoduleCheckout::Unreadable, Some(V3_REFUSAL.into()))
+        );
+        let config = format!("{sep}/config");
+        git(&host, &["config", "-f", &config, "core.worktree", &shown]).await;
+        ChildRepo::resolve(&host, &folder).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pinned_call_refuses_a_gitfile_where_its_git_directory_was() {
+        let f = gitlink_fixture("pin-slash").await;
+        // A tracking ref the parent's remote lacks: a parent `fetch --prune` deletes it.
+        git(&f.host, &["remote", "add", "origin", &f.dep]).await;
+        let head = head_of(&f.host).await;
+        git(&f.host, &["update-ref", "refs/remotes/origin/ghost", &head]).await;
+        git(&f.host, &["clone", "-q", &f.dep, "libs/own"]).await;
+        let own = Path::new(&f.host)
+            .join("libs/own")
+            .to_string_lossy()
+            .into_owned();
+        let host_git = abs_git_path(&f.host, "--git-dir").await;
+        // The absorbed layout, then the own `.git` directory.
+        for folder in [f.sub.clone(), own] {
+            let child = child_at(&folder).await;
+            let pinned = child.git_dir().to_string();
+            std::fs::rename(&pinned, format!("{pinned}.moved")).unwrap();
+            std::fs::write(&pinned, format!("gitdir: {host_git}\n")).unwrap();
+            let read = child.read(&["rev-parse", "--git-dir"]).await.unwrap();
+            assert_eq!(read.code, 128, "{folder}: {}", read.stdout_lossy());
+            assert!(
+                read.stderr.contains("not a git repository"),
+                "{}",
+                read.stderr
+            );
+            let mut args = fetch_args(false, Some(false)).unwrap();
+            args.push("origin");
+            let out = child.fetch(&[], &args, NETWORK_TIMEOUT).await.unwrap();
+            assert_eq!(out.code, 128, "{folder}: {}", out.stderr);
+            git(
+                &f.host,
+                &["rev-parse", "--verify", "-q", "refs/remotes/origin/ghost"],
+            )
+            .await;
+            assert_eq!(
+                git(&f.host, &["symbolic-ref", "HEAD"]).await.trim(),
+                "refs/heads/main"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_refuses_a_folder_the_parent_no_longer_records() {
+        // The gitlink removed before the call, then during the network wait.
+        for during in [false, true] {
+            let f = gitlink_fixture(if during {
+                "fetch-unrecorded-wait"
+            } else {
+                "fetch-unrecorded"
+            })
+            .await;
+            // A tracking ref the submodule's remote lacks: a `fetch --prune` deletes it.
+            let head = head_of(&f.sub).await;
+            git(&f.sub, &["update-ref", "refs/remotes/origin/ghost", &head]).await;
+            let host = f.host.clone();
+            let unrecord: PickLandedHook = Arc::new(move || {
+                let host = host.clone();
+                Box::pin(async move {
+                    git(&host, &["rm", "-q", "--cached", "libs/dep"]).await;
+                })
+            });
+            let state = AppState::default();
+            let fetch = git_submodule_fetch_core(&state, &f.host, "libs/dep", false);
+            let e = if during {
+                FETCH_WAITED_HOOK.scope(unrecord, fetch).await
+            } else {
+                unrecord().await;
+                fetch.await
+            }
+            .unwrap_err();
+            assert!(
+                e.to_string().contains("records no submodule there"),
+                "{during}: {e}"
+            );
+            git(
+                &f.sub,
+                &["rev-parse", "--verify", "-q", "refs/remotes/origin/ghost"],
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_checkout_ignores_a_gitfile_swapped_after_the_resolve() {
+        let f = gitlink_fixture("pin-checkout-swap").await;
+        let child = child_at(&f.sub).await;
+        point_gitfile(&f.sub, &abs_git_path(&f.host, "--git-dir").await);
+        // The raw run: the folder's read-back would refuse the swapped gitfile.
+        let folder = Path::new(&f.sub);
+        let parent = folder.parent().unwrap().to_string_lossy().into_owned();
+        let out = detach_run(&parent, folder, &child, &f.c1, Some(&f.c2))
+            .await
+            .unwrap();
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        assert_eq!(
+            git(child.git_dir(), &["rev-parse", "HEAD"]).await.trim(),
+            f.c1
+        );
+        assert_eq!(
+            git(&f.host, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/main"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_fetch_stays_in_the_submodule_after_a_deinit() {
+        let f = gitlink_fixture("pin-fetch-deinit").await;
+        // A tracking ref the parent's remote lacks: a parent `fetch --prune` deletes it.
+        git(&f.host, &["remote", "add", "origin", &f.dep]).await;
+        let head = head_of(&f.host).await;
+        git(&f.host, &["update-ref", "refs/remotes/origin/ghost", &head]).await;
+        let child = child_at(&f.sub).await;
+        git(&f.host, &["submodule", "deinit", "-q", "-f", "libs/dep"]).await;
+        let mut args = fetch_args(false, Some(false)).unwrap();
+        args.push("origin");
+        let out = child.fetch(&[], &args, NETWORK_TIMEOUT).await.unwrap();
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        git(
+            &f.host,
+            &["rev-parse", "--verify", "-q", "refs/remotes/origin/ghost"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn both_fetch_spawns_carry_the_pin() {
+        let f = gitlink_fixture("pin-fetch-retry").await;
+        let child = child_at(&f.sub).await;
+        // git echoes the missing path, which `is_auth_class_failure` reads as an auth
+        // failure, so the injected spawn is followed by the ambient retry.
+        let url = Path::new(&f.host)
+            .parent()
+            .unwrap()
+            .join("repository not found")
+            .to_string_lossy()
+            .into_owned();
+        let spawns = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        let sink = spawns.clone();
+        let hook = Arc::new(move |args: &[&str]| {
+            sink.lock()
+                .unwrap()
+                .push(args.iter().map(|arg| arg.to_string()).collect());
+        });
+        let cred = ["credential.helper=".to_string()];
+        let args = ["fetch", "--no-recurse-submodules", &url];
+        let fetch = child.fetch(&cred, &args, NETWORK_TIMEOUT);
+        let out = crate::git::runner::GIT_SPAWN_LOG
+            .scope(hook, fetch)
+            .await
+            .unwrap();
+        assert_ne!(out.code, 0, "the fixture remote is missing");
+        let fetches: Vec<Vec<String>> = spawns
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|argv| argv.iter().any(|arg| arg == "fetch"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            fetches.len(),
+            2,
+            "the injected spawn and the ambient retry: {fetches:?}"
+        );
+        for argv in &fetches {
+            let at = argv.iter().position(|arg| arg == "fetch").unwrap();
+            assert_eq!(
+                argv[at - 2],
+                format!("--git-dir={}/", child.git_dir()),
+                "{argv:?}"
+            );
+            assert_eq!(
+                argv[at - 1],
+                format!("--work-tree={}", child.folder()),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn update_remote_settles_nested_modules_in_the_child_only() {
+        let (_dir, host, _dep) = host_with_submodule("update-gate").await;
+        let state = AppState::default();
+        git_submodule_add_core(
+            &state,
+            host.clone(),
+            "../dep".into(),
+            Some("libs/b".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        git(&host, &["commit", "-qm", "add b"]).await;
+        let b = Path::new(&host)
+            .join("libs/b")
+            .to_string_lossy()
+            .into_owned();
+        let parked = commit_in(&b, "p.txt", "parked").await;
+        let outside = host.clone();
+        let deinit: PickLandedHook = Arc::new(move || {
+            let host = outside.clone();
+            Box::pin(async move {
+                git(&host, &["submodule", "deinit", "-q", "-f", "libs/dep"]).await;
+            })
+        });
+        let update = git_submodule_update_core(&state, host.clone(), Some("libs/dep".into()), true);
+        let e = UPDATE_SETTLE_HOOK.scope(deinit, update).await.unwrap_err();
+        assert!(
+            e.to_string().contains("not the submodules inside it"),
+            "{e}"
+        );
+        assert_eq!(
+            head_of(&b).await,
+            parked,
+            "the sibling stays where it was parked"
+        );
+        assert!(
+            !exists(&host, "libs/dep/dep.txt"),
+            "the emptied folder stays empty"
+        );
+    }
+
+    /// A hook that commits in `repo`, on its checked-out branch.
+    fn commit_hook(repo: &str) -> PickLandedHook {
+        let repo = repo.to_string();
+        Arc::new(move || {
+            let repo = repo.clone();
+            Box::pin(async move {
+                commit_in(&repo, "late.txt", "late").await;
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn pick_rechecks_the_checkout_just_before_moving_it() {
+        let f = gitlink_fixture("pick-precheck").await;
+        let outcome = PRE_CHECKOUT_HOOK
+            .scope(commit_hook(&f.sub), pick(&f.host, &f.c1, &f.c0))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, SubmodulePickOutcome::Changed),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            git(&f.sub, &["log", "-1", "--format=%s"]).await.trim(),
+            "late"
+        );
+        let spec = crate::git::pathspec::literal("libs/dep");
+        assert_eq!(
+            index_gitlink(&f.host, "libs/dep", &spec).await.unwrap(),
+            Some(f.c0.clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_leaves_the_checkout_when_head_moved_just_before_it() {
+        let f = gitlink_fixture("accept-precheck").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c2), Some(&f.c1)).await;
+        let read = read_conflict(&f.host).await;
+        assert_eq!(
+            side(&read.theirs).plan,
+            Some(SubmoduleCheckoutPlan::CheckOut)
+        );
+        let expected = stages_of(Some(&f.c0), Some(&f.c2), Some(&f.c1));
+        let outcome = PRE_CHECKOUT_HOOK
+            .scope(
+                commit_hook(&f.sub),
+                accept(&f.host, "theirs", &expected, true),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            SubmoduleAcceptOutcome::Staged {
+                sha: f.c1.clone(),
+                checkout: SubmoduleAcceptCheckout::Left {
+                    why: SubmoduleCheckoutLeft::Failed,
+                    reason: Some("its HEAD moved after it was read".into()),
+                },
+            }
+        );
+        assert_pointer_staged(&f.host, &f.c1).await;
+        assert_eq!(
+            git(&f.sub, &["log", "-1", "--format=%s"]).await.trim(),
+            "late"
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_confirms_its_checkout_through_the_folder() {
+        let f = gitlink_fixture("accept-confirm").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c2), Some(&f.c1)).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c2), Some(&f.c1));
+        // The checkout lands, then its hook re-points the folder at the parent.
+        let module = abs_git_path(&f.sub, "--git-dir").await;
+        let host_git = abs_git_path(&f.host, "--git-dir").await;
+        write_hook(
+            &Path::new(&module).join("hooks"),
+            "post-checkout",
+            &format!("echo 'gitdir: {host_git}' > .git\n"),
+        );
+        // The stage and the checkout both ran, so "its checkout stays as is" is false.
+        let err = accept(&f.host, "theirs", &expected, true)
+            .await
+            .unwrap_err();
+        let AppError::InvalidArgument(message) = &err else {
+            panic!("{err:?}")
+        };
+        let lead = format!(
+            "Staged {} for {} and checked it out, but its HEAD couldn't be read: ",
+            short_oid(&f.c1),
+            crate::git::ops::discard_shown("libs/dep")
+        );
+        assert!(message.starts_with(&lead), "{message}");
+        assert!(message.contains("own git directory"), "{message}");
+        assert_eq!(git(&module, &["rev-parse", "HEAD"]).await.trim(), f.c1);
+        assert_pointer_staged(&f.host, &f.c1).await;
+    }
+
+    #[tokio::test]
+    async fn submodule_paths_with_parentheses_list_and_update_exactly() {
+        let (_dir, host, dep) = host_with_submodule("list-paren").await;
+        git(&host, &["submodule", "add", "-q", &dep, "vendor (old)"]).await;
+        git(&host, &["commit", "-qm", "vendor (old)"]).await;
+        let listed = list_submodules(&host).await.unwrap();
+        let row = listed
+            .iter()
+            .find(|sub| sub.path == "vendor (old)")
+            .unwrap_or_else(|| panic!("{listed:?}"));
+        assert_eq!(
+            (row.status.as_str(), row.name.as_str()),
+            ("ok", "vendor (old)")
+        );
+        // Uninitialized, so `submodule status` prints no describe after the path, and an
+        // unrelated clone with a submodule of its own at the path the old parse cut out.
+        let key = "submodule.vendor (old).update";
+        git(&host, &["config", "-f", ".gitmodules", key, "none"]).await;
+        git(
+            &host,
+            &["submodule", "deinit", "-q", "-f", "--", "vendor (old)"],
+        )
+        .await;
+        git(&host, &["clone", "-q", &host, "vendor"]).await;
+        git_submodule_update_core(&AppState::default(), host.clone(), None, true)
+            .await
+            .unwrap();
+        assert!(
+            !exists(&host, "vendor/libs/dep/dep.txt"),
+            "the unrelated clone stays as it was"
+        );
+        let listed = list_submodules(&host).await.unwrap();
+        let row = listed
+            .iter()
+            .find(|sub| sub.path == "vendor (old)")
+            .unwrap_or_else(|| panic!("{listed:?}"));
+        assert_eq!(
+            (
+                row.status.as_str(),
+                row.name.as_str(),
+                row.describe.as_str()
+            ),
+            ("uninitialized", "vendor (old)", "")
+        );
+        assert!(!listed.iter().any(|sub| sub.path == "vendor"), "{listed:?}");
+    }
+
+    /// The callee whose argument list holds the end of `before`, its `::` path
+    /// included; None outside any call.
+    fn enclosing_callee(before: &str) -> Option<&str> {
+        let mut depth = 0usize;
+        for (at, b) in before.bytes().enumerate().rev() {
+            match b {
+                b')' | b']' | b'}' => depth += 1,
+                b'(' if depth == 0 => {
+                    let start = before[..at]
+                        .bytes()
+                        .rposition(|b| !(b.is_ascii_alphanumeric() || b == b'_' || b == b':'))
+                        .map_or(0, |i| i + 1);
+                    return Some(&before[start..at]);
+                }
+                b'[' | b'{' | b';' if depth == 0 => return None,
+                b'(' | b'[' | b'{' => depth -= 1,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// A call's top-level arguments from its `(` at `open`, whitespace dropped and string
+    /// literals kept whole.
+    fn top_level_args(text: &str, open: usize) -> Vec<String> {
+        let bytes = text.as_bytes();
+        let (mut args, mut arg, mut depth, mut i) = (Vec::new(), String::new(), 0, open + 1);
+        while i < bytes.len() {
+            let b = bytes[i];
+            match b {
+                b'"' => {
+                    let mut close = i + 1;
+                    while bytes[close] != b'"' {
+                        close += if bytes[close] == b'\\' { 2 } else { 1 };
+                    }
+                    arg.push_str(&text[i..=close]);
+                    i = close;
+                }
+                b'(' | b'[' | b'{' => {
+                    depth += 1;
+                    arg.push(b as char);
+                }
+                b')' | b']' | b'}' if depth == 0 => break,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    arg.push(b as char);
+                }
+                b',' if depth == 0 => args.push(std::mem::take(&mut arg)),
+                _ if b.is_ascii_whitespace() => {}
+                _ => arg.push(b as char),
+            }
+            i += 1;
+        }
+        args.push(arg);
+        args
+    }
+
+    /// Runner calls inside `mod child_repo` whose argv isn't `&self.argv(..)`, bar
+    /// `resolve`'s discovering reads (the only source of a pin, named in full), and how
+    /// many runner calls the scan read.
+    fn unpinned_child_calls(source: &str) -> (usize, Vec<String>) {
+        const DISCOVERING: [&str; 3] = [
+            "run_git_raw_env(Some(&folder),&args,&env,DEFAULT_TIMEOUT",
+            "run_git_raw(Some(repo_path),&parent_args,DEFAULT_TIMEOUT",
+            "run_git_raw(Some(repo_path),&args,DEFAULT_TIMEOUT",
+        ];
+        let source = source.replace("\r\n", "\n");
+        let start = source
+            .find("\nmod child_repo {")
+            .expect("child_repo module");
+        let end = start + source[start..].find("\n}\n").expect("child_repo's end");
+        let module = &source[start..end];
+        let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let (mut calls, mut stray) = (0, Vec::new());
+        for (open, _) in module.match_indices('(') {
+            let name_at = module[..open]
+                .bytes()
+                .rposition(|b| !ident(b))
+                .map_or(0, |i| i + 1);
+            let name = &module[name_at..open];
+            if !name.starts_with("run_git") || module[..name_at].ends_with("fn ") {
+                continue;
+            }
+            calls += 1;
+            let args = top_level_args(module, open);
+            if args.iter().any(|arg| arg.starts_with("&self.argv(")) {
+                continue;
+            }
+            let within = module[..name_at].rfind("fn ").map_or("", |at| {
+                let rest = &module[at + 3..];
+                &rest[..rest.bytes().position(|b| !ident(b)).unwrap_or(rest.len())]
+            });
+            let call = format!("{name}({}", args.join(","));
+            if !(within == "resolve" && DISCOVERING.contains(&call.as_str())) {
+                stray.push(format!("{within}: {call}"));
+            }
+        }
+        (calls, stray)
+    }
+
+    #[test]
+    fn child_repo_runs_git_only_behind_its_pin() {
+        let source = include_str!("submodule.rs");
+        let (calls, stray) = unpinned_child_calls(source);
+        assert!(
+            calls >= 6,
+            "the scan reads the module's runner calls: {calls}"
+        );
+        assert_eq!(stray, Vec::<String>::new());
+        let anchor = "    /// V3's refusal clause.";
+        for splice in [
+            "    fn spliced(&self) { run_git_raw(Some(&self.folder), &[\"status\"], DEFAULT_TIMEOUT); }",
+            "    fn spliced(repo_path: &str, args: [&str; 1]) { run_git_raw(Some(repo_path), &args, DEFAULT_TIMEOUT); }",
+        ] {
+            let spliced = source.replacen(anchor, &format!("{splice}\n{anchor}"), 1);
+            assert_ne!(
+                unpinned_child_calls(&spliced).1,
+                Vec::<String>::new(),
+                "{splice}"
+            );
+        }
+    }
+
+    /// Runner calls (and the named cross-module git reads) outside `mod child_repo` whose
+    /// cwd isn't the parent's path, and how many calls the scan read. The strays also
+    /// hold the ways a child path could reach a runner under a parent spelling: a
+    /// `.folder()` outside a named sink's arguments, a path-to-string conversion on an
+    /// unnamed receiver, a `repo` / `repo_path` binding, and a redirect literal: `-C`,
+    /// one starting `--git-dir` (bar a `rev-parse` query) or `--work-tree`, `GIT_DIR`,
+    /// `GIT_WORK_TREE`, `GIT_COMMON_DIR`. Still open: a path built with `format!`.
+    fn child_side_spawns(source: &str) -> (usize, Vec<String>) {
+        const PARENT: [&str; 6] = [
+            "repo_path",
+            "&repo_path",
+            "Some(repo_path)",
+            "Some(&repo_path)",
+            "repo",
+            "Some(repo)",
+        ];
+        const NAMED: [&str; 8] = [
+            "has_unmerged",
+            "op_state_strict",
+            "op_state",
+            "git_remotes",
+            "current_branch_name",
+            "current_branch_ref",
+            "read_unless_unborn",
+            "config_get",
+        ];
+        let source = source.replace("\r\n", "\n");
+        let prod = &source[..source.find("\nmod tests {").expect("tests module")];
+        let start = prod.find("\nmod child_repo {").expect("child_repo module");
+        let end = start + prod[start..].find("\n}\n").expect("child_repo's end");
+        let outside = format!("{}{}", &prod[..start], &prod[end..]);
+        let bytes = outside.as_bytes();
+        let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let (mut calls, mut stray) = (0, Vec::new());
+        for (open, _) in outside.match_indices('(') {
+            let name_at = outside[..open]
+                .bytes()
+                .rposition(|b| !ident(b))
+                .map_or(0, |i| i + 1);
+            let name = &outside[name_at..open];
+            if !(name.starts_with("run_git") || NAMED.contains(&name))
+                || outside[..name_at].ends_with("fn ")
+            {
+                continue;
+            }
+            let args = top_level_args(&outside, open);
+            calls += 1;
+            let cwd = if name == "run_git_config_write_held" {
+                &args[1]
+            } else {
+                &args[0]
+            };
+            if !PARENT.contains(&cwd.as_str()) {
+                stray.push(format!("{name}({cwd}"));
+            }
+        }
+        const FOLDER_SINKS: [&str; 5] = [
+            "working_tree_lock",
+            "network_lock",
+            "crate::forge::credential_config_for_remote",
+            "crate::git::history::git_find_commits_by_prefix",
+            "PathBuf::from",
+        ];
+        const STRING_RECEIVERS: [&str; 2] = ["scratch", "file_name()"];
+        for (at, _) in outside.match_indices(".folder()") {
+            let callee = enclosing_callee(&outside[..at]);
+            if !callee.is_some_and(|callee| FOLDER_SINKS.contains(&callee)) {
+                stray.push(format!(".folder() in {}", callee.unwrap_or("no call")));
+            }
+        }
+        // The git dir is a path to read, never a cwd or an argument: only a direct
+        // argument of these, `Path::new` wrapping it included.
+        const GIT_DIR_SINKS: [&str; 1] = ["crate::git::ops::op_state_at"];
+        let ends_arg = |rest: &str| rest.trim_start().starts_with([')', ',']);
+        for (at, needle) in outside.match_indices(".git_dir()") {
+            let (mut before, mut end) = (&outside[..at], at + needle.len());
+            let mut callee = enclosing_callee(before);
+            if callee == Some("Path::new") && ends_arg(&outside[end..]) {
+                before = &before[..before.rfind("Path::new(").unwrap_or(0)];
+                end += outside[end..].find(')').map_or(0, |i| i + 1);
+                callee = enclosing_callee(before);
+            }
+            if !ends_arg(&outside[end..])
+                || !callee.is_some_and(|callee| GIT_DIR_SINKS.contains(&callee))
+            {
+                stray.push(format!(".git_dir() in {}", callee.unwrap_or("no call")));
+            }
+        }
+        for conversion in [".to_string_lossy()", ".to_str()", ".display()"] {
+            for (at, _) in outside.match_indices(conversion) {
+                let before = outside[..at].trim_end();
+                let start = before
+                    .trim_end_matches("()")
+                    .bytes()
+                    .rposition(|b| !ident(b))
+                    .map_or(0, |i| i + 1);
+                let receiver = &before[start..];
+                if !STRING_RECEIVERS.contains(&receiver) {
+                    stray.push(format!("{conversion} on {receiver}"));
+                }
+            }
+        }
+        for (at, _) in outside.match_indices("let ") {
+            if at > 0 && ident(bytes[at - 1]) {
+                continue;
+            }
+            let rest = outside[at + 4..].trim_start_matches("mut ");
+            let end = rest.bytes().position(|b| !ident(b)).unwrap_or(rest.len());
+            if matches!(&rest[..end], "repo" | "repo_path") {
+                stray.push(format!("let {}", &rest[..end]));
+            }
+        }
+        // Anywhere outside the module, so an argv or env built before its call counts.
+        const REDIRECTS: [&str; 6] = [
+            "\"-C\"",
+            "\"--git-dir",
+            "\"--work-tree",
+            "\"GIT_DIR\"",
+            "\"GIT_WORK_TREE\"",
+            "\"GIT_COMMON_DIR\"",
+        ];
+        for needle in REDIRECTS {
+            for (at, _) in outside.match_indices(needle) {
+                // A `rev-parse` query of `--git-dir` asks for a path; it redirects nothing.
+                if outside[at..].starts_with("\"--git-dir\"") {
+                    let open = outside[..at].rfind('[').map_or(0, |i| i + 1);
+                    if outside[open..].trim_start().starts_with("\"rev-parse\"") {
+                        continue;
+                    }
+                }
+                stray.push(format!("redirect {}", needle.trim_matches('"')));
+            }
+        }
+        (calls, stray)
+    }
+
+    #[test]
+    fn child_side_git_goes_through_child_repo() {
+        let source = include_str!("submodule.rs");
+        let (calls, stray) = child_side_spawns(source);
+        assert!(
+            calls >= 20,
+            "the scan reads the file's runner calls: {calls}"
+        );
+        assert_eq!(stray, Vec::<String>::new());
+        let anchor = "async fn submodule_is_shallow(";
+        for splice in [
+            "fn spliced() { run_git_raw(Some(dir), &[], DEFAULT_TIMEOUT); }",
+            "fn spliced() { crate::git::ops::has_unmerged(child.folder()); }",
+            "fn spliced(child: &ChildRepo) { let repo = child.folder(); \
+             let _ = run_git_raw(Some(repo), &[], DEFAULT_TIMEOUT); }",
+            "async fn spliced(child: &ChildRepo) { \
+             let _ = index_gitlink(child.folder(), \"\", \"\").await; }",
+            "fn spliced(worktree: &Path) { let repo_path = worktree.to_str().unwrap_or(\"\"); \
+             let _ = run_git_raw(Some(repo_path), &[], DEFAULT_TIMEOUT); }",
+            "fn spliced(worktree: &Path) { \
+             let _ = run_git_raw(Some(&worktree.to_string_lossy()), &[], DEFAULT_TIMEOUT); }",
+            "fn spliced() { run_git_raw(Some(repo_path), &[\"-C\", \"x\", \"status\"], DEFAULT_TIMEOUT); }",
+            "fn spliced() { run_git_raw(Some(repo_path), &[\"--git-dir=x\", \"status\"], DEFAULT_TIMEOUT); }",
+            "fn spliced() { run_git_raw(Some(repo_path), &[\"--git-dir\", \"x\", \"status\"], DEFAULT_TIMEOUT); }",
+            "fn spliced() { run_git_raw(Some(repo_path), &[\"--work-tree=x\", \"status\"], DEFAULT_TIMEOUT); }",
+            "fn spliced() { run_git_raw_env(Some(repo_path), &[\"status\"], &[(\"GIT_DIR\", \"x\")], DEFAULT_TIMEOUT); }",
+            "fn spliced() { run_git_raw_env(Some(repo_path), &[\"status\"], &[(\"GIT_WORK_TREE\", \"x\")], DEFAULT_TIMEOUT); }",
+            "fn spliced() { run_git_raw_env(Some(repo_path), &[\"status\"], &[(\"GIT_COMMON_DIR\", \"x\")], DEFAULT_TIMEOUT); }",
+            "fn spliced(child: &ChildRepo) { let dir = child.git_dir(); }",
+            "fn spliced(child: &ChildRepo) { let _ = run_git_raw(Some(child.git_dir()), &[], DEFAULT_TIMEOUT); }",
+            "fn spliced(child: &ChildRepo) { crate::git::ops::op_state_at(&Path::new(child.git_dir()).join(\"x\")); }",
+            "fn spliced(child: &ChildRepo) { crate::git::ops::op_state_at(other(child.git_dir())); }",
+        ] {
+            let spliced = source.replacen(anchor, &format!("{splice}\n{anchor}"), 1);
+            assert_ne!(
+                child_side_spawns(&spliced).1,
+                Vec::<String>::new(),
+                "{splice}"
+            );
+        }
+    }
+
     /// The parent's tree with `libs/dep` at `sha`, or without it; the index stays there.
     async fn tree_with(host: &str, sha: Option<&str>) -> String {
         match sha {
@@ -6552,7 +8942,7 @@ mod tests {
         let at = |needle: &str| write.find(needle).unwrap_or_else(|| panic!("{needle}"));
         assert!(at("conflict_rel_path(") < at("working_tree_lock("));
         assert!(at("working_tree_lock(") < at("acquire_repo_lock("));
-        assert!(at("acquire_repo_lock(") < at("\"update-index\""));
+        assert!(at("acquire_repo_lock(") < at("stage_gitlink_write("));
         assert!(at("acquire_repo_lock(") < at("checkout_staged_commit("));
         // The submodule's own hold: bounded, and taken before anything reads inside it.
         let child = write
@@ -6981,7 +9371,7 @@ mod tests {
             outcome,
             outcome_blocked(
                 SubmodulePickBlock::WouldOverwrite,
-                Some(WOULD_OVERWRITE_HEADERS[0]),
+                Some(WOULD_OVERWRITE_HEADERS[0].0),
                 &["b.txt"]
             )
         );
@@ -6998,14 +9388,14 @@ mod tests {
         let read = pick_read(&f.host, &f.c1).await;
         assert_eq!(
             read.plan,
-            plan_blocked(SubmodulePickBlock::WouldOverwrite, None, &["a.txt"])
+            plan_blocked(SubmodulePickBlock::UntrackedInTheWay, None, &["a.txt"])
         );
         let outcome = pick(&f.host, &f.c1, &f.c0).await.unwrap();
         assert_eq!(
             outcome,
             outcome_blocked(
-                SubmodulePickBlock::WouldOverwrite,
-                Some(WOULD_OVERWRITE_HEADERS[1]),
+                SubmodulePickBlock::UntrackedInTheWay,
+                Some(WOULD_OVERWRITE_HEADERS[1].0),
                 &["a.txt"]
             )
         );
@@ -7026,26 +9416,17 @@ mod tests {
         let read = pick_read(&f.host, &tracks).await;
         assert_eq!(
             read.plan,
-            plan_blocked(SubmodulePickBlock::WouldOverwrite, None, &["ign.txt"])
+            plan_blocked(SubmodulePickBlock::IgnoredInTheWay, None, &["ign.txt"])
         );
         let outcome = pick(&f.host, &tracks, &f.c0).await.unwrap();
-        assert!(
-            matches!(
-                &outcome,
-                SubmodulePickOutcome::Blocked {
-                    why: SubmodulePickBlock::WouldOverwrite,
-                    ..
-                }
-            ),
-            "outcome is blocked/wouldOverwrite: {outcome:?}"
-        );
         assert_eq!(
             outcome,
             outcome_blocked(
-                SubmodulePickBlock::WouldOverwrite,
-                Some(WOULD_OVERWRITE_HEADERS[1]),
+                SubmodulePickBlock::IgnoredInTheWay,
+                Some(WOULD_OVERWRITE_HEADERS[1].0),
                 &["ign.txt"]
-            )
+            ),
+            "git lists it under the untracked header; check-ignore tells it apart"
         );
         assert_eq!(read_at(&f.sub, "ign.txt"), "LOCAL BYTES\n");
         assert_eq!(head_of(&f.sub).await, f.c2);
@@ -7084,7 +9465,7 @@ mod tests {
         let hooks = git_path(&f.sub, "hooks").await;
         std::fs::create_dir_all(&hooks).unwrap();
         let hook = hooks.join("post-checkout");
-        let header = WOULD_OVERWRITE_HEADERS[0];
+        let header = WOULD_OVERWRITE_HEADERS[0].0;
         let script =
             format!("#!/bin/sh\necho 'hook: build step failed' >&2\necho '{header}' >&2\nprintf '\\tdep.txt\\n' >&2\nexit 1\n");
         std::fs::write(&hook, script).unwrap();
@@ -7261,18 +9642,21 @@ mod tests {
     /// read: a ready plan lands, and a would-overwrite plan is refused by git with
     /// each planned path (or a directory holding it) in git's list.
     async fn assert_checkout_agrees(sub: &str, m: &str, plan: &SubmodulePickPlan, arm: &str) {
-        let out = detach_submodule_at(sub, m).await.unwrap();
+        let out = detach_in(sub, &child_at(sub).await, m).await.unwrap();
         match plan {
             SubmodulePickPlan::Ready { .. } => {
                 assert_eq!(out.code, 0, "{arm}: the checkout lands: {}", out.stderr)
             }
             SubmodulePickPlan::Blocked {
-                why: SubmodulePickBlock::WouldOverwrite,
+                why:
+                    SubmodulePickBlock::WouldOverwrite
+                    | SubmodulePickBlock::UntrackedInTheWay
+                    | SubmodulePickBlock::IgnoredInTheWay,
                 paths,
                 ..
             } => {
                 assert_ne!(out.code, 0, "{arm}: the checkout refuses");
-                let (_, listed) = would_overwrite(&out.stderr)
+                let (_, _, listed) = would_overwrite(&out.stderr)
                     .unwrap_or_else(|| panic!("{arm}: git's header: {}", out.stderr));
                 for path in paths {
                     assert!(
@@ -7294,27 +9678,52 @@ mod tests {
         assert_eq!(clean, ready(SubmodulePickMove::CheckOut), "the clean tree");
         assert_checkout_agrees(&sub, &m, &clean, "the clean tree").await;
         reset_sub(&sub).await;
-        for (arm, blocks) in [
-            ("a tracked edit the target changes", "edit.txt"),
-            ("an untracked file the target tracks", "untracked.txt"),
-            ("an ignored file the target tracks", "ignored.txt"),
+        use SubmodulePickBlock::{IgnoredInTheWay, UntrackedInTheWay, WouldOverwrite};
+        for (arm, blocks, why) in [
+            (
+                "a tracked edit the target changes",
+                "edit.txt",
+                WouldOverwrite,
+            ),
+            (
+                "an untracked file the target tracks",
+                "untracked.txt",
+                UntrackedInTheWay,
+            ),
+            (
+                "an ignored file the target tracks",
+                "ignored.txt",
+                IgnoredInTheWay,
+            ),
             (
                 "an untracked file where the target needs a directory",
                 "need",
+                UntrackedInTheWay,
             ),
             (
                 "a directory the target makes a file, holding an untracked file",
                 "dirfile",
+                UntrackedInTheWay,
             ),
             (
                 "a directory the target makes a file, holding an ignored file",
                 "dirfile/u.ign",
+                IgnoredInTheWay,
             ),
-            ("a directory at a path deleted from disk", "dirdel.txt"),
-            ("a staged rename of a file the target changes", "r.txt"),
+            (
+                "a directory at a path deleted from disk",
+                "dirdel.txt",
+                WouldOverwrite,
+            ),
+            (
+                "a staged rename of a file the target changes",
+                "r.txt",
+                WouldOverwrite,
+            ),
             (
                 "a staged deletion still on disk of a file the target deletes",
                 "gone.txt",
+                UntrackedInTheWay,
             ),
         ] {
             match blocks {
@@ -7334,11 +9743,7 @@ mod tests {
                 _ => write_at(&sub, blocks, "local"),
             }
             let plan = pick_read(&host, &m).await.plan;
-            assert_eq!(
-                plan,
-                plan_blocked(SubmodulePickBlock::WouldOverwrite, None, &[blocks]),
-                "{arm}"
-            );
+            assert_eq!(plan, plan_blocked(why, None, &[blocks]), "{arm}");
             assert_checkout_agrees(&sub, &m, &plan, arm).await;
             reset_sub(&sub).await;
         }
@@ -7351,7 +9756,11 @@ mod tests {
         let plan = pick_read(&host, &m).await.plan;
         assert_eq!(
             plan,
-            plan_blocked(SubmodulePickBlock::WouldOverwrite, None, &["untracked.txt"]),
+            plan_blocked(
+                SubmodulePickBlock::IgnoredInTheWay,
+                None,
+                &["untracked.txt"]
+            ),
             "{arm}"
         );
         assert_checkout_agrees(&sub, &m, &plan, arm).await;
@@ -7374,7 +9783,7 @@ mod tests {
         let plan = pick_read(&host, &m).await.plan;
         assert_eq!(
             plan,
-            plan_blocked(SubmodulePickBlock::WouldOverwrite, None, &["same.txt"]),
+            plan_blocked(SubmodulePickBlock::IgnoredInTheWay, None, &["same.txt"]),
             "{arm}"
         );
         assert_checkout_agrees(&sub, &m, &plan, arm).await;
@@ -7549,7 +9958,7 @@ mod tests {
         let plan = pick_read(&host, &m).await.plan;
         assert_eq!(
             plan,
-            plan_blocked(SubmodulePickBlock::WouldOverwrite, None, &["edit.txt"]),
+            plan_blocked(SubmodulePickBlock::UntrackedInTheWay, None, &["edit.txt"]),
             "{arm}"
         );
         assert_checkout_agrees(&sub, &m, &plan, arm).await;
@@ -7622,7 +10031,7 @@ mod tests {
 
     #[test]
     fn dry_run_refusal_reads_only_gits_would_overwrite_errors() {
-        let rows: [(&str, i32, &str, Option<&str>); 11] = [
+        let rows: [(&str, i32, &str, Option<&str>); 12] = [
             (
                 "an edit",
                 128,
@@ -7679,9 +10088,16 @@ mod tests {
                 None,
             ),
             ("nothing said", 128, "", None),
+            (
+                "a path holding the lossy marker",
+                128,
+                "error: Untracked working tree file 'a\u{FFFD}.txt' would be overwritten by merge.\n",
+                None,
+            ),
         ];
         for (name, code, stderr, want) in rows {
-            assert_eq!(dry_run_refusal(code, stderr).as_deref(), want, "{name}");
+            let got = dry_run_refusal(code, stderr);
+            assert_eq!(got.as_ref().map(|(_, path)| path.as_str()), want, "{name}");
         }
     }
 
@@ -7932,14 +10348,27 @@ mod tests {
         };
         assert_eq!(shallow().await, "true", "fixture");
         let state = AppState::default();
-        git_submodule_fetch_core(&state, &host, "libs/dep", false)
+        let plain = git_submodule_fetch_core(&state, &host, "libs/dep", false)
             .await
             .unwrap();
         assert_eq!(shallow().await, "true", "a plain fetch keeps the cut");
-        git_submodule_fetch_core(&state, &host, "libs/dep", true)
+        assert_eq!(
+            plain,
+            SubmoduleFetchResult {
+                shallow: Some(true)
+            }
+        );
+        let full = git_submodule_fetch_core(&state, &host, "libs/dep", true)
             .await
             .unwrap();
         assert_eq!(shallow().await, "false");
+        assert_eq!(
+            full,
+            SubmoduleFetchResult {
+                shallow: Some(false)
+            },
+            "measured after the fetch"
+        );
         git_submodule_fetch_core(&state, &host, "libs/dep", true)
             .await
             .expect("a complete submodule takes a plain fetch");
@@ -7954,10 +10383,15 @@ mod tests {
         let mut text = std::fs::read_to_string(&config).unwrap();
         text.push_str("[broken\n");
         std::fs::write(&config, text).unwrap();
-        assert_invalid(
-            git_submodule_fetch_core(&AppState::default(), &host, "libs/dep", true).await,
-            "couldn't tell whether libs/dep's history is shallow; nothing was fetched",
-        );
+        // A config git can't read fails the folder gate first, which names git's line.
+        match git_submodule_fetch_core(&AppState::default(), &host, "libs/dep", true).await {
+            Err(AppError::InvalidArgument(message)) => assert!(
+                message
+                    .starts_with("Can't fetch the submodule at libs/dep — git couldn't read it: "),
+                "{message}"
+            ),
+            other => panic!("an unreadable submodule refuses: {other:?}"),
+        }
         let plain = vec![
             "fetch",
             "--prune",
@@ -8416,46 +10850,36 @@ mod tests {
         let read = pick_read(&f.host, &f.c1).await;
         assert_eq!(
             read.plan,
-            plan_blocked(SubmodulePickBlock::SubmoduleMidOperation, None, &[])
+            plan_blocked(
+                SubmodulePickBlock::SubmoduleMidOperation,
+                Some("a rebase"),
+                &[]
+            )
         );
         assert_eq!(
             pick(&f.host, &f.c1, &f.c0).await.unwrap(),
-            outcome_blocked(SubmodulePickBlock::SubmoduleMidOperation, None, &[])
+            outcome_blocked(
+                SubmodulePickBlock::SubmoduleMidOperation,
+                Some("a rebase"),
+                &[]
+            )
         );
         assert!(marker.is_dir(), "rebase-merge is still there");
         assert_eq!(head_of(&f.sub).await, f.c2);
         assert_eq!(pointer_row(&f.host).await, row_at(&f.c0));
     }
 
+    /// The submodule's op state is read at the git dir its resolve returned, so no git-dir
+    /// probe of its own can fail there.
     #[tokio::test]
-    async fn pick_reads_a_failed_submodule_operation_probe_as_check_failed() {
+    async fn pick_reads_the_submodule_op_state_at_the_resolved_git_dir() {
         let f = gitlink_fixture("pick-probe-fault").await;
         let read = crate::git::ops::with_git_dir_probe_fault(git_submodule_pick_plan_core(
             &f.host, "libs/dep", &f.c1,
         ))
         .await
         .unwrap();
-        assert_eq!(
-            read.plan,
-            plan_blocked(
-                SubmodulePickBlock::CheckFailed,
-                Some("invalid argument: couldn't resolve the git dir"),
-                &[]
-            )
-        );
-        let outcome = crate::git::ops::with_git_dir_probe_fault(pick(&f.host, &f.c1, &f.c0))
-            .await
-            .unwrap();
-        assert_eq!(
-            outcome,
-            outcome_blocked(
-                SubmodulePickBlock::CheckFailed,
-                Some("invalid argument: couldn't resolve the git dir"),
-                &[]
-            )
-        );
-        assert_eq!(head_of(&f.sub).await, f.c2);
-        assert_eq!(pointer_row(&f.host).await, row_at(&f.c0));
+        assert_eq!(read.plan, ready(SubmodulePickMove::CheckOut));
     }
 
     #[tokio::test]
@@ -8572,7 +10996,8 @@ mod tests {
         git(&f.sub, &["checkout", "-q", "--detach", &f.c2]).await;
         let orphan = commit_in(&f.sub, "o.txt", "orphan").await;
         let recorded = [f.c0.clone()];
-        let probe = |shallow| orphan_probe(&f.sub, "libs/dep", &orphan, &f.c1, &recorded, shallow);
+        let child = child_at(&f.sub).await;
+        let probe = |shallow| orphan_probe(&child, "libs/dep", &orphan, &f.c1, &recorded, shallow);
         assert_eq!(probe(Some(false)).await, OrphanFact::Orphan);
         assert_eq!(probe(Some(true)).await, OrphanFact::Unverified(None));
         assert_eq!(
@@ -8637,7 +11062,10 @@ mod tests {
             SubmodulePickOutcome::CheckedOutNotStaged {
                 sha: f.c1.clone(),
                 why: SubmodulePickUnstaged::PointerMoved,
-                reason: None,
+                reason: Some(format!(
+                    "the recorded commit reads {} now",
+                    short_oid(&f.c2)
+                )),
             },
             "outcome is checkedOutNotStaged/pointerMoved"
         );
@@ -8969,7 +11397,9 @@ mod tests {
             ),
             (
                 "files in the way",
-                edit(|f| f.overwrite = Some(OverwriteFact::Blocked(vec!["x".into()]))),
+                edit(|f| {
+                    f.overwrite = Some(OverwriteFact::Blocked(B::WouldOverwrite, vec!["x".into()]))
+                }),
                 PickStep::Plan(SubmodulePickPlan::Blocked {
                     why: B::WouldOverwrite,
                     reason: None,
@@ -9280,6 +11710,8 @@ mod tests {
             (B::DetachedOrphan, "detachedOrphan"),
             (B::DetachedUnverified, "detachedUnverified"),
             (B::WouldOverwrite, "wouldOverwrite"),
+            (B::UntrackedInTheWay, "untrackedInTheWay"),
+            (B::IgnoredInTheWay, "ignoredInTheWay"),
             (B::CheckFailed, "checkFailed"),
         ] {
             assert_eq!(serde_json::to_value(why).unwrap(), json!(wire));
@@ -9357,6 +11789,21 @@ mod tests {
                     "reason": null
                 }),
             ),
+            (
+                SubmodulePickOutcome::MovedAfter {
+                    sha: "s".into(),
+                    pointer: Some("p".into()),
+                    head: None,
+                },
+                json!({ "kind": "movedAfter", "sha": "s", "pointer": "p", "head": null }),
+            ),
+            (
+                SubmodulePickOutcome::ReadBackFailed {
+                    sha: "s".into(),
+                    reason: "r".into(),
+                },
+                json!({ "kind": "readBackFailed", "sha": "s", "reason": "r" }),
+            ),
         ] {
             let json = serde_json::to_value(outcome).unwrap();
             texts.push(json.to_string());
@@ -9370,6 +11817,7 @@ mod tests {
             "broken_refs",
             "checked_out_not_staged",
             "checkout_failed",
+            "moved_after",
         ] {
             assert!(!text.contains(snake), "{snake}");
         }
@@ -9398,10 +11846,10 @@ mod tests {
         let child = "acquire_repo_lock(child, submodule_wait";
         assert!(at("pick_rel_path(") < at("working_tree_lock("));
         assert!(at("working_tree_lock(") < at("acquire_repo_lock("));
-        assert!(at("acquire_repo_lock(") < at("index_gitlink("));
-        assert!(at("index_gitlink(") < at(child));
+        assert!(at("acquire_repo_lock(") < at("pick_entry_gate("));
+        assert!(at("pick_entry_gate(") < at(child));
         assert!(at(child) < at("detach_submodule_at("));
-        assert!(at("detach_submodule_at(") < at("\"update-index\""));
+        assert!(at("detach_submodule_at(") < at("stage_gitlink_cas("));
         assert!(!write.contains("acquire_repo_lock_unbounded"));
         assert!(!write.contains("conflict_rel_path("));
     }
@@ -9479,5 +11927,1835 @@ mod tests {
         );
         let unreadable = Err(AppError::Command("unreadable .gitmodules".into()));
         assert_eq!(inferred_added_path(&before, unreadable), None);
+    }
+
+    fn write_hook(hooks: &Path, name: &str, body: &str) {
+        std::fs::create_dir_all(hooks).unwrap();
+        let hook = hooks.join(name);
+        std::fs::write(&hook, format!("#!/bin/sh\n{body}")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn sh_path(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
+    #[tokio::test]
+    async fn a_dot_git_folder_git_rejects_reads_not_initialized_and_never_reaches_the_parent() {
+        let f = gitlink_fixture("pick-bogus-dot-git").await;
+        let dot_git = Path::new(&f.sub).join(".git");
+        let gitfile = std::fs::read(&dot_git).unwrap();
+        let parent_head = git(&f.host, &["symbolic-ref", "HEAD"]).await;
+        for arm in ["an empty .git folder", "a .git folder without HEAD"] {
+            std::fs::remove_file(&dot_git).unwrap();
+            std::fs::create_dir(&dot_git).unwrap();
+            if arm == "a .git folder without HEAD" {
+                for sub in ["objects", "refs"] {
+                    std::fs::create_dir(dot_git.join(sub)).unwrap();
+                }
+            }
+            let refs = git_submodule_refs_core(&f.host, "libs/dep").await.unwrap();
+            assert_eq!(
+                refs.checkout,
+                SubmoduleCheckout::NotInitialized,
+                "{arm}: refs"
+            );
+            assert!(refs.branches.is_empty(), "{arm}: no parent branches");
+            let page =
+                git_submodule_commits_core(&f.host, "libs/dep", "refs/heads/main", 0, 10, None)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                page.checkout,
+                SubmoduleCheckout::NotInitialized,
+                "{arm}: commits"
+            );
+            assert!(page.commits.is_empty(), "{arm}: no parent commits");
+            assert_eq!(
+                pick_read(&f.host, &f.c1).await.plan,
+                plan_blocked(SubmodulePickBlock::NotInitialized, None, &[]),
+                "{arm}: plan"
+            );
+            assert!(
+                git_submodule_fetch_core(&AppState::default(), &f.host, "libs/dep", false)
+                    .await
+                    .is_err(),
+                "{arm}: fetch refuses"
+            );
+            assert_eq!(
+                pick(&f.host, &f.c1, &f.c0).await.unwrap(),
+                outcome_blocked(SubmodulePickBlock::NotInitialized, None, &[]),
+                "{arm}: setter"
+            );
+            assert_eq!(
+                git(&f.host, &["symbolic-ref", "HEAD"]).await,
+                parent_head,
+                "{arm}: the parent's HEAD stays on its branch"
+            );
+            assert_eq!(pointer_row(&f.host).await, row_at(&f.c0), "{arm}: pointer");
+            std::fs::remove_dir_all(&dot_git).unwrap();
+            std::fs::write(&dot_git, &gitfile).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn pick_checks_out_the_commit_when_a_branch_is_named_as_its_id() {
+        let f = gitlink_fixture("pick-sha-branch").await;
+        git(&f.sub, &["branch", &f.c1, &f.c2]).await;
+        assert_eq!(
+            pick(&f.host, &f.c1, &f.c0).await.unwrap(),
+            set_at(&f.c1, SubmodulePickMove::CheckOut)
+        );
+        assert_eq!(
+            head_of(&f.sub).await,
+            f.c1,
+            "HEAD is the commit, not the branch tip"
+        );
+        assert_eq!(pointer_row(&f.host).await, row_at(&f.c1));
+    }
+
+    #[tokio::test]
+    async fn pick_refuses_a_checkout_that_exits_0_elsewhere() {
+        let f = gitlink_fixture("pick-hook-moves-head").await;
+        let hooks = git_path(&f.sub, "hooks").await;
+        write_hook(
+            &hooks,
+            "post-checkout",
+            &format!("git update-ref --no-deref HEAD {}\n", f.c2),
+        );
+        assert_eq!(
+            pick(&f.host, &f.c1, &f.c0).await.unwrap(),
+            SubmodulePickOutcome::CheckoutFailed {
+                reason: format!("HEAD isn't at {} after the checkout", f.c1)
+            }
+        );
+        assert_eq!(pointer_row(&f.host).await, row_at(&f.c0), "nothing staged");
+    }
+
+    #[test]
+    fn detach_retries_only_gits_own_lock_refusal_with_head_unmoved() {
+        let out = |code: i32, stderr: &str| GitOutput {
+            stdout: Vec::new(),
+            stderr: stderr.into(),
+            code,
+        };
+        let lock = "fatal: Unable to create 'x/index.lock': File exists.";
+        let at = |sha: &str| HeadRead::At(sha.to_string());
+        let rows = [
+            (
+                "git's refusal, HEAD unmoved",
+                out(128, lock),
+                Some("a"),
+                at("a"),
+                true,
+            ),
+            (
+                "an unborn HEAD unmoved",
+                out(128, lock),
+                None,
+                HeadRead::Gone(NO_COMMIT),
+                true,
+            ),
+            (
+                "HEAD moved (a hook's text)",
+                out(128, lock),
+                Some("a"),
+                at("b"),
+                false,
+            ),
+            (
+                "a hook's own exit code",
+                out(1, lock),
+                Some("a"),
+                at("a"),
+                false,
+            ),
+            (
+                "no lock text",
+                out(128, "fatal: other"),
+                Some("a"),
+                at("a"),
+                false,
+            ),
+            (
+                "HEAD unread after",
+                out(128, lock),
+                Some("a"),
+                HeadRead::Unread("x".into()),
+                false,
+            ),
+            (
+                "the folder emptied while unborn",
+                out(128, lock),
+                None,
+                HeadRead::Gone(FOLDER_GONE),
+                false,
+            ),
+        ];
+        for (name, out, before, after, want) in rows {
+            assert_eq!(detach_retry(&out, before, &after), want, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn detach_runs_a_failing_post_checkout_hook_once() {
+        let f = gitlink_fixture("pick-hook-lock-text").await;
+        let runs = Path::new(&f.host).parent().unwrap().join("hook-runs.txt");
+        let hooks = git_path(&f.sub, "hooks").await;
+        let body = format!(
+            "echo run >> '{}'\necho \"fatal: Unable to create 'x/index.lock': File exists.\" >&2\nexit 128\n",
+            sh_path(&runs)
+        );
+        write_hook(&hooks, "post-checkout", &body);
+        let out = detach_in(&f.sub, &child_at(&f.sub).await, &f.c1)
+            .await
+            .unwrap();
+        assert_ne!(out.code, 0, "the hook's failure stands");
+        assert_eq!(head_of(&f.sub).await, f.c1, "HEAD moved before the hook");
+        assert_eq!(
+            std::fs::read_to_string(&runs).unwrap().lines().count(),
+            1,
+            "the hook ran once"
+        );
+    }
+
+    #[tokio::test]
+    async fn pick_keeps_an_outside_stage_made_during_the_lock_wait() {
+        let f = gitlink_fixture("pick-stage-retry").await;
+        let lock = Path::new(&f.host).join(".git").join("index.lock");
+        let retried = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let landed: PickLandedHook = {
+            let lock = lock.clone();
+            Arc::new(move || {
+                let lock = lock.clone();
+                Box::pin(async move { std::fs::write(&lock, "").unwrap() })
+            })
+        };
+        let retry: PickLandedHook = {
+            let (lock, host, c2, retried) = (lock, f.host.clone(), f.c2.clone(), retried.clone());
+            Arc::new(move || {
+                let (lock, host, c2, retried) =
+                    (lock.clone(), host.clone(), c2.clone(), retried.clone());
+                Box::pin(async move {
+                    retried.store(true, std::sync::atomic::Ordering::SeqCst);
+                    std::fs::remove_file(&lock).unwrap();
+                    stage_gitlink(&host, &c2).await;
+                })
+            })
+        };
+        let outcome = PICK_LANDED_HOOK
+            .scope(
+                landed,
+                STAGE_RETRY_HOOK.scope(retry, pick(&f.host, &f.c1, &f.c0)),
+            )
+            .await
+            .unwrap();
+        assert!(
+            retried.load(std::sync::atomic::Ordering::SeqCst),
+            "the stage hit the lock"
+        );
+        assert_eq!(
+            outcome,
+            SubmodulePickOutcome::CheckedOutNotStaged {
+                sha: f.c1.clone(),
+                why: SubmodulePickUnstaged::PointerMoved,
+                reason: Some(format!(
+                    "the recorded commit reads {} now",
+                    short_oid(&f.c2)
+                )),
+            }
+        );
+        assert_eq!(
+            pointer_row(&f.host).await,
+            row_at(&f.c2),
+            "the new pointer stays"
+        );
+        assert_eq!(head_of(&f.sub).await, f.c1);
+    }
+
+    #[tokio::test]
+    async fn stage_cas_moves_only_a_matching_pointer() {
+        let f = gitlink_fixture("stage-cas").await;
+        let moved = stage_gitlink_cas(&f.host, "libs/dep", &f.c0, &f.c1)
+            .await
+            .unwrap();
+        assert_eq!(moved.code, 0, "{}", moved.stderr);
+        assert_eq!(pointer_row(&f.host).await, row_at(&f.c1));
+        let stale = stage_gitlink_cas(&f.host, "libs/dep", &f.c0, &f.c2)
+            .await
+            .unwrap();
+        assert_ne!(stale.code, 0, "a stale preimage is refused");
+        assert_eq!(
+            pointer_row(&f.host).await,
+            row_at(&f.c1),
+            "the outside value stays"
+        );
+        assert_eq!(head_of(&f.sub).await, f.c2, "the checkout is untouched");
+    }
+
+    /// A post-index-change hook body that stages `sha` at `libs/dep` after each write.
+    fn rewrite_hook(sha: &str) -> String {
+        format!(
+            "[ -n \"$GD_REENTRY\" ] && exit 0\n\
+             GD_REENTRY=1 git update-index --cacheinfo 160000,{sha},libs/dep\nexit 1\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn pick_reports_the_pointer_a_post_index_change_hook_left() {
+        let f = gitlink_fixture("pick-hook-rewrite").await;
+        let hooks = git_path(&f.host, "hooks").await;
+        write_hook(&hooks, "post-index-change", &rewrite_hook(&f.c2));
+        let outcome = pick(&f.host, &f.c1, &f.c0).await.unwrap();
+        assert_eq!(
+            outcome,
+            SubmodulePickOutcome::CheckedOutNotStaged {
+                sha: f.c1.clone(),
+                why: SubmodulePickUnstaged::PointerMoved,
+                reason: Some(format!(
+                    "the recorded commit reads {} now",
+                    short_oid(&f.c2)
+                )),
+            }
+        );
+        assert_eq!(pointer_row(&f.host).await, row_at(&f.c2));
+        assert_eq!(head_of(&f.sub).await, f.c1);
+    }
+
+    /// The landed hook moves the submodule's HEAD after the checkout.
+    #[tokio::test]
+    async fn pick_reports_a_checkout_moved_after_it_landed() {
+        let f = gitlink_fixture("pick-moved-after").await;
+        let landed: PickLandedHook = {
+            let (sub, c2) = (f.sub.clone(), f.c2.clone());
+            Arc::new(move || {
+                let (sub, c2) = (sub.clone(), c2.clone());
+                Box::pin(async move {
+                    git(&sub, &["checkout", "-q", "--detach", &c2]).await;
+                })
+            })
+        };
+        let outcome = PICK_LANDED_HOOK
+            .scope(landed, pick(&f.host, &f.c1, &f.c0))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            SubmodulePickOutcome::MovedAfter {
+                sha: f.c1.clone(),
+                pointer: Some(f.c1.clone()),
+                head: Some(f.c2.clone()),
+            }
+        );
+        assert_eq!(pointer_row(&f.host).await, row_at(&f.c1));
+    }
+
+    #[test]
+    fn stage_verdict_table() {
+        use SubmodulePickMove::{AlreadyThere, CheckOut};
+        use SubmodulePickUnstaged::{PointerMoved, StageFailed, StageUnconfirmed};
+        let (e, s, o) = ("e".repeat(40), "s".repeat(40), "o".repeat(40));
+        let (short_e, short_o) = (short_oid(&e), short_oid(&o));
+        let at = |sha: &str| -> Result<Option<String>, String> { Ok(Some(sha.to_string())) };
+        let head_at = |sha: &str| HeadRead::At(sha.to_string());
+        let refused: Result<(), String> = Err("git's line".into());
+        let unstaged = |why, reason: String| SubmodulePickOutcome::CheckedOutNotStaged {
+            sha: s.clone(),
+            why,
+            reason: Some(reason),
+        };
+        let failed = |reason: &str| SubmodulePickOutcome::ReadBackFailed {
+            sha: s.clone(),
+            reason: reason.into(),
+        };
+        let unread = |line: &str| HeadRead::Unread(line.into());
+        let rows = vec![
+            (
+                "0: HEAD unread",
+                Ok(()),
+                at(&s),
+                unread("h"),
+                CheckOut,
+                failed("h"),
+            ),
+            (
+                "0: HEAD unread over an unread pointer",
+                Ok(()),
+                Err("p".to_string()),
+                unread("h"),
+                CheckOut,
+                failed("h"),
+            ),
+            (
+                "0': pointer unread, HEAD moved",
+                Ok(()),
+                Err("p".to_string()),
+                head_at(&o),
+                CheckOut,
+                failed("p"),
+            ),
+            (
+                "0': pointer unread, folder gone",
+                Ok(()),
+                Err("p".to_string()),
+                HeadRead::Gone(FOLDER_GONE),
+                CheckOut,
+                failed("p"),
+            ),
+            (
+                "1: HEAD moved",
+                Ok(()),
+                at(&s),
+                head_at(&o),
+                CheckOut,
+                SubmodulePickOutcome::MovedAfter {
+                    sha: s.clone(),
+                    pointer: Some(s.clone()),
+                    head: Some(o.clone()),
+                },
+            ),
+            (
+                "1: folder gone, no gitlink recorded",
+                Ok(()),
+                Ok(None),
+                HeadRead::Gone(FOLDER_GONE),
+                CheckOut,
+                SubmodulePickOutcome::MovedAfter {
+                    sha: s.clone(),
+                    pointer: None,
+                    head: None,
+                },
+            ),
+            (
+                "1: HEAD names no commit",
+                Ok(()),
+                at(&s),
+                HeadRead::Gone(NO_COMMIT),
+                CheckOut,
+                SubmodulePickOutcome::MovedAfter {
+                    sha: s.clone(),
+                    pointer: Some(s.clone()),
+                    head: None,
+                },
+            ),
+            (
+                "2: both at sha, a refused write included",
+                refused.clone(),
+                at(&s),
+                head_at(&s),
+                CheckOut,
+                SubmodulePickOutcome::Set {
+                    sha: s.clone(),
+                    checkout: CheckOut,
+                    nested_left: None,
+                },
+            ),
+            (
+                "3: pointer unreadable",
+                Ok(()),
+                Err("read failed".to_string()),
+                head_at(&s),
+                CheckOut,
+                unstaged(StageUnconfirmed, "read failed".into()),
+            ),
+            (
+                "4: pointer unmoved, git's line",
+                refused.clone(),
+                at(&e),
+                head_at(&s),
+                CheckOut,
+                unstaged(StageFailed, "git's line".into()),
+            ),
+            (
+                "4: pointer unmoved after exit 0",
+                Ok(()),
+                at(&e),
+                head_at(&s),
+                CheckOut,
+                unstaged(
+                    StageFailed,
+                    format!("the staged pointer still reads {short_e}"),
+                ),
+            ),
+            (
+                "5: nothing this call moved or staged",
+                refused.clone(),
+                at(&o),
+                head_at(&s),
+                AlreadyThere,
+                SubmodulePickOutcome::Changed,
+            ),
+            (
+                "6: pointer moved",
+                refused.clone(),
+                at(&o),
+                head_at(&s),
+                CheckOut,
+                unstaged(
+                    PointerMoved,
+                    format!("the recorded commit reads {short_o} now"),
+                ),
+            ),
+            (
+                "6: no gitlink now",
+                Ok(()),
+                Ok(None),
+                head_at(&s),
+                AlreadyThere,
+                unstaged(PointerMoved, "the recorded commit reads nothing now".into()),
+            ),
+        ];
+        for (name, wrote, pointer, head, checkout, want) in rows {
+            assert_eq!(
+                stage_verdict(&wrote, &pointer, &head, &e, &s, checkout),
+                want,
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gitlink_patch_quotes_awkward_paths() {
+        let dir = temp("patch-quoting");
+        let repo = seed_repo(dir.path(), "repo").await;
+        git(&repo, &["config", "core.protectNTFS", "false"]).await;
+        let (old, new) = ("1".repeat(40), "2".repeat(40));
+        let cafe = format!("caf{}", char::from(0xe9_u8));
+        let names = [
+            "ta\tb",
+            "my sub",
+            cafe.as_str(),
+            "quo\"te",
+            "back\\slash",
+            "nl\nx",
+            " lead",
+            "\"q",
+        ];
+        for name in names {
+            let info = format!("160000,{old},{name}");
+            git(&repo, &["update-index", "--add", "--cacheinfo", &info]).await;
+            let out = stage_gitlink_cas(&repo, name, &old, &new).await.unwrap();
+            assert_eq!(out.code, 0, "{name:?}: {}", out.stderr);
+            // Every entry, matched by exact name: Windows reads `\` in a pathspec as a
+            // separator.
+            let staged = index_gitlink(&repo, name, ".").await.unwrap();
+            assert_eq!(staged, Some(new.clone()), "{name:?}");
+        }
+        assert_eq!(
+            quote_patch_path("a/ta\tb\"\\\x7f"),
+            "\"a/ta\\011b\\\"\\\\\\177\""
+        );
+        assert!(gitlink_patch("my sub", &old, &new)
+            .starts_with("diff --git \"a/my sub\" \"b/my sub\"\nindex "));
+    }
+
+    /// The write exited 0, then its hook rewrote the entry: the accept says what it
+    /// staged and what the index holds now, never "nothing was staged".
+    #[tokio::test]
+    async fn accept_errs_with_what_the_index_holds_when_a_hook_rewrites_the_stage() {
+        let f = gitlink_fixture("accept-hook-rewrite").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let hooks = git_path(&f.host, "hooks").await;
+        write_hook(&hooks, "post-index-change", &rewrite_hook(&f.c0));
+        let err = accept(&f.host, "theirs", &expected, false)
+            .await
+            .unwrap_err();
+        let AppError::InvalidArgument(message) = &err else {
+            panic!("{err:?}")
+        };
+        let lead = format!(
+            "Staged {} for {}, but something changed it right after: the index now reads \
+             commit {}.",
+            short_oid(&f.c2),
+            crate::git::ops::discard_shown("libs/dep"),
+            short_oid(&f.c0)
+        );
+        assert!(message.starts_with(&lead), "{message}");
+        assert_eq!(
+            pointer_row(&f.host).await,
+            row_at(&f.c0),
+            "the hook's entry stands"
+        );
+    }
+
+    /// The write exited 0, then its hook left an index git can't read.
+    #[tokio::test]
+    async fn accept_errs_when_the_read_back_fails() {
+        let f = gitlink_fixture("accept-read-back-fails").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let hooks = git_path(&f.host, "hooks").await;
+        write_hook(&hooks, "post-index-change", "printf garbage > .git/index\n");
+        let err = accept(&f.host, "theirs", &expected, false)
+            .await
+            .unwrap_err();
+        let AppError::InvalidArgument(message) = &err else {
+            panic!("{err:?}")
+        };
+        let lead = format!(
+            "Staged {} for {}, but couldn't read it back: ",
+            short_oid(&f.c2),
+            crate::git::ops::discard_shown("libs/dep")
+        );
+        assert!(message.starts_with(&lead), "{message}");
+        assert!(message.ends_with("The submodule's checkout was left as it was."));
+    }
+
+    /// A commit on `parent` with its tree, committed at `date` (git's raw format).
+    async fn commit_dated(repo: &str, parent: &str, date: &str) -> String {
+        let tree = format!("{parent}^{{tree}}");
+        let env = [("GIT_COMMITTER_DATE", date), ("GIT_AUTHOR_DATE", date)];
+        let args = [
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit-tree",
+            &tree,
+            "-p",
+            parent,
+            "-m",
+            date,
+        ];
+        crate::git::runner::run_git_raw_env(Some(repo), &args, &env, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap()
+            .exit_verdict()
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_string()
+    }
+
+    /// A commit dated after its history under six commits dated long before it, the
+    /// tip named by a remote-tracking ref: a `rev-list --not` walk gives up on the
+    /// old-dated side before it reaches the commit and prints it.
+    #[tokio::test]
+    async fn reach_checks_recheck_what_a_skewed_walk_printed() {
+        let f = gitlink_fixture("reach-skew").await;
+        let skewed = commit_dated(&f.sub, &f.c2, "2051222400 +0000").await;
+        let mut tip = skewed.clone();
+        for _ in 0..6 {
+            tip = commit_dated(&f.sub, &tip, "978307200 +0000").await;
+        }
+        git(&f.sub, &["update-ref", "refs/remotes/origin/skew", &tip]).await;
+        let child = child_at(&f.sub).await;
+        let reach = remote_reach(&child, std::slice::from_ref(&skewed), Some(false)).await;
+        assert_eq!(reach, vec![Some(true)], "a remote-tracking ref holds it");
+        let fact = orphan_probe(&child, "libs/dep", &skewed, &f.c0, &[], Some(false)).await;
+        assert!(matches!(fact, OrphanFact::Named), "a ref names it");
+    }
+
+    /// A page of local-only commits: the walk prints each, and one `--contains` read over
+    /// all of them proves them unreached, with no per-commit re-check.
+    #[tokio::test]
+    async fn reach_checks_batch_a_page_of_local_only_commits() {
+        let f = gitlink_fixture("reach-batch").await;
+        let c3 = commit_in(&f.sub, "c.txt", "three").await;
+        let c4 = commit_in(&f.sub, "d.txt", "four").await;
+        let child = child_at(&f.sub).await;
+        let shas = [f.c0.clone(), f.c1.clone(), f.c2.clone(), c3, c4];
+        let (reach, reads) = RECHECKS
+            .scope(std::cell::Cell::new(0), async {
+                let reach = remote_reach(&child, &shas, Some(false)).await;
+                (reach, RECHECKS.with(std::cell::Cell::get))
+            })
+            .await;
+        let local = Some(false);
+        assert_eq!(reach, vec![Some(true), local, local, local, local]);
+        assert_eq!(reads, 1, "one --contains read for the whole page");
+    }
+
+    /// The checkout lands, then the folder's gitfile is re-pointed at the host: the
+    /// read-back's resolve refuses, so the pick says it couldn't read back.
+    #[tokio::test]
+    async fn pick_reports_a_read_back_it_could_not_make() {
+        let f = gitlink_fixture("pick-read-back-unread").await;
+        let host_git = abs_git_path(&f.host, "--git-dir").await;
+        let landed: PickLandedHook = {
+            let (sub, host_git) = (f.sub.clone(), host_git.clone());
+            Arc::new(move || {
+                let gitfile = Path::new(&sub).join(".git");
+                let body = format!("gitdir: {host_git}\n");
+                Box::pin(async move {
+                    std::fs::write(gitfile, body).unwrap();
+                })
+            })
+        };
+        let outcome = PICK_LANDED_HOOK
+            .scope(landed, pick(&f.host, &f.c1, &f.c0))
+            .await
+            .unwrap();
+        let SubmodulePickOutcome::ReadBackFailed { sha, reason } = &outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(sha, &f.c1);
+        assert!(reason.contains("own git directory"), "{reason}");
+    }
+
+    /// After the checkout the child's HEAD moves and the host's index turns to garbage:
+    /// an unread pointer under a moved HEAD is a read-back failure, never "no gitlink".
+    #[tokio::test]
+    async fn pick_never_reads_a_failed_pointer_read_as_no_gitlink() {
+        let f = gitlink_fixture("pick-pointer-unread").await;
+        let index = git_path(&f.host, "index").await;
+        let landed: PickLandedHook = {
+            let (sub, c2, index) = (f.sub.clone(), f.c2.clone(), index.clone());
+            Arc::new(move || {
+                let (sub, c2, index) = (sub.clone(), c2.clone(), index.clone());
+                Box::pin(async move {
+                    git(&sub, &["checkout", "-q", "--detach", &c2]).await;
+                    std::fs::write(&index, "garbage").unwrap();
+                })
+            })
+        };
+        let outcome = PICK_LANDED_HOOK
+            .scope(landed, pick(&f.host, &f.c1, &f.c0))
+            .await
+            .unwrap();
+        let SubmodulePickOutcome::ReadBackFailed { sha, reason } = &outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(sha, &f.c1);
+        assert!(reason.contains("index"), "{reason}");
+    }
+
+    /// `deinit -f` right after the checkout empties the folder and keeps the module's
+    /// HEAD: read through the folder, the pick says the checkout is gone.
+    #[tokio::test]
+    async fn pick_reports_a_submodule_deinitialized_after_its_checkout() {
+        let f = gitlink_fixture("pick-deinit-after").await;
+        let landed: PickLandedHook = {
+            let host = f.host.clone();
+            Arc::new(move || {
+                let host = host.clone();
+                Box::pin(async move {
+                    git(
+                        &host,
+                        &["submodule", "deinit", "-q", "-f", "--", "libs/dep"],
+                    )
+                    .await;
+                })
+            })
+        };
+        let outcome = PICK_LANDED_HOOK
+            .scope(landed, pick(&f.host, &f.c1, &f.c0))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            SubmodulePickOutcome::MovedAfter {
+                sha: f.c1.clone(),
+                pointer: Some(f.c1.clone()),
+                head: None,
+            }
+        );
+    }
+
+    /// A lock in the child's git dir refuses the first run; during the wait the holder
+    /// finishes and commits on the detached HEAD. HEAD is read after the wait, so no
+    /// retry runs and the outside commit stays HEAD.
+    #[tokio::test]
+    async fn detach_leaves_a_head_that_moved_during_the_lock_wait() {
+        let f = gitlink_fixture("detach-lock-wait").await;
+        git(&f.sub, &["checkout", "-q", "--detach", &f.c2]).await;
+        let lock = Path::new(&abs_git_path(&f.sub, "--git-dir").await).join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let waited: PickLandedHook = {
+            let (sub, lock) = (f.sub.clone(), lock.clone());
+            Arc::new(move || {
+                let (sub, lock) = (sub.clone(), lock.clone());
+                Box::pin(async move {
+                    std::fs::remove_file(&lock).unwrap();
+                    commit_in(&sub, "late.txt", "late").await;
+                })
+            })
+        };
+        let child = child_at(&f.sub).await;
+        let out = DETACH_WAIT_HOOK
+            .scope(waited, detach_in(&f.sub, &child, &f.c1))
+            .await
+            .unwrap();
+        assert_eq!(out.code, 128, "{}", out.stderr);
+        assert_eq!(
+            git(&f.sub, &["log", "-1", "--format=%s"]).await.trim(),
+            "late"
+        );
+    }
+
+    /// A path the target adds that isn't UTF-8, built from a C-quoted index line (the
+    /// one way Windows holds one): the ignored-file prediction is unanswered, not clear.
+    #[tokio::test]
+    async fn ignored_in_the_way_never_probes_a_path_that_is_not_utf8() {
+        let f = gitlink_fixture("ignored-not-utf8").await;
+        let from = head_of(&f.sub).await;
+        let blob = git(&f.sub, &["rev-parse", "HEAD:a.txt"]).await;
+        let info = format!("100644 {}\t\"\\377bad.log\"\n", blob.trim());
+        crate::git::runner::run_git_raw_input(
+            Some(&f.sub),
+            &["update-index", "--index-info"],
+            Some(&info),
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap()
+        .exit_verdict()
+        .unwrap();
+        let c = [
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "raw",
+        ];
+        git(&f.sub, &c).await;
+        let target = head_of(&f.sub).await;
+        let fact = ignored_in_the_way(&child_at(&f.sub).await, &from, &target).await;
+        assert!(
+            matches!(&fact, OverwriteFact::Failed(reason) if reason.contains("UTF-8")),
+            "{fact:?}"
+        );
+    }
+
+    /// `x`, whose describe is literally `y`, beside a sibling named `x (y)`: both print a
+    /// line starting `x (y)`, and index order tells them apart.
+    #[tokio::test]
+    async fn list_pairs_status_lines_with_the_index_in_order() {
+        let (_dir, host, dep) = host_with_submodule("list-order").await;
+        git(&host, &["submodule", "add", "-q", &dep, "x (y)"]).await;
+        git(&host, &["submodule", "add", "-q", &dep, "x"]).await;
+        git(&format!("{host}/x"), &["tag", "y"]).await;
+        git(&host, &["commit", "-qm", "x"]).await;
+        let listed = list_submodules(&host).await.unwrap();
+        let rows: Vec<(&str, &str)> = listed
+            .iter()
+            .map(|sub| (sub.path.as_str(), sub.describe.as_str()))
+            .collect();
+        assert!(rows.contains(&("x", "y")), "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|(path, describe)| *path == "x (y)" && *describe != "y"),
+            "{rows:?}"
+        );
+    }
+
+    /// A gitlink whose path isn't UTF-8, built from a C-quoted index line (the one way
+    /// Windows holds one): the list fails rather than name a lossy path.
+    #[tokio::test]
+    async fn list_refuses_a_gitlink_path_that_is_not_utf8() {
+        let (_dir, host, _dep) = host_with_submodule("list-not-utf8").await;
+        let sha = head_of(&sub_dir(&host)).await;
+        let info = format!("160000 {sha}\t\"\\377bad\"\n");
+        crate::git::runner::run_git_raw_input(
+            Some(&host),
+            &["update-index", "--index-info"],
+            Some(&info),
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap()
+        .exit_verdict()
+        .unwrap();
+        let err = list_submodules(&host).await.unwrap_err();
+        assert!(
+            matches!(&err, AppError::InvalidArgument(message) if message
+                == "Couldn't read the submodules: git listed a submodule path that isn't UTF-8."),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn ignored_listing_fails_on_a_path_that_is_not_utf8() {
+        assert_eq!(
+            ignored_listed(b"a.log\0nr/\0".to_vec()),
+            Ok(vec!["a.log".to_string(), "nr".to_string()])
+        );
+        assert_eq!(
+            ignored_listed(b"a.log\0\xffbad.log\0".to_vec()),
+            Err("git listed a path that isn't UTF-8".to_string())
+        );
+    }
+
+    /// HEAD naming an object the repository doesn't hold, or a tree: the read couldn't
+    /// confirm a commit, so it is `Unread`, never `At`.
+    #[tokio::test]
+    async fn head_read_back_confirms_head_names_a_commit() {
+        let f = gitlink_fixture("head-not-a-commit").await;
+        let child = child_at(&f.sub).await;
+        let folder = Path::new(&f.sub);
+        let parent = folder.parent().unwrap().to_string_lossy().into_owned();
+        let head_file = Path::new(&abs_git_path(&f.sub, "--git-dir").await).join("HEAD");
+        let read = || head_read_back(&parent, folder, &child);
+        assert_eq!(read().await, HeadRead::At(f.c2.clone()));
+        let missing = "0123456789abcdef0123456789abcdef01234567";
+        std::fs::write(&head_file, format!("{missing}\n")).unwrap();
+        assert_eq!(
+            read().await,
+            HeadRead::Unread(format!(
+                "its HEAD names {}, which this repository doesn't hold",
+                short_oid(missing)
+            ))
+        );
+        let tree = git(&f.sub, &["rev-parse", &format!("{}^{{tree}}", f.c2)]).await;
+        std::fs::write(&head_file, tree).unwrap();
+        assert!(
+            matches!(read().await, HeadRead::Unread(line) if line.contains("expected commit type")),
+            "a tree"
+        );
+    }
+
+    /// An already-current pick whose pointer or folder HEAD moves during its probes
+    /// touched nothing, so it answers `Changed`, never `Set`.
+    #[tokio::test]
+    async fn pick_already_current_answers_changed_when_either_value_moves() {
+        for arm in ["pointer", "head"] {
+            let f = gitlink_fixture(&format!("pick-current-{arm}")).await;
+            stage_gitlink(&f.host, &f.c2).await;
+            assert!(
+                matches!(
+                    pick(&f.host, &f.c2, &f.c2).await.unwrap(),
+                    SubmodulePickOutcome::Set {
+                        checkout: SubmodulePickMove::AlreadyThere,
+                        ..
+                    }
+                ),
+                "{arm}: the pick is already current"
+            );
+            let moved: PickLandedHook = {
+                let (host, sub, c1) = (f.host.clone(), f.sub.clone(), f.c1.clone());
+                Arc::new(move || {
+                    let (host, sub, c1) = (host.clone(), sub.clone(), c1.clone());
+                    Box::pin(async move {
+                        if arm == "pointer" {
+                            stage_gitlink(&host, &c1).await;
+                        } else {
+                            git(&sub, &["checkout", "-q", "--detach", &c1]).await;
+                        }
+                    })
+                })
+            };
+            let outcome = PRE_CHECKOUT_HOOK
+                .scope(moved, pick(&f.host, &f.c2, &f.c2))
+                .await
+                .unwrap();
+            assert_eq!(outcome, SubmodulePickOutcome::Changed, "{arm}");
+        }
+    }
+
+    /// A lock refuses the pick's checkout, and during the wait the absorbed submodule
+    /// is deinit-ed, which keeps the held repository's HEAD. The folder's HEAD is read
+    /// after the wait, so no retry runs: the held HEAD stays, the folder stays empty,
+    /// and the checkout failed with git's lock line (nothing was staged).
+    #[tokio::test]
+    async fn pick_never_retries_into_a_folder_emptied_during_the_lock_wait() {
+        let f = gitlink_fixture("detach-wait-deinit").await;
+        let module = abs_git_path(&f.sub, "--git-dir").await;
+        let lock = Path::new(&module).join("index.lock");
+        let locked: PickLandedHook = {
+            let lock = lock.clone();
+            Arc::new(move || {
+                let lock = lock.clone();
+                Box::pin(async move { std::fs::write(&lock, "").unwrap() })
+            })
+        };
+        let waited: PickLandedHook = {
+            let (host, lock) = (f.host.clone(), lock.clone());
+            Arc::new(move || {
+                let (host, lock) = (host.clone(), lock.clone());
+                Box::pin(async move {
+                    std::fs::remove_file(&lock).unwrap();
+                    let deinit = ["submodule", "deinit", "-q", "-f", "--", "libs/dep"];
+                    git(&host, &deinit).await;
+                })
+            })
+        };
+        let picked = DETACH_WAIT_HOOK.scope(waited, pick(&f.host, &f.c1, &f.c0));
+        let outcome = PRE_CHECKOUT_HOOK.scope(locked, picked).await.unwrap();
+        assert_eq!(
+            git(&module, &["rev-parse", "HEAD"]).await.trim(),
+            f.c2,
+            "no retry moved the held repository"
+        );
+        let left = std::fs::read_dir(&f.sub).unwrap().count();
+        assert_eq!(left, 0, "the folder stays empty");
+        assert!(
+            matches!(&outcome, SubmodulePickOutcome::CheckoutFailed { reason }
+                if reason.contains("index.lock")),
+            "{outcome:?}"
+        );
+        assert_eq!(pointer_row(&f.host).await, row_at(&f.c0), "nothing staged");
+    }
+
+    #[tokio::test]
+    async fn fetch_reads_the_only_remote_when_it_is_not_origin() {
+        let f = gitlink_fixture("fetch-sole-remote").await;
+        git(&f.sub, &["remote", "rename", "origin", "up"]).await;
+        git(&f.sub, &["checkout", "-q", "--detach"]).await;
+        let late = commit_in(&f.dep, "late.txt", "late").await;
+        git_submodule_fetch_core(&AppState::default(), &f.host, "libs/dep", false)
+            .await
+            .unwrap();
+        let fetched = git(&f.sub, &["rev-parse", "refs/remotes/up/main"]).await;
+        assert_eq!(fetched.trim(), late);
+    }
+
+    #[tokio::test]
+    async fn pick_checkout_refusal_tells_ignored_files_from_untracked_ones() {
+        let f = gitlink_fixture("pick-ignored-kind").await;
+        let sub = Path::new(&f.sub);
+        std::fs::write(sub.join("plain.txt"), "theirs").unwrap();
+        let target = commit_in(&f.sub, "ign.txt", "adds two").await;
+        git(&f.sub, &["checkout", "-q", "--detach", &f.c2]).await;
+        let exclude = git_path(&f.sub, "info/exclude").await;
+        std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        std::fs::write(&exclude, "ign.txt\n").unwrap();
+        std::fs::write(sub.join("ign.txt"), "mine").unwrap();
+        let child = child_at(&f.sub).await;
+        let refused = |why, paths: &[&str]| SubmodulePickOutcome::Blocked {
+            why,
+            reason: Some(WOULD_OVERWRITE_HEADERS[1].0.to_string()),
+            paths: paths.iter().map(|path| path.to_string()).collect(),
+        };
+        let moved = detach_in(&f.sub, &child, &target).await;
+        assert_eq!(
+            pick_checkout_verdict(&child, Some(f.c2.as_str()), moved).await,
+            refused(SubmodulePickBlock::IgnoredInTheWay, &["ign.txt"]),
+            "only an ignored file"
+        );
+        std::fs::write(sub.join("plain.txt"), "mine").unwrap();
+        let moved = detach_in(&f.sub, &child, &target).await;
+        assert_eq!(
+            pick_checkout_verdict(&child, Some(f.c2.as_str()), moved).await,
+            refused(
+                SubmodulePickBlock::UntrackedInTheWay,
+                &["ign.txt", "plain.txt"]
+            ),
+            "an untracked file beside it"
+        );
+    }
+
+    #[tokio::test]
+    async fn ignored_in_the_way_skips_candidates_still_in_the_index() {
+        let f = gitlink_fixture("ignored-tracked").await;
+        let sub = Path::new(&f.sub);
+        std::fs::write(sub.join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(sub.join("t.log"), "tracked").unwrap();
+        git(&f.sub, &["add", "-f", ".gitignore", "t.log"]).await;
+        let c = [
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "x0",
+        ];
+        git(&f.sub, &c).await;
+        let from = head_of(&f.sub).await;
+        git(&f.sub, &["rm", "-q", "t.log"]).await;
+        std::fs::write(sub.join("x.log"), "theirs").unwrap();
+        git(&f.sub, &["add", "-f", "x.log"]).await;
+        let c = [
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "x1",
+        ];
+        git(&f.sub, &c).await;
+        let target = head_of(&f.sub).await;
+        git(&f.sub, &["checkout", "-q", "--detach", &from]).await;
+        std::fs::write(sub.join("x.log"), "mine").unwrap();
+        assert!(
+            sub.join("t.log").exists(),
+            "the tracked candidate is on disk"
+        );
+        assert_eq!(
+            ignored_in_the_way(&child_at(&f.sub).await, &from, &target).await,
+            OverwriteFact::Blocked(
+                SubmodulePickBlock::IgnoredInTheWay,
+                vec!["x.log".to_string()]
+            )
+        );
+    }
+
+    /// A no-path update whose settling walk meets a sibling re-pointed at the parent's
+    /// own git dir refuses there, and runs no git in it.
+    #[tokio::test]
+    async fn update_all_refuses_a_sibling_that_names_the_parents_git_dir() {
+        let (_dir, host, _dep) = host_with_submodule("update-all-gate").await;
+        let state = AppState::default();
+        git_submodule_add_core(
+            &state,
+            host.clone(),
+            "../dep".into(),
+            Some("libs/b".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        git(&host, &["commit", "-qm", "add b"]).await;
+        let dep = sub_dir(&host);
+        let (head, dep_head) = (head_of(&host).await, head_of(&dep).await);
+        let b = Path::new(&host)
+            .join("libs/b")
+            .to_string_lossy()
+            .into_owned();
+        let own = abs_git_path(&host, "--git-dir").await;
+        let repoint: PickLandedHook = Arc::new(move || {
+            let (b, own) = (b.clone(), own.clone());
+            Box::pin(async move { point_gitfile(&b, &own) })
+        });
+        let update = git_submodule_update_core(&state, host.clone(), None, true);
+        let e = UPDATE_SETTLE_HOOK.scope(repoint, update).await.unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("Updated the submodules, but not the ones inside libs/b: "),
+            "{e}"
+        );
+        let symbolic = git(&host, &["symbolic-ref", "HEAD"]).await;
+        assert_eq!(symbolic.trim(), "refs/heads/main", "the parent's HEAD");
+        assert_eq!(head_of(&host).await, head);
+        assert_eq!(head_of(&dep).await, dep_head, "the other submodule");
+    }
+
+    /// A no-path update whose settling walk meets a later submodule whose path now runs
+    /// through a directory link to an outside repository skips it: no git runs there.
+    #[tokio::test]
+    async fn update_all_skips_a_submodule_whose_path_runs_through_a_link() {
+        let (dir, host, _dep) = host_with_submodule("update-all-link").await;
+        let state = AppState::default();
+        git_submodule_add_core(
+            &state,
+            host.clone(),
+            "../dep".into(),
+            Some("vendor/b".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        git(&host, &["commit", "-qm", "add b"]).await;
+        // A clone of the host, its submodules uninitialized: a settling leg run inside
+        // it would clone them.
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let foreign = outside.join("b").to_string_lossy().into_owned();
+        git(&host, &["clone", "-q", &host, &foreign]).await;
+        let vendor = Path::new(&host).join("vendor");
+        let parked = Path::new(&host).join("vendor-parked");
+        let swap: PickLandedHook = Arc::new(move || {
+            let (vendor, parked, outside) = (vendor.clone(), parked.clone(), outside.clone());
+            Box::pin(async move {
+                std::fs::rename(&vendor, &parked).unwrap();
+                link_dir(&vendor, &outside);
+            })
+        });
+        let update = git_submodule_update_core(&state, host.clone(), None, true);
+        UPDATE_SETTLE_HOOK.scope(swap, update).await.unwrap();
+        assert!(
+            !exists(&foreign, "libs/dep/dep.txt"),
+            "the outside repository stays untouched"
+        );
+        let child = Path::new(&host).join("vendor/b");
+        assert_eq!(
+            ChildRepo::resolve(&host, &child).await.unwrap_err(),
+            (SubmoduleCheckout::Replaced, None)
+        );
+    }
+
+    /// A pick whose HEAD is already at `sha` stages only the pointer, after reading the
+    /// folder again: a HEAD moved or a folder emptied during the probes is `Changed`,
+    /// with the index untouched.
+    #[tokio::test]
+    async fn pick_already_there_answers_changed_when_the_folder_moves_before_the_stage() {
+        for arm in ["head", "deinit"] {
+            let f = gitlink_fixture(&format!("pick-there-{arm}")).await;
+            assert_eq!(
+                pick_read(&f.host, &f.c2).await.plan,
+                ready(SubmodulePickMove::AlreadyThere),
+                "{arm}"
+            );
+            let before = pointer_row(&f.host).await;
+            let moved: PickLandedHook = {
+                let (host, sub, c1) = (f.host.clone(), f.sub.clone(), f.c1.clone());
+                Arc::new(move || {
+                    let (host, sub, c1) = (host.clone(), sub.clone(), c1.clone());
+                    Box::pin(async move {
+                        if arm == "head" {
+                            git(&sub, &["checkout", "-q", "--detach", &c1]).await;
+                        } else {
+                            git(&host, &["submodule", "deinit", "-q", "-f", "libs/dep"]).await;
+                        }
+                    })
+                })
+            };
+            let outcome = PRE_CHECKOUT_HOOK
+                .scope(moved, pick(&f.host, &f.c2, &f.c0))
+                .await
+                .unwrap();
+            assert_eq!(outcome, SubmodulePickOutcome::Changed, "{arm}");
+            assert_eq!(pointer_row(&f.host).await, before, "{arm}: the index");
+        }
+    }
+
+    /// Only ' ' and '+' rows carry a describe, so a '-' or 'U' row's rest is its path
+    /// exactly: `vendor (old)` printed for the index's `vendor` is a mismatch.
+    #[test]
+    fn status_lines_pair_only_with_their_own_path() {
+        let sha = "1".repeat(40);
+        let rows: [(char, &str, &str, Option<&str>); 11] = [
+            (' ', "vendor", "vendor", Some("")),
+            (' ', "vendor (heads/main)", "vendor", Some("heads/main")),
+            ('+', "vendor (v1)", "vendor", Some("v1")),
+            ('-', "vendor (old)", "vendor (old)", Some("")),
+            ('-', "vendor (old)", "vendor", None),
+            ('U', "vendor (old)", "vendor", None),
+            ('U', "vendor", "vendor", Some("")),
+            (' ', "vendor (old", "vendor", None),
+            (' ', "vendorx", "vendor", None),
+            ('-', "vendorx", "vendor", None),
+            ('?', "vendor", "vendor", None),
+        ];
+        for (flag, rest, path, want) in rows {
+            let line = format!("{flag}{sha} {rest}");
+            let got = paired_status(&line, path);
+            assert_eq!(
+                got.map(|(_, _, describe)| describe),
+                want,
+                "{line:?} against {path:?}"
+            );
+            if let Some((read_flag, read_sha, _)) = got {
+                assert_eq!((read_flag, read_sha), (flag, sha.as_str()));
+            }
+        }
+    }
+
+    /// Arm (a) takes only the on-disk name `.git`: a `.Git` directory inside the folder
+    /// isn't one git created.
+    #[test]
+    fn own_git_dir_takes_only_a_directory_spelled_dot_git() {
+        let dir = temp("own-git-name");
+        // A folder each: on a case-folding disk `.git` and `.Git` name one directory.
+        let check = |folder: &str, name: &str| {
+            let folder = dir.path().join(folder);
+            let git_dir = folder.join(name);
+            std::fs::create_dir_all(&git_dir).unwrap();
+            child_repo::own_git_dir(&git_dir.to_string_lossy(), &folder.to_string_lossy())
+        };
+        assert_eq!(check("exact", ".git"), Ok(true));
+        assert_eq!(check("other", ".Git"), Ok(false));
+    }
+
+    /// A folder git can't read refuses the remove with why, never as dirty: no discard
+    /// is offered on it.
+    #[tokio::test]
+    async fn remove_refuses_a_folder_git_cannot_read_and_offers_no_discard() {
+        let (_dir, host, _dep) = host_with_submodule("remove-unreadable").await;
+        let own = abs_git_path(&host, "--git-dir").await;
+        point_gitfile(&sub_dir(&host), &own);
+        let removed = git_submodule_remove_core(
+            &AppState::default(),
+            host.clone(),
+            "libs/dep".into(),
+            false,
+            false,
+        )
+        .await;
+        let e = removed.unwrap_err().to_string();
+        assert!(
+            e.contains(
+                "Can't remove the submodule at libs/dep \u{2014} git couldn't read it: its .git \
+                 names this repository's own git directory. Nothing was removed."
+            ),
+            "{e}"
+        );
+        let listed = git(&host, &["ls-files", "-s", "--", "libs/dep"]).await;
+        assert!(listed.starts_with("160000 "), "still a submodule: {listed}");
+    }
+
+    /// Output holding the lossy marker is never compared or listed as exact. Built with
+    /// a genuine U+FFFD in a name, which degrades the same way.
+    #[tokio::test]
+    async fn child_repo_refuses_a_printed_path_holding_the_lossy_marker() {
+        let dir = temp("child-repo-lossy");
+        let host = seed_repo(dir.path(), "host").await;
+        let marked = seed_repo(Path::new(&host), &format!("d{LOSSY}")).await;
+        assert_eq!(
+            ChildRepo::resolve(&host, Path::new(&marked))
+                .await
+                .unwrap_err(),
+            (SubmoduleCheckout::Unreadable, Some(NOT_UTF8_PATH.into()))
+        );
+        let plain = seed_repo(Path::new(&host), "d").await;
+        ChildRepo::resolve(&host, Path::new(&plain)).await.unwrap();
+    }
+
+    #[test]
+    fn a_refused_checkout_lists_only_exact_paths() {
+        let header = WOULD_OVERWRITE_HEADERS[1].0.to_string();
+        let owned = |paths: &[&str]| paths.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        let marked = format!("i{LOSSY}.txt");
+        assert_eq!(
+            exact_listing(
+                header.clone(),
+                owned(&["a.txt"]),
+                &owned(&["a.txt"]),
+                |_| true
+            ),
+            (header.clone(), owned(&["a.txt"]), true)
+        );
+        assert_eq!(
+            exact_listing(
+                header.clone(),
+                owned(&["a.txt", &marked]),
+                &owned(&["a.txt", &marked]),
+                |_| true
+            ),
+            (
+                format!("{header} {LOSSY_PATHS_LEFT_OUT}"),
+                owned(&["a.txt"]),
+                false
+            )
+        );
+    }
+
+    /// An ignored file whose name holds the marker keeps the untracked kind (its name
+    /// can't be asked about) and is left out of the listed paths.
+    #[tokio::test]
+    async fn pick_checkout_refusal_never_asks_about_a_lossy_path() {
+        let f = gitlink_fixture("pick-lossy-ignored").await;
+        let name = format!("i{LOSSY}.txt");
+        let target = commit_in(&f.sub, &name, "adds it").await;
+        git(&f.sub, &["checkout", "-q", "--detach", &f.c2]).await;
+        exclude_in(&f.sub, &name).await;
+        std::fs::write(Path::new(&f.sub).join(&name), "mine").unwrap();
+        let child = child_at(&f.sub).await;
+        let moved = detach_in(&f.sub, &child, &target).await;
+        assert_eq!(
+            pick_checkout_verdict(&child, Some(f.c2.as_str()), moved).await,
+            SubmodulePickOutcome::Blocked {
+                why: SubmodulePickBlock::UntrackedInTheWay,
+                reason: Some(format!(
+                    "{} {LOSSY_PATHS_LEFT_OUT}",
+                    WOULD_OVERWRITE_HEADERS[1].0
+                )),
+                paths: Vec::new(),
+            }
+        );
+    }
+
+    /// Refs and remotes whose names hold the marker never reach git: the lists leave
+    /// them out, and the fetch's remote choice skips them down to `origin`.
+    #[tokio::test]
+    async fn lossy_ref_and_remote_names_are_left_out() {
+        let f = gitlink_fixture("refs-lossy").await;
+        let marked = format!("x{LOSSY}");
+        git(&f.sub, &["branch", &marked]).await;
+        let refs = git_submodule_refs_core(&f.host, "libs/dep").await.unwrap();
+        assert_eq!(revs(&refs.branches), ["refs/heads/main"]);
+        let remote = format!("up{LOSSY}");
+        git(&f.sub, &["remote", "rename", "origin", &remote]).await;
+        let configured = git(&f.sub, &["config", "--get", "branch.main.remote"]).await;
+        assert_eq!(configured.trim(), remote, "the branch follows the rename");
+        let child = child_at(&f.sub).await;
+        assert_eq!(fetch_remote(&child).await.as_deref(), Some("origin"));
+    }
+
+    /// Runs the pick of `sha` against `expected` with the submodule's own working tree
+    /// held, applying `during` while it waits.
+    async fn pick_during_child_wait(
+        f: &GitlinkFixture,
+        sha: &str,
+        expected: &str,
+        during: impl std::future::Future<Output = ()>,
+    ) -> SubmodulePickOutcome {
+        let state = AppState::default();
+        let tab = git(&f.sub, &["rev-parse", "--show-toplevel"])
+            .await
+            .trim()
+            .to_string();
+        let domain = state.working_tree_lock(&tab).await;
+        let held = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a test hold")
+            .await
+            .expect("the tab takes its hold");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let tx = std::sync::Mutex::new(Some(tx));
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        });
+        let picked = CHILD_WAIT_HOOK.scope(
+            hook,
+            git_submodule_set_commit_core(&state, &f.host, "libs/dep", sha, expected),
+        );
+        let moved = async move {
+            rx.await
+                .expect("the pick waits on the submodule's working tree");
+            during.await;
+            drop(held);
+        };
+        let (outcome, ()) = tokio::join!(picked, moved);
+        outcome.unwrap()
+    }
+
+    #[tokio::test]
+    async fn pick_rereads_pointer_and_parent_operation_after_the_child_wait() {
+        let f = gitlink_fixture("pick-wait-reread").await;
+        stage_gitlink(&f.host, &f.c2).await;
+        let outcome = pick_during_child_wait(&f, &f.c2, &f.c2, stage_gitlink(&f.host, &f.c1)).await;
+        assert_eq!(outcome, SubmodulePickOutcome::Changed, "a current pick");
+        assert_eq!(
+            pointer_row(&f.host).await,
+            row_at(&f.c1),
+            "the new pointer stays"
+        );
+
+        let head = head_of(&f.host).await;
+        let merge_head = Path::new(&f.host).join(".git").join("MERGE_HEAD");
+        let begin = async { std::fs::write(&merge_head, format!("{head}\n")).unwrap() };
+        let outcome = pick_during_child_wait(&f, &f.c0, &f.c1, begin).await;
+        assert!(
+            matches!(
+                &outcome,
+                SubmodulePickOutcome::Blocked {
+                    why: SubmodulePickBlock::MidOperation,
+                    ..
+                }
+            ),
+            "a merge begun during the wait: {outcome:?}"
+        );
+        assert_eq!(head_of(&f.sub).await, f.c2, "nothing checked out");
+        assert_eq!(pointer_row(&f.host).await, row_at(&f.c1));
+    }
+
+    #[tokio::test]
+    async fn pick_plan_reads_an_ignored_file_where_the_target_deletes() {
+        let f = gitlink_fixture("pick-ignored-delete").await;
+        let a = commit_in(&f.sub, "x", "x").await;
+        git(&f.sub, &["checkout", "-q", "-b", "gone"]).await;
+        std::fs::remove_file(Path::new(&f.sub).join("x")).unwrap();
+        let b = commit_all(&f.sub, "drop x").await;
+        git(&f.sub, &["checkout", "-q", "main"]).await;
+        assert_eq!(head_of(&f.sub).await, a);
+        git(&f.sub, &["rm", "-q", "--cached", "x"]).await;
+        exclude_in(&f.sub, "x").await;
+        let plan = pick_read(&f.host, &b).await.plan;
+        assert_eq!(
+            plan,
+            plan_blocked(SubmodulePickBlock::IgnoredInTheWay, None, &["x"])
+        );
+        assert_checkout_agrees(&f.sub, &b, &plan, "an ignored file the target deletes").await;
+        assert_eq!(read_at(&f.sub, "x"), "x");
+    }
+
+    #[tokio::test]
+    async fn pick_plan_checks_ignored_files_when_sparse_has_no_patterns_file() {
+        let f = gitlink_fixture("pick-sparse-no-file").await;
+        git(&f.sub, &["checkout", "-q", "-b", "target"]).await;
+        let t = commit_in(&f.sub, "n.txt", "n").await;
+        git(&f.sub, &["checkout", "-q", "main"]).await;
+        exclude_in(&f.sub, "n.txt").await;
+        write_at(&f.sub, "n.txt", "local");
+        git(&f.sub, &["config", "core.sparseCheckout", "true"]).await;
+        assert!(!git_path(&f.sub, "info/sparse-checkout").await.exists());
+        let plan = pick_read(&f.host, &t).await.plan;
+        assert_eq!(
+            plan,
+            plan_blocked(SubmodulePickBlock::IgnoredInTheWay, None, &["n.txt"])
+        );
+        assert_checkout_agrees(&f.sub, &t, &plan, "sparse without a patterns file").await;
+    }
+
+    #[tokio::test]
+    async fn picker_reads_never_fetch_in_a_partial_clone() {
+        allow_file_submodules();
+        let dir = temp("pick-partial");
+        let src = seed_repo(dir.path(), "src").await;
+        let old = commit_in(&src, "f.txt", "v1").await;
+        let at = commit_in(&src, "f.txt", "v2").await;
+        let bare = dir.path().join("bare.git").to_string_lossy().into_owned();
+        git(&src, &["clone", "-q", "--bare", &src, &bare]).await;
+        git(&bare, &["config", "uploadpack.allowFilter", "true"]).await;
+        let host = seed_repo(dir.path(), "host").await;
+        let slashed = bare.replace('\\', "/");
+        let url = if slashed.starts_with('/') {
+            format!("file://{slashed}")
+        } else {
+            format!("file:///{slashed}")
+        };
+        let sub = sub_dir(&host);
+        git(&host, &["clone", "-q", "--filter=blob:none", &url, &sub]).await;
+        stage_gitlink(&host, &at).await;
+        let late = commit_in(&src, "late.txt", "late").await;
+        git(&src, &["push", "-q", &bare, "HEAD"]).await;
+
+        let read = pick_read(&host, &late).await;
+        assert_eq!(
+            read.plan,
+            plan_blocked(SubmodulePickBlock::NotFetched, None, &[])
+        );
+        assert!(
+            git_submodule_commits_core(&host, "libs/dep", &late, 0, 10, None)
+                .await
+                .is_err(),
+            "the page read fails without the commit"
+        );
+        let present = run_git_raw_env(
+            Some(&sub),
+            &["cat-file", "-e", &late],
+            &NO_LAZY_FETCH,
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        assert_ne!(present.code, 0, "the commit is still absent");
+        assert_eq!(
+            pick_read(&host, &old).await.plan,
+            ready(SubmodulePickMove::CheckOut),
+            "a local commit whose blobs are absent still plans"
+        );
+    }
+
+    #[tokio::test]
+    async fn pick_plan_reads_a_corrupt_object_as_check_failed() {
+        let f = gitlink_fixture("pick-corrupt").await;
+        // Off main's history, which the gate's status walks for ahead/behind.
+        git(&f.sub, &["checkout", "-q", "-b", "side"]).await;
+        let side = commit_in(&f.sub, "side.txt", "side").await;
+        git(&f.sub, &["checkout", "-q", "main"]).await;
+        let object = git_path(&f.sub, &format!("objects/{}/{}", &side[..2], &side[2..])).await;
+        let mut perms = std::fs::metadata(&object).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&object, perms).unwrap();
+        std::fs::write(&object, "garbage").unwrap();
+        match pick_read(&f.host, &side).await.plan {
+            SubmodulePickPlan::Blocked {
+                why: SubmodulePickBlock::CheckFailed,
+                reason: Some(reason),
+                ..
+            } => {
+                assert!(reason.starts_with("error:"), "{reason}");
+                assert!(reason.contains(ABSENT_OBJECT), "{reason}");
+            }
+            other => panic!("a corrupt object is checkFailed: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pick_counts_uninitialized_nested_submodules_only_where_it_moved_them() {
+        let n = nested_fixture("pick-nested-uninit").await;
+        git(&n.sub, &["checkout", "-q", "--detach", &n.m1]).await;
+        let m2 = commit_in(&n.sub, "other.txt", "m2").await;
+        git(&n.sub, &["checkout", "-q", "--detach", &n.m1]).await;
+        git(&n.sub, &["submodule", "deinit", "-q", "-f", "deep/leaf"]).await;
+        let untouched = pick(&n.host, &m2, &n.m1).await.unwrap();
+        assert_eq!(
+            untouched,
+            SubmodulePickOutcome::Set {
+                sha: m2.clone(),
+                checkout: SubmodulePickMove::CheckOut,
+                nested_left: Some(0),
+            },
+            "a nested submodule the pick didn't move"
+        );
+        let moved = pick(&n.host, &n.m0, &m2).await.unwrap();
+        assert_eq!(
+            moved,
+            SubmodulePickOutcome::Set {
+                sha: n.m0.clone(),
+                checkout: SubmodulePickMove::CheckOut,
+                nested_left: Some(1),
+            },
+            "a nested submodule the pick moved"
+        );
+    }
+
+    #[test]
+    fn submodule_operation_names_its_arm() {
+        let clear = crate::git::types::RepoOpState {
+            merging: false,
+            rebasing: false,
+            cherry_picking: false,
+            reverting: false,
+            edit_paused: false,
+            rebase_stop: None,
+        };
+        assert_eq!(mid_op_name(&clear), None);
+        for (set, name) in [
+            (
+                (|s: &mut crate::git::types::RepoOpState| s.merging = true)
+                    as fn(&mut crate::git::types::RepoOpState),
+                "a merge",
+            ),
+            (|s| s.rebasing = true, "a rebase"),
+            (|s| s.cherry_picking = true, "a cherry-pick"),
+            (|s| s.reverting = true, "a revert"),
+        ] {
+            let mut state = clear.clone();
+            set(&mut state);
+            assert_eq!(mid_op_name(&state), Some(name));
+        }
+    }
+
+    #[tokio::test]
+    async fn pick_plan_names_the_submodules_operation() {
+        let f = gitlink_fixture("pick-sub-merge").await;
+        let merge_head = git_path(&f.sub, "MERGE_HEAD").await;
+        std::fs::write(&merge_head, format!("{}\n", f.c1)).unwrap();
+        assert_eq!(
+            pick_read(&f.host, &f.c1).await.plan,
+            plan_blocked(
+                SubmodulePickBlock::SubmoduleMidOperation,
+                Some("a merge"),
+                &[]
+            )
+        );
+    }
+
+    #[test]
+    fn would_overwrite_reports_the_highest_kind_and_every_path() {
+        let stderr = format!(
+            "{}\n\tu.txt\n{}\n\tt.txt\nAborting\n",
+            WOULD_OVERWRITE_HEADERS[1].0, WOULD_OVERWRITE_HEADERS[0].0
+        );
+        assert_eq!(
+            would_overwrite(&stderr),
+            Some((
+                SubmodulePickBlock::WouldOverwrite,
+                WOULD_OVERWRITE_HEADERS[1].0.to_string(),
+                vec!["u.txt".to_string(), "t.txt".to_string()],
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_uses_the_branchs_remote_and_reports_shallowness_after() {
+        let f = gitlink_fixture("fetch-branch-remote").await;
+        let up = Path::new(&f.host).parent().unwrap().join("up");
+        let up = up.to_string_lossy().into_owned();
+        git(&f.host, &["clone", "-q", &f.dep, &up]).await;
+        let only_up = commit_in(&up, "up.txt", "up").await;
+        git(&f.sub, &["remote", "add", "up", &up]).await;
+        git(&f.sub, &["config", "branch.main.remote", "up"]).await;
+        let fetched = git_submodule_fetch_core(&AppState::default(), &f.host, "libs/dep", false)
+            .await
+            .unwrap();
+        assert_eq!(
+            fetched,
+            SubmoduleFetchResult {
+                shallow: Some(false)
+            }
+        );
+        let present = format!("{only_up}^{{commit}}");
+        git(&f.sub, &["cat-file", "-e", &present]).await;
+    }
+
+    #[test]
+    fn fetch_result_wire_shape() {
+        use serde_json::json;
+        for (shallow, wire) in [
+            (Some(true), json!({ "shallow": true })),
+            (None, json!({ "shallow": null })),
+        ] {
+            assert_eq!(
+                serde_json::to_value(SubmoduleFetchResult { shallow }).unwrap(),
+                wire
+            );
+        }
+        let blocked = plan_blocked(SubmodulePickBlock::UntrackedInTheWay, None, &["a"]);
+        let text = serde_json::to_string(&blocked).unwrap();
+        assert!(text.contains("\"untrackedInTheWay\""), "{text}");
+        for snake in [
+            "untracked_in_the_way",
+            "ignored_in_the_way",
+            "UntrackedInTheWay",
+        ] {
+            assert!(!text.contains(snake), "{snake}");
+        }
+    }
+
+    /// The no-path settling walk reads the index's gitlinks, never `submodule status`,
+    /// which dies on a gitlink no `.gitmodules` maps as it does on a path through a
+    /// symlink: one added after the parent's update, with no folder, is skipped.
+    #[tokio::test]
+    async fn update_all_walks_the_index_never_submodule_status() {
+        let (_dir, host, _dep) = host_with_submodule("update-all-index").await;
+        let sha = head_of(&sub_dir(&host)).await;
+        let unmapped: PickLandedHook = {
+            let host = host.clone();
+            Arc::new(move || {
+                let (host, sha) = (host.clone(), sha.clone());
+                Box::pin(async move {
+                    let info = format!("160000,{sha},vendor/ghost");
+                    git(&host, &["update-index", "--add", "--cacheinfo", &info]).await;
+                })
+            })
+        };
+        let state = AppState::default();
+        let update = git_submodule_update_core(&state, host.clone(), None, true);
+        UPDATE_SETTLE_HOOK.scope(unmapped, update).await.unwrap();
+        assert!(
+            list_submodules(&host).await.is_err(),
+            "the premise: `submodule status` refuses the unmapped gitlink"
+        );
+    }
+
+    /// A status probe that fails refuses the remove with git's reason, never as dirty.
+    #[tokio::test]
+    async fn remove_refuses_when_the_status_probe_fails_and_offers_no_discard() {
+        let (_dir, host, _dep) = host_with_submodule("remove-status-fails").await;
+        let git_dir = abs_git_path(&sub_dir(&host), "--git-dir").await;
+        std::fs::write(Path::new(&git_dir).join("index"), b"junk").unwrap();
+        let removed = git_submodule_remove_core(
+            &AppState::default(),
+            host.clone(),
+            "libs/dep".into(),
+            false,
+            false,
+        )
+        .await;
+        let e = removed.unwrap_err().to_string();
+        assert!(
+            e.contains(
+                "Can't remove the submodule at libs/dep \u{2014} git couldn't read its status: "
+            ),
+            "{e}"
+        );
+        assert!(e.ends_with(". Nothing was removed."), "{e}");
+        let listed = git(&host, &["ls-files", "-s", "--", "libs/dep"]).await;
+        assert!(listed.starts_with("160000 "), "still a submodule: {listed}");
+    }
+
+    /// The fetch reads its remote after the network wait: a branch switched during it,
+    /// whose `branch.<b>.remote` differs, is fetched from that remote.
+    #[tokio::test]
+    async fn fetch_picks_its_remote_after_the_network_wait() {
+        let f = gitlink_fixture("fetch-remote-after-wait").await;
+        let head = head_of(&f.sub).await;
+        git(&f.sub, &["remote", "add", "up", &f.dep]).await;
+        // A tracking ref neither remote has: the fetched remote's `--prune` deletes it.
+        for remote in ["origin", "up"] {
+            let ghost = format!("refs/remotes/{remote}/ghost");
+            git(&f.sub, &["update-ref", &ghost, &head]).await;
+        }
+        let sub = f.sub.clone();
+        let switch: PickLandedHook = Arc::new(move || {
+            let sub = sub.clone();
+            Box::pin(async move {
+                git(&sub, &["checkout", "-q", "-b", "other"]).await;
+                git(&sub, &["config", "branch.other.remote", "up"]).await;
+            })
+        });
+        let state = AppState::default();
+        let fetch = git_submodule_fetch_core(&state, &f.host, "libs/dep", false);
+        FETCH_WAITED_HOOK.scope(switch, fetch).await.unwrap();
+        let ghosts = [
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes/*/ghost",
+        ];
+        assert_eq!(
+            git(&f.sub, &ghosts).await.trim(),
+            "refs/remotes/origin/ghost"
+        );
+    }
+
+    #[test]
+    fn a_landed_checkout_counts_only_with_head_read_at_its_commit() {
+        let sha = "a".repeat(40);
+        let judged = |after: HeadRead| {
+            let ran = GitOutput {
+                stdout: Vec::new(),
+                stderr: String::new(),
+                code: 0,
+            };
+            let out = detach_landed(ran, &sha, &after);
+            (out.code, out.stderr)
+        };
+        assert_eq!(judged(HeadRead::At(sha.clone())), (0, String::new()));
+        assert_eq!(
+            judged(HeadRead::Unread("git couldn't read it".into())),
+            (
+                1,
+                "couldn't confirm the checkout: git couldn't read it".into()
+            )
+        );
+        let elsewhere = format!("HEAD isn't at {sha} after the checkout");
+        assert_eq!(judged(HeadRead::At("b".repeat(40))), (1, elsewhere.clone()));
+        assert_eq!(judged(HeadRead::Gone(FOLDER_GONE)), (1, elsewhere));
+    }
+
+    #[test]
+    fn a_refused_checkout_leaves_out_a_listed_path_the_folder_lacks() {
+        let header = WOULD_OVERWRITE_HEADERS[1].0.to_string();
+        let owned = |paths: &[&str]| paths.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        let exists = |path: &str| path != "cut";
+        assert_eq!(
+            exact_listing(
+                header.clone(),
+                owned(&["a.txt", "cut"]),
+                &owned(&["a.txt", "cut"]),
+                exists
+            ),
+            (
+                format!("{header} {LOSSY_PATHS_LEFT_OUT}"),
+                owned(&["a.txt"]),
+                false
+            )
+        );
+    }
+
+    /// The ignore check reads each name literally: `:i.txt` is not `i.txt`. No file is
+    /// made (Windows forbids `:` in names): `check-ignore --no-index` answers from the
+    /// rules alone, so this runs the same on every platform.
+    #[tokio::test]
+    async fn ignore_check_reads_a_colon_led_name_as_a_plain_path() {
+        let (_dir, host, _dep) = host_with_submodule("ignore-literal").await;
+        let sub = sub_dir(&host);
+        exclude_in(&sub, "i.txt").await;
+        let child = child_at(&sub).await;
+        let ask = |path: &str| vec![path.to_string()];
+        assert_eq!(all_ignored(&child, &ask("i.txt")).await, Some(true));
+        assert_eq!(all_ignored(&child, &ask(":i.txt")).await, Some(false));
+    }
+
+    /// A checked-out branch whose name holds the lossy marker asks no `branch.<b>.remote`
+    /// key: `origin` decides. Built with a genuine U+FFFD, which degrades the same way.
+    #[tokio::test]
+    async fn submodule_refs_default_skips_a_lossy_branch_name() {
+        let (_dir, host, dep) = host_with_submodule("refs-default-lossy").await;
+        let sub = sub_dir(&host);
+        git(&sub, &["remote", "add", "up", &dep]).await;
+        git(&sub, &["fetch", "-q", "up"]).await;
+        let marked = format!("m{LOSSY}");
+        git(&sub, &["checkout", "-q", "-b", &marked]).await;
+        git(&sub, &["config", &format!("branch.{marked}.remote"), "up"]).await;
+        assert_eq!(
+            default_rev_of(&host).await.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
+    }
+
+    #[test]
+    fn nested_counts_compare_only_exact_paths() {
+        let sha = "1".repeat(40);
+        let status = format!("+{sha} a (v1)\n-{sha} b\n");
+        assert_eq!(nested_rows(&status), Some((1, vec!["b"])));
+        assert_eq!(nested_rows(&format!("{status}-{sha} c{LOSSY}\n")), None);
+        let raw = format!(":160000 160000 {sha} {sha} M\0b\0:100644 100644 {sha} {sha} M\0f\0");
+        assert_eq!(moved_gitlinks(&raw), Some(vec!["b"]));
+        let marked = format!("{raw}:160000 160000 {sha} {sha} M\0c{LOSSY}\0");
+        assert_eq!(moved_gitlinks(&marked), None);
     }
 }

@@ -1,4 +1,8 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  QueryObserver,
+} from "@tanstack/react-query";
 import {
   act,
   cleanup,
@@ -24,6 +28,7 @@ import {
 import type {
   Submodule,
   SubmoduleCommitPage,
+  SubmoduleFetchResult,
   SubmodulePickBlock,
   SubmodulePickOutcome,
   SubmodulePickPlan,
@@ -145,6 +150,8 @@ const DEFAULT_ROWS = [
   commit(C, "Older change"),
 ];
 
+const REPLACED_COPY = `Something other than a submodule checkout sits where ${SUB} should be.`;
+
 const READY: SubmodulePickPlan = { kind: "ready", checkout: "checkOut" };
 
 const readOf = (
@@ -252,7 +259,7 @@ beforeEach(() => {
     checkout: "checkOut",
     nestedLeft: 0,
   });
-  vi.mocked(gitSubmoduleFetch).mockResolvedValue(undefined);
+  vi.mocked(gitSubmoduleFetch).mockResolvedValue({ shallow: false });
 });
 
 const search = () => screen.getByRole("textbox", { name: "Search commits" });
@@ -487,6 +494,26 @@ describe("palette entry and modes", () => {
     expect(document.activeElement).toHaveTextContent(/^Close$/);
   });
 
+  it("T79 a palette request still waiting on its list read drops to the list when the repository changes", async () => {
+    const first = held<Submodule[]>();
+    vi.mocked(gitSubmodules).mockImplementation((repo) =>
+      repo === REPO ? first.promise : Promise.resolve([sub("only/one")]),
+    );
+    renderHarness("choose");
+    await screen.findByRole("heading", { name: "Submodules" });
+    act(() => {
+      useUiStore.setState({ repoPath: OTHER });
+      controls.setRepo?.(OTHER);
+    });
+    await waitFor(() => expect(gitSubmodules).toHaveBeenCalledWith(OTHER));
+    await act(async () => undefined);
+    expect(screen.queryByRole("heading", { name: "Choose commit" })).toBe(null);
+    await screen.findByRole("button", { name: "Actions for only/one" });
+    await act(async () => first.resolve([sub(SUB)]));
+    expect(screen.queryByRole("heading", { name: "Choose commit" })).toBe(null);
+    expect(gitSubmoduleRefs).not.toHaveBeenCalled();
+  });
+
   it("T8 entering the picker puts the caret in the search box; leaving it lands on that submodule's row", async () => {
     const { user } = await pickerWithRows();
     await waitFor(() => expect(document.activeElement).toBe(search()));
@@ -622,7 +649,7 @@ describe("the picker frame", () => {
         `${SUB}'s folder is missing. Initialize it from the list first.`,
         null,
       ],
-      ["replaced", `A file sits where ${SUB} should be.`, null],
+      ["replaced", REPLACED_COPY, null],
       ["unreadable", `${SUB} couldn't be read.`, "index locked"],
     ];
     for (const [checkout, text, reason] of cases) {
@@ -797,6 +824,41 @@ describe("the commit list", () => {
     expect(screen.queryByText("Loading commits…")).toBe(null);
     await waitApplyReason(`${SUB} has no commits yet.`);
     expect(gitSubmoduleCommits).not.toHaveBeenCalled();
+  });
+
+  it("T80 an unborn submodule still lists and applies a pasted id the lookup resolved", async () => {
+    vi.mocked(gitSubmoduleRefs).mockResolvedValue(
+      refsOf({
+        defaultRev: null,
+        branches: [],
+        remoteBranches: [],
+        tags: [],
+        head: null,
+      }),
+    );
+    renderHarness("list");
+    const user = await openPicker();
+    const unbornLine = `${SUB} has no commits yet.`;
+    await screen.findByText(unbornLine, { selector: "p" });
+    await user.click(search());
+    await user.paste(E);
+    await waitFor(() =>
+      expect(row(E)).toHaveAttribute("aria-selected", "true"),
+    );
+    expect(screen.queryByText(unbornLine)).toBe(null);
+    await waitFor(() =>
+      expect(liveNote()).toContain(`Moves ${SUB} forward 1 commit.`),
+    );
+    await waitApplyReady();
+    await user.click(applyButton());
+    await waitFor(() =>
+      expect(gitSubmoduleSetCommit).toHaveBeenCalledExactlyOnceWith(
+        REPO,
+        SUB,
+        E,
+        P,
+      ),
+    );
   });
 
   it("T13 an empty ref and an empty search say so; a failed commit read offers Retry", async () => {
@@ -1083,6 +1145,75 @@ describe("the commit list", () => {
     await waitApplyReason(lead);
     expect(row(D)).toBeNull();
   });
+
+  it("T70 a Load more page that finds the checkout unusable says so with that page's reason", async () => {
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, skip) =>
+        skip === 0
+          ? page(DEFAULT_ROWS, { hasMore: true })
+          : page([], { checkout: "unreadable", reason: "bad object HEAD" }),
+    );
+    const { user } = await pickerWithRows();
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    const text = `${SUB} couldn't be read.`;
+    expect(
+      await screen.findByText(text, { selector: "p" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("bad object HEAD")).toBeInTheDocument();
+    await waitApplyReason(text);
+    expect(row(P)).toBeNull();
+  });
+
+  it("T71 a new search typed over one that matched nothing holds Apply as loading", async () => {
+    const next = held<SubmoduleCommitPage>();
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) => {
+        if (q === "zz") return page([]);
+        if (q === "zzz") return next.promise;
+        return page(DEFAULT_ROWS);
+      },
+    );
+    const { user } = await pickerWithRows();
+    await user.type(search(), "zz");
+    await screen.findByText('No commits on origin/main match "zz".');
+    await waitApplyReason("No commits to pick from");
+    await user.type(search(), "z");
+    await waitFor(() =>
+      expect(gitSubmoduleCommits).toHaveBeenCalledWith(
+        REPO,
+        SUB,
+        "refs/remotes/origin/main",
+        0,
+        50,
+        "zzz",
+      ),
+    );
+    await waitApplyReason("Loading commits…");
+    await act(async () => next.resolve(page(DEFAULT_ROWS)));
+    await waitApplyReady();
+  });
+
+  it("T72 a pasted id that matches no commit at all says so on its own line", async () => {
+    planFor = (sha) =>
+      sha === "1234567"
+        ? readOf("", blocked("notFound"), { sha: null, commit: null })
+        : readOf(sha);
+    const { user } = await pickerWithRows();
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) =>
+        q === "1234567" ? page([]) : page(DEFAULT_ROWS),
+    );
+    await user.click(search());
+    await user.paste("1234567");
+    expect(
+      await screen.findByText(`No commit in ${SUB} matches that id.`, {
+        selector: "p",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('No commits on origin/main match "1234567".'),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("the note and the gate", () => {
@@ -1173,7 +1304,11 @@ describe("the note and the gate", () => {
       [
         blocked("wouldOverwrite", null, paths(1)),
         `${SUB} has local changes this commit would overwrite.`,
-        ["src/file0.ts", "and possibly others"],
+        [
+          "src/file0.ts",
+          "and possibly others",
+          `Commit or stash them inside ${SUB} first.`,
+        ],
       ],
       [
         blocked("wouldOverwrite", null, paths(3)),
@@ -1193,6 +1328,21 @@ describe("the note and the gate", () => {
         blocked("wouldOverwrite", null, paths(20)),
         `${SUB} has local changes this commit would overwrite.`,
         ["and more"],
+      ],
+      [
+        blocked("untrackedInTheWay", "error: untracked files", paths(2)),
+        `${SUB} has untracked files in the way of this commit.`,
+        [
+          `Move or delete them inside ${SUB} first, or stash them with untracked files included.`,
+          "src/file1.ts",
+          "and possibly others",
+          "error: untracked files",
+        ],
+      ],
+      [
+        blocked("ignoredInTheWay", null, paths(1)),
+        `${SUB} has ignored files where this commit adds or removes files.`,
+        [`Move or delete them inside ${SUB} first.`, "src/file0.ts"],
       ],
       [
         blocked("detachedOrphan"),
@@ -1233,6 +1383,16 @@ describe("the note and the gate", () => {
       [
         blocked("submoduleMidOperation"),
         `A conflict, merge, rebase, cherry-pick or revert is in progress inside ${SUB}.`,
+        ["Finish or abort it there first."],
+      ],
+      [
+        blocked("submoduleMidOperation", "a rebase"),
+        `Finish or abort a rebase inside ${SUB} first.`,
+        [],
+      ],
+      [
+        blocked("submoduleMidOperation", "unresolved conflicts"),
+        `Resolve the conflicts inside ${SUB} first.`,
         [],
       ],
       [
@@ -1309,11 +1469,11 @@ describe("the note and the gate", () => {
     expect(row(P)).not.toHaveTextContent("not on a remote");
     expect(row(C)).not.toHaveTextContent("not on a remote");
     await waitApplyReady();
-    expect(liveNote()).not.toContain("Not on any remote");
+    expect(liveNote()).not.toContain("No remote branch or tag");
     await user.click(row(A) as HTMLElement);
     await waitFor(() =>
       expect(liveNote()).toContain(
-        "Not on any remote branch or tag as of the last fetch.",
+        "No remote branch or tag fetched here contains it, so other clones may not be able to check it out until it's pushed.",
       ),
     );
     await waitApplyReady();
@@ -1441,7 +1601,45 @@ describe("applying", () => {
     expect(applyButton()).toHaveAccessibleDescription("Checking this commit…");
   });
 
+  it("T77 a pasted id inside the search debounce never applies the commit highlighted before it", async () => {
+    const { user } = await pickerWithRows();
+    await waitApplyReady();
+    // The id's search matches no message, so only its pinned row lists.
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) =>
+        q === E ? page([]) : page(DEFAULT_ROWS),
+    );
+    // One tick: the paste, the press, and ArrowDown then Enter into the list.
+    act(() => {
+      fireEvent.change(search(), { target: { value: E } });
+    });
+    expect(applyButton()).toHaveAccessibleDescription("Loading commits…");
+    fireEvent.click(applyButton());
+    fireEvent.keyDown(search(), { key: "ArrowDown" });
+    fireEvent.keyDown(document.activeElement ?? document.body, {
+      key: "Enter",
+    });
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).not.toHaveBeenCalled();
+    // Once the search catches up, the pasted commit is the one applied.
+    await waitFor(() =>
+      expect(row(E)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitApplyReady();
+    await user.click(applyButton());
+    await waitFor(() =>
+      expect(gitSubmoduleSetCommit).toHaveBeenCalledExactlyOnceWith(
+        REPO,
+        SUB,
+        E,
+        P,
+      ),
+    );
+  });
+
   it("T21 each setter outcome reports itself", async () => {
+    // The highlighted commit moves the pointer: the read records D.
+    planFor = (sha) => readOf(sha, READY, { pointer: D });
     type Case = {
       outcome: SubmodulePickOutcome | Error;
       check: () => void;
@@ -1477,7 +1675,7 @@ describe("applying", () => {
           expect(toast.success).toHaveBeenCalledWith(
             `${SUB} now points at bbbbbbb, staged for you to commit.`,
             {
-              description: `Its own submodules still point at their old commits; ${SUB}'s Update in this list moves them.`,
+              description: `Its own submodules still need updating; use ${SUB}'s Update in this list.`,
             },
           ),
         leaves: true,
@@ -1491,7 +1689,7 @@ describe("applying", () => {
         },
         check: () =>
           expect(toast.success).toHaveBeenCalledWith(
-            `${SUB} points at bbbbbbb.`,
+            `${SUB} now points at bbbbbbb, staged for you to commit.`,
             undefined,
           ),
         leaves: true,
@@ -1500,8 +1698,11 @@ describe("applying", () => {
         outcome: { kind: "changed" },
         check: () =>
           expect(toast.info).toHaveBeenCalledWith(
-            `${SUB}'s recorded commit changed. Review the list and try again.`,
-            { description: "bbbbbbb wasn't checked out." },
+            `${SUB} changed while this ran; nothing was staged.`,
+            {
+              description:
+                "bbbbbbb wasn't checked out. Look again before picking.",
+            },
           ),
         leaves: false,
       },
@@ -1550,25 +1751,29 @@ describe("applying", () => {
         [
           [
             "pointerMoved",
+            null,
+            "but the new commit isn't staged.",
             `Its recorded commit changed while the checkout ran. Stage ${SUB} in Changes to finish.`,
           ],
-          ["stageFailed", `Stage ${SUB} in Changes to finish. index.lock`],
+          [
+            "stageFailed",
+            "index.lock held",
+            "but the new commit isn't staged.",
+            `Stage ${SUB} in Changes to finish. index.lock held.`,
+          ],
           [
             "stageUnconfirmed",
-            `Staging timed out, so it may or may not have landed. Check ${SUB} in Changes and stage it there if it isn't.`,
+            "index read timed out",
+            "but staging it couldn't be confirmed.",
+            `The staged commit couldn't be read back, so it may or may not have landed. Check ${SUB} in Changes and stage it there if it isn't. index read timed out.`,
           ],
         ] as const
       ).map(
-        ([why, description]): Case => ({
-          outcome: {
-            kind: "checkedOutNotStaged",
-            sha: P,
-            why,
-            reason: why === "stageFailed" ? "index.lock" : null,
-          },
+        ([why, reason, tail, description]): Case => ({
+          outcome: { kind: "checkedOutNotStaged", sha: P, why, reason },
           check: () =>
             expect(toast.warning).toHaveBeenCalledWith(
-              `${SUB} is checked out at bbbbbbb, but the new commit isn't staged.`,
+              `${SUB} is checked out at bbbbbbb, ${tail}`,
               { description, duration: 10_000 },
             ),
           leaves: false,
@@ -1597,6 +1802,36 @@ describe("applying", () => {
       cleanup();
     }
   }, 30_000);
+
+  it("T21b the success toast says staged only when the pointer moved, whatever the checkout did", async () => {
+    const recorded = `${SUB} is checked out at bbbbbbb, the commit this repository already records.`;
+    const moved = `${SUB} now points at bbbbbbb, staged for you to commit.`;
+    for (const [pointer, plan, checkout, headline] of [
+      [P, READY, "checkOut", recorded],
+      [P, READY, "alreadyThere", recorded],
+      [C, { kind: "ready", checkout: "alreadyThere" }, "alreadyThere", moved],
+      [C, READY, "checkOut", moved],
+    ] as const) {
+      vi.clearAllMocks();
+      planFor = (sha) => readOf(sha, plan, { pointer });
+      vi.mocked(gitSubmoduleSetCommit).mockResolvedValue({
+        kind: "set",
+        sha: P,
+        checkout,
+        nestedLeft: 0,
+      });
+      const { user } = await pickerWithRows();
+      await waitApplyReady();
+      await user.click(applyButton());
+      await waitFor(() =>
+        expect(toast.success, `${pointer} ${checkout}`).toHaveBeenCalledWith(
+          headline,
+          undefined,
+        ),
+      );
+      cleanup();
+    }
+  });
 
   it("T39 a block that arrives after the highlight moved on is toasted", async () => {
     const pending = held<SubmodulePickOutcome>();
@@ -1644,6 +1879,488 @@ describe("applying", () => {
     vi.mocked(gitSubmoduleSetCommit).mockClear();
     await user.click(applyButton());
     expect(gitSubmoduleSetCommit).toHaveBeenCalledWith(REPO, SUB, P, C);
+  });
+
+  it("T81 a checkout moved after it landed warns with what HEAD and the recorded commit now read, keeps the picker, and holds Apply for a fresh check", async () => {
+    const headline = `${SUB} moved after bbbbbbb was checked out.`;
+    for (const [pointer, head, description] of [
+      [
+        P,
+        D,
+        "It's now at ddddddd. Its recorded commit is bbbbbbb, the one you picked. Look again before picking.",
+      ],
+      [
+        C,
+        D,
+        "It's now at ddddddd. Its recorded commit is ccccccc. Look again before picking.",
+      ],
+      [
+        null,
+        D,
+        "It's now at ddddddd. This repository no longer records a commit for it. Look again before picking.",
+      ],
+      [
+        E,
+        D,
+        "It's now at ddddddd. Its recorded commit is eeeeeee. Look again before picking.",
+      ],
+      [
+        C,
+        null,
+        "Its folder no longer holds that checkout. Its recorded commit is ccccccc. Look again before picking.",
+      ],
+    ] as const) {
+      vi.clearAllMocks();
+      // The press sends P against a recorded C, so the picked commit and the
+      // one it replaced read different pointers.
+      planFor = (sha) => readOf(sha, READY, { pointer: C });
+      vi.mocked(gitSubmoduleSetCommit).mockResolvedValue({
+        kind: "movedAfter",
+        sha: P,
+        pointer,
+        head,
+      });
+      const { user } = await pickerWithRows();
+      await waitApplyReady();
+      const fresh = held<SubmodulePickRead>();
+      planFor = () => fresh.promise;
+      await user.click(applyButton());
+      await waitFor(() =>
+        expect(toast.warning, `${pointer} ${head}`).toHaveBeenCalledWith(
+          headline,
+          { description, duration: 10_000 },
+        ),
+      );
+      expect(search()).toBeInTheDocument();
+      await waitApplyReason("Checking this commit…");
+      await new Promise((r) => setTimeout(r, 5));
+      await act(async () => fresh.resolve(readOf(P, READY, { pointer: C })));
+      await waitApplyReady();
+      expect(gitSubmoduleSetCommit).toHaveBeenCalledTimes(1);
+      cleanup();
+    }
+  }, 30_000);
+
+  it("T82 a checkout whose state couldn't be read back warns with the read's line, keeps the picker, and holds Apply for a fresh check", async () => {
+    planFor = (sha) => readOf(sha, READY, { pointer: C });
+    vi.mocked(gitSubmoduleSetCommit).mockResolvedValue({
+      kind: "readBackFailed",
+      sha: P,
+      reason: "index read timed out",
+    });
+    const { user } = await pickerWithRows();
+    await waitApplyReady();
+    const fresh = held<SubmodulePickRead>();
+    planFor = () => fresh.promise;
+    await user.click(applyButton());
+    await waitFor(() =>
+      expect(toast.warning).toHaveBeenCalledWith(
+        `bbbbbbb was checked out in ${SUB}, but its state couldn't be read back.`,
+        {
+          description: `index read timed out. Check ${SUB} in Changes, then look again before picking.`,
+          duration: 10_000,
+        },
+      ),
+    );
+    expect(search()).toBeInTheDocument();
+    await waitApplyReason("Checking this commit…");
+    fireEvent.keyDown(row(P) as HTMLElement, { key: "Enter" });
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).toHaveBeenCalledTimes(1);
+    await new Promise((r) => setTimeout(r, 5));
+    await act(async () => fresh.resolve(readOf(P, READY, { pointer: C })));
+    await waitApplyReady();
+  });
+
+  it("T83 a pasted id whose lookup is still out holds Apply over a message-search row naming it, then applies the pinned id", async () => {
+    const { user } = await pickerWithRows();
+    await waitApplyReady();
+    // A cherry-picked copy whose message names the pasted id lists, and its
+    // own plan lands, before the lookup answers.
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) =>
+        q === E
+          ? page([commit(D, "(cherry picked from commit e)")])
+          : page(DEFAULT_ROWS),
+    );
+    const lookup = held<SubmodulePickRead>();
+    planFor = (sha) =>
+      sha === E
+        ? lookup.promise
+        : readOf(sha, READY, { relation: { kind: "rewind", behind: 2 } });
+    act(() => {
+      fireEvent.change(search(), { target: { value: E } });
+    });
+    await waitFor(() =>
+      expect(row(D)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitFor(() => expect(liveNote()).toContain("back 2 commits"));
+    expect(applyButton()).toHaveAttribute("aria-disabled", "true");
+    expect(applyButton()).toHaveAccessibleDescription("Loading commits…");
+    fireEvent.click(applyButton());
+    fireEvent.keyDown(row(D) as HTMLElement, { key: "Enter" });
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).not.toHaveBeenCalled();
+    await act(async () => lookup.resolve(readOf(E)));
+    await waitFor(() =>
+      expect(row(E)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitApplyReady();
+    await user.click(applyButton());
+    await waitFor(() =>
+      expect(gitSubmoduleSetCommit).toHaveBeenCalledExactlyOnceWith(
+        REPO,
+        SUB,
+        E,
+        P,
+      ),
+    );
+  });
+
+  it("T84 the list reads once per open: a first open, a reopen before the closing dialog unmounted, and a reopen over cached rows", async () => {
+    renderHarness("list");
+    await screen.findByRole("button", { name: `Actions for ${SUB}` });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(gitSubmodules).toHaveBeenCalledTimes(1);
+    const before = document.querySelector(`[data-sub-row="${SUB}"]`);
+    expect(before).not.toBeNull();
+    // Close and reopen inside the exit animation: the list stays mounted.
+    act(() => controls.setMode?.(null));
+    act(() => controls.setMode?.("list"));
+    await waitFor(() => expect(gitSubmodules).toHaveBeenCalledTimes(2));
+    expect(document.querySelector(`[data-sub-row="${SUB}"]`)).toBe(before);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(gitSubmodules).toHaveBeenCalledTimes(2);
+    // A reopen after the unmount, over cached rows: still one read.
+    act(() => controls.setMode?.(null));
+    await waitFor(() =>
+      expect(document.querySelector(`[data-sub-row="${SUB}"]`)).toBeNull(),
+    );
+    act(() => controls.setMode?.("list"));
+    await screen.findByRole("button", { name: `Actions for ${SUB}` });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(gitSubmodules).toHaveBeenCalledTimes(3);
+  });
+
+  it("T85 a pasted id pasted again holds Apply while its cached lookup re-reads, then applies the settled answer", async () => {
+    const F = `eeeeeee${"f".repeat(33)}`;
+    const { user } = await pickerWithRows();
+    await waitApplyReady();
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) =>
+        q === null ? page(DEFAULT_ROWS) : page([]),
+    );
+    planFor = (sha) => readOf(sha === "eeeeeee" ? E : sha);
+    const paste = (text: string) =>
+      act(() => {
+        fireEvent.change(search(), { target: { value: text } });
+      });
+    paste("eeeeeee");
+    await waitFor(() =>
+      expect(row(E)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitApplyReady();
+    planFor = (sha) => readOf(sha === "ddddddd" ? D : sha);
+    paste("ddddddd");
+    await waitFor(() =>
+      expect(row(D)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitApplyReady();
+    // A fetch since made the first prefix name another commit.
+    const lookup = held<SubmodulePickRead>();
+    planFor = (sha) => (sha === "eeeeeee" ? lookup.promise : readOf(sha));
+    paste("eeeeeee");
+    await waitFor(() =>
+      expect(row(E)).toHaveAttribute("aria-selected", "true"),
+    );
+    await new Promise((r) => setTimeout(r, 400));
+    expect(applyButton()).toHaveAttribute("aria-disabled", "true");
+    expect(applyButton()).toHaveAccessibleDescription("Loading commits…");
+    fireEvent.click(applyButton());
+    fireEvent.keyDown(row(E) as HTMLElement, { key: "Enter" });
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).not.toHaveBeenCalled();
+    await act(async () => lookup.resolve(readOf(F)));
+    await waitFor(() =>
+      expect(row(F)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitApplyReady();
+    await user.click(applyButton());
+    await waitFor(() =>
+      expect(gitSubmoduleSetCommit).toHaveBeenCalledExactlyOnceWith(
+        REPO,
+        SUB,
+        F,
+        P,
+      ),
+    );
+  });
+
+  it("T86 a first plan read running across a fetch's settle is read again, and its pre-fetch answer never says the fetch didn't bring the commit", async () => {
+    const after = `${SUB} still doesn't have this commit after fetching.`;
+    const fetching = held<SubmoduleFetchResult>();
+    vi.mocked(gitSubmoduleFetch).mockReturnValue(fetching.promise);
+    const { user } = await pickerWithRows();
+    await waitApplyReady();
+    await user.click(screen.getByRole("button", { name: "Fetch" }));
+    // Row C's first plan read starts inside the open picker, before the fetch
+    // finishes, and answers from before it.
+    const stale = held<SubmodulePickRead>();
+    planFor = (sha) => (sha === C ? stale.promise : readOf(sha));
+    await user.click(row(C) as HTMLElement);
+    await waitFor(() =>
+      expect(gitSubmodulePickPlan).toHaveBeenCalledWith(REPO, SUB, C),
+    );
+    const fresh = held<SubmodulePickRead>();
+    planFor = (sha) => (sha === C ? fresh.promise : readOf(sha));
+    await act(async () => fetching.resolve({ shallow: false }));
+    await new Promise((r) => setTimeout(r, 5));
+    await act(async () => stale.resolve(readOf(C, blocked("notFetched"))));
+    await waitFor(() =>
+      expect(
+        vi.mocked(gitSubmodulePickPlan).mock.calls.filter((c) => c[2] === C),
+      ).toHaveLength(2),
+    );
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(`Fetched ${SUB}.`),
+    );
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(liveNote()).not.toContain(after);
+    await new Promise((r) => setTimeout(r, 5));
+    await act(async () => fresh.resolve(readOf(C, blocked("notFetched"))));
+    await waitFor(() => expect(liveNote()).toContain(after));
+  });
+
+  it("T87 a reopen inside the exit animation over a list read still running from the last open reads again once it lands", async () => {
+    const first = held<Submodule[]>();
+    vi.mocked(gitSubmodules).mockReturnValueOnce(first.promise);
+    renderHarness("list");
+    await waitFor(() => expect(gitSubmodules).toHaveBeenCalledTimes(1));
+    const dialog = screen.getByRole("dialog");
+    act(() => controls.setMode?.(null));
+    act(() => controls.setMode?.("list"));
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    const second = held<Submodule[]>();
+    vi.mocked(gitSubmodules).mockReturnValueOnce(second.promise);
+    // The old read sampled the submodule before an outside repair.
+    await act(async () => first.resolve([sub(SUB, "uninitialized")]));
+    await waitFor(() => expect(gitSubmodules).toHaveBeenCalledTimes(2));
+    await act(async () => second.resolve([sub(SUB)]));
+    await screen.findByRole("button", { name: `Actions for ${SUB}` });
+    await waitFor(() =>
+      expect(screen.queryByText("Not initialized")).toBe(null),
+    );
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(gitSubmodules).toHaveBeenCalledTimes(2);
+  });
+
+  it("T88 a pasted id's pinned row outranks a row picked before the paste, and a row picked after it lands outranks the pin", async () => {
+    const cherry = commit(D, "(cherry picked from commit e)");
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) =>
+        q === E ? page([cherry]) : page([...DEFAULT_ROWS, cherry]),
+    );
+    const { user } = await pickerWithRows();
+    await user.click(row(D) as HTMLElement);
+    await waitApplyReady();
+    const lookup = held<SubmodulePickRead>();
+    planFor = (sha) => (sha === E ? lookup.promise : readOf(sha));
+    act(() => {
+      fireEvent.change(search(), { target: { value: E } });
+    });
+    await waitFor(() =>
+      expect(gitSubmodulePickPlan).toHaveBeenCalledWith(REPO, SUB, E),
+    );
+    await act(async () => lookup.resolve(readOf(E)));
+    await waitFor(() =>
+      expect(row(E)).toHaveAttribute("aria-selected", "true"),
+    );
+    vi.mocked(gitSubmoduleSetCommit).mockResolvedValueOnce({ kind: "changed" });
+    await waitApplyReady();
+    await user.click(applyButton());
+    await waitFor(() =>
+      expect(gitSubmoduleSetCommit).toHaveBeenCalledExactlyOnceWith(
+        REPO,
+        SUB,
+        E,
+        P,
+      ),
+    );
+    act(() => row(E)?.focus());
+    fireEvent.keyDown(row(E) as HTMLElement, { key: "ArrowDown" });
+    expect(row(D)).toHaveAttribute("aria-selected", "true");
+    await waitApplyReady();
+    await user.click(applyButton());
+    await waitFor(() =>
+      expect(gitSubmoduleSetCommit).toHaveBeenLastCalledWith(REPO, SUB, D, P),
+    );
+    expect(gitSubmoduleSetCommit).toHaveBeenCalledTimes(2);
+  });
+
+  it("T89 Enter in the same tick a pasted id's lookup starts re-reading applies nothing", async () => {
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) =>
+        q === E ? page([]) : page(DEFAULT_ROWS),
+    );
+    const { client } = await pickerWithRows();
+    act(() => {
+      fireEvent.change(search(), { target: { value: E } });
+    });
+    await waitFor(() =>
+      expect(row(E)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitApplyReady();
+    const reread = held<SubmodulePickRead>();
+    planFor = (sha) => (sha === E ? reread.promise : readOf(sha));
+    act(() => {
+      void client.invalidateQueries({
+        queryKey: ["repo", REPO, "submodule-pick", SUB, "plan", E],
+        exact: true,
+      });
+      fireEvent.keyDown(row(E) as HTMLElement, { key: "Enter" });
+    });
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).not.toHaveBeenCalled();
+    await act(async () => reread.resolve(readOf(E)));
+  });
+
+  it("T90 a pick read that turns inactive while a fetch's settle waits on another read is read again after it lands", async () => {
+    const fetching = held<SubmoduleFetchResult>();
+    vi.mocked(gitSubmoduleFetch).mockReturnValue(fetching.promise);
+    const { client, user } = await pickerWithRows();
+    await waitApplyReady();
+    const probeKey = ["repo", REPO, "submodule-pick", SUB, "probe"];
+    const answers = [held<string>(), held<string>(), held<string>()];
+    let reads = 0;
+    const probe = {
+      queryKey: probeKey,
+      queryFn: () => answers[reads++].promise,
+      staleTime: Number.POSITIVE_INFINITY,
+      networkMode: "always" as const,
+    };
+    const observer = new QueryObserver(client, probe);
+    const stop = observer.subscribe(() => undefined);
+    await act(async () => answers[0].resolve("before"));
+    await waitFor(() =>
+      expect(observer.getCurrentResult().data).toBe("before"),
+    );
+    // Active with data and refetching when the settle starts: not waited on.
+    void observer.refetch();
+    const other = held<string>();
+    void client.prefetchQuery({
+      queryKey: ["repo", REPO, "submodule-pick", SUB, "other"],
+      queryFn: () => other.promise,
+      networkMode: "always",
+    });
+    await user.click(screen.getByRole("button", { name: "Fetch" }));
+    await act(async () => fetching.resolve({ shallow: false }));
+    stop();
+    await act(async () => other.resolve("x"));
+    await act(async () => answers[1].resolve("stale"));
+    await act(async () => undefined);
+    expect(reads).toBe(2);
+    expect(client.getQueryState(probeKey)?.isInvalidated).toBe(true);
+    const again = new QueryObserver(client, probe);
+    const stopAgain = again.subscribe(() => undefined);
+    await waitFor(() => expect(reads).toBe(3));
+    await act(async () => answers[2].resolve("after"));
+    stopAgain();
+  });
+
+  it("T91 a row picked over a pasted id's pin wins for that paste only: the same id pasted again applies once its lookup lands", async () => {
+    const cherry = commit(D, "(cherry picked from commit e)");
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) =>
+        q === E ? page([cherry]) : page([...DEFAULT_ROWS, cherry]),
+    );
+    const { user } = await pickerWithRows();
+    const paste = (text: string) =>
+      act(() => {
+        fireEvent.change(search(), { target: { value: text } });
+      });
+    paste(E);
+    await waitFor(() =>
+      expect(row(E)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitApplyReady();
+    await user.click(row(D) as HTMLElement);
+    expect(row(D)).toHaveAttribute("aria-selected", "true");
+    paste("");
+    await waitFor(() => expect(row(E)).toBe(null));
+    expect(row(D)).toHaveAttribute("aria-selected", "true");
+    const lookupsOfE = () =>
+      vi.mocked(gitSubmodulePickPlan).mock.calls.filter((c) => c[2] === E)
+        .length;
+    const before = lookupsOfE();
+    const lookup = held<SubmodulePickRead>();
+    planFor = (sha) => (sha === E ? lookup.promise : readOf(sha));
+    paste(E);
+    await waitFor(() => expect(lookupsOfE()).toBeGreaterThan(before));
+    await act(async () => lookup.resolve(readOf(E)));
+    await waitFor(() =>
+      expect(row(E)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitApplyReady();
+    await user.click(applyButton());
+    await waitFor(() =>
+      expect(gitSubmoduleSetCommit).toHaveBeenCalledExactlyOnceWith(
+        REPO,
+        SUB,
+        E,
+        P,
+      ),
+    );
+  });
+
+  it("T92 Enter after a pasted id's lookup answered again, or failed again over its answer, before the picker re-rendered applies nothing", async () => {
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) =>
+        q === E ? page([]) : page(DEFAULT_ROWS),
+    );
+    const { client } = await pickerWithRows();
+    act(() => {
+      fireEvent.change(search(), { target: { value: E } });
+    });
+    await waitFor(() =>
+      expect(row(E)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitApplyReady();
+    const key = ["repo", REPO, "submodule-pick", SUB, "plan", E];
+    // The same commit again: only the answer's stamp tells it apart.
+    act(() => {
+      const at = client.getQueryState(key)?.dataUpdatedAt ?? 0;
+      client.setQueryData(key, readOf(E), { updatedAt: at + 1 });
+      fireEvent.keyDown(row(E) as HTMLElement, { key: "Enter" });
+    });
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).not.toHaveBeenCalled();
+    await waitApplyReady();
+    act(() => {
+      const query = client.getQueryCache().find({ queryKey: key, exact: true });
+      const error = new Error("lookup failed");
+      query?.setState({
+        ...query.state,
+        status: "error",
+        error,
+        errorUpdatedAt: Date.now(),
+        errorUpdateCount: query.state.errorUpdateCount + 1,
+        fetchFailureCount: 1,
+        fetchFailureReason: error,
+      });
+      fireEvent.keyDown(row(E) as HTMLElement, { key: "Enter" });
+    });
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).not.toHaveBeenCalled();
   });
 
   it("T46 Check again on a held failed check asks the plan afresh and lets its answer through", async () => {
@@ -1717,6 +2434,7 @@ describe("applying", () => {
   });
 
   it("T25 a pick that settles after the dialog closed still reports, names the repository after a switch, toasts a block, and neither reopens nor navigates", async () => {
+    planFor = (sha) => readOf(sha, READY, { pointer: D });
     for (const [settle, outcome, check] of [
       [
         "close",
@@ -1868,7 +2586,7 @@ describe("fetching", () => {
   });
 
   it("T42 Apply stays available while a fetch runs", async () => {
-    const fetching = held<void>();
+    const fetching = held<SubmoduleFetchResult>();
     vi.mocked(gitSubmoduleFetch).mockReturnValue(fetching.promise);
     const { user } = await pickerWithRows();
     await waitApplyReady();
@@ -1879,7 +2597,68 @@ describe("fetching", () => {
     await waitApplyReady();
     await user.click(applyButton());
     expect(gitSubmoduleSetCommit).toHaveBeenCalledTimes(1);
-    await act(async () => fetching.resolve());
+    await act(async () => fetching.resolve({ shallow: false }));
+  });
+
+  it("T73 Fetch full history over a remote that is itself shallow says older history is still missing", async () => {
+    vi.mocked(gitSubmoduleCommits).mockResolvedValue(
+      page(DEFAULT_ROWS, { shallow: true }),
+    );
+    vi.mocked(gitSubmoduleFetch).mockResolvedValue({ shallow: true });
+    const { user } = await pickerWithRows();
+    await user.click(
+      screen.getByRole("button", { name: "Fetch full history" }),
+    );
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(
+        `Fetched what ${SUB}'s remote has; it is itself shallow, so older history is still missing.`,
+      ),
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("T78 Fetch full history whose shallow re-read failed says only that it fetched", async () => {
+    vi.mocked(gitSubmoduleCommits).mockResolvedValue(
+      page(DEFAULT_ROWS, { shallow: true }),
+    );
+    vi.mocked(gitSubmoduleFetch).mockResolvedValue({ shallow: null });
+    const { user } = await pickerWithRows();
+    await user.click(
+      screen.getByRole("button", { name: "Fetch full history" }),
+    );
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledExactlyOnceWith(`Fetched ${SUB}.`),
+    );
+    expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  it("T74 a running fetch still holds both fetch controls after the picker is left and opened again", async () => {
+    const fetching = held<SubmoduleFetchResult>();
+    vi.mocked(gitSubmoduleFetch).mockReturnValue(fetching.promise);
+    vi.mocked(gitSubmoduleCommits).mockResolvedValue(
+      page(DEFAULT_ROWS, { shallow: true }),
+    );
+    const { user } = await pickerWithRows();
+    await user.click(
+      screen.getByRole("button", { name: "Fetch full history" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("heading", { name: "Submodules" });
+    await openPicker();
+    await waitFor(() => expect(row(P)).not.toBeNull());
+    // The running one's spinner leads its name with "Loading".
+    for (const name of [/^Fetch$/, /Fetch full history$/])
+      expect(
+        screen.getByRole("button", { name }),
+        String(name),
+      ).toHaveAccessibleDescription("Fetching…");
+    expect(gitSubmoduleFetch).toHaveBeenCalledTimes(1);
+    await act(async () => fetching.resolve({ shallow: false }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Fetch" }),
+      ).not.toHaveAccessibleDescription("Fetching…"),
+    );
   });
 });
 
@@ -1895,9 +2674,12 @@ describe("focus rescues", () => {
     await user.click(
       await screen.findByRole("menuitem", { name: "Choose commit…" }),
     );
+    // Each press follows the entry frame; T75 covers a press that beats it.
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    await act(frames);
     const refsHeld = held<SubmoduleRefs>();
     vi.mocked(gitSubmoduleRefs).mockReturnValue(refsHeld.promise);
-    await user.click(await screen.findByRole("button", { name: "Retry" }));
+    await user.click(retry);
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "Retry" })).toBe(null),
     );
@@ -1914,9 +2696,11 @@ describe("focus rescues", () => {
     });
     renderHarness("list");
     user = await openPicker();
+    const commitsRetry = await screen.findByRole("button", { name: "Retry" });
+    await act(frames);
     const commitsHeld = held<SubmoduleCommitPage>();
     vi.mocked(gitSubmoduleCommits).mockReturnValue(commitsHeld.promise);
-    await user.click(await screen.findByRole("button", { name: "Retry" }));
+    await user.click(commitsRetry);
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "Retry" })).toBe(null),
     );
@@ -1964,6 +2748,61 @@ describe("focus rescues", () => {
   });
 });
 
+/** Holds back the picker's own entry frame, as a slow runner's late paint
+ *  does: only frames the picker's module asks for wait for `release`. */
+function holdEntryFrame() {
+  const held: FrameRequestCallback[] = [];
+  const raf = window.requestAnimationFrame.bind(window);
+  const spy = vi
+    .spyOn(window, "requestAnimationFrame")
+    .mockImplementation((cb) => {
+      if (!new Error().stack?.includes("ChooseSubmoduleCommitDialog"))
+        return raf(cb);
+      held.push(cb);
+      return 0;
+    });
+  return {
+    held,
+    release: () => {
+      for (const cb of held.splice(0)) cb(performance.now());
+    },
+    restore: () => spy.mockRestore(),
+  };
+}
+
+describe("the entry frame", () => {
+  it("T75 a press that lands before the entry frame keeps focus where the press left it", async () => {
+    vi.mocked(gitSubmoduleRefs).mockRejectedValue({ kind: "io", message: "x" });
+    renderHarness("list");
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: `Actions for ${SUB}` }),
+    );
+    const entry = holdEntryFrame();
+    try {
+      await user.click(
+        await screen.findByRole("menuitem", { name: "Choose commit…" }),
+      );
+      const retry = await screen.findByRole("button", { name: "Retry" });
+      expect(entry.held).toHaveLength(1);
+      const refsHeld = held<SubmoduleRefs>();
+      vi.mocked(gitSubmoduleRefs).mockReturnValue(refsHeld.promise);
+      await user.click(retry);
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Retry" })).toBe(null),
+      );
+      const landed = document.activeElement;
+      expect(landed).toHaveAttribute("tabindex", "-1");
+      expect(search()).toBeInTheDocument();
+      act(() => entry.release());
+      expect(document.activeElement).toBe(landed);
+      await act(async () => refsHeld.resolve(refsOf()));
+    } finally {
+      entry.restore();
+    }
+  });
+});
+
 describe("focus when the search box leaves", () => {
   it("T48 a refs answer that removes the focused search box keeps focus in the picker", async () => {
     const unusable = refsOf({
@@ -1997,7 +2836,7 @@ describe("focus when the search box leaves", () => {
     vi.mocked(gitSubmoduleRefs).mockResolvedValue(unusable);
     renderHarness("list");
     await openPicker();
-    await screen.findByText(`A file sits where ${SUB} should be.`, {
+    await screen.findByText(REPLACED_COPY, {
       selector: "p",
     });
     await waitFor(() =>
@@ -2025,7 +2864,7 @@ describe("focus when the search box leaves", () => {
     expect(document.activeElement).not.toBe(document.body);
     expect(document.activeElement).toHaveAttribute("tabindex", "-1");
     expect(document.activeElement).toContainElement(
-      screen.getByText(`A file sits where ${SUB} should be.`, {
+      screen.getByText(REPLACED_COPY, {
         selector: "p",
       }),
     );
@@ -2098,13 +2937,13 @@ describe("focus across a removed control", () => {
     const { user } = await pickerWithRows();
     const full = screen.getByRole("button", { name: "Fetch full history" });
     vi.mocked(gitSubmoduleCommits).mockResolvedValue(page(DEFAULT_ROWS));
-    const fetching = held<void>();
+    const fetching = held<SubmoduleFetchResult>();
     vi.mocked(gitSubmoduleFetch).mockReturnValue(fetching.promise);
     const { restore } = fireFocusOutOnRemoval();
     try {
       await user.click(full);
       expect(document.activeElement).toBe(full);
-      await act(async () => fetching.resolve());
+      await act(async () => fetching.resolve({ shallow: false }));
       await waitFor(() =>
         expect(
           screen.queryByRole("button", { name: "Fetch full history" }),
@@ -2133,7 +2972,7 @@ describe("focus across a removed control", () => {
         refsOf({ checkout: "replaced", branches: [], remoteBranches: [] }),
       );
       await act(() => client.invalidateQueries());
-      await screen.findByText(`A file sits where ${SUB} should be.`, {
+      await screen.findByText(REPLACED_COPY, {
         selector: "p",
       });
       expect(screen.queryByRole("button", { name: "Fetch" })).toBe(null);
@@ -2223,12 +3062,21 @@ describe("a reopen over a cached unusable answer", () => {
   }
 
   /** Opens the picker over a fresh not-initialized answer that lands before
-   *  the entry frame, so entry parks on the body. */
+   *  the entry frame, so entry parks on the body. The frame waits for the
+   *  answer: a slow runner can otherwise paint first. */
   async function parkedOnBody() {
     vi.mocked(gitSubmoduleRefs).mockResolvedValue(notInit);
     const client = renderHarness("list");
-    const user = await openPicker();
-    await screen.findByText(notInitCopy, { selector: "p" });
+    const entry = holdEntryFrame();
+    let user: ReturnType<typeof userEvent.setup>;
+    try {
+      user = await openPicker();
+      await screen.findByText(notInitCopy, { selector: "p" });
+      expect(entry.held).toHaveLength(1);
+      act(() => entry.release());
+    } finally {
+      entry.restore();
+    }
     await waitFor(() => expect(document.activeElement).toBe(bodyHost()));
     return { client, user };
   }
@@ -2552,6 +3400,37 @@ describe("a reopen over verdicts cached before it", () => {
     watch.disconnect();
   });
 
+  it("T76 a reopen over a cached Load more page that found the checkout unusable shows the loading frame, then the list", async () => {
+    const text = `${SUB} couldn't be read.`;
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, skip) =>
+        skip === 0
+          ? page(DEFAULT_ROWS, { hasMore: true })
+          : page([], { checkout: "unreadable", reason: "bad object HEAD" }),
+    );
+    const { user } = await pickerWithRows();
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByText(text, { selector: "p" });
+    await closeDialog(user);
+    const commits = held<SubmoduleCommitPage>();
+    vi.mocked(gitSubmoduleCommits).mockImplementation((_r, _p, _rev, skip) =>
+      skip === 0 ? commits.promise : Promise.resolve(page([])),
+    );
+    const second = await reopen(text);
+    expect(second.copyAdded()).toBe(false);
+    expect(screen.queryByText(text)).toBe(null);
+    expect(loadingStatus()).not.toBe(null);
+    await act(async () => second.reread.resolve(refsOf()));
+    await refsLanded();
+    await waitApplyReason("Loading commits…");
+    expect(second.copyAdded()).toBe(false);
+    await act(async () => commits.resolve(page(DEFAULT_ROWS)));
+    await waitFor(() => expect(row(P)).not.toBeNull());
+    expect(screen.queryByText(text)).toBe(null);
+    expect(second.copyAdded()).toBe(false);
+    second.watch.disconnect();
+  });
+
   it("T69 a pasted id's lookup read before the reopen never shows its block", async () => {
     const lead = `${SUB} isn't initialized.`;
     const blockedRead = () =>
@@ -2799,5 +3678,59 @@ describe("the list re-reads on every open", () => {
     );
     expect(screen.queryByRole("heading", { name: "Choose commit" })).toBe(null);
     expect(gitSubmoduleRefs).not.toHaveBeenCalled();
+  });
+
+  it("L5 a press or key in the list while a palette entry waits keeps the list, so a late answer never closes the menu it opened", async () => {
+    for (const gesture of ["press", "key"] as const) {
+      const { reread } = overCachedList([sub(SUB, "uninitialized")]);
+      act(() => controls.setMode?.("choose"));
+      const kebab = await screen.findByRole("button", {
+        name: `Actions for ${SUB}`,
+      });
+      const user = userEvent.setup();
+      if (gesture === "press") await user.click(kebab);
+      else {
+        act(() => kebab.focus());
+        await user.keyboard("{Enter}");
+      }
+      expect(
+        await screen.findByRole("menuitem", { name: /^Choose commit…/ }),
+        gesture,
+      ).toBeInTheDocument();
+      // The re-read now names exactly one initialized submodule.
+      await act(async () => reread.resolve([sub(SUB)]));
+      await act(() => new Promise((r) => setTimeout(r, 0)));
+      expect(
+        screen.getByRole("menuitem", { name: /^Choose commit…/ }),
+        gesture,
+      ).toBeInTheDocument();
+      // An open menu may hide the rest of the dialog from the role queries.
+      expect(
+        screen.getByRole("heading", { name: "Submodules", hidden: true }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("heading", { name: "Choose commit", hidden: true }),
+      ).toBe(null);
+      expect(gitSubmoduleRefs).not.toHaveBeenCalled();
+      cleanup();
+    }
+  });
+
+  it("L6 a failed re-read over a cached empty list shows the failure, never that there are no submodules", async () => {
+    const { reread } = overCachedList([]);
+    act(() => controls.setMode?.("list"));
+    await act(async () => reread.reject({ kind: "io", message: "x" }));
+    expect(
+      await screen.findByText("Couldn't read this repository's submodules."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("This repository has no submodules.")).toBe(null);
+    expect(
+      screen.queryByText(
+        "Couldn't refresh submodules — showing the last loaded results.",
+      ),
+    ).toBe(null);
+    expect(
+      screen.getByRole("button", { name: "Update all" }),
+    ).toHaveAccessibleDescription("Submodules couldn't be read");
   });
 });

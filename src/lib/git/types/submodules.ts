@@ -182,6 +182,10 @@ export interface SubmoduleRefs {
 
 export type SubmodulePickMove = "checkOut" | "alreadyThere";
 
+/** `wouldOverwrite` is tracked local changes only; untracked and ignored files in
+ *  the checkout's way have their own kinds, and when several apply, tracked wins
+ *  over untracked over ignored. `submoduleMidOperation`'s `reason` names the
+ *  operation ("a merge", "unresolved conflicts", …), or is null when unknown. */
 export type SubmodulePickBlock =
   | "notInitialized"
   | "unusable"
@@ -195,6 +199,8 @@ export type SubmodulePickBlock =
   | "detachedOrphan"
   | "detachedUnverified"
   | "wouldOverwrite"
+  | "untrackedInTheWay"
+  | "ignoredInTheWay"
   | "checkFailed";
 
 /** Advisory: the setter re-measures everything and can answer differently. */
@@ -216,7 +222,8 @@ export type SubmodulePickRelation =
   | { kind: "rewind"; behind: number }
   | { kind: "diverged"; ahead: number; behind: number };
 
-/** `sha` is the resolved full id, or null when the read stopped before resolving
+/** `sha` is the resolved full id (on notFetched, the full id as typed, which the
+ *  submodule doesn't have), or null when the read stopped before resolving
  *  the commit: notFound, ambiguous, notACommit, and every arm that blocks ahead
  *  of resolution (notInitialized, unusable, noPointer, midOperation,
  *  submoduleMidOperation, an early checkFailed). `sha` + `pointer` are the
@@ -227,6 +234,11 @@ export interface SubmodulePickRead {
   pointer: string | null;
   plan: SubmodulePickPlan;
   relation: SubmodulePickRelation;
+  shallow: boolean | null;
+}
+
+/** `shallow` is measured after the fetch; null when that read failed. */
+export interface SubmoduleFetchResult {
   shallow: boolean | null;
 }
 
@@ -255,4 +267,16 @@ export type SubmodulePickOutcome =
       sha: string;
       why: SubmodulePickUnstaged;
       reason: string | null;
-    };
+    }
+  /** The checkout landed, then the submodule's HEAD no longer read `sha`.
+   *  `pointer` is the staged gitlink read back (null = none recorded); `head`
+   *  is HEAD read back (null = the folder no longer holds that checkout, or HEAD
+   *  names no commit). Neither null means unreadable. */
+  | {
+      kind: "movedAfter";
+      sha: string;
+      pointer: string | null;
+      head: string | null;
+    }
+  /** The checkout landed, but its state couldn't be read back. */
+  | { kind: "readBackFailed"; sha: string; reason: string };

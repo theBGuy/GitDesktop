@@ -49,11 +49,13 @@ import { appErrorDetail, presentError } from "@/lib/error-summary";
 import { focusIsLost } from "@/lib/focus-lost";
 import {
   isShaPrefixQuery,
+  isSubmoduleFetchPending,
   isSubmodulePickPending,
   submodulePickKeys,
   useFetchSubmodule,
   useSetSubmoduleCommit,
   useSubmoduleCommits,
+  useSubmoduleFetchPending,
   useSubmodulePickPending,
   useSubmodulePickPlan,
   useSubmoduleRefs,
@@ -127,7 +129,8 @@ const UNUSABLE_COPY: Record<
     `${p} isn't initialized. Initialize it from the list first.`,
   missing: (p) =>
     `${p}'s folder is missing. Initialize it from the list first.`,
-  replaced: (p) => `A file sits where ${p} should be.`,
+  replaced: (p) =>
+    `Something other than a submodule checkout sits where ${p} should be.`,
   unreadable: (p) => `${p} couldn't be read.`,
 };
 
@@ -152,7 +155,8 @@ interface BlockContext {
   /** A fetch succeeded in this picker and this answer is newer than it. */
   refetched: boolean;
   /** The plan read predicts with git's dry run, which names only the first
-   *  path it would overwrite (or the ignored ones); the setter lists them all. */
+   *  path it would overwrite (or the ignored ones); the setter lists git's own
+   *  list, up to PATHS_CAP. */
   partialPaths: boolean;
 }
 
@@ -183,6 +187,22 @@ const BLOCK_NOTE: Record<SubmodulePickBlock, (c: BlockContext) => Note> = {
   wouldOverwrite: (c) => ({
     lead: `${c.p} has local changes this commit would overwrite.`,
     rest: `Commit or stash them inside ${c.p} first.`,
+    detail: c.reason,
+    paths: c.paths.slice(0, PATHS_SHOWN),
+    more: morePaths(c.paths, c.partialPaths),
+    blocks: true,
+  }),
+  untrackedInTheWay: (c) => ({
+    lead: `${c.p} has untracked files in the way of this commit.`,
+    rest: `Move or delete them inside ${c.p} first, or stash them with untracked files included.`,
+    detail: c.reason,
+    paths: c.paths.slice(0, PATHS_SHOWN),
+    more: morePaths(c.paths, c.partialPaths),
+    blocks: true,
+  }),
+  ignoredInTheWay: (c) => ({
+    lead: `${c.p} has ignored files where this commit adds or removes files.`,
+    rest: `Move or delete them inside ${c.p} first.`,
     detail: c.reason,
     paths: c.paths.slice(0, PATHS_SHOWN),
     more: morePaths(c.paths, c.partialPaths),
@@ -227,11 +247,27 @@ const BLOCK_NOTE: Record<SubmodulePickBlock, (c: BlockContext) => Note> = {
     ),
     blocks: true,
   }),
-  submoduleMidOperation: (c) => ({
-    lead: `A conflict, merge, rebase, cherry-pick or revert is in progress inside ${c.p}.`,
-    rest: "Finish or abort it there first.",
-    blocks: true,
-  }),
+  submoduleMidOperation: (c) => {
+    switch (true) {
+      case c.reason === null:
+        return {
+          lead: `A conflict, merge, rebase, cherry-pick or revert is in progress inside ${c.p}.`,
+          rest: "Finish or abort it there first.",
+          blocks: true,
+        };
+      // The contract's phrase for unmerged index entries, which resolving clears.
+      case c.reason === "unresolved conflicts":
+        return {
+          lead: `Resolve the conflicts inside ${c.p} first.`,
+          blocks: true,
+        };
+      default:
+        return {
+          lead: `Finish or abort ${c.reason} inside ${c.p} first.`,
+          blocks: true,
+        };
+    }
+  },
   noPointer: (c) => ({
     lead: `This repository has no commit recorded for ${c.p} to change.`,
     rest: `If ${c.p} is conflicted, resolve it in Changes; if it is no longer a submodule here, add it again from the list.`,
@@ -301,12 +337,36 @@ const RELATION_NOTE: Record<
   unknown: (p, s) => `Moves ${p} to ${s}.`,
 };
 
-const UNSTAGED_COPY: Record<SubmodulePickUnstaged, (p: string) => string> = {
-  pointerMoved: (p) =>
-    `Its recorded commit changed while the checkout ran. Stage ${p} in Changes to finish.`,
-  stageFailed: (p) => `Stage ${p} in Changes to finish.`,
-  stageUnconfirmed: (p) =>
-    `Staging timed out, so it may or may not have landed. Check ${p} in Changes and stage it there if it isn't.`,
+/** The checked-out-but-not-staged toast; `at` is the short id plus any repo
+ *  suffix. */
+const UNSTAGED_COPY: Record<
+  SubmodulePickUnstaged,
+  {
+    headline: (p: string, at: string) => string;
+    description: (p: string) => string;
+    showsReason: boolean;
+  }
+> = {
+  pointerMoved: {
+    headline: (p, at) =>
+      `${p} is checked out at ${at}, but the new commit isn't staged.`,
+    description: (p) =>
+      `Its recorded commit changed while the checkout ran. Stage ${p} in Changes to finish.`,
+    showsReason: true,
+  },
+  stageFailed: {
+    headline: (p, at) =>
+      `${p} is checked out at ${at}, but the new commit isn't staged.`,
+    description: (p) => `Stage ${p} in Changes to finish.`,
+    showsReason: true,
+  },
+  stageUnconfirmed: {
+    headline: (p, at) =>
+      `${p} is checked out at ${at}, but staging it couldn't be confirmed.`,
+    description: (p) =>
+      `The staged commit couldn't be read back, so it may or may not have landed. Check ${p} in Changes and stage it there if it isn't.`,
+    showsReason: true,
+  },
 };
 
 function planNote(
@@ -366,7 +426,7 @@ interface RefEntry {
   kind: GroupKind;
 }
 
-/** D14: the tracked branch, then the first remote branch, branch, tag, then the
+/** The tracked branch, then the first remote branch, branch, tag, then the
  *  checked-out commit. */
 function defaultRevOf(r: SubmoduleRefs): string | null {
   return (
@@ -420,10 +480,17 @@ export function ChooseSubmoduleCommit({
   const pick = useSetSubmoduleCommit(repoPath, path);
   const fetchSub = useFetchSubmodule(repoPath, path);
   const pickPending = useSubmodulePickPending(repoPath, path);
+  const fetchPending = useSubmoduleFetchPending(repoPath, path);
 
   const [pickedRev, setPickedRev] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [userSha, setUserSha] = useState<string | null>(null);
+  // The row the user moved to, and the paste whose pin was shown when they did:
+  // a pin outranks a move made before it landed or over another paste, so a
+  // paste is what Apply acts on.
+  const [userPick, setUserPick] = useState<{
+    sha: string;
+    overPaste: number | null;
+  } | null>(null);
   // A setter refusal for the pressed commit outranks the plan read's note (the
   // plan is advisory) until the highlight moves by any route, another apply or
   // fetch starts, or Check again asks the plan afresh.
@@ -459,27 +526,39 @@ export function ChooseSubmoduleCommit({
   // A refs answer that already removed the search parks it on the body, and the
   // search box's first mount takes it over while focus is still where entry put
   // it or fell to <body>; a key, a press or a focus move elsewhere ends the entry
-  // first (every user route to <body> passes the first two).
+  // first (every user route to <body> passes the first two). A fresh key or a
+  // press before the frame also stands the frame down, leaving focus where the
+  // user put it; a focus move doesn't, since Base UI's own return is one.
   const entryParked = useRef(false);
   useLayoutEffect(() => {
+    let acted = false;
     const id = requestAnimationFrame(() => {
+      if (acted) return;
       (searchRef.current ?? bodyRef.current)?.focus({ preventScroll: true });
       entryParked.current = searchRef.current === null;
     });
     const end = () => {
       entryParked.current = false;
     };
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (!e.repeat) acted = true;
+      end();
+    };
+    const onPointerDown = () => {
+      acted = true;
+      end();
+    };
     const onFocusIn = (e: FocusEvent) => {
       const t = e.target;
       if (t !== bodyRef.current && t !== popupOf(bodyRef.current)) end();
     };
-    document.addEventListener("keydown", end, true);
-    document.addEventListener("pointerdown", end, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("focusin", onFocusIn, true);
     return () => {
       cancelAnimationFrame(id);
-      document.removeEventListener("keydown", end, true);
-      document.removeEventListener("pointerdown", end, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("focusin", onFocusIn, true);
     };
   }, []);
@@ -497,9 +576,20 @@ export function ChooseSubmoduleCommit({
   });
 
   const search = useDebouncedValue(cleanSearch(query), SEARCH_DEBOUNCE_MS);
+  // Until the debounce catches up with the box, the rows and highlight answer
+  // an older search: Apply would act on a commit the user typed past.
+  const searchCaughtUp = (text: string) => cleanSearch(text) === search;
   const shaText =
     search !== null && isShaPrefixQuery(search) ? search.toLowerCase() : null;
   const lookup = useSubmodulePickPlan(repoPath, path, shaText);
+  // Each pasted id the box takes is a new paste, the same id pasted again
+  // included.
+  const [pasteSeen, setPasteSeen] = useState(shaText);
+  const [pasteGen, setPasteGen] = useState(0);
+  if (pasteSeen !== shaText) {
+    setPasteSeen(shaText);
+    if (shaText !== null) setPasteGen(pasteGen + 1);
+  }
 
   // An answer cached before this mount may paint data (rows, refs, the state
   // line) but never a verdict: a not-usable refs or commits answer, or any plan
@@ -570,24 +660,25 @@ export function ChooseSubmoduleCommit({
     revEntry !== undefined && (nameKinds.get(revEntry.ref.name)?.size ?? 0) > 1;
 
   const commits = useSubmoduleCommits(repoPath, path, rev, search);
-  // A placeholder is never read here: it carries the new key's stamp.
+  // A placeholder is never read here: it carries the new key's stamp. Any
+  // cached not-usable page is a verdict, a Load more page included.
   const commitsData =
     commits.data !== undefined &&
-    commits.data.pages[0] !== undefined &&
-    commits.data.pages[0].checkout !== "ok" &&
+    commits.data.pages.some((p) => p.checkout !== "ok") &&
     !readHere(commits)
       ? undefined
       : commits.data;
   const pages = commitsData?.pages ?? [];
-  const firstPage = pages[0];
 
   // Not usable: the refs read, or a commits page, says no git can run inside.
+  // The newest such page speaks; the mask above keeps a cached one off screen.
+  const unusablePage = pages.findLast((p) => p.checkout !== "ok");
   const unusableKind = ((): Exclude<SubmoduleCheckout, "ok"> | null => {
     switch (true) {
       case refsData !== undefined && refsData.checkout !== "ok":
         return refsData.checkout;
-      case firstPage !== undefined && firstPage.checkout !== "ok":
-        return firstPage.checkout;
+      case unusablePage !== undefined && unusablePage.checkout !== "ok":
+        return unusablePage.checkout;
       default:
         return null;
     }
@@ -595,11 +686,10 @@ export function ChooseSubmoduleCommit({
   const unusableReason =
     refsData && refsData.checkout !== "ok"
       ? refsData.reason
-      : (firstPage?.reason ?? null);
+      : (unusablePage?.reason ?? null);
   const unusableText =
     unusableKind === null ? null : UNUSABLE_COPY[unusableKind](path);
   const refsFailed = refsData === undefined && refs.isError && !refsLoading;
-  const unborn = usableRefs && rev === null;
 
   // The pasted id's lookup pins its commit above the page rows.
   const lookupRead =
@@ -615,6 +705,8 @@ export function ChooseSubmoduleCommit({
       return { sha: lookupRead.sha, commit: null };
     return null;
   })();
+  // No ref to list, but a pasted id the lookup resolved is still a row to pick.
+  const unborn = usableRefs && rev === null && pin === null;
   const lookupBlock =
     lookupRead !== undefined &&
     lookupRead.sha === null &&
@@ -629,6 +721,12 @@ export function ChooseSubmoduleCommit({
           partialPaths: true,
         }).lead
       : null;
+  // A pasted id whose lookup is running, or has no answer read here yet, may
+  // still pin another row above whatever the search listed, so Apply waits for
+  // it; a cached answer shown meanwhile may predate a fetch.
+  const lookupLoading =
+    shaText !== null &&
+    (lookup.isFetching || (lookupRead === undefined && !lookup.isError));
   const seen = new Set<string>(pin ? [pin.sha] : []);
   const pageRows: PickRow[] = [];
   for (const page of pages)
@@ -643,8 +741,10 @@ export function ChooseSubmoduleCommit({
   const pointer = refsData?.pointer ?? null;
   const highlighted = ((): string | null => {
     switch (true) {
-      case userSha !== null && seen.has(userSha):
-        return userSha;
+      case userPick !== null &&
+        seen.has(userPick.sha) &&
+        (pin === null || userPick.overPaste === pasteGen):
+        return userPick.sha;
       case pin !== null:
         return pin.sha;
       case pointer !== null && seen.has(pointer):
@@ -764,7 +864,10 @@ export function ChooseSubmoduleCommit({
         return unusableText;
       case refsFailed:
         return `${path}'s branches and tags couldn't be read`;
-      case refsLoading || commitsLoading:
+      case refsLoading ||
+        commitsLoading ||
+        lookupLoading ||
+        !searchCaughtUp(query):
         return LOADING_REASON;
       case unborn:
         return `${path} has no commits yet.`;
@@ -774,10 +877,11 @@ export function ChooseSubmoduleCommit({
         return "Commits couldn't be loaded";
       case emptyRead:
         return "No commits to pick from";
-      case highlighted === null:
-        return "Pick a commit first";
+      // A new search over rows that matched nothing has no row to highlight yet.
       case placeholder:
         return LOADING_REASON;
+      case highlighted === null:
+        return "Pick a commit first";
       case planChecking:
         return CHECKING_REASON;
       case planFailed:
@@ -793,6 +897,21 @@ export function ChooseSubmoduleCommit({
 
   async function apply() {
     if (applyReason !== null || planRead === undefined) return;
+    // The box's text at the event: a paste can precede the render that holds.
+    if (!searchCaughtUp(searchRef.current?.value ?? query)) return;
+    // The lookup's state at the event: a re-read can start, answer or fail
+    // before the render that holds, and its answer may pin another row.
+    if (shaText !== null) {
+      const live = queryClient.getQueryState(
+        submodulePickKeys.plan(repoPath, path, shaText),
+      );
+      if (
+        live?.fetchStatus === "fetching" ||
+        live?.dataUpdatedAt !== lookup.dataUpdatedAt ||
+        live.errorUpdatedAt !== lookup.errorUpdatedAt
+      )
+        return;
+    }
     if (pressing.current || isSubmodulePickPending(queryClient, repoPath, path))
       return;
     if (refuseIfSwitched(repoPath, "nothing was checked out")) return;
@@ -800,12 +919,7 @@ export function ChooseSubmoduleCommit({
     // setter's compare-and-swap token.
     const { sha, pointer: expected } = planRead;
     if (sha === null || expected === null) return;
-    const pressed = {
-      sha,
-      startedIn: repoPath,
-      promisedCheckOut:
-        planRead.plan.kind === "ready" && planRead.plan.checkout === "checkOut",
-    };
+    const pressed = { sha, expected, startedIn: repoPath };
     pressing.current = true;
     setHeldBlock(null);
     try {
@@ -823,22 +937,34 @@ export function ChooseSubmoduleCommit({
 
   function report(
     outcome: SubmodulePickOutcome,
-    pressed: { sha: string; startedIn: string; promisedCheckOut: boolean },
+    pressed: { sha: string; expected: string; startedIn: string },
   ) {
     const { away, live } = landedIn(pressed.startedIn);
     const ui = mounted.current && isOpen() && live;
     const ps = short(pressed.sha);
+    // Apply waits for a plan read newer than the one this press sent.
+    const holdForRecheck = () => {
+      const state = queryClient.getQueryState(
+        submodulePickKeys.plan(repoPath, path, pressed.sha),
+      );
+      if (mounted.current)
+        setRecheckHold({
+          sha: pressed.sha,
+          stamp: state?.dataUpdatedAt ?? 0,
+        });
+    };
     switch (outcome.kind) {
       case "set": {
         const nested =
           outcome.nestedLeft !== null && outcome.nestedLeft > 0
             ? {
-                description: `Its own submodules still point at their old commits; ${path}'s Update in this list moves them.`,
+                description: `Its own submodules still need updating; use ${path}'s Update in this list.`,
               }
             : undefined;
+        // Only a moved pointer leaves anything staged.
         toast.success(
-          pressed.promisedCheckOut && outcome.checkout === "alreadyThere"
-            ? `${path} points at ${ps}${away}.`
+          pressed.expected === pressed.sha
+            ? `${path} is checked out at ${ps}${away}, the commit this repository already records.`
             : `${path} now points at ${ps}${away}, staged for you to commit.`,
           nested,
         );
@@ -846,20 +972,51 @@ export function ChooseSubmoduleCommit({
         return;
       }
       case "changed": {
+        // Either the recorded commit or the checkout itself moved.
         toast.info(
-          `${path}'s recorded commit changed${away}. Review the list and try again.`,
-          { description: `${ps} wasn't checked out.` },
+          `${path} changed${away} while this ran; nothing was staged.`,
+          {
+            description: `${ps} wasn't checked out. Look again before picking.`,
+          },
         );
-        const state = queryClient.getQueryState(
-          submodulePickKeys.plan(repoPath, path, pressed.sha),
-        );
-        if (mounted.current)
-          setRecheckHold({
-            sha: pressed.sha,
-            stamp: state?.dataUpdatedAt ?? 0,
-          });
+        holdForRecheck();
         return;
       }
+      case "movedAfter": {
+        const { head, pointer } = outcome;
+        const headClause =
+          head === null
+            ? "Its folder no longer holds that checkout."
+            : `It's now at ${short(head)}.`;
+        // What the index records now, never whether this call wrote: the
+        // setter skips an unchanged pointer, and an outside write can undo one.
+        const pointerClause = (() => {
+          switch (true) {
+            case pointer === pressed.sha:
+              return `Its recorded commit is ${ps}, the one you picked.`;
+            case pointer === null:
+              return "This repository no longer records a commit for it.";
+            default:
+              return `Its recorded commit is ${short(pointer)}.`;
+          }
+        })();
+        toast.warning(`${path} moved${away} after ${ps} was checked out.`, {
+          description: `${headClause} ${pointerClause} Look again before picking.`,
+          duration: 10_000,
+        });
+        holdForRecheck();
+        return;
+      }
+      case "readBackFailed":
+        toast.warning(
+          `${ps} was checked out in ${path}${away}, but its state couldn't be read back.`,
+          {
+            description: `${asSentence(outcome.reason)} Check ${path} in Changes, then look again before picking.`,
+            duration: 10_000,
+          },
+        );
+        holdForRecheck();
+        return;
       case "blocked": {
         if (ui && highlightRef.current === pressed.sha) {
           setHeldBlock({ sha: pressed.sha, outcome });
@@ -886,17 +1043,17 @@ export function ChooseSubmoduleCommit({
           },
         );
         return;
-      case "checkedOutNotStaged":
-        toast.warning(
-          `${path} is checked out at ${ps}${away}, but the new commit isn't staged.`,
-          {
-            description: [UNSTAGED_COPY[outcome.why](path), outcome.reason]
-              .filter(Boolean)
-              .join(" "),
-            duration: 10_000,
-          },
-        );
+      case "checkedOutNotStaged": {
+        const copy = UNSTAGED_COPY[outcome.why];
+        toast.warning(copy.headline(path, `${ps}${away}`), {
+          description:
+            copy.showsReason && outcome.reason
+              ? `${copy.description(path)} ${asSentence(outcome.reason)}`
+              : copy.description(path),
+          duration: 10_000,
+        });
         return;
+      }
     }
   }
 
@@ -904,7 +1061,7 @@ export function ChooseSubmoduleCommit({
     switch (true) {
       case !online:
         return OFFLINE_WRITE_REASON;
-      case fetchSub.isPending:
+      case fetchPending !== null:
         return FETCHING_REASON;
       case pickPending:
         return PICKING_REASON;
@@ -912,21 +1069,27 @@ export function ChooseSubmoduleCommit({
         return null;
     }
   })();
-  const fetchingFull = fetchSub.isPending && fetchSub.variables?.unshallow;
 
   async function runFetch(unshallow: boolean) {
     if (fetchReason !== null) return;
-    if (isSubmodulePickPending(queryClient, repoPath, path)) return;
+    if (
+      isSubmodulePickPending(queryClient, repoPath, path) ||
+      isSubmoduleFetchPending(queryClient, repoPath, path)
+    )
+      return;
     const startedIn = repoPath;
     setHeldBlock(null);
     try {
-      await fetchSub.mutateAsync({ unshallow });
+      const result = await fetchSub.mutateAsync({ unshallow });
       const { away } = landedIn(startedIn);
-      toast.success(
-        unshallow
-          ? `Fetched ${path}'s full history${away}.`
-          : `Fetched ${path}${away}.`,
-      );
+      // A failed shallow read after the fetch claims neither outcome.
+      if (!unshallow || result.shallow === null)
+        toast.success(`Fetched ${path}${away}.`);
+      else if (result.shallow === true)
+        toast.info(
+          `Fetched what ${path}'s remote has${away}; it is itself shallow, so older history is still missing.`,
+        );
+      else toast.success(`Fetched ${path}'s full history${away}.`);
       if (mounted.current) setFetchStamp(Date.now());
     } catch (e) {
       toastError(e);
@@ -934,7 +1097,7 @@ export function ChooseSubmoduleCommit({
   }
 
   function moveHighlight(sha: string) {
-    setUserSha(sha);
+    setUserPick({ sha, overPaste: pin === null ? null : pasteGen });
   }
 
   // A held block's Check again asks the plan afresh and holds Apply until that
@@ -1250,7 +1413,7 @@ export function ChooseSubmoduleCommit({
                 reason={fetchReason}
                 onClick={() => void runFetch(false)}
               >
-                {fetchSub.isPending && !fetchingFull && (
+                {fetchPending === "fetch" && (
                   <Spinner data-icon="inline-start" />
                 )}
                 Fetch
@@ -1294,6 +1457,7 @@ export function ChooseSubmoduleCommit({
               />
               {/* Outside the listbox, which holds options only. */}
               <ShaLookupLine
+                path={path}
                 shaText={shaText}
                 lookup={lookupRead}
                 blockLead={lookupBlock}
@@ -1327,7 +1491,11 @@ export function ChooseSubmoduleCommit({
                         <>
                           <div
                             role="listbox"
-                            aria-label={`Commits on ${refLabel}`}
+                            aria-label={
+                              rev === null
+                                ? "Commits"
+                                : `Commits on ${refLabel}`
+                            }
                             aria-disabled={pickPending || undefined}
                             onKeyDown={onListKeyDown}
                             className={cn(placeholder && "opacity-60")}
@@ -1410,7 +1578,9 @@ export function ChooseSubmoduleCommit({
                     reason={fetchReason}
                     onClick={() => void runFetch(true)}
                   >
-                    {fetchingFull && <Spinner data-icon="inline-start" />}
+                    {fetchPending === "full" && (
+                      <Spinner data-icon="inline-start" />
+                    )}
                     Fetch full history
                   </DisabledReasonButton>
                 </div>
@@ -1487,11 +1657,13 @@ const LOOKUP_LINE = "border-b px-3 py-1.5 text-[11px] text-muted-foreground";
 
 /** The pasted id's own line atop the list box, for answers that pin no row. */
 function ShaLookupLine({
+  path,
   shaText,
   lookup,
   blockLead,
   lookupError,
 }: {
+  path: string;
   shaText: string | null;
   lookup: SubmodulePickRead | undefined;
   /** A block that stopped the lookup before it resolved the id. */
@@ -1516,6 +1688,9 @@ function ShaLookupLine({
     );
   if (lookup.plan.why === "notACommit")
     return <p className={LOOKUP_LINE}>That id isn't a commit.</p>;
+  // The lookup searched the whole object store, not just this ref's history.
+  if (lookup.plan.why === "notFound")
+    return <p className={LOOKUP_LINE}>No commit in {path} matches that id.</p>;
   return null;
 }
 
@@ -1541,8 +1716,8 @@ function NoteBody({ note }: { note: Note }) {
         <p className="mt-0.5 flex items-start gap-1 text-warning">
           <WarningIcon className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
           <span>
-            Not on any remote branch or tag as of the last fetch. Clones of this
-            repository can't check it out until it's pushed.
+            No remote branch or tag fetched here contains it, so other clones
+            may not be able to check it out until it's pushed.
           </span>
         </p>
       )}

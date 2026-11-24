@@ -45,6 +45,8 @@ import { presentError } from "@/lib/error-summary";
 import { focusIsLost } from "@/lib/focus-lost";
 import {
   isSubmodulePickPending,
+  rereadSubmodules,
+  submodulesReadRunning,
   useAddSubmodule,
   useRemoveSubmodule,
   useSetSubmoduleBranch,
@@ -58,6 +60,7 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { ChooseSubmoduleCommit } from "./ChooseSubmoduleCommitDialog";
 import { useOpenSubmoduleAsRepo } from "./useOpenSubmoduleAsRepo";
@@ -101,10 +104,11 @@ type ChooseTarget = { repo: string; path: string };
 
 /**
  * The submodule manager: lists what the parent repo references, updates each
- * per its `update` setting (by default to the recorded commit) or to its
- * tracked branch's tip, picks the exact commit one points at, adds and removes
- * them, edits URL and branch, and opens one as its own repository. Every
- * mutation but an update stages its change for the user to commit.
+ * per its `update` setting (by default to the recorded commit) or, under that
+ * setting, from its tracked branch's tip, picks the exact commit one points
+ * at, adds and removes them, edits URL and branch, and opens one as its own
+ * repository. Every mutation but an update and the picker's fetches stages
+ * its change for the user to commit; those stage nothing.
  */
 export function SubmodulesDialog({
   repoPath,
@@ -218,9 +222,28 @@ export function SubmodulesDialog({
     mode === "choose" && target !== null && target.repo === repoPath
       ? target
       : null;
-  // A palette request names no submodule: resolve it from the list read.
-  const resolving =
+  // A palette request names no submodule: resolve it from the list read of the
+  // repository it was made in. A switch while it waits drops it for the list,
+  // never resolving it against the new repository's submodules.
+  const wantsResolve =
     open && initialMode === "choose" && mode === "choose" && target === null;
+  const [requestRepo, setRequestRepo] = useState<string | null>(null);
+  if (wantsResolve && requestRepo === null) setRequestRepo(repoPath);
+  else if (!wantsResolve && requestRepo !== null) setRequestRepo(null);
+  const requestMoved =
+    wantsResolve && requestRepo !== null && requestRepo !== repoPath;
+  const resolving = wantsResolve && !requestMoved;
+  useLayoutEffect(() => {
+    if (!requestMoved) return;
+    changeMode("list");
+    if (focusIsLost()) closeRef.current?.focus({ preventScroll: true });
+  });
+  // While it waits, the user's first press or key in the list keeps the list:
+  // a late resolve would unmount the row menu or dialog that gesture opened.
+  // React's bubbling reaches here from the list's portaled popups too.
+  function keepList() {
+    if (resolving) changeMode("list");
+  }
 
   const handleOpenChange: NonNullable<
     ComponentProps<typeof Dialog>["onOpenChange"]
@@ -256,7 +279,14 @@ export function SubmodulesDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent ref={popupRef} className="sm:max-w-lg">
+      <DialogContent
+        ref={popupRef}
+        className="sm:max-w-lg"
+        onPointerDownCapture={keepList}
+        onKeyDownCapture={(e) => {
+          if (!e.repeat) keepList();
+        }}
+      >
         {resolving && (
           <ChooseResolver
             key={repoPath}
@@ -296,6 +326,7 @@ export function SubmodulesDialog({
               return (
                 <SubmoduleList
                   repoPath={repoPath}
+                  open={open}
                   closeRef={closeRef}
                   returnTo={returnTo}
                   onReturned={() => setReturnTo(null)}
@@ -348,6 +379,7 @@ function ChooseResolver({
 /** List mode: every submodule as a row, its actions on an always-visible kebab. */
 function SubmoduleList({
   repoPath,
+  open,
   closeRef,
   returnTo,
   onReturned,
@@ -356,6 +388,7 @@ function SubmoduleList({
   onClose,
 }: {
   repoPath: string;
+  open: boolean;
   closeRef: Ref<HTMLButtonElement>;
   /** The submodule whose picker just closed: its row takes lost focus. */
   returnTo: string | null;
@@ -365,13 +398,27 @@ function SubmoduleList({
   onClose: () => void;
 }) {
   const subs = useSubmodules(repoPath);
+  const queryClient = useQueryClient();
+  // A reopen during the exit animation keeps this list mounted, so the mount
+  // re-read never runs: re-read on the open edge too, with a read started after
+  // it. Layout effects run before the mount read starts, so a read running here
+  // predates the edge; a fresh mount's open joins its own mount read.
+  const readBeforeEdge = useRef(false);
+  useLayoutEffect(() => {
+    readBeforeEdge.current =
+      open && submodulesReadRunning(queryClient, repoPath);
+  }, [open, queryClient, repoPath]);
+  useSeedOnOpen(open, () =>
+    rereadSubmodules(queryClient, repoPath, !readBeforeEdge.current),
+  );
   const update = useUpdateSubmodule(repoPath);
   const remove = useRemoveSubmodule(repoPath);
   const openSubmodule = useOpenSubmoduleAsRepo(repoPath);
   const list = subs.data ?? [];
-  // A read that failed with nothing loaded says so; one over loaded rows keeps
-  // them under a notice.
-  const loadFailed = subs.data === undefined && subs.isError;
+  // A failed read with no rows to keep says so, since a cached empty list never
+  // shows there are none; one over loaded rows keeps them under a notice.
+  const loadFailed =
+    subs.isError && (subs.data === undefined || subs.data.length === 0);
   const { hostRef, retryRef } = useRetryFocusRescue(loadFailed);
 
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -531,10 +578,11 @@ function SubmoduleList({
         <DialogDescription>
           Initialize and update the submodules this repository references.
           Update follows each submodule's update setting (by default, a checkout
-          of the commit this repository records); you can also move one to the
-          tip of the branch it tracks, or choose the exact commit it points at.
-          Updating fetches over the network; adding, removing, editing and
-          choosing a commit stage the change for you to commit.
+          of the commit this repository records); Update to latest does the same
+          with the tip of the branch it tracks, or you can choose the exact
+          commit it points at. Updating fetches over the network; adding,
+          removing, editing and choosing a commit stage the change for you to
+          commit.
         </DialogDescription>
       </DialogHeader>
 
@@ -589,13 +637,15 @@ function SubmoduleList({
         )}
         <DegradedListNotice
           noun="submodules"
-          degraded={subs.data !== undefined && refreshFailed(subs)}
+          degraded={
+            !loadFailed && subs.data !== undefined && refreshFailed(subs)
+          }
           onRetry={() => void subs.refetch()}
           className="border-t px-3 py-1.5"
         />
         {/* No border-t: with no rows above it there is nothing to separate, and
             the container's own border would double up against it. */}
-        {subs.data?.length === 0 && (
+        {!loadFailed && subs.data?.length === 0 && (
           <div className="space-y-2 p-3">
             <p className="text-[11px] text-muted-foreground">
               This repository has no submodules.
@@ -1108,8 +1158,9 @@ function SetSubmoduleBranchDialog({
         <DialogHeader>
           <DialogTitle>Set submodule branch</DialogTitle>
           <DialogDescription>
-            "Update to latest" moves {submodule?.path} to the tip of this
-            branch. Leave it empty to follow the remote's default branch.
+            "Update to latest" brings {submodule?.path} up to date with the tip
+            of this branch. Leave it empty to follow the remote's default
+            branch.
           </DialogDescription>
         </DialogHeader>
 

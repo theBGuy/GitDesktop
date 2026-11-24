@@ -7,6 +7,7 @@ import type {
   SubmoduleCommitPage,
   SubmoduleConflict,
   SubmoduleConflictStages,
+  SubmoduleFetchResult,
   SubmodulePickOutcome,
   SubmodulePickRead,
   SubmoduleRefs,
@@ -58,8 +59,9 @@ export const gitSubmodules = (repoPath: string) =>
 
 /** Init + update submodules per each one's `update` setting (by default, a
  *  checkout of the recorded commit); `path` for one, else all. `remote` instead
- *  moves them to the tip of the branch they track (the remote's default branch
- *  when none is configured), leaving the move unstaged in the parent for review. */
+ *  updates them, under the same setting, against the tip of the branch they
+ *  track (the remote's default branch when none is configured), leaving the
+ *  move unstaged in the parent for review. */
 export const gitSubmoduleUpdate = (
   repoPath: string,
   path?: string,
@@ -176,9 +178,15 @@ export const gitSubmoduleSetCommit = (
     expectedIndexSha,
   });
 
-/** Fetches inside the submodule; `unshallow` also completes a shallow history. */
+/** Fetches inside the submodule; `unshallow` also completes a shallow history,
+ *  as far as its remote has it. */
 export const gitSubmoduleFetch = (
   repoPath: string,
   path: string,
   unshallow: boolean,
-) => invoke<void>("git_submodule_fetch", { repoPath, path, unshallow });
+) =>
+  invoke<SubmoduleFetchResult>("git_submodule_fetch", {
+    repoPath,
+    path,
+    unshallow,
+  });
