@@ -92,16 +92,16 @@ the whole fetch. The cause and the fixes are the same.
 
 ## Give the twin its own name on the remote
 
-There are two fixes. The one that also clears every other Windows and
-Mac clone is to stop the remote from having two spellings. Here the
-capital F was a typo (more on that below), so Leo's commit moves to a
-separate branch name and the misspelled one goes. Anyone with push access
-can do it, from a clone that has fetched since the twin appeared: the
-push needs Leo's commit. Work from the hash `ls-remote` printed, because
-`origin/Feature/offline-maps` in your clone is the wrong one:
+There are two fixes. The one that also clears every other Windows and Mac
+clone is to stop the remote from having two spellings. Here the capital F
+was a typo (more on that below), so Leo's commit moves to a separate branch
+name and the misspelled one goes. Anyone with push access can do it, from a
+clone that has fetched since the twin appeared: the push needs Leo's commit.
+Work from the hash `ls-remote` printed, because your clone's two copies
+share one file and either can hold the other's hash:
 
 ```sh
-$ git push --atomic --force-with-lease=Feature/offline-maps:5d95f9c origin 5d95f9c:refs/heads/feature/offline-maps-prefetch :Feature/offline-maps
+$ git push --atomic --force-with-lease=Feature/offline-maps:5d95f9c --force-with-lease=feature/offline-maps-prefetch: origin 5d95f9c:refs/heads/feature/offline-maps-prefetch :Feature/offline-maps
 To …/trailmap.git
  - [deleted]         Feature/offline-maps
  * [new branch]      5d95f9c -> feature/offline-maps-prefetch
@@ -113,14 +113,18 @@ $ git fetch
 
 The one push creates `feature/offline-maps-prefetch` at Leo's commit and
 deletes `Feature/offline-maps`, and `--atomic` makes the two land together
-or not at all. The [lease](/blog/force-push-without-overwriting-work/) makes
-the delete conditional: if Leo pushed to the twin after your `ls-remote`,
-the remote no longer holds `5d95f9c`, and the whole push is rejected
-before the delete can drop his new commit. Spell the lease's branch name
-exactly as the branch you delete: a lease on `feature/offline-maps` doesn't
-guard `Feature/offline-maps`, and Git doesn't warn you. If the push fails,
-run `git ls-remote` again, since someone may have moved the twin or already
-removed it, and rerun the push with the new hash if the twin is still there.
+or not at all. The first [lease](/blog/force-push-without-overwriting-work/)
+makes the delete conditional: if Leo pushed to the twin after your
+`ls-remote`, the remote no longer holds `5d95f9c`, and the whole push is
+rejected before the delete can drop his new commit. Spell the lease's branch
+name exactly as the branch you delete: a lease on `feature/offline-maps`
+doesn't guard `Feature/offline-maps`, and Git doesn't warn you. The second
+lease, with nothing after the colon, requires the new name to be free;
+without it, an existing branch by that name would be fast-forwarded to Leo's
+commit. If the push fails, the new name may be taken (pick another), or
+someone may have moved the twin or already removed it. Run `git fetch`, which
+still downloads new commits while it reports the error, then `git ls-remote`,
+and rerun the push with the new hash if the twin is still there.
 
 Deleting the twin also removed the shared file in your clone, so
 `git fetch --prune` brings `origin/feature/offline-maps` from its hash
@@ -158,11 +162,13 @@ running into it until the remote drops a spelling. And before you migrate:
 - It won't run while the repository has [linked
   worktrees](/blog/work-on-two-branches-at-once/). Git answers
   `migrating repositories with worktrees is not supported yet`. Commit
-  in each one, or stash with `git stash -u` so untracked files go
-  too, run `git worktree remove` on it, and run `git worktree prune`
-  for any folder you deleted by hand. A fresh clone made with
-  `git clone --ref-format=reftable` avoids that, but your local branches,
-  stashes and unpushed commits stay behind in the old one.
+  in each one, or stash with `git stash -u` so untracked files go too,
+  and copy out any ignored files you still need (a `.env`, local settings),
+  since `git worktree remove` deletes them with the folder. Then remove
+  each worktree, and run `git worktree prune` for any folder you deleted
+  by hand. A fresh clone made with `git clone --ref-format=reftable`
+  avoids that, but your local branches, stashes and unpushed commits stay
+  behind in the old one.
 - It can't lock out other writers while it runs, so close editors and
   anything else that fetches in the background, and if the repository
   is registered for scheduled maintenance, run `git maintenance unregister`
