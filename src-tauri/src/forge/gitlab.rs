@@ -8545,9 +8545,10 @@ fn gl_state_kept(number: u64, state: &str) -> AppError {
     ))
 }
 
-/// Reads whether the issue is closed now, ahead of a close or reopen: GitLab's state
-/// PUT answers 200 when the issue is already in the asked-for state. A change racing
-/// another actor's after this read still reports as done.
+/// Reads whether the issue is closed now: ahead of a close or reopen, since GitLab's
+/// state PUT answers 200 when the issue is already in the asked-for state, and as
+/// `gl_issue_closed_after`'s re-read when the PUT's answer can't be read. A change
+/// racing another actor's after the first read still reports as done.
 async fn gl_issue_closed_now(repo_path: &str, enc: &str, number: u64) -> AppResult<bool> {
     let out = run_glab(
         Some(repo_path),
