@@ -143,7 +143,7 @@ test("the guard dialog's installed, blocked and unread states", () => {
   );
   assert.deepEqual(copy.KEEP_LOCAL_HOOK_MANAGER_NOTE, {
     lefthook:
-      "With lefthook, the check sees the pushed refs only in a command that sets use_stdin: true.",
+      "With lefthook, the check sees the pushed refs only when it is the one pre-push command or script that sets use_stdin: true.",
   });
   for (const manager of ["husky", "pre-commit"])
     assert.equal(

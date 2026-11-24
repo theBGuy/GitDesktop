@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { copyText } from "@/lib/clipboard";
+import { focusIsLost } from "@/lib/focus-lost";
 import {
   useInstallKeepLocalHook,
   useKeepLocalHookStatus,
@@ -56,9 +57,9 @@ type HookWrite = "install" | "remove";
 
 /** Whether a write's returned status counts as done; anything else (an install
  *  that lost a race comes back blocked) leaves the dialog open. A remove is done
- *  once GitDesktop's file is gone and the hooks folder is no link, since nothing
- *  is deleted through a linked hooks folder, and git no longer runs the guard
- *  through a pre-push link, which a remove leaves in place. */
+ *  once GitDesktop's file is gone, the hooks folder is no link (nothing is
+ *  deleted through one) and no pre-push link to a guard-marked file remains,
+ *  since a remove leaves that link in place. */
 const WRITE_DONE: Record<HookWrite, (after: KeepLocalHookStatus) => boolean> = {
   install: (after) => after.state === "installed",
   remove: (after) =>
@@ -68,7 +69,8 @@ const WRITE_DONE: Record<HookWrite, (after: KeepLocalHookStatus) => boolean> = {
 };
 
 /** The can't-install state's description: the reason, a manager's note, then
- *  the check's lead. A linked hook already runs the guard, so it gets no check. */
+ *  the check's lead. A linked hook's target carries the guard's marker, so it
+ *  gets no check. */
 function blockedDescription(status: KeepLocalHookStatus | undefined): string {
   const blocked = status?.blocked ?? null;
   const manager = status?.manager ?? null;
@@ -153,21 +155,30 @@ export function KeepLocalHookDialog({
   // Every state has one safe button, and focus lands on it on open and on every
   // change of state, so a key still held from the menu never installs or
   // removes, and a button that unmounts under focus never drops it to <body>.
+  // Within the can't-install state a change of its controls moves only focus
+  // that went with a control: lost, or already restored to the popup itself.
   const contentRef = useRef<HTMLDivElement>(null);
   const safeRef = useRef<HTMLButtonElement>(null);
   const shownView = useRef<HookView | null>(null);
+  const controls =
+    view === "blocked" ? `${linkedHook}:${!!data?.managedHookPresent}` : null;
+  const shownControls = useRef<string | null>(null);
   useLayoutEffect(() => {
     const previous = shownView.current;
+    const previousControls = shownControls.current;
     shownView.current = view;
-    if (!open || previous === null || previous === view) return;
+    shownControls.current = controls;
+    if (!open || previous === null) return;
     const active = document.activeElement;
-    if (
-      active === null ||
-      active === document.body ||
-      contentRef.current?.contains(active)
-    )
-      safeRef.current?.focus();
-  }, [view, open]);
+    const land =
+      previous !== view
+        ? active === null ||
+          active === document.body ||
+          contentRef.current?.contains(active)
+        : previousControls !== controls &&
+          (focusIsLost() || active === contentRef.current);
+    if (land) safeRef.current?.focus();
+  }, [view, controls, open]);
 
   async function runWrite(kind: HookWrite) {
     if (session === null) return;

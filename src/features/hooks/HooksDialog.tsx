@@ -1,4 +1,5 @@
 import { CaretDownIcon } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   type KeyboardEvent,
   lazy,
@@ -126,8 +127,18 @@ type HookWriteVerb = "deleted" | "saved" | "disabled" | "enabled";
 const hookChangedNotice = (name: string, verb: HookWriteVerb) =>
   `${name} changed since this list loaded — nothing was ${verb}.`;
 
+/** The disk text the editor last took in for one repository's hook. */
+type HookSeed = {
+  repo: string;
+  name: string;
+  text: string;
+  replaced: string | null;
+  /** Minted per selection only; every later seed of that selection keeps it. */
+  session: object;
+};
+
 const changedOnDiskLine = (name: string) =>
-  `${name} changed on disk while you were editing. Saving replaces it with your edit.`;
+  `${name} changed on disk while you were editing. Reload replaces your edit with the script on disk.`;
 
 export function HooksDialog({
   repoPath,
@@ -138,6 +149,7 @@ export function HooksDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const queryClient = useQueryClient();
   const hooks = useHooks(repoPath);
   const writeHook = useWriteHook(repoPath);
   const setEnabled = useSetHookEnabled(repoPath);
@@ -219,14 +231,18 @@ export function HooksDialog({
   const base = content.data ?? DEFAULT_HOOK;
   // `replaced` is the disk text this dialog's own Save overwrote, still shown
   // until the save's re-read arrives; it never reads as a change on disk.
-  const [seed, setSeed] = useState<{
-    repo: string;
-    name: string;
-    text: string;
-    replaced: string | null;
-  } | null>(null);
+  const [seed, setSeed] = useState<HookSeed | null>(null);
   const seedMatches =
     seed !== null && seed.repo === repoPath && seed.name === selected;
+  // The disk text a kept edit was last weighed against, bound to the seed it
+  // arrived under: whatever moves the seed's text mints a new seed and so
+  // retires it. While it holds, a draft back at the seed text is still the
+  // user's, never an untouched one an arrival may replace.
+  const [conflict, setConflict] = useState<{
+    seed: HookSeed;
+    text: string;
+  } | null>(null);
+  const conflictHeld = conflict !== null && conflict.seed === seed;
 
   // A selected hook whose script read failed before it seeded. Kept through
   // its own retry, which clears the query's error while it runs, so the
@@ -251,7 +267,7 @@ export function HooksDialog({
   // during render when the read is already cached, so no frame paints the
   // loading hold between two cached hooks; the effect below takes later reads.
   const freshSeed = (repo: string, name: string, text: string) => {
-    setSeed({ repo, name, text, replaced: null });
+    setSeed({ repo, name, text, replaced: null, session: {} });
     setDraft(text);
     setConfirmDelete(false);
     setReadFailure(null);
@@ -270,7 +286,7 @@ export function HooksDialog({
   // A data-arrival seed: a later read of the seeded hook replaces only an
   // untouched draft, and an edit is kept (the line below offers Reload). Reads
   // the draft at arrival, so typing never re-runs it. Every arrival for the
-  // seeded hook retires `replaced`.
+  // seeded hook retires `replaced`, and only a kept edit records a conflict.
   const takeContent = useEffectEvent(
     (repo: string, name: string, text: string) => {
       if (seed === null || seed.repo !== repo || seed.name !== name) {
@@ -278,16 +294,32 @@ export function HooksDialog({
         return;
       }
       const kept = seed.replaced === null ? seed : { ...seed, replaced: null };
+      // Untouched: the draft is the latest disk text the dialog took in, which
+      // is the held conflict's text while one holds.
+      const untouched = conflictHeld
+        ? draft === conflict.text
+        : draft === seed.text;
       if (seed.text === text) {
+        if (untouched) setDraft(text);
         if (kept !== seed) setSeed(kept);
+        setConflict(null);
         return;
       }
-      if (draft === seed.text) setDraft(text);
-      if (draft === seed.text || draft === text) setSeed({ ...kept, text });
-      else if (kept !== seed) setSeed(kept);
+      if (untouched) setDraft(text);
+      if (untouched || draft === text) {
+        setSeed({ ...kept, text });
+        setConflict(null);
+        return;
+      }
+      if (kept !== seed) setSeed(kept);
+      if (kept !== conflict?.seed || conflict.text !== text)
+        setConflict({ seed: kept, text });
     },
   );
-  // The repo is a dep: another repo's cached read can answer the same text.
+  // Runs on every successful read of the selected hook: a re-read answering
+  // the cached bytes keeps `data`'s reference, so only `dataUpdatedAt` moves.
+  // A hook or repository not seeded yet is taken during render above.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: dataUpdatedAt re-runs the arrival on a same-bytes re-read
   useEffect(() => {
     if (selected === null) {
       setSeed(null);
@@ -295,17 +327,25 @@ export function HooksDialog({
     }
     if (content.isSuccess)
       takeContent(repoPath, selected, content.data ?? DEFAULT_HOOK);
-  }, [repoPath, selected, content.isSuccess, content.data]);
+  }, [
+    repoPath,
+    selected,
+    content.isSuccess,
+    content.data,
+    content.dataUpdatedAt,
+  ]);
 
   // Hidden once the hook is gone from disk: the read then answers the sample or
-  // nothing, which isn't a change to the user's file.
+  // nothing, which isn't a change to the user's file. A draft at the seed text
+  // shows it only under a held conflict: before the arrival effect runs, that
+  // draft is an untouched one the effect is about to replace.
   const changedOnDisk =
     seedMatches &&
     entry?.state !== "inactive" &&
     typeof content.data === "string" &&
     base !== seed.text &&
     base !== seed.replaced &&
-    draft !== seed.text &&
+    (draft !== seed.text || conflictHeld) &&
     draft !== base;
   const reload = () => {
     setDraft(base);
@@ -415,7 +455,7 @@ export function HooksDialog({
     const name = entry.name;
     const script = draft;
     const pressed = seed;
-    const replaced = base;
+    const pressBase = base;
     const expectedManaged = entry.managed === true;
     if (entry.managed && !(await confirmManaged("save"))) return;
     let outcome: HookWriteOutcome;
@@ -433,13 +473,28 @@ export function HooksDialog({
       await writeRefused(name, firedIn, "saved");
       return;
     }
-    // The bytes sent are what the editor took in, and the text they replaced
-    // stays known until the re-read, so this dialog's own write never reads
-    // as a change on disk. Only the seed the press saw: one taken since (the
-    // hook re-selected) converges through its own re-read.
+    // The bytes sent become the editor's disk text, and the cached text they
+    // replaced never reads as a change on disk. Only over the press's text and
+    // selection; after a re-selection or a Reload, the re-read converges.
+    const cached =
+      queryClient.getQueryData<string | null>([
+        "repo",
+        firedIn,
+        "hook",
+        name,
+      ]) ?? DEFAULT_HOOK;
+    // A cache moved to anything but the press's text is a change on disk, never
+    // the text this Save replaced: that falls back to the one cached at the press.
+    const replaced =
+      pressed !== null && cached === pressed.text ? cached : pressBase;
     if (stillIn(firedIn))
       setSeed((s) =>
-        s !== null && s === pressed ? { ...s, text: script, replaced } : s,
+        s !== null &&
+        pressed !== null &&
+        s.session === pressed.session &&
+        s.text === pressed.text
+          ? { ...s, text: script, replaced }
+          : s,
       );
     toast.success(`Saved the ${name} hook`);
   }

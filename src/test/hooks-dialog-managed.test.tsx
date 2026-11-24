@@ -20,6 +20,7 @@ import {
 } from "vitest";
 import { ConfirmDialogHost } from "@/components/confirm-dialog-host";
 import { HooksDialog } from "@/features/hooks/HooksDialog";
+import { HOOK_TEMPLATES } from "@/features/hooks/templates";
 import { presentError } from "@/lib/error-summary";
 import {
   gitHookDelete,
@@ -606,10 +607,20 @@ describe("held controls in the Hooks dialog", () => {
 
   it("holds Save with the reason that applies", async () => {
     let saved: () => void = () => undefined;
+    let reread: () => void = () => undefined;
     vi.mocked(gitHookWrite).mockImplementationOnce(
-      () =>
+      (_r, _n, content) =>
         new Promise<HookWriteOutcome>((resolve) => {
-          saved = () => resolve(WRITTEN);
+          saved = () => {
+            // The save's re-read is held, so Save is checked before it lands.
+            vi.mocked(gitHookRead).mockImplementationOnce(
+              () =>
+                new Promise<string>((r) => {
+                  reread = () => r(content);
+                }),
+            );
+            resolve(WRITTEN);
+          };
         }),
     );
     const { user } = renderDialog();
@@ -635,6 +646,10 @@ describe("held controls in the Hooks dialog", () => {
     expect(fireEvent.keyDown(save, { key: "Enter", repeat: true })).toBe(false);
     await act(() => Promise.resolve());
     expect(gitHookWrite).toHaveBeenCalledTimes(1);
+    await act(async () => reread());
+    await waitFor(() =>
+      expect(save).toHaveAccessibleDescription("No changes to save."),
+    );
   });
 
   it("refuses to close while its own managed prompt is pending", async () => {
@@ -1031,7 +1046,7 @@ describe("a hook that changes on disk while it is open", () => {
   let unreadable: Set<string>;
   const EDITED = `${SCRIPT}true`;
   const LINE =
-    "pre-commit changed on disk while you were editing. Saving replaces it with your edit.";
+    "pre-commit changed on disk while you were editing. Reload replaces your edit with the script on disk.";
   const READ_ERROR = {
     kind: "io",
     message: "Access is denied. (os error 5)",
@@ -1096,6 +1111,51 @@ describe("a hook that changes on disk while it is open", () => {
     expect(screen.getByRole("button", { name: "Reload" })).toBeInTheDocument();
   });
 
+  it("an edit set back to the original keeps the line, Reload and Save through a same-bytes re-read", async () => {
+    const { client } = await edited();
+    disk.set("pre-commit", "#!/bin/sh\necho new\n");
+    await reread(client);
+    await waitFor(() => expect(line().textContent).toBe(LINE));
+    fireEvent.change(editor(), { target: { value: SCRIPT } });
+    expect(editor()).toHaveValue(SCRIPT);
+    expect(line().textContent).toBe(LINE);
+    expect(screen.getByRole("button", { name: "Reload" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).not.toHaveAttribute(
+      "aria-disabled",
+    );
+    // The draft stays the user's: a re-read of the same disk text neither
+    // replaces it nor hides the line.
+    const reads = vi.mocked(gitHookRead).mock.calls.length;
+    await reread(client);
+    await waitFor(() =>
+      expect(vi.mocked(gitHookRead).mock.calls.length).toBe(reads + 1),
+    );
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    expect(editor()).toHaveValue(SCRIPT);
+    expect(line().textContent).toBe(LINE);
+  });
+
+  it("a template whose script is the original keeps the line", async () => {
+    const template = HOOK_TEMPLATES.find((t) => t.hook === "pre-commit");
+    if (!template) throw new Error("no pre-commit template");
+    disk.set("pre-commit", template.body);
+    const { user, client } = renderDialog();
+    await waitFor(() => row("pre-commit"));
+    await user.click(row("pre-commit"));
+    await waitFor(() => expect(editor()).toHaveValue(template.body));
+    await user.type(editor(), "x");
+    disk.set("pre-commit", "#!/bin/sh\necho new\n");
+    await reread(client);
+    await waitFor(() => expect(line().textContent).toBe(LINE));
+    await user.click(screen.getByRole("button", { name: "Templates" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: new RegExp(template.name) }),
+    );
+    await waitFor(() => expect(editor()).toHaveValue(template.body));
+    expect(line().textContent).toBe(LINE);
+    expect(screen.getByRole("button", { name: "Reload" })).toBeInTheDocument();
+  });
+
   it("Reload by keyboard takes the disk's script and lands on the editor", async () => {
     const { user, client } = await edited();
     disk.set("pre-commit", "#!/bin/sh\necho new\n");
@@ -1119,6 +1179,37 @@ describe("a hook that changes on disk while it is open", () => {
     await waitFor(() => expect(line().textContent).toBe(""));
     expect(document.activeElement).toBe(editor());
     expect(editor()).toHaveValue(EDITED);
+  });
+
+  it("an edit set to the disk's change reloads the next change silently", async () => {
+    const { client } = await edited();
+    disk.set("pre-commit", "#!/bin/sh\necho new\n");
+    await reread(client);
+    await waitFor(() => expect(line().textContent).toBe(LINE));
+    fireEvent.change(editor(), { target: { value: "#!/bin/sh\necho new\n" } });
+    expect(line().textContent).toBe("");
+    disk.set("pre-commit", "#!/bin/sh\necho newer\n");
+    await reread(client);
+    await waitFor(() =>
+      expect(editor()).toHaveValue("#!/bin/sh\necho newer\n"),
+    );
+    expect(line().textContent).toBe("");
+    expect(screen.queryByRole("button", { name: "Reload" })).toBe(null);
+  });
+
+  it("an edit set to the disk's change follows the disk back to the original", async () => {
+    const { client } = await edited();
+    disk.set("pre-commit", "#!/bin/sh\necho new\n");
+    await reread(client);
+    await waitFor(() => expect(line().textContent).toBe(LINE));
+    fireEvent.change(editor(), { target: { value: "#!/bin/sh\necho new\n" } });
+    disk.set("pre-commit", SCRIPT);
+    await reread(client);
+    await waitFor(() => expect(editor()).toHaveValue(SCRIPT));
+    expect(line().textContent).toBe("");
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    expect(save).toHaveAccessibleDescription("No changes to save.");
   });
 
   it("a line hiding while Save holds focus leaves focus there", async () => {
@@ -1156,7 +1247,7 @@ describe("a hook that changes on disk while it is open", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(line().textContent).toBe(
-        "pre-push changed on disk while you were editing. Saving replaces it with your edit.",
+        "pre-push changed on disk while you were editing. Reload replaces your edit with the script on disk.",
       ),
     );
     expect(editor()).toHaveValue(EDITED);
@@ -1220,6 +1311,43 @@ describe("a hook that changes on disk while it is open", () => {
     expect(editor()).toHaveValue(`${EDITED}x`);
   });
 
+  it("a Save's re-read answering the cached text it replaced shows the line", async () => {
+    // The write lands, but the disk is put back before its held re-read
+    // answers, so that answer equals the cache and only its time moves.
+    let reply: () => void = () => undefined;
+    vi.mocked(gitHookWrite).mockImplementationOnce(async (_r, name, text) => {
+      disk.set(name, text);
+      vi.mocked(gitHookRead).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            reply = () => resolve(disk.get(name) ?? SCRIPT);
+          }),
+      );
+      return WRITTEN;
+    });
+    const { user, client } = await edited();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Saved the pre-commit hook"),
+    );
+    disk.set("pre-commit", SCRIPT);
+    await user.type(editor(), "x");
+    expect(line().textContent).toBe("");
+    const before = client.getQueryState(["repo", REPO, "hook", "pre-commit"]);
+    await act(async () => reply());
+    await waitFor(() =>
+      expect(
+        client.getQueryState(["repo", REPO, "hook", "pre-commit"])
+          ?.dataUpdatedAt,
+      ).toBeGreaterThan(before?.dataUpdatedAt ?? 0),
+    );
+    expect(client.getQueryData(["repo", REPO, "hook", "pre-commit"])).toBe(
+      SCRIPT,
+    );
+    await waitFor(() => expect(line().textContent).toBe(LINE));
+    expect(editor()).toHaveValue(`${EDITED}x`);
+  });
+
   it("a Save whose hook was re-selected during the write leaves the fresh seed to its re-read", async () => {
     let release: () => void = () => undefined;
     let replyRead: () => void = () => undefined;
@@ -1262,6 +1390,116 @@ describe("a hook that changes on disk while it is open", () => {
       screen.getByRole("button", { name: "Save" }),
     ).toHaveAccessibleDescription("No changes to save.");
     expect(line().textContent).toBe("");
+  });
+
+  it("a second Save pressed before the first one's re-read keeps a draft set back to the first save's text", async () => {
+    // Each write holds the re-read it starts, and the second write is held,
+    // so the first re-read lands while the second write runs.
+    const key = ["repo", REPO, "hook", "pre-commit"];
+    const replies: Array<() => void> = [];
+    const holdReread = (name: string) =>
+      vi.mocked(gitHookRead).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            replies.push(() => resolve(disk.get(name) ?? SCRIPT));
+          }),
+      );
+    let release: () => void = () => undefined;
+    vi.mocked(gitHookWrite)
+      .mockImplementationOnce(async (_r, name, text) => {
+        disk.set(name, text);
+        holdReread(name);
+        return WRITTEN;
+      })
+      .mockImplementationOnce(
+        (_r, name, text) =>
+          new Promise<HookWriteOutcome>((resolve) => {
+            release = () => {
+              disk.set(name, text);
+              holdReread(name);
+              resolve(WRITTEN);
+            };
+          }),
+      );
+    const { user, client } = await edited();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    await user.type(editor(), "x");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(gitHookWrite).toHaveBeenCalledTimes(2));
+    await act(async () => replies[0]?.());
+    await waitFor(() => expect(client.getQueryData(key)).toBe(EDITED));
+    await act(async () => release());
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(2));
+    // The second write replaced the first one's text, never a change on disk.
+    await user.type(editor(), "y");
+    expect(line().textContent).toBe("");
+    fireEvent.change(editor(), { target: { value: EDITED } });
+    expect(line().textContent).toBe("");
+    await act(async () => replies[1]?.());
+    await waitFor(() => expect(client.getQueryData(key)).toBe(`${EDITED}x`));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    expect(editor()).toHaveValue(EDITED);
+    expect(line().textContent).toBe("");
+  });
+
+  it("Reload pressed while a Save writes follows the disk to the saved script", async () => {
+    const NEW = "#!/bin/sh\necho new\n";
+    let release: () => void = () => undefined;
+    vi.mocked(gitHookWrite).mockImplementationOnce(
+      (_r, name, text) =>
+        new Promise<HookWriteOutcome>((resolve) => {
+          release = () => {
+            disk.set(name, text);
+            resolve(WRITTEN);
+          };
+        }),
+    );
+    const { user, client } = await edited();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(gitHookWrite).toHaveBeenCalledTimes(1));
+    disk.set("pre-commit", NEW);
+    await reread(client);
+    await user.click(await screen.findByRole("button", { name: "Reload" }));
+    expect(editor()).toHaveValue(NEW);
+    await act(async () => release());
+    await waitFor(() =>
+      expect(client.getQueryData(["repo", REPO, "hook", "pre-commit"])).toBe(
+        EDITED,
+      ),
+    );
+    await waitFor(() => expect(editor()).toHaveValue(EDITED));
+    expect(line().textContent).toBe("");
+  });
+
+  it("a change on disk read while a Save writes still shows its line after the save", async () => {
+    const OTHER = "#!/bin/sh\necho other\n";
+    let release: () => void = () => undefined;
+    vi.mocked(gitHookWrite).mockImplementationOnce(
+      (_r, name, text) =>
+        new Promise<HookWriteOutcome>((resolve) => {
+          release = () => {
+            disk.set(name, text);
+            vi.mocked(gitHookRead).mockImplementationOnce(
+              () => new Promise<string>(() => undefined),
+            );
+            resolve(WRITTEN);
+          };
+        }),
+    );
+    const { user, client } = await edited();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(gitHookWrite).toHaveBeenCalledTimes(1));
+    await user.type(editor(), "x");
+    disk.set("pre-commit", OTHER);
+    await reread(client);
+    await waitFor(() => expect(line().textContent).toBe(LINE));
+    await act(async () => release());
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Saved the pre-commit hook"),
+    );
+    expect(editor()).toHaveValue(`${EDITED}x`);
+    expect(line().textContent).toBe(LINE);
   });
 
   it("an edited hook deleted on disk shows no line", async () => {
@@ -1548,5 +1786,45 @@ describe("a repository switch under the open dialog", () => {
       "aria-disabled",
     );
     expect(screen.getByLabelText("Hook script")).toHaveValue(SCRIPT);
+  });
+
+  it("holds an edited draft while the other repository's script loads", async () => {
+    let reply: () => void = () => undefined;
+    const { user, client, setRepo } = renderDialog();
+    await select(user, "pre-commit");
+    await user.type(screen.getByLabelText("Hook script"), "true");
+    client.setQueryData(["repo", OTHER, "hooks"], info());
+    vi.mocked(gitHookRead).mockImplementation((repo) =>
+      repo === OTHER
+        ? new Promise<string>((resolve) => {
+            reply = () => resolve(SCRIPT);
+          })
+        : Promise.resolve(SCRIPT),
+    );
+    setRepo(OTHER);
+    await waitFor(() =>
+      expect(gitHookRead).toHaveBeenCalledWith(OTHER, "pre-commit"),
+    );
+    const save = screen.getByRole("button", { name: "Save" });
+    const toggle = screen.getByRole("button", { name: "Disable" });
+    for (const held of [save, toggle]) {
+      expect(held).toHaveAttribute("aria-disabled", "true");
+      expect(held).toHaveAccessibleDescription(
+        "This hook's script is still loading.",
+      );
+    }
+    expect(screen.getByLabelText("Hook script")).toHaveAttribute("readonly");
+    await user.click(save);
+    await act(() => Promise.resolve());
+    expect(gitHookWrite).not.toHaveBeenCalled();
+    await act(async () => reply());
+    await waitFor(() =>
+      expect(screen.getByLabelText("Hook script")).toHaveValue(SCRIPT),
+    );
+    expect(save).toHaveAccessibleDescription("No changes to save.");
+    expect(toggle).not.toHaveAttribute("aria-disabled");
+    expect(screen.getByLabelText("Hook script")).not.toHaveAttribute(
+      "readonly",
+    );
   });
 });

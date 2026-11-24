@@ -163,8 +163,8 @@ fn detect_manager(repo_path: &str, hooks_dir: &Path) -> Option<(String, PathBuf)
 /// part below `root` when the dir is under it, else of the whole `..`-normalized path,
 /// since git prints a climbing `core.hooksPath` verbatim.
 fn husky_dir_in_hooks_path(root: &Path, hooks_dir: &Path) -> Option<PathBuf> {
-    let normal = lexically_normal(hooks_dir);
-    let (side, skip) = match hooks_dir_below_root(root, &normal, hooks_dir) {
+    let normal = normal_hooks_dir(hooks_dir);
+    let (side, skip) = match hooks_dir_below_root(root, &normal) {
         Some(below) => below,
         None => (normal, 0),
     };
@@ -175,18 +175,51 @@ fn husky_dir_in_hooks_path(root: &Path, hooks_dir: &Path) -> Option<PathBuf> {
     Some(side.components().take(skip + at + 1).collect())
 }
 
-/// When the hooks dir is under `root`: the hooks spelling that matched and how many of
-/// its components spell the root. Lexical first over `normal`, its `..`-normalized
-/// spelling (separators normalized, case folded only on Windows), then both sides
-/// canonicalized with `hooks` as given, the hooks side through its nearest existing
-/// ancestor, so `/var` vs `/private/var`, 8.3 names and a linked ancestor still compare.
-fn hooks_dir_below_root(root: &Path, normal: &Path, hooks: &Path) -> Option<(PathBuf, usize)> {
+/// When `normal`, the `..`-normalized hooks dir, is under `root`: that spelling and how
+/// many of its components spell the root. Lexical first (separators normalized, case
+/// folded only on Windows), then the nearest ancestor whose canonical form is the
+/// root's, so `/var` vs `/private/var`, 8.3 names and a linked ancestor still compare
+/// while links below the root keep their names. With no such ancestor, a link that
+/// enters the clone below its root is judged by its canonical form.
+fn hooks_dir_below_root(root: &Path, normal: &Path) -> Option<(PathBuf, usize)> {
     if let Some(skip) = root_prefix_len(root, normal) {
         return Some((normal.to_path_buf(), skip));
     }
     let root = dunce::canonicalize(root).ok()?;
-    let hooks = canonicalize_existing_prefix(hooks)?;
-    root_prefix_len(&root, &hooks).map(|skip| (hooks, skip))
+    if let Some(at) = normal
+        .ancestors()
+        .find(|a| dunce::canonicalize(a).is_ok_and(|a| a == root))
+    {
+        return Some((normal.to_path_buf(), at.components().count()));
+    }
+    let landed = canonicalize_existing_prefix(normal)?;
+    root_prefix_len(&root, &landed).map(|skip| (landed, skip))
+}
+
+/// `hooks_dir` with its `..` collapsed the way the OS opens it. Win32 collapses `..`
+/// lexically before the filesystem sees the path. A unix kernel resolves each `..`
+/// after the links before it, so when the part through the last `..` names another
+/// folder lexically, its physical form wins, the names after it kept as spelled; a
+/// lexical spelling of the same folder is kept as written.
+fn normal_hooks_dir(hooks_dir: &Path) -> PathBuf {
+    let normal = lexically_normal(hooks_dir);
+    #[cfg(unix)]
+    {
+        use std::path::Component;
+        let parts: Vec<Component> = hooks_dir.components().collect();
+        if let Some(last) = parts.iter().rposition(|c| *c == Component::ParentDir) {
+            let prefix: PathBuf = parts[..=last].iter().collect();
+            let lexical = canonicalize_existing_prefix(&lexically_normal(&prefix));
+            if let Ok(physical) = dunce::canonicalize(&prefix) {
+                if Some(&physical) != lexical.as_ref() {
+                    return parts[last + 1..]
+                        .iter()
+                        .fold(physical, |acc, c| acc.join(c));
+                }
+            }
+        }
+    }
+    normal
 }
 
 /// `path` with each `..` popping the normal component before it, lexically; a `..` with
@@ -293,9 +326,11 @@ pub async fn git_hooks_list(repo_path: String) -> AppResult<HooksInfo> {
 /// file (a hooks path through a file included), a directory or symlink in its place,
 /// another hooks dir, a redirected one or a file without the marker is `false`; a read
 /// that fails on what exists, or a failed common-dir read, is the `Err`. The entry is
-/// read itself, never followed, so a symlink is `false` whatever it points at. A failure
-/// reading the entry (its lstat or its marker read) is [`ManagedReadError::Entry`], which
-/// callers turn into a sentence; any other failure keeps its own error.
+/// classified by its own lstat, so a symlink is `false` whatever it points at; one
+/// swapped in after that lstat can still be followed by the marker read ([`hook_file`]
+/// states that race). A failure reading the entry (its lstat or its marker read) is
+/// [`ManagedReadError::Entry`], which callers turn into a sentence; any other failure
+/// keeps its own error.
 async fn hook_managed_state(
     repo_path: &str,
     hooks_dir: &Path,
@@ -637,8 +672,9 @@ pub enum HookDeleteOutcome {
 }
 
 /// Deletes a hook (active and disabled variants): a link (dangling, looping or a
-/// junction included) is removed itself, leaving its target, and anything else at the
-/// path goes to the OS recycle bin, so a hand-written script can be recovered. With an
+/// junction included) is unlinked, never followed, so its target stays unless it is the
+/// hook's other name, and anything else at the path goes to the OS recycle bin, so a
+/// hand-written script can be recovered. With an
 /// expected managed state, a hook whose managed state changed since the caller's list is
 /// left alone, and one that can't be read is the `Err` with nothing deleted; the check
 /// and the delete are not atomic. A failure is a sentence naming what was already done.
@@ -877,9 +913,10 @@ fn same_hooks_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// What sits at a hook path. Only a regular file is ever rewritten or deleted: a link
-/// could point outside the hooks dir, and a FIFO would block the read. `LinkedOurs` is
-/// a link whose followed target is a regular file carrying the marker; every act that
+/// What sits at a hook path. Only an entry classified as a regular file is rewritten or
+/// deleted, since a link could point outside the hooks dir and a FIFO would block the
+/// read; the rename or delete acts on the entry itself, never through a link. `LinkedOurs`
+/// is a link whose followed target is a regular file carrying the marker; every act that
 /// keys on `Ours` still refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HookFile {
@@ -891,10 +928,13 @@ enum HookFile {
 }
 
 /// Classifies `path` by its lstat; an unreadable regular file is an Err, never absent.
-/// A link is followed only to read a regular-file target for the marker, and any
-/// failure there reads `NotRegular`, never an Err. Both kinds read through
-/// [`read_if_regular`], so a path swapped after the lstat is never read as what the
-/// lstat saw. The marker test here is the one "ours" predicate.
+/// A link is followed only to read a regular-file target of at most
+/// [`LINKED_HOOK_READ_CAP`] bytes for the marker, and any failure there reads
+/// `NotRegular`, never an Err. The entry's kind comes from the lstat and its bytes from
+/// a later open by path, and the two aren't atomic: a path swapped in between is read
+/// as whatever regular file it then opens to. Both kinds read through
+/// [`read_if_regular`], so a non-regular target swapped in is never read or blocked on.
+/// The marker test here is the one "ours" predicate.
 fn hook_file(path: &Path) -> std::io::Result<HookFile> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -902,19 +942,12 @@ fn hook_file(path: &Path) -> std::io::Result<HookFile> {
         Err(e) => return Err(e),
     };
     if meta.file_type().is_symlink() {
-        // Stat before the open: a device or FIFO target is opened only if swapped in after.
-        let marked = std::fs::metadata(path).is_ok_and(|m| m.is_file())
-            && read_if_regular(path).is_ok_and(|b| b.is_some_and(|b| carries_marker(&b)));
-        return Ok(if marked {
-            HookFile::LinkedOurs
-        } else {
-            HookFile::NotRegular
-        });
+        return Ok(followed_link(path));
     }
     if !meta.file_type().is_file() {
         return Ok(HookFile::NotRegular);
     }
-    match read_if_regular(path) {
+    match read_if_regular(path, None) {
         Ok(Some(bytes)) => Ok(if carries_marker(&bytes) {
             HookFile::Ours
         } else {
@@ -926,12 +959,53 @@ fn hook_file(path: &Path) -> std::io::Result<HookFile> {
     }
 }
 
+/// [`hook_file`]'s answer for a path its lstat found to be a link.
+fn followed_link(path: &Path) -> HookFile {
+    // Stat before the open: a device or FIFO target is opened only if swapped in after.
+    let cap = Some(LINKED_HOOK_READ_CAP);
+    let marked = std::fs::metadata(path).is_ok_and(|m| m.is_file())
+        && read_if_regular(path, cap).is_ok_and(|b| b.is_some_and(|b| carries_marker(&b)));
+    if marked {
+        HookFile::LinkedOurs
+    } else {
+        HookFile::NotRegular
+    }
+}
+
+/// Whether `path`'s lstat says it is a link; a failed lstat is no link.
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Whether `link` resolves to `file`: the same device and inode, so a second spelling
+/// or a hard link of the file matches; a failure on either side is no match.
+#[cfg(unix)]
+fn resolves_to(link: &Path, file: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let id = |path: &Path| std::fs::metadata(path).map(|m| (m.dev(), m.ino()));
+    matches!((id(link), id(file)), (Ok(a), Ok(b)) if a == b)
+}
+
+/// Whether `link` resolves to `file`: equal canonical paths, which spell the on-disk
+/// letter case; a failure on either side is no match.
+#[cfg(not(unix))]
+fn resolves_to(link: &Path, file: &Path) -> bool {
+    matches!(
+        (std::fs::canonicalize(link), std::fs::canonicalize(file)),
+        (Ok(a), Ok(b)) if a == b
+    )
+}
+
+/// The most a linked hook's target is read for the marker, far above the guard script:
+/// a link can point at any file, and a status read holds a runtime worker.
+const LINKED_HOOK_READ_CAP: u64 = 64 * 1024;
+
 /// Opens `path` once and reads it only when the opened handle is a regular file (None
-/// otherwise): the type check reads the handle, never the path. Unix opens with
-/// `O_NONBLOCK`, because a FIFO's open otherwise waits for a writer (it doesn't change
-/// regular-file reads).
-fn read_if_regular(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
-    use std::io::Read;
+/// otherwise): the type check reads the handle, never the path. With `cap`, a file
+/// longer than `cap` bytes is None too, and the read stops one byte past it, so a file
+/// growing under the handle stays bounded. Unix opens with `O_NONBLOCK`, because a
+/// FIFO's open otherwise waits for a writer (it doesn't change regular-file reads).
+fn read_if_regular(path: &Path, cap: Option<u64>) -> std::io::Result<Option<Vec<u8>>> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -940,13 +1014,30 @@ fn read_if_regular(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
         let flags: libc::c_int = libc::O_NONBLOCK;
         options.custom_flags(flags);
     }
-    let mut file = options.open(path)?;
-    if !file.metadata()?.is_file() {
+    let file = options.open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Ok(None);
+    }
+    read_capped(meta.len(), file, cap)
+}
+
+/// `reader`'s bytes, or None past `cap`: a stat'd `len` over it is None unread, and the
+/// read stops one byte past it, so a reader longer than `len` stays bounded.
+fn read_capped(
+    len: u64,
+    reader: impl std::io::Read,
+    cap: Option<u64>,
+) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let over = |len: u64| cap.is_some_and(|cap| len > cap);
+    if over(len) {
         return Ok(None);
     }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(Some(bytes))
+    let limit = cap.map_or(u64::MAX, |cap| cap + 1);
+    reader.take(limit).read_to_end(&mut bytes)?;
+    Ok((!over(bytes.len() as u64)).then_some(bytes))
 }
 
 fn carries_marker(bytes: &[u8]) -> bool {
@@ -1086,11 +1177,13 @@ fn display_hooks_path(path: &Path) -> String {
 }
 
 /// A custom hooks dir blocks first: git doesn't run `<common>/hooks` then, even if
-/// our file sits there. Past it, a marker-carrying managed file is what git runs, so
-/// it reads installed before a manager config in the tree can block, and a link to a
-/// marker-carrying file reads `linkedHook` there for the same reason. Config-defined
-/// hooks (`hook.<name>.*`, git 2.54+) aren't detected: they run beside the hooks-folder
-/// file, whose non-zero exit still stops the push.
+/// our file sits there, unless the custom dir's `pre-push` links to a marker-carrying
+/// file, which git runs through the link and so reads `linkedHook` ahead of a manager.
+/// Past it, a marker-carrying managed file is what git runs, so it reads installed
+/// before a manager config in the tree can block, and a link to a marker-carrying file
+/// reads `linkedHook` there for the same reason. Config-defined hooks
+/// (`hook.<name>.*`, git 2.54+) aren't detected: they run beside the hooks-folder file,
+/// whose non-zero exit still stops the push.
 async fn keep_local_hook_status_core(repo_path: &str) -> AppResult<KeepLocalHookStatus> {
     use KeepLocalHookBlock::{CustomHooksPath, ForeignHook, HookManager, LinkedHook};
     use KeepLocalHookState::{Absent, Blocked, Installed};
@@ -1103,23 +1196,38 @@ async fn keep_local_hook_status_core(repo_path: &str) -> AppResult<KeepLocalHook
     let redirected = hooks_dir_redirected(&managed);
     let linked = matches!(redirected, Ok(true));
     let (state, blocked, managed_hook_present) = if !same_hooks_dir(&effective, &managed) {
-        let reason = if manager.is_some() {
-            HookManager
+        if links_to_a_guard_elsewhere(&effective, &managed) {
+            (Blocked, Some(LinkedHook), false)
+        } else {
+            let reason = if manager.is_some() {
+                HookManager
+            } else {
+                CustomHooksPath
+            };
+            // git reaches this file here only through the other dir's `pre-push`, whose
+            // link to a marker-carrying file is answered above, so a failed read reports
+            // it absent rather than failing a status whose state doesn't depend on it.
+            let present = matches!(redirected, Ok(false))
+                && matches!(hook_file(&pre_push), Ok(HookFile::Ours));
+            (Blocked, Some(reason), present)
+        }
+    } else if redirected.map_err(AppError::Io)? {
+        // git runs a linked guard through the redirect too; Blocked either way, so
+        // Install never writes through it.
+        let reason = if links_to_a_managed_guard(&pre_push, &managed) {
+            LinkedHook
         } else {
             CustomHooksPath
         };
-        // git doesn't run this file here, so a failed read reports it absent rather
-        // than failing a status whose state doesn't depend on it.
-        let present =
-            matches!(redirected, Ok(false)) && matches!(hook_file(&pre_push), Ok(HookFile::Ours));
-        (Blocked, Some(reason), present)
-    } else if redirected.map_err(AppError::Io)? {
-        (Blocked, Some(CustomHooksPath), false)
+        (Blocked, Some(reason), false)
     } else {
         let file = hook_file(&pre_push).map_err(AppError::Io)?;
         let (state, blocked) = match file {
             HookFile::Ours => (Installed, None),
             HookFile::LinkedOurs => (Blocked, Some(LinkedHook)),
+            HookFile::NotRegular if links_to_a_managed_guard(&pre_push, &managed) => {
+                (Blocked, Some(LinkedHook))
+            }
             _ if manager.is_some() => (Blocked, Some(HookManager)),
             HookFile::Foreign | HookFile::NotRegular => (Blocked, Some(ForeignHook)),
             HookFile::Missing => (Absent, None),
@@ -1167,14 +1275,44 @@ async fn keep_local_hook_install_core(repo_path: &str) -> AppResult<KeepLocalHoo
     Ok(after)
 }
 
+/// Whether git reads a hooks dir other than `managed` whose `pre-push` links to a
+/// managed guard ([`links_to_a_managed_guard`]). git runs it through the link, so the
+/// status reads `linkedHook` and Remove leaves the managed dir alone.
+fn links_to_a_guard_elsewhere(effective: &Path, managed: &Path) -> bool {
+    !same_hooks_dir(effective, managed)
+        && links_to_a_managed_guard(&effective.join("pre-push"), managed)
+}
+
+/// Whether `link` is a link to a marker-carrying file within the read cap, or to the
+/// managed `pre-push` or `pre-push.disabled` carrying it at any size. One lstat decides
+/// it is a link; a path that isn't one is never read.
+fn links_to_a_managed_guard(link: &Path, managed: &Path) -> bool {
+    is_link(link)
+        && (followed_link(link) == HookFile::LinkedOurs
+            || ["pre-push", "pre-push.disabled"].into_iter().any(|name| {
+                let file = managed.join(name);
+                resolves_to(link, &file) && matches!(hook_file(&file), Ok(HookFile::Ours))
+            }))
+}
+
 /// Deletes the managed hook from `<common>/hooks` in any state (a hook left inert
 /// behind a later custom hooksPath stays removable); only marker-carrying regular
-/// files go, and nothing is deleted through a redirected hooks dir.
+/// files go, nothing is deleted through a redirected hooks dir, nothing at all while
+/// another hooks dir git reads links its `pre-push` to a marker-carrying file, and
+/// never the file the effective `pre-push` link resolves to.
 async fn keep_local_hook_remove_core(repo_path: &str) -> AppResult<KeepLocalHookStatus> {
     let dir = managed_hooks_dir(repo_path).await?;
-    if !hooks_dir_redirected(&dir).map_err(AppError::Io)? {
+    let (effective, _) = resolve_hooks_dir(repo_path).await?;
+    if !links_to_a_guard_elsewhere(&effective, &dir)
+        && !hooks_dir_redirected(&dir).map_err(AppError::Io)?
+    {
+        let link = effective.join("pre-push");
+        let linked = is_link(&link);
         for name in ["pre-push", "pre-push.disabled"] {
-            remove_if_keep_local_hook(&dir.join(name)).map_err(AppError::Io)?;
+            let file = dir.join(name);
+            if !(linked && resolves_to(&link, &file)) {
+                remove_if_keep_local_hook(&file).map_err(AppError::Io)?;
+            }
         }
     }
     keep_local_hook_status_core(repo_path).await
@@ -1758,17 +1896,90 @@ mod tests {
     #[tokio::test]
     async fn keep_local_hook_never_opens_a_fifo_pre_push() {
         let (_g, _base, repo, _remote) = hook_repo("fifo").await;
-        let file = managed_file(&repo, "pre-push");
-        let made = std::process::Command::new("mkfifo").arg(&file).status();
-        if !matches!(made, Ok(s) if s.success()) {
-            eprintln!("skipped: mkfifo unavailable");
+        if try_mkfifo(&managed_file(&repo, "pre-push")).is_none() {
             return;
         }
-        let read = tokio::time::timeout(std::time::Duration::from_secs(20), status(&repo));
-        let st = read.await.expect("status must not block on a FIFO");
-        assert_status(&st, Blocked, Some(ForeignHook), None);
-        assert_status(&install(&repo).await, Blocked, Some(ForeignHook), None);
-        assert_status(&remove(&repo).await, Blocked, Some(ForeignHook), None);
+        for st in acts_within_bound(&repo) {
+            assert_status(&st, Blocked, Some(ForeignHook), None);
+        }
+    }
+
+    /// Makes a FIFO at `path`, or None where mkfifo is unavailable; CI must have it.
+    #[cfg(unix)]
+    fn try_mkfifo(path: &Path) -> Option<()> {
+        let made = std::process::Command::new("mkfifo").arg(path).status();
+        if matches!(made, Ok(s) if s.success()) {
+            return Some(());
+        }
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must be able to make a FIFO: {made:?}"
+        );
+        eprintln!("skipped: mkfifo unavailable: {made:?}");
+        None
+    }
+
+    /// Status, install and remove for `repo`, each on a thread with its own runtime and
+    /// failed past a bound: they classify the hook synchronously, so a blocking open
+    /// would stall a shared runtime's only thread and no timer on it could fire.
+    #[cfg(unix)]
+    fn acts_within_bound(repo: &str) -> Vec<KeepLocalHookStatus> {
+        ["status", "install", "remove"]
+            .into_iter()
+            .map(|act| {
+                let repo = repo.to_string();
+                within_bound(act, move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    rt.block_on(async {
+                        match act {
+                            "status" => status(&repo).await,
+                            "install" => install(&repo).await,
+                            _ => remove(&repo).await,
+                        }
+                    })
+                })
+            })
+            .collect()
+    }
+
+    /// Runs `f` on a thread and fails past a bound; a panic inside `f` is re-raised as
+    /// itself rather than reported as a timeout.
+    #[cfg(unix)]
+    fn within_bound<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(value) => value,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => match handle.join() {
+                Err(panic) => std::panic::resume_unwind(panic),
+                Ok(()) => panic!("{what} sent nothing"),
+            },
+            Err(e) => panic!("{what} must not block on a FIFO: {e}"),
+        }
+    }
+
+    /// The pin for `O_NONBLOCK`: opening a FIFO with no writer by path returns at once,
+    /// and the handle check answers None.
+    #[cfg(unix)]
+    #[test]
+    fn read_if_regular_never_blocks_on_a_fifo() {
+        let guard = tempfile::Builder::new()
+            .prefix("gd-hook-fifo-read-")
+            .tempdir()
+            .unwrap();
+        let fifo = guard.path().join("fifo");
+        if try_mkfifo(&fifo).is_none() {
+            return;
+        }
+        let read = within_bound("read_if_regular", move || {
+            read_if_regular(&fifo, None).map_err(|e| e.to_string())
+        });
+        assert_eq!(read, Ok(None));
     }
 
     /// Makes a file symlink, or None where the platform refuses (Windows without the
@@ -1833,6 +2044,449 @@ mod tests {
             std::fs::read(&target).unwrap(),
             KEEP_LOCAL_HOOK_SCRIPT.as_bytes()
         );
+    }
+
+    /// git runs another hooks dir's `pre-push` link to the clone's own guard, so it reads
+    /// `linkedHook` ahead of the custom-dir and manager reasons with no leftover counted,
+    /// and Install and Remove leave both the link and the guard.
+    #[tokio::test]
+    async fn keep_local_hook_reads_another_dirs_link_to_the_guard_as_linked() {
+        let (_g, base, repo, _remote) = hook_repo("other-dir-link").await;
+        assert_status(&install(&repo).await, Installed, None, None);
+        let guard = base
+            .join("repo")
+            .join(".git")
+            .join("hooks")
+            .join("pre-push");
+        for dir in ["custom-hooks", ".husky/_"] {
+            let folder = Path::new(&repo).join(dir);
+            std::fs::create_dir_all(&folder).unwrap();
+            let link = folder.join("pre-push");
+            if try_symlink_file(&guard, &link).is_none() {
+                return;
+            }
+            git_ok(&repo, &["config", "core.hooksPath", dir]).await;
+            for st in [
+                status(&repo).await,
+                install(&repo).await,
+                remove(&repo).await,
+            ] {
+                assert_status(&st, Blocked, Some(LinkedHook), None);
+                assert_present(&st, false);
+                assert_redirected(&st, false);
+            }
+            assert_link(&link);
+            assert_eq!(
+                std::fs::read(&guard).unwrap(),
+                KEEP_LOCAL_HOOK_SCRIPT.as_bytes()
+            );
+            let top = dir.split('/').next().unwrap();
+            std::fs::remove_dir_all(Path::new(&repo).join(top)).unwrap();
+        }
+    }
+
+    /// Without a link to a marker-carrying file in the other hooks dir, its answers are
+    /// the custom-dir or manager reason: the common leftover reads present until Remove
+    /// deletes it, and the other dir's file stays as it was.
+    #[tokio::test]
+    async fn keep_local_hook_other_dir_without_a_link_to_the_guard_keeps_its_answers() {
+        let (_g, base, repo, _remote) = hook_repo("other-dir-rows").await;
+        let guard = managed_file(&repo, "pre-push");
+        let foreign = base.join("foreign.sh");
+        std::fs::write(&foreign, FOREIGN).unwrap();
+        let dirs = [
+            ("custom-hooks", CustomHooksPath, None),
+            (".husky/_", HookManager, Some("husky")),
+        ];
+        for (dir, reason, manager) in dirs {
+            for shape in ["none", "foreign", "marker", "foreign-link"] {
+                let folder = Path::new(&repo).join(dir);
+                std::fs::create_dir_all(&folder).unwrap();
+                let file = folder.join("pre-push");
+                match shape {
+                    "none" => {}
+                    "foreign" => std::fs::write(&file, FOREIGN).unwrap(),
+                    "marker" => std::fs::write(&file, KEEP_LOCAL_HOOK_SCRIPT).unwrap(),
+                    _ => {
+                        if try_symlink_file(&foreign, &file).is_none() {
+                            continue;
+                        }
+                    }
+                }
+                std::fs::write(&guard, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+                git_ok(&repo, &["config", "core.hooksPath", dir]).await;
+                for st in [status(&repo).await, install(&repo).await] {
+                    assert_status(&st, Blocked, Some(reason), manager);
+                    assert_present(&st, true);
+                }
+                let st = remove(&repo).await;
+                assert_status(&st, Blocked, Some(reason), manager);
+                assert_present(&st, false);
+                assert_gone(&guard);
+                match shape {
+                    "none" => assert_gone(&file),
+                    "foreign" => assert_eq!(std::fs::read(&file).unwrap(), FOREIGN),
+                    "marker" => assert_eq!(
+                        std::fs::read(&file).unwrap(),
+                        KEEP_LOCAL_HOOK_SCRIPT.as_bytes()
+                    ),
+                    _ => assert_link(&file),
+                }
+                let top = dir.split('/').next().unwrap();
+                std::fs::remove_dir_all(Path::new(&repo).join(top)).unwrap();
+            }
+        }
+    }
+
+    /// A linked target is read for the marker only up to the cap, so a longer one reads
+    /// foreign; a regular file is read whole, so a longer guard is still ours.
+    #[tokio::test]
+    async fn keep_local_hook_reads_a_linked_target_only_up_to_the_cap() {
+        let (_g, base, repo, _remote) = hook_repo("link-cap").await;
+        let cap = usize::try_from(LINKED_HOOK_READ_CAP).unwrap();
+        let mut body = KEEP_LOCAL_HOOK_SCRIPT.as_bytes().to_vec();
+        body.push(b'\n');
+        body.resize(cap + 1, b'#');
+        let hook = managed_file(&repo, "pre-push");
+        std::fs::write(&hook, &body).unwrap();
+        assert_status(&status(&repo).await, Installed, None, None);
+        std::fs::remove_file(&hook).unwrap();
+        let target = base.join("target");
+        std::fs::write(&target, &body[..cap]).unwrap();
+        if try_symlink_file(&target, &hook).is_none() {
+            return;
+        }
+        assert_status(&status(&repo).await, Blocked, Some(LinkedHook), None);
+        std::fs::write(&target, &body).unwrap();
+        for st in [
+            status(&repo).await,
+            install(&repo).await,
+            remove(&repo).await,
+        ] {
+            assert_status(&st, Blocked, Some(ForeignHook), None);
+            assert_present(&st, false);
+        }
+        assert_link(&hook);
+        assert_eq!(std::fs::read(&target).unwrap(), body);
+    }
+
+    /// The guard script padded to one byte past the linked-read cap.
+    fn over_cap_guard() -> Vec<u8> {
+        let mut body = KEEP_LOCAL_HOOK_SCRIPT.as_bytes().to_vec();
+        body.push(b'\n');
+        body.resize(usize::try_from(LINKED_HOOK_READ_CAP).unwrap() + 1, b'#');
+        body
+    }
+
+    /// Another hooks dir's `pre-push` link to the clone's own `pre-push` or
+    /// `pre-push.disabled` is a linked guard at any size: no leftover is counted, and
+    /// Install and Remove leave the link and the file.
+    #[tokio::test]
+    async fn keep_local_hook_reads_a_link_to_an_over_cap_managed_guard_as_linked() {
+        let (_g, _base, repo, _remote) = hook_repo("link-identity").await;
+        let body = over_cap_guard();
+        let folder = Path::new(&repo).join("custom-hooks");
+        std::fs::create_dir_all(&folder).unwrap();
+        git_ok(&repo, &["config", "core.hooksPath", "custom-hooks"]).await;
+        let link = folder.join("pre-push");
+        for name in ["pre-push", "pre-push.disabled"] {
+            let guard = managed_file(&repo, name);
+            std::fs::write(&guard, &body).unwrap();
+            if try_symlink_file(&guard, &link).is_none() {
+                return;
+            }
+            for st in [
+                status(&repo).await,
+                install(&repo).await,
+                remove(&repo).await,
+            ] {
+                assert_status(&st, Blocked, Some(LinkedHook), None);
+                assert_present(&st, false);
+                assert_redirected(&st, false);
+            }
+            assert_link(&link);
+            assert_eq!(std::fs::read(&guard).unwrap(), body, "{name}");
+            std::fs::remove_file(&link).unwrap();
+            std::fs::remove_file(&guard).unwrap();
+        }
+    }
+
+    /// While another hooks dir's `pre-push` links to a separate marker-carrying script,
+    /// Remove deletes nothing: the clone's own leftover guard stays with the link.
+    #[tokio::test]
+    async fn keep_local_hook_remove_leaves_a_leftover_while_another_dir_links_to_a_separate_guard()
+    {
+        let (_g, base, repo, _remote) = hook_repo("other-dir-separate").await;
+        let target = base.join("guard.sh");
+        std::fs::write(&target, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        let leftover = managed_file(&repo, "pre-push");
+        std::fs::write(&leftover, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        let folder = Path::new(&repo).join("custom-hooks");
+        std::fs::create_dir_all(&folder).unwrap();
+        let link = folder.join("pre-push");
+        if try_symlink_file(&target, &link).is_none() {
+            return;
+        }
+        git_ok(&repo, &["config", "core.hooksPath", "custom-hooks"]).await;
+        for st in [
+            status(&repo).await,
+            install(&repo).await,
+            remove(&repo).await,
+        ] {
+            assert_status(&st, Blocked, Some(LinkedHook), None);
+            assert_present(&st, false);
+            assert_redirected(&st, false);
+        }
+        assert_eq!(
+            std::fs::read(&leftover).unwrap(),
+            KEEP_LOCAL_HOOK_SCRIPT.as_bytes()
+        );
+        assert_link(&link);
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            KEEP_LOCAL_HOOK_SCRIPT.as_bytes()
+        );
+    }
+
+    /// A link to an over-cap marker-carrying file outside the managed dir keeps the
+    /// custom-dir answer: the common leftover reads present and Remove deletes only it.
+    #[tokio::test]
+    async fn keep_local_hook_reads_a_link_to_an_over_cap_file_elsewhere_as_custom() {
+        let (_g, base, repo, _remote) = hook_repo("link-elsewhere").await;
+        let body = over_cap_guard();
+        let target = base.join("big-guard.sh");
+        std::fs::write(&target, &body).unwrap();
+        let guard = managed_file(&repo, "pre-push");
+        std::fs::write(&guard, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        let folder = Path::new(&repo).join("custom-hooks");
+        std::fs::create_dir_all(&folder).unwrap();
+        let link = folder.join("pre-push");
+        if try_symlink_file(&target, &link).is_none() {
+            return;
+        }
+        git_ok(&repo, &["config", "core.hooksPath", "custom-hooks"]).await;
+        for st in [status(&repo).await, install(&repo).await] {
+            assert_status(&st, Blocked, Some(CustomHooksPath), None);
+            assert_present(&st, true);
+        }
+        let st = remove(&repo).await;
+        assert_status(&st, Blocked, Some(CustomHooksPath), None);
+        assert_present(&st, false);
+        assert_gone(&guard);
+        assert_link(&link);
+        assert_eq!(std::fs::read(&target).unwrap(), body);
+    }
+
+    /// A regular `pre-push` in another hooks dir is never opened, so one that can't be
+    /// read leaves the custom-dir answer as it is, with no error.
+    #[tokio::test]
+    async fn keep_local_hook_does_not_read_a_regular_pre_push_in_another_dir() {
+        let (_g, _base, repo, _remote) = hook_repo("other-dir-unread").await;
+        let guard = managed_file(&repo, "pre-push");
+        std::fs::write(&guard, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        let folder = Path::new(&repo).join("custom-hooks");
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("pre-push");
+        std::fs::write(&file, FOREIGN).unwrap();
+        git_ok(&repo, &["config", "core.hooksPath", "custom-hooks"]).await;
+        #[cfg(windows)]
+        let hold = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&file)
+                .unwrap()
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        for st in [status(&repo).await, install(&repo).await] {
+            assert_status(&st, Blocked, Some(CustomHooksPath), None);
+            assert_present(&st, true);
+        }
+        assert_status(&remove(&repo).await, Blocked, Some(CustomHooksPath), None);
+        assert_gone(&guard);
+        #[cfg(windows)]
+        drop(hold);
+        assert!(file.is_file());
+    }
+
+    /// The clone's own `pre-push` linked to its `pre-push.disabled` twin: Remove leaves
+    /// the twin, the file git runs through the link.
+    #[tokio::test]
+    async fn keep_local_hook_remove_keeps_the_twin_its_pre_push_links_to() {
+        let (_g, _base, repo, _remote) = hook_repo("twin-link").await;
+        let twin = managed_file(&repo, "pre-push.disabled");
+        std::fs::write(&twin, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        let link = managed_file(&repo, "pre-push");
+        if try_symlink_file(&twin, &link).is_none() {
+            return;
+        }
+        for st in [
+            status(&repo).await,
+            install(&repo).await,
+            remove(&repo).await,
+        ] {
+            assert_status(&st, Blocked, Some(LinkedHook), None);
+            assert_present(&st, false);
+        }
+        assert_link(&link);
+        assert_eq!(
+            std::fs::read(&twin).unwrap(),
+            KEEP_LOCAL_HOOK_SCRIPT.as_bytes()
+        );
+    }
+
+    /// The clone's own `pre-push` linked to an over-cap marker-carrying twin is a linked
+    /// guard too: the twin is matched by name, not by the capped read.
+    #[tokio::test]
+    async fn keep_local_hook_reads_its_pre_push_linked_to_an_over_cap_twin_as_linked() {
+        let (_g, _base, repo, _remote) = hook_repo("twin-over-cap").await;
+        let body = over_cap_guard();
+        let twin = managed_file(&repo, "pre-push.disabled");
+        std::fs::write(&twin, &body).unwrap();
+        let link = managed_file(&repo, "pre-push");
+        if try_symlink_file(&twin, &link).is_none() {
+            return;
+        }
+        for st in [
+            status(&repo).await,
+            install(&repo).await,
+            remove(&repo).await,
+        ] {
+            assert_status(&st, Blocked, Some(LinkedHook), None);
+            assert_present(&st, false);
+        }
+        assert_link(&link);
+        assert_eq!(std::fs::read(&twin).unwrap(), body);
+    }
+
+    /// A `pre-push` link to a hard-linked second name of the twin resolves to the twin:
+    /// Remove keeps it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn keep_local_hook_remove_keeps_a_twin_its_pre_push_reaches_by_a_hard_link() {
+        let (_g, base, repo, _remote) = hook_repo("twin-hard-link").await;
+        let twin = managed_file(&repo, "pre-push.disabled");
+        std::fs::write(&twin, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        let alias = base.join("alias");
+        std::fs::hard_link(&twin, &alias).unwrap();
+        let link = managed_file(&repo, "pre-push");
+        try_symlink_file(&alias, &link).expect("a unix symlink is made");
+        let st = remove(&repo).await;
+        assert_status(&st, Blocked, Some(LinkedHook), None);
+        assert_link(&link);
+        assert_eq!(
+            std::fs::read(&twin).unwrap(),
+            KEEP_LOCAL_HOOK_SCRIPT.as_bytes()
+        );
+    }
+
+    /// `read_capped` refuses a stat'd length past the cap unread, and a reader longer
+    /// than its stat'd length (a file grown since) stops one byte past the cap as None.
+    #[test]
+    fn read_capped_stops_one_byte_past_the_cap() {
+        let cap = LINKED_HOOK_READ_CAP;
+        let len = usize::try_from(cap).unwrap();
+        let src = vec![b'#'; len + 2];
+        let mut rest = &src[..];
+        assert_eq!(read_capped(cap, &mut rest, Some(cap)).unwrap(), None);
+        assert_eq!(rest.len(), 1, "the read takes cap + 1 bytes");
+        let mut unread = &src[..];
+        assert_eq!(read_capped(cap + 1, &mut unread, Some(cap)).unwrap(), None);
+        assert_eq!(unread.len(), src.len(), "a length past the cap isn't read");
+        let exact = read_capped(cap, &src[..len], Some(cap)).unwrap();
+        assert_eq!(exact.as_deref(), Some(&src[..len]));
+        let whole = read_capped(cap + 2, &src[..], None).unwrap();
+        assert_eq!(whole, Some(src.clone()));
+    }
+
+    /// A `pre-push` link to a marker-carrying file inside a redirected hooks dir reads
+    /// `linkedHook`, with nothing written or deleted through the redirect; a regular
+    /// guard there keeps the custom-dir reason.
+    #[tokio::test]
+    async fn keep_local_hook_reads_a_linked_guard_inside_a_redirected_hooks_dir() {
+        let (_g, base, repo, _remote) = hook_repo("redirected-link").await;
+        let outside = base.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let hooks = base.join("repo").join(".git").join("hooks");
+        std::fs::remove_dir(&hooks).unwrap();
+        if link_hooks_dir(&base, &hooks, &outside, cfg!(windows)).is_none() {
+            return;
+        }
+        let target = base.join("guard.sh");
+        std::fs::write(&target, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        let link = outside.join("pre-push");
+        if try_symlink_file(&target, &link).is_none() {
+            return;
+        }
+        for st in [
+            status(&repo).await,
+            install(&repo).await,
+            remove(&repo).await,
+        ] {
+            assert_status(&st, Blocked, Some(LinkedHook), None);
+            assert_present(&st, false);
+            assert_redirected(&st, true);
+        }
+        assert_link(&link);
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            KEEP_LOCAL_HOOK_SCRIPT.as_bytes()
+        );
+        let names: Vec<_> = std::fs::read_dir(&outside)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["pre-push"], "nothing else written through it");
+        std::fs::remove_file(&link).unwrap();
+        std::fs::write(&link, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        for st in [status(&repo).await, remove(&repo).await] {
+            assert_status(&st, Blocked, Some(CustomHooksPath), None);
+            assert_redirected(&st, true);
+        }
+        assert!(link.is_file(), "nothing deleted through it");
+    }
+
+    /// A redirected hooks dir whose `pre-push` links to an over-cap marker-carrying
+    /// `pre-push.disabled` beside it reads `linkedHook`: the link resolves to that managed file.
+    #[tokio::test]
+    async fn keep_local_hook_reads_a_redirected_pre_push_linked_to_an_over_cap_twin_as_linked() {
+        let (_g, base, repo, _remote) = hook_repo("redirected-twin").await;
+        let outside = base.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let hooks = base.join("repo").join(".git").join("hooks");
+        std::fs::remove_dir(&hooks).unwrap();
+        if link_hooks_dir(&base, &hooks, &outside, cfg!(windows)).is_none() {
+            return;
+        }
+        let body = over_cap_guard();
+        let twin = outside.join("pre-push.disabled");
+        std::fs::write(&twin, &body).unwrap();
+        let link = outside.join("pre-push");
+        if try_symlink_file(&twin, &link).is_none() {
+            return;
+        }
+        for st in [
+            status(&repo).await,
+            install(&repo).await,
+            remove(&repo).await,
+        ] {
+            assert_status(&st, Blocked, Some(LinkedHook), None);
+            assert_present(&st, false);
+            assert_redirected(&st, true);
+        }
+        assert_link(&link);
+        assert_eq!(std::fs::read(&twin).unwrap(), body);
+        let mut names: Vec<_> = std::fs::read_dir(&outside)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["pre-push", "pre-push.disabled"]);
     }
 
     #[tokio::test]
@@ -3506,29 +4160,18 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn keep_local_hook_never_opens_a_fifo_behind_a_pre_push_link() {
+    async fn keep_local_hook_does_not_block_on_a_fifo_behind_a_pre_push_link() {
         let (_g, base, repo, _remote) = hook_repo("fifo-link").await;
         let fifo = base.join("fifo");
-        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
-        if !matches!(made, Ok(s) if s.success()) {
-            eprintln!("skipped: mkfifo unavailable");
+        if try_mkfifo(&fifo).is_none() {
             return;
         }
         let link = managed_file(&repo, "pre-push");
         try_symlink_file(&fifo, &link).expect("a unix symlink is made");
-        let bound = std::time::Duration::from_secs(20);
-        let st = tokio::time::timeout(bound, status(&repo))
-            .await
-            .expect("status must not block on a FIFO behind a link");
-        assert_status(&st, Blocked, Some(ForeignHook), None);
-        let st = tokio::time::timeout(bound, install(&repo))
-            .await
-            .expect("install must not block on a FIFO behind a link");
-        assert_status(&st, Blocked, Some(ForeignHook), None);
-        let st = tokio::time::timeout(bound, remove(&repo))
-            .await
-            .expect("remove must not block on a FIFO behind a link");
-        assert_status(&st, Blocked, Some(ForeignHook), None);
+        for st in acts_within_bound(&repo) {
+            assert_status(&st, Blocked, Some(ForeignHook), None);
+        }
+        assert_link(&link);
     }
 
     /// Makes `link` a directory link to `target` on every platform: a junction on
@@ -3641,6 +4284,115 @@ mod tests {
             canonical(&config),
             canonical(&real.join("web").join(".husky"))
         );
+    }
+
+    /// unix resolves a `..` after a linked folder physically, so a hooks path climbing
+    /// back out of a link to a shared `.husky` subfolder is that shared `.husky`, though
+    /// its lexical spelling names a folder under no `.husky`.
+    #[cfg(unix)]
+    #[test]
+    fn detect_manager_resolves_a_climb_through_a_linked_folder_physically() {
+        let guard = tempfile::Builder::new()
+            .prefix("gd-husky-link-")
+            .tempdir()
+            .unwrap();
+        let t = guard.path();
+        let repo = t.join("repo");
+        std::fs::create_dir_all(repo.join("vendor")).unwrap();
+        let stubs = t.join("shared").join(".husky").join("stubs");
+        std::fs::create_dir_all(&stubs).unwrap();
+        let link = repo.join("vendor").join("hooks-link");
+        std::os::unix::fs::symlink(&stubs, &link).unwrap();
+        let hooks = link.join("..").join("hooks");
+        assert_eq!(lexically_normal(&hooks), repo.join("vendor").join("hooks"));
+        let config = husky_config(&repo, &hooks).expect("husky");
+        assert_eq!(
+            canonical(&config),
+            canonical(&t.join("shared").join(".husky"))
+        );
+        // The names after the last `..` keep their spelling: a `_` linked to a folder
+        // under no `.husky` is still in the shared `.husky`.
+        let plain = t.join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        std::os::unix::fs::symlink(&plain, t.join("shared").join(".husky").join("_")).unwrap();
+        let config = husky_config(&repo, &link.join("..").join("_")).expect("husky");
+        assert_eq!(config, canonical(&t.join("shared").join(".husky")));
+    }
+
+    /// The canonical root compare keeps the names below the root: a root reached only
+    /// through a linked ancestor, whose `.husky` is itself a link, is still husky. The
+    /// alias sits under a `.husky` folder, which a spelled-path scan would pick instead.
+    #[test]
+    fn detect_manager_keeps_a_linked_husky_below_a_root_matched_canonically() {
+        let guard = tempfile::Builder::new()
+            .prefix("gd-husky-canon-")
+            .tempdir()
+            .unwrap();
+        let t = guard.path();
+        let real = t.join("real");
+        let home = real.join("tools").join("home");
+        std::fs::create_dir_all(home.join("_")).unwrap();
+        std::fs::create_dir_all(real.join("web")).unwrap();
+        link_dir(&home, &real.join("web").join(".husky"));
+        std::fs::create_dir_all(t.join(".husky")).unwrap();
+        let alias = t.join(".husky").join("alias");
+        link_dir(&real, &alias);
+        let hooks = alias.join("web").join(".husky").join("_");
+        let config = husky_config(&real, &hooks).expect("husky");
+        assert_eq!(config, alias.join("web").join(".husky"));
+    }
+
+    /// A hooks path that enters the clone through a link below its root, where no
+    /// spelled ancestor is the root, is judged by where it lands, never by `.husky`
+    /// folders in its spelling outside the clone.
+    #[test]
+    fn detect_manager_judges_a_link_into_the_root_by_where_it_lands() {
+        let guard = tempfile::Builder::new()
+            .prefix("gd-husky-landed-")
+            .tempdir()
+            .unwrap();
+        let t = guard.path();
+        let husky = t.join(".husky");
+        let repo = husky.join("repo");
+        std::fs::create_dir_all(repo.join(".git").join("hooks")).unwrap();
+        let alias = husky.join("hook-alias");
+        link_dir(&repo.join(".git").join("hooks"), &alias);
+        assert_eq!(husky_config(&repo, &alias), None);
+        let plain = t.join("plain").join("repo");
+        let husky_dir = plain.join("frontend").join(".husky");
+        std::fs::create_dir_all(husky_dir.join("_")).unwrap();
+        let hk = t.join("hk");
+        link_dir(&husky_dir, &hk);
+        let config = husky_config(&plain, &hk.join("_")).expect("husky");
+        assert_eq!(canonical(&config), canonical(&husky_dir));
+        std::fs::create_dir_all(repo.join("tools").join("hooks")).unwrap();
+        let al = husky.join("al");
+        link_dir(&repo.join("tools"), &al);
+        assert_eq!(husky_config(&repo, &al.join("hooks")), None);
+    }
+
+    /// A climb whose lexical and physical folders differ through the last `..` takes the
+    /// physical one, though both then reach one folder through their `_` links.
+    #[cfg(unix)]
+    #[test]
+    fn detect_manager_takes_a_physical_climb_whose_endpoints_meet() {
+        let guard = tempfile::Builder::new()
+            .prefix("gd-husky-meet-")
+            .tempdir()
+            .unwrap();
+        let t = guard.path();
+        let repo = t.join("repo");
+        std::fs::create_dir_all(repo.join("vendor")).unwrap();
+        let stubs = t.join("shared").join(".husky").join("stubs");
+        std::fs::create_dir_all(&stubs).unwrap();
+        let shims = t.join("shims");
+        std::fs::create_dir(&shims).unwrap();
+        let link = repo.join("vendor").join("link");
+        std::os::unix::fs::symlink(&stubs, &link).unwrap();
+        std::os::unix::fs::symlink(&shims, t.join("shared").join(".husky").join("_")).unwrap();
+        std::os::unix::fs::symlink(&shims, repo.join("vendor").join("_")).unwrap();
+        let config = husky_config(&repo, &link.join("..").join("_")).expect("husky");
+        assert_eq!(config, canonical(&t.join("shared").join(".husky")));
     }
 
     /// A repository stored inside a `.husky` folder, with the default hooks folder, is

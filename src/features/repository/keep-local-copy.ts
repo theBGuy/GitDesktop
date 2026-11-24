@@ -117,7 +117,7 @@ export const KEEP_LOCAL_HOOK_MANAGER_NOTE: Partial<
   Record<"husky" | "pre-commit" | "lefthook", string>
 > = {
   lefthook:
-    "With lefthook, the check sees the pushed refs only in a command that sets use_stdin: true.",
+    "With lefthook, the check sees the pushed refs only when it is the one pre-push command or script that sets use_stdin: true.",
 };
 
 /** The can't-install state's lead-in to the check's code block. */

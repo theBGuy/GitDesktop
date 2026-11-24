@@ -1017,8 +1017,8 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   offers **Remove hook** too.
   When the clone's pre-push hook is a link to a file that carries the guard, the dialog
   says so, and installing or removing the guard leaves the link as it is. With lefthook,
-  put the check in a command that sets \`use_stdin: true\`: lefthook passes the pushed
-  refs only to such a command.
+  put the check in the one pre-push command or script that sets \`use_stdin: true\`:
+  lefthook passes the pushed refs to a single such entry.
 - **Clean up branches** opens from the switcher's menu or the command palette and gathers
   stale branches into one reviewed list. Three toggles choose what it lists, in any mix:
   **Merged** (into the default branch directly, or through a recent pull request where the
@@ -4438,11 +4438,13 @@ the small programs Git runs at points like *before commit* or *before push*. Whe
   deleting it here changes the guard too. While it's active, its row reads **Managed by
   GitDesktop**, and **Save**, **Disable** and **Delete** on it ask first.
 - When a hook changes on disk while it's open, an unedited script reloads by itself; an
-  edited one keeps your edit and offers **Reload**. A script that can't be read shows
-  the reason and a **Retry**. **Save**, **Disable** and **Enable** stop with a notice
-  when the terminal push guard was added or removed since the list loaded, and
-  GitDesktop doesn't save, enable or disable a hook that is a link. **Delete** on a hook
-  that is a link removes the link and leaves the file it points to.
+  edited one keeps your edit and offers **Reload**. A hook whose script can't be read
+  when you select it shows the reason and a **Retry**. **Save**, **Disable** and
+  **Enable** stop with a notice when the terminal push guard was added or removed since
+  the list loaded, and GitDesktop never writes through a link: **Enable** and **Disable**
+  on a hook that is a link stop and say so, as does **Save** when the active hook is a
+  link. **Delete** removes a hook's active and disabled copies together. A copy that is a
+  link is removed as a link, so a file it points to elsewhere stays.
 - If your repo uses a hook manager — **husky**, **pre-commit**, or **lefthook** —
   GitDesktop detects it, opens its config, and can run the right install/update command
   for you.`,

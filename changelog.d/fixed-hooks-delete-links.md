@@ -1,3 +1,4 @@
-- **Deleting a git hook** that is a link removes the link itself and leaves the
-  file it points to, including a link that points nowhere, and a delete that
-  can't finish says which file stayed and why.
+- **Deleting a git hook** handles a copy that is a link: the link is removed
+  and a file it points to elsewhere stays, a link that points nowhere is
+  cleared along with the hook's other copy, and a delete that can't finish
+  says which file stayed and why.

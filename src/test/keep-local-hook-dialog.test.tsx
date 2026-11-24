@@ -70,7 +70,7 @@ const L_BODY =
 const LINKED =
   "This clone's pre-push hook is a link to a file that carries GitDesktop's guard. Installing or removing the guard here leaves a linked hook alone, so change or delete the link yourself.";
 const LEFTHOOK_NOTE =
-  "With lefthook, the check sees the pushed refs only in a command that sets use_stdin: true.";
+  "With lefthook, the check sees the pushed refs only when it is the one pre-push command or script that sets use_stdin: true.";
 
 const hookStatus = (
   state: KeepLocalHookStatus["state"],
@@ -801,6 +801,82 @@ describe("the can't-install state", () => {
       expect(button("Remove hook")).toHaveAttribute("aria-disabled", "true"),
     );
     expect(button("Close")).not.toHaveAttribute("aria-disabled");
+  });
+
+  describe("a re-read that changes the controls", () => {
+    /** Opens on `from`, puts focus where `focus` says, then re-reads `to`. */
+    async function reread(
+      from: KeepLocalHookStatus,
+      to: KeepLocalHookStatus,
+      focus: (d: HTMLElement) => HTMLElement,
+    ) {
+      backend = from;
+      const { queryClient } = renderDialog();
+      const d = await dialog();
+      await expectFocusOn("Close");
+      const target = focus(d);
+      act(() => target.focus());
+      expect(target).toHaveFocus();
+      backend = to;
+      await act(async () => {
+        await queryClient.invalidateQueries({ queryKey: HOOK_KEY });
+      });
+      await settle();
+      return { d, target };
+    }
+
+    it("lands focus on Close when Copy check goes with it", async () => {
+      const { d } = await reread(
+        hookStatus("blocked", "foreignHook"),
+        hookStatus("blocked", "linkedHook"),
+        () => button("Copy check"),
+      );
+      await within(d).findByText(LINKED);
+      await expectFocusOn("Close");
+    });
+
+    it("lands focus on Close when Remove hook goes with it", async () => {
+      const { d } = await reread(
+        hookStatus("blocked", "customHooksPath", null, true),
+        hookStatus("blocked", "customHooksPath", null, false),
+        () => button("Remove hook"),
+      );
+      expect(within(d).queryByText(INERT)).toBe(null);
+      await expectFocusOn("Close");
+    });
+
+    it("lands focus on Close when it sits on the popup itself", async () => {
+      const { d } = await reread(
+        hookStatus("blocked", "foreignHook"),
+        hookStatus("blocked", "linkedHook"),
+        (popup) => popup,
+      );
+      await within(d).findByText(LINKED);
+      await expectFocusOn("Close");
+    });
+
+    it("leaves focus on Close", async () => {
+      const { d, target } = await reread(
+        hookStatus("blocked", "foreignHook"),
+        hookStatus("blocked", "linkedHook"),
+        () => button("Close"),
+      );
+      await within(d).findByText(LINKED);
+      expect(target).toHaveFocus();
+    });
+
+    it("leaves focus on Remove hook when only Copy check goes", async () => {
+      const { d, target } = await reread(
+        hookStatus("blocked", "customHooksPath", null, true),
+        hookStatus("blocked", "linkedHook", null, true),
+        () => button("Remove hook"),
+      );
+      await within(d).findByText(LINKED);
+      expect(within(d).queryByRole("button", { name: "Copy check" })).toBe(
+        null,
+      );
+      expect(target).toHaveFocus();
+    });
   });
 });
 

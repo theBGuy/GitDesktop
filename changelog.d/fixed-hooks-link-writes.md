@@ -1,3 +1,3 @@
-- **Git hooks** leave a hook that is a link, and the file it points to,
-  untouched: **Save**, **Enable** and **Disable** say the hook is a link
-  instead.
+- **Git hooks** never write through a link, so a script a hook links to
+  elsewhere stays as it is: **Enable** and **Disable** on a linked hook say
+  it is a link, and so does **Save** when the active hook is one.
