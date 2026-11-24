@@ -16,16 +16,19 @@ import {
   it,
   vi,
 } from "vitest";
+import { useBranchCommitDraft } from "@/features/commit/useCommitSubmit";
 import {
   type RemoteRenameOffer,
   RenameBranchDialog,
 } from "@/features/repository/RenameBranchDialog";
+import { GIT_PUSH_TIMEOUT_MESSAGE, presentError } from "@/lib/error-summary";
 import {
   forgePrsOnRemoteBranch,
+  gitBranches,
   gitRemoteRenameCheck,
   gitRenameBranch,
 } from "@/lib/git/api";
-import { remoteRenameCheckOptions } from "@/lib/git/queries";
+import { remoteRenameCheckOptions, usePush } from "@/lib/git/queries";
 import type {
   RemoteBranchPulls,
   RemoteRenameCheck,
@@ -34,7 +37,7 @@ import type {
 } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
-import { useUiStore } from "@/lib/stores/ui";
+import { commitDraftKey, useUiStore } from "@/lib/stores/ui";
 import { unmockedCommands } from "./setup";
 
 // The remote rename callee is reached only through its spy: publish-hold-routes
@@ -51,6 +54,8 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgePrsOnRemoteBranch: vi.fn(),
   gitRenameBranchRemote: renameRemoteSpy,
   gitRenameBranch: vi.fn(),
+  gitBranches: vi.fn(),
+  gitPush: vi.fn(() => new Promise(() => undefined)),
 }));
 // A stand-in generator: the chord's dispatch is what these tests read.
 const generateSpy = vi.hoisted(() => vi.fn(async () => undefined));
@@ -77,6 +82,9 @@ vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
 const REPO = "C:/repos/ren";
 const OTHER = "C:/repos/elsewhere";
 const TIP = "1111111111111111111111111111111111111111";
+const TIP_B = "2222222222222222222222222222222222222222";
+/** `text` closed by one period, as the dialog closes a summary. */
+const closed = (text: string) => (/[.!?…]$/.test(text) ? text : `${text}.`);
 const ORIGIN: RemoteRenameOffer = { remote: "origin", blocked: null };
 /** One code point, two UTF-16 units. */
 const ASTRAL = String.fromCodePoint(0x1f600);
@@ -128,6 +136,7 @@ beforeEach(() => {
     warning: null,
   });
   vi.mocked(gitRenameBranch).mockResolvedValue({ warning: null } as never);
+  vi.mocked(gitBranches).mockResolvedValue([{ name: "feat" }] as never);
   spies = {
     success: vi.spyOn(toast, "success"),
     warning: vi.spyOn(toast, "warning"),
@@ -221,6 +230,13 @@ function renderDialog(
     queryClient,
     onClose,
     rerenderWith: (p: Partial<Props>) => act(() => rerenderWith(p)),
+    /** A repository switch as the app makes one: the store and the prop the
+     *  view reads from it move in one commit. */
+    switchRepo: (next: string) =>
+      act(() => {
+        useUiStore.setState({ repoPath: next });
+        rerenderWith({ repoPath: next });
+      }),
   };
 }
 
@@ -325,15 +341,26 @@ describe("the box", () => {
     expect(gitRemoteRenameCheck).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["remoteDefault", "feat is the default branch on origin"],
-    ["keepLocal", "feat is marked Keep local"],
-  ] as const)(
+  it.each<[string, RemoteRenameOffer, string]>([
+    [
+      "remoteDefault",
+      { remote: "origin", blocked: "remoteDefault" },
+      "feat is the default branch on origin",
+    ],
+    [
+      "keepLocal",
+      { remote: "origin", blocked: "keepLocal" },
+      "feat is marked Keep local",
+    ],
+    [
+      "pushesElsewhere",
+      { remote: "origin", blocked: "pushesElsewhere", pushRemote: "fork" },
+      "feat pushes to fork, not origin",
+    ],
+  ])(
     "is held for %s with its visible reason",
-    async (blocked, why) => {
-      const { user } = renderDialog({
-        remoteRename: { remote: "origin", blocked },
-      });
+    async (_n, remoteRename, why) => {
+      const { user } = renderDialog({ remoteRename });
       expect(box()).toHaveAttribute("aria-disabled", "true");
       expect(box()).toHaveAccessibleName("Also rename on origin");
       expectBoxReason(why);
@@ -348,8 +375,9 @@ describe("the box", () => {
     await tickClear(user);
     act(() => onlineManager.setOnline(false));
     expectBoxReason("you're offline");
-    expect(helper()).toHaveTextContent(
-      "keeps its name and feat2 keeps tracking it.",
+    // Said in the live region, so the drop-back is announced.
+    expect(status()).toHaveTextContent(
+      "origin/feat keeps its name and feat2 keeps tracking it.",
     );
     await user.click(submit());
     await waitFor(() => expect(gitRenameBranch).toHaveBeenCalled());
@@ -484,23 +512,35 @@ describe("the tick and the reads belong to one open dialog", () => {
   });
 
   it.each([
-    ["the host drops the target", { target: null }],
-    ["the repository switches", { repoPath: OTHER }],
-  ] as const)("toasts a refusal that settles after %s", async (_n, next) => {
-    const act$ = deferred<RemoteRenameOutcome>();
-    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
-    const { user, rerenderWith } = renderDialog();
-    await rename(user);
-    await tickClear(user);
-    await user.click(submit());
-    await waitFor(() => expect(footerClose()).not.toBe(null));
-    rerenderWith(next);
-    await act(async () =>
-      act$.resolve({ status: "refused", refusal: { code: "remoteGone" } }),
-    );
-    await waitFor(() => expect(spies.info).toHaveBeenCalledTimes(1));
-    expect(spies.info.mock.calls[0][0]).toMatch(/^Didn't rename feat: /);
-  });
+    [
+      "the host drops the target",
+      false,
+      "Didn't rename feat: origin/feat no longer exists.",
+    ],
+    [
+      "the repository switches",
+      true,
+      "Didn't rename feat in ren: origin/feat no longer exists.",
+    ],
+  ] as const)(
+    "toasts a refusal that settles after %s",
+    async (_n, switches, text) => {
+      const act$ = deferred<RemoteRenameOutcome>();
+      vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+      const { user, rerenderWith, switchRepo } = renderDialog();
+      await rename(user);
+      await tickClear(user);
+      await user.click(submit());
+      await waitFor(() => expect(footerClose()).not.toBe(null));
+      if (switches) switchRepo(OTHER);
+      else rerenderWith({ target: null });
+      await act(async () =>
+        act$.resolve({ status: "refused", refusal: { code: "remoteGone" } }),
+      );
+      await waitFor(() => expect(spies.info).toHaveBeenCalledTimes(1));
+      expect(spies.info).toHaveBeenCalledWith(text);
+    },
+  );
 
   it("drops the tick when the offer leaves and comes back", async () => {
     const { user, rerenderWith } = renderDialog();
@@ -534,7 +574,7 @@ describe("a running remote rename stays on screen", () => {
   it("shows the running state when reopened on the new name", async () => {
     const act$ = deferred<RemoteRenameOutcome>();
     vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
-    const { user, rerenderWith } = renderDialog();
+    const { user, onClose, rerenderWith } = renderDialog();
     await rename(user);
     await tickClear(user);
     await user.click(submit());
@@ -550,7 +590,10 @@ describe("a running remote rename stays on screen", () => {
     expect(submit()).toHaveAccessibleDescription(
       "Wait for the rename to finish",
     );
+    const closes = onClose.mock.calls.length;
     await act(async () => act$.resolve({ status: "renamed", warning: null }));
+    // The settle closes it like the pressing dialog.
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(closes + 1));
   });
 
   it("keeps what it showed at the press when the re-read drops the old name", async () => {
@@ -757,6 +800,61 @@ describe("a settled rename leaves without a reset frame", () => {
     );
     await user.click(box());
     expect(box()).toBeChecked();
+  });
+
+  it("holds Rename and the box through a local-only rename when an older remote rename settles first", async () => {
+    const act$ = deferred<RemoteRenameOutcome>();
+    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+    const local$ = deferred<{ warning: null }>();
+    vi.mocked(gitRenameBranch).mockReturnValue(local$.promise as never);
+    const { user, rerenderWith } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    await user.click(submit());
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    await user.click(footerClose() as HTMLElement);
+    rerenderWith({ target: "topic" });
+    await waitFor(() => expect(nameField()).toHaveValue("topic"));
+    await rename(user, "topic2");
+    await user.click(submit());
+    await waitFor(() =>
+      expect(gitRenameBranch).toHaveBeenCalledWith(REPO, "topic", "topic2"),
+    );
+    // The older submit's settle clears form-core's one `isSubmitting`.
+    await act(async () => act$.resolve({ status: "renamed", warning: null }));
+    await waitFor(() => expect(spies.success).toHaveBeenCalled());
+    expectHeld();
+    expect(submit()).toHaveAccessibleDescription(
+      "Wait for the rename to finish",
+    );
+    expectBoxReason("Wait for the rename to finish");
+    await act(async () => local$.resolve({ warning: null }));
+  });
+
+  it("holds only the repository a local-only rename runs in", async () => {
+    const local$ = deferred<{ warning: null }>();
+    vi.mocked(gitRenameBranch).mockReturnValue(local$.promise as never);
+    const { user, rerenderWith, switchRepo } = renderDialog();
+    await rename(user);
+    await user.click(submit());
+    await waitFor(() =>
+      expect(gitRenameBranch).toHaveBeenCalledWith(REPO, "feat", "feat2"),
+    );
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    switchRepo(OTHER);
+    rerenderWith({ target: "feat" });
+    await rename(user, "feat3");
+    await waitFor(() =>
+      expect(submit()).toHaveAttribute("aria-disabled", "false"),
+    );
+    expect(box()).not.toHaveAttribute("aria-disabled", "true");
+    // Back where it runs, the same dialog holds again.
+    switchRepo(REPO);
+    await waitFor(() => expectHeld());
+    expect(submit()).toHaveAccessibleDescription(
+      "Wait for the rename to finish",
+    );
+    await act(async () => local$.resolve({ warning: null }));
   });
 });
 
@@ -988,6 +1086,16 @@ describe("the check and the lookup", () => {
       "Couldn't reach origin: unable to access. Untick to rename only here.",
     ],
     [
+      "unreachable ending in a colon",
+      { code: "unreachable", detail: "fatal: Policy check failed:" },
+      "Couldn't reach origin: Policy check failed. Untick to rename only here.",
+    ],
+    [
+      "pushesElsewhere",
+      { code: "pushesElsewhere", pushRemote: "fork" },
+      "feat pushes to fork, not origin. Untick to rename only here.",
+    ],
+    [
       "unreachable long",
       { code: "unreachable", detail: LONG_UNREACHABLE },
       `${LONG_UNREACHABLE_SHOWN} Untick to rename only here.`,
@@ -1027,11 +1135,6 @@ describe("the check and the lookup", () => {
       { code: "keepLocal" },
       "feat is marked Keep local. Untick to rename only here.",
     ],
-    [
-      "moved",
-      { code: "moved" },
-      "origin/feat changed since it was checked. Checking again…",
-    ],
   ])(
     "refused %s: its own sentence holds Rename and Enter",
     async (_n, refusal, text) => {
@@ -1048,6 +1151,118 @@ describe("the check and the lookup", () => {
       expect(gitRenameBranch).not.toHaveBeenCalled();
     },
   );
+
+  it("re-checks after the act answers moved and sends the tip it then read", async () => {
+    vi.mocked(gitRenameBranchRemote).mockResolvedValueOnce({
+      status: "refused",
+      refusal: { code: "moved" },
+    });
+    const { user } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    const recheck = deferred<RemoteRenameCheck>();
+    vi.mocked(gitRemoteRenameCheck).mockReturnValueOnce(recheck.promise);
+    await user.click(submit());
+    await within(status()).findByText(
+      "origin/feat changed since it was checked. Checking again…",
+    );
+    expectHeld();
+    await act(async () => recheck.resolve({ status: "clear", oldTip: TIP_B }));
+    await waitFor(() =>
+      expect(within(status()).queryByText(/changed since it was checked/)).toBe(
+        null,
+      ),
+    );
+    await waitFor(() =>
+      expect(submit()).toHaveAttribute("aria-disabled", "false"),
+    );
+    await user.click(submit());
+    await waitFor(() =>
+      expect(gitRenameBranchRemote).toHaveBeenLastCalledWith(
+        REPO,
+        "feat",
+        "feat2",
+        "origin",
+        TIP_B,
+      ),
+    );
+  });
+
+  it("lets a newer clear check at the same tip retire a transient act refusal", async () => {
+    vi.mocked(gitRenameBranchRemote).mockResolvedValueOnce({
+      status: "refused",
+      refusal: { code: "unreachable", detail: "unable to access" },
+    });
+    const { user } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    const recheck = deferred<RemoteRenameCheck>();
+    vi.mocked(gitRemoteRenameCheck).mockReturnValueOnce(recheck.promise);
+    await user.click(submit());
+    await within(status()).findByText(
+      "Couldn't reach origin: unable to access. Untick to rename only here.",
+    );
+    await act(async () => recheck.resolve(clear));
+    await screen.findByText(/^Pushes feat2 to origin, then deletes origin\//);
+    await waitFor(() =>
+      expect(submit()).toHaveAttribute("aria-disabled", "false"),
+    );
+  });
+
+  it("explains a held Rename with the field's own message", async () => {
+    const { user } = renderDialog();
+    await user.clear(nameField());
+    await waitFor(() =>
+      expect(submit()).toHaveAccessibleDescription("Required"),
+    );
+    expectHeld();
+    await user.type(nameField(), "feat");
+    await waitFor(() =>
+      expect(submit()).toHaveAccessibleDescription("Unchanged"),
+    );
+  });
+
+  it("holds the remote step while another branch's push runs here", async () => {
+    // Started from outside the modal, as the branch list's own push would be.
+    let startPush: (() => void) | null = null;
+    function Pusher() {
+      const push = usePush(REPO);
+      startPush = () =>
+        void push.mutateAsync({ setUpstream: false, branch: "other" });
+      return null;
+    }
+    const { user } = renderDialog({}, () => <Pusher />);
+    await rename(user);
+    await tickClear(user);
+    act(() => startPush?.());
+    await waitFor(() =>
+      expect(submit()).toHaveAccessibleDescription("A push is running."),
+    );
+    expectHeld();
+  });
+
+  it("offers Retry beside a failed read and lands focus on the name field", async () => {
+    vi.mocked(gitRemoteRenameCheck).mockRejectedValueOnce({
+      kind: "git",
+      message: "fatal: boom",
+    });
+    const { user } = renderDialog();
+    await rename(user);
+    await user.click(box());
+    const retry = await screen.findByRole(
+      "button",
+      { name: "Retry" },
+      { timeout: 2000 },
+    );
+    // The region announces the failure; the action sits beside it.
+    expect(status()).toHaveTextContent(/^Couldn't check origin: /);
+    expect(status()).not.toContainElement(retry);
+    const checks = vi.mocked(gitRemoteRenameCheck).mock.calls.length;
+    await user.click(retry);
+    await screen.findByText(/^Pushes feat2 to origin, then deletes origin\//);
+    expect(vi.mocked(gitRemoteRenameCheck).mock.calls.length).toBe(checks + 1);
+    expect(nameField()).toHaveFocus();
+  });
 
   it("says why a read failed and holds Rename", async () => {
     vi.mocked(gitRemoteRenameCheck).mockRejectedValue({
@@ -1277,231 +1492,268 @@ describe("the check and the lookup", () => {
 
 describe("the outcome", () => {
   const err = { kind: "git", message: "rejected" } as never;
-  it.each<[string, RemoteRenameOutcome, "success" | "warning", string, RegExp]>(
+  it.each<
     [
-      [
-        "renamed",
-        { status: "renamed", warning: "W." },
-        "success",
-        "Renamed to feat2 here and on origin",
-        /^W\.$/,
-      ],
-      [
-        "pushFailed",
-        { status: "pushFailed", warning: null, error: err },
-        "warning",
-        "Renamed to feat2 here. Couldn't push it to origin.",
-        /feat2 still tracks origin\/feat\.$/,
-      ],
-      [
-        "pushFailed timeout",
-        {
-          status: "pushFailed",
-          warning: null,
-          error: { kind: "timeout", message: "timed out after 120s" } as never,
-        },
-        "warning",
-        "Renamed to feat2 here. Couldn't confirm the push to origin.",
-        /^(?!.*still tracks)/,
-      ],
-      [
-        "notInPush",
-        { status: "oldKept", warning: null, cause: { reason: "notInPush" } },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        /^feat2 changed while the rename ran/,
-      ],
-      [
-        "moved",
-        { status: "oldKept", warning: null, cause: { reason: "moved" } },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        /^origin\/feat changed while the rename ran, so it wasn't deleted\./,
-      ],
-      [
-        "rejected",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: { reason: "rejected", detail: "error: denying ref deletion" },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        /^denying ref deletion\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
-      ],
-      [
-        "rejected by a hook in two lines",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: {
-            reason: "rejected",
-            detail:
-              "deletes are not allowed here\nerror: hook declined to update refs/heads/part11",
-          },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        /^deletes are not allowed here\. hook declined to update refs\/heads\/part11\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
-      ],
-      [
-        "rejected in three lines, each closed once",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: {
-            reason: "rejected",
-            detail: "error: one\nremote: two.\nfatal: remote: three!",
-          },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        /^one\. two\. remote: three! Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
-      ],
-      [
-        "rejected at exactly the cap",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: { reason: "rejected", detail: "y".repeat(300) },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        new RegExp(
-          `^${"y".repeat(300)}\\. Delete feat on origin from the branch menu's Remote group, or on GitHub\\.$`,
-        ),
-      ],
-      [
-        "rejected with a line that runs on",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: { reason: "rejected", detail: "first:\nsecond" },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        /^first: second\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
-      ],
-      [
-        "rejected with lines ending in a semicolon and a comma",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: { reason: "rejected", detail: "a;\nb,\nc" },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        /^a; b, c\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
-      ],
-      [
-        "rejected with lines already closed",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: { reason: "rejected", detail: "why?\nso…\nend." },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        /^why\? so… end\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
-      ],
-      [
-        "rejected with no reason",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: { reason: "rejected", detail: " \n " },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        /^origin refused the delete\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
-      ],
-      [
-        "rejected with a long reason",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: {
-            reason: "rejected",
-            detail: `remote: one\n\nremote: two\nremote: three\nremote: ${"x".repeat(5000)}`,
-          },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        /^one\. two\. three… Delete feat on origin/,
-      ],
-      [
-        "rejected with one very long line",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: { reason: "rejected", detail: "y".repeat(1000) },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        new RegExp(`^${"y".repeat(299)}… Delete feat on origin`),
-      ],
-      [
-        "rejected whose last kept line ends in a period",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: {
-            reason: "rejected",
-            detail: "remote: a\nremote: b\nremote: c.\nremote: d",
-          },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        /^a\. b\. c… Delete feat on origin/,
-      ],
-      [
-        "rejected cut on a period",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: {
-            reason: "rejected",
-            detail: `${"y".repeat(298)}. ${"z".repeat(50)}`,
-          },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        new RegExp(`^${"y".repeat(298)}… Delete feat on origin`),
-      ],
-      [
-        "rejected with an astral character at the cut",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: {
-            reason: "rejected",
-            detail: `${"y".repeat(298)}${ASTRAL}${"z".repeat(50)}`,
-          },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        new RegExp(`^${"y".repeat(298)}${ASTRAL}… Delete feat on origin`),
-      ],
-      [
-        "unverified",
-        { status: "oldKept", warning: null, cause: { reason: "unverified" } },
-        "warning",
-        "Renamed to feat2, but origin/feat is still there",
-        /^Couldn't confirm that origin\/feat2 includes everything on origin\/feat, so feat wasn't deleted there\. Compare the two before deleting feat on origin\.$/,
-      ],
-      [
-        "failed",
-        {
-          status: "oldKept",
-          warning: null,
-          cause: { reason: "failed", error: err },
-        },
-        "warning",
-        "Renamed to feat2, but origin/feat may still be there",
-        /Delete feat on origin from the branch menu's Remote group\.$/,
-      ],
+      string,
+      RemoteRenameOutcome,
+      "success" | "warning",
+      string,
+      RegExp | string,
+    ]
+  >([
+    [
+      "renamed",
+      { status: "renamed", warning: "W." },
+      "success",
+      "Renamed to feat2 here and on origin",
+      /^W\.$/,
     ],
-  )(
+    [
+      "pushFailed",
+      { status: "pushFailed", warning: null, error: err },
+      "warning",
+      "Renamed to feat2 here. Couldn't push it to origin.",
+      /feat2 still tracks origin\/feat\.$/,
+    ],
+    [
+      "pushFailed timeout",
+      {
+        status: "pushFailed",
+        warning: null,
+        error: { kind: "timeout", message: "timed out after 120s" } as never,
+      },
+      "warning",
+      "Renamed to feat2 here. Couldn't confirm the push to origin.",
+      closed(
+        presentError({ kind: "timeout", message: "timed out after 120s" })
+          .summary,
+      ),
+    ],
+    [
+      "pushFailed at git's push timeout",
+      {
+        status: "pushFailed",
+        warning: null,
+        error: {
+          kind: "timeout",
+          message: GIT_PUSH_TIMEOUT_MESSAGE,
+        } as never,
+      },
+      "warning",
+      "Renamed to feat2 here. Couldn't confirm the push to origin.",
+      closed(
+        presentError({ kind: "timeout", message: GIT_PUSH_TIMEOUT_MESSAGE })
+          .summary,
+      ),
+    ],
+    [
+      "notInPush",
+      { status: "oldKept", warning: null, cause: { reason: "notInPush" } },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^feat2 changed while the rename ran/,
+    ],
+    [
+      "moved",
+      { status: "oldKept", warning: null, cause: { reason: "moved" } },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^origin\/feat changed while the rename ran, so it wasn't deleted\./,
+    ],
+    [
+      "rejected",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: { reason: "rejected", detail: "error: denying ref deletion" },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^denying ref deletion\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
+    ],
+    [
+      "rejected by a hook in two lines",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: {
+          reason: "rejected",
+          detail:
+            "deletes are not allowed here\nerror: hook declined to update refs/heads/part11",
+        },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^deletes are not allowed here\. hook declined to update refs\/heads\/part11\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
+    ],
+    [
+      "rejected in three lines, each closed once",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: {
+          reason: "rejected",
+          detail: "error: one\nremote: two.\nfatal: remote: three!",
+        },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^one\. two\. remote: three! Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
+    ],
+    [
+      "rejected at exactly the cap",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: { reason: "rejected", detail: "y".repeat(300) },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      new RegExp(
+        `^${"y".repeat(300)}\\. Delete feat on origin from the branch menu's Remote group, or on GitHub\\.$`,
+      ),
+    ],
+    [
+      "rejected with a line that runs on",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: { reason: "rejected", detail: "first:\nsecond" },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^first: second\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
+    ],
+    [
+      "rejected with lines ending in a semicolon and a comma",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: { reason: "rejected", detail: "a;\nb,\nc" },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^a; b, c\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
+    ],
+    [
+      "rejected with lines already closed",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: { reason: "rejected", detail: "why?\nso…\nend." },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^why\? so… end\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
+    ],
+    [
+      "rejected with no reason",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: { reason: "rejected", detail: " \n " },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^origin refused the delete\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
+    ],
+    [
+      "rejected with a reason that is only a run-on mark",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: { reason: "rejected", detail: "error: :" },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^origin refused the delete\. Delete feat on origin from the branch menu's Remote group, or on GitHub\.$/,
+    ],
+    [
+      "rejected with a long reason",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: {
+          reason: "rejected",
+          detail: `remote: one\n\nremote: two\nremote: three\nremote: ${"x".repeat(5000)}`,
+        },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^one\. two\. three… Delete feat on origin/,
+    ],
+    [
+      "rejected with one very long line",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: { reason: "rejected", detail: "y".repeat(1000) },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      new RegExp(`^${"y".repeat(299)}… Delete feat on origin`),
+    ],
+    [
+      "rejected whose last kept line ends in a period",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: {
+          reason: "rejected",
+          detail: "remote: a\nremote: b\nremote: c.\nremote: d",
+        },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^a\. b\. c… Delete feat on origin/,
+    ],
+    [
+      "rejected cut on a period",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: {
+          reason: "rejected",
+          detail: `${"y".repeat(298)}. ${"z".repeat(50)}`,
+        },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      new RegExp(`^${"y".repeat(298)}… Delete feat on origin`),
+    ],
+    [
+      "rejected with an astral character at the cut",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: {
+          reason: "rejected",
+          detail: `${"y".repeat(298)}${ASTRAL}${"z".repeat(50)}`,
+        },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      new RegExp(`^${"y".repeat(298)}${ASTRAL}… Delete feat on origin`),
+    ],
+    [
+      "unverified",
+      { status: "oldKept", warning: null, cause: { reason: "unverified" } },
+      "warning",
+      "Renamed to feat2, but origin/feat is still there",
+      /^Couldn't confirm that origin\/feat2 includes everything on origin\/feat, so feat wasn't deleted there\. Compare the two before deleting feat on origin\.$/,
+    ],
+    [
+      "failed",
+      {
+        status: "oldKept",
+        warning: null,
+        cause: { reason: "failed", error: err },
+      },
+      "warning",
+      "Renamed to feat2, but origin/feat may still be there",
+      /Delete feat on origin from the branch menu's Remote group\.$/,
+    ],
+  ])(
     "%s raises its own toast and closes the dialog",
     async (_n, outcome, kind, title, description) => {
       vi.mocked(gitRenameBranchRemote).mockResolvedValue(outcome);
@@ -1515,7 +1767,9 @@ describe("the outcome", () => {
         { description?: string },
       ];
       expect(t).toBe(title);
-      expect(opts.description ?? "").toMatch(description);
+      if (typeof description === "string")
+        expect(opts.description).toBe(description);
+      else expect(opts.description ?? "").toMatch(description);
       expect(onClose).toHaveBeenCalled();
     },
   );
@@ -1529,6 +1783,10 @@ describe("the outcome", () => {
     await rename(user);
     await tickClear(user);
     const checks = vi.mocked(gitRemoteRenameCheck).mock.calls.length;
+    // The re-check answers the same refusal, which keeps the hold.
+    vi.mocked(gitRemoteRenameCheck).mockResolvedValue(
+      refused({ code: "notTracking" }),
+    );
     await user.click(submit());
     await within(status()).findByText(
       "feat no longer tracks origin/feat. Untick to rename only here.",
@@ -1552,6 +1810,7 @@ describe("the outcome", () => {
     rerenderWith({ target: "feat" });
     await waitFor(() => expect(footerClose()).not.toBe(null));
     expect(nameField()).toHaveValue("feat2");
+    expect(nameField()).toHaveAttribute("readonly");
     expect(box()).toBeChecked();
     expectBoxReason("Wait for the rename to finish");
     expectHeld();
@@ -1563,14 +1822,84 @@ describe("the outcome", () => {
     await act(async () => act$.resolve({ status: "renamed", warning: null }));
     await waitFor(() =>
       expect(spies.success).toHaveBeenCalledWith(
-        "Renamed to feat2 here and on origin in ren",
+        "Renamed to feat2 in ren and on origin",
         { description: undefined },
       ),
     );
     expect(document.activeElement).toBe(focused);
   });
 
-  it("leaves a dialog reopened after a switch open, focus included, when the older run settles", async () => {
+  it.each<[string, RemoteRenameOutcome]>([
+    ["renamed", { status: "renamed", warning: null }],
+    [
+      "oldKept",
+      { status: "oldKept", warning: null, cause: { reason: "moved" } },
+    ],
+    [
+      "pushFailed",
+      {
+        status: "pushFailed",
+        warning: null,
+        error: { kind: "git", message: "rejected" } as never,
+      },
+    ],
+  ])(
+    "closes a dialog reopened on the old name when its run settles %s",
+    async (_n, outcome) => {
+      const act$ = deferred<RemoteRenameOutcome>();
+      vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+      const { user, onClose, rerenderWith } = renderDialog();
+      await rename(user);
+      await tickClear(user);
+      await user.click(submit());
+      await waitFor(() => expect(footerClose()).not.toBe(null));
+      await user.click(footerClose() as HTMLElement);
+      rerenderWith({ target: "feat" });
+      await waitFor(() => expect(footerClose()).not.toBe(null));
+      const closes = onClose.mock.calls.length;
+      await act(async () => act$.resolve(outcome));
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(closes + 1));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBe(null));
+    },
+  );
+
+  it("keeps a dialog reopened on the old name open on a refusal, the refusal under its box", async () => {
+    const act$ = deferred<RemoteRenameOutcome>();
+    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+    const { user, onClose, rerenderWith } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    await user.click(submit());
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    await user.click(footerClose() as HTMLElement);
+    rerenderWith({ target: "feat" });
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    const closes = onClose.mock.calls.length;
+    // The re-check stays out, so only the act's refusal can show.
+    const recheck$ = deferred<RemoteRenameCheck>();
+    vi.mocked(gitRemoteRenameCheck).mockReturnValue(recheck$.promise);
+    await act(async () =>
+      act$.resolve({ status: "refused", refusal: { code: "remoteGone" } }),
+    );
+    await within(status()).findByText(
+      "origin/feat no longer exists. Untick to rename only here.",
+    );
+    expect(box()).toBeChecked();
+    expect(nameField()).toHaveValue("feat2");
+    expectHeld();
+    expect(onClose).toHaveBeenCalledTimes(closes);
+    expect(spies.info).not.toHaveBeenCalled();
+    // A newer clear answer retires it.
+    await act(async () => recheck$.resolve(clear));
+    await screen.findByText(/^Pushes feat2 to origin, then deletes origin\//);
+    expect(
+      screen.queryByText(
+        "origin/feat no longer exists. Untick to rename only here.",
+      ),
+    ).toBe(null);
+  });
+
+  it("toasts a refusal to a dialog reopened on the new name and leaves it open", async () => {
     const act$ = deferred<RemoteRenameOutcome>();
     vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
     const { user, onClose, rerenderWith } = renderDialog();
@@ -1580,19 +1909,303 @@ describe("the outcome", () => {
     await waitFor(() => expect(footerClose()).not.toBe(null));
     await user.click(footerClose() as HTMLElement);
     await waitFor(() => expect(screen.queryByRole("dialog")).toBe(null));
-    act(() => useUiStore.setState({ repoPath: OTHER }));
+    rerenderWith({ target: "feat2", remoteRename: null });
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    const closes = onClose.mock.calls.length;
+    await act(async () =>
+      act$.resolve({ status: "refused", refusal: { code: "remoteGone" } }),
+    );
+    await waitFor(() =>
+      expect(spies.info).toHaveBeenCalledWith(
+        "Didn't rename feat: origin/feat no longer exists.",
+      ),
+    );
+    expect(onClose).toHaveBeenCalledTimes(closes);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("toasts a refusal to a dialog reopened on the old name once another branch's dialog dropped the press's check", async () => {
+    const act$ = deferred<RemoteRenameOutcome>();
+    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+    const { user, onClose, queryClient, rerenderWith } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    const checkKey = remoteRenameCheckOptions(
+      REPO,
+      "origin",
+      "feat",
+      "feat2",
+    ).queryKey;
+    await user.click(submit());
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    await user.click(footerClose() as HTMLElement);
     rerenderWith({ target: "topic" });
+    await waitFor(() =>
+      expect(queryClient.getQueryState(checkKey)).toBe(undefined),
+    );
+    rerenderWith({ target: null });
+    rerenderWith({ target: "feat" });
+    // The reopen re-creates the entry with no answer while the run holds it.
+    await waitFor(() =>
+      expect(queryClient.getQueryState(checkKey)?.dataUpdatedAt).toBe(0),
+    );
+    const closes = onClose.mock.calls.length;
+    const recheck$ = deferred<RemoteRenameCheck>();
+    vi.mocked(gitRemoteRenameCheck).mockReturnValue(recheck$.promise);
+    await act(async () =>
+      act$.resolve({ status: "refused", refusal: { code: "remoteGone" } }),
+    );
+    await waitFor(() =>
+      expect(spies.info).toHaveBeenCalledWith(
+        "Didn't rename feat: origin/feat no longer exists.",
+      ),
+    );
+    expect(onClose).toHaveBeenCalledTimes(closes);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("leaves a dialog reopened on another branch open when the run settles", async () => {
+    const act$ = deferred<RemoteRenameOutcome>();
+    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+    const { user, onClose, rerenderWith } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    await user.click(submit());
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    await user.click(footerClose() as HTMLElement);
+    rerenderWith({ target: "topic" });
+    await waitFor(() => expect(nameField()).toHaveValue("topic"));
+    const closes = onClose.mock.calls.length;
+    await act(async () => act$.resolve({ status: "renamed", warning: null }));
+    await waitFor(() => expect(spies.success).toHaveBeenCalled());
+    expect(onClose).toHaveBeenCalledTimes(closes);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("moves the commit draft when the status poll first reports the new name", async () => {
+    let branch = "feat";
+    function Draft() {
+      useBranchCommitDraft(REPO, branch);
+      return null;
+    }
+    const act$ = deferred<RemoteRenameOutcome>();
+    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+    const { user, rerenderWith } = renderDialog({}, () => <Draft />);
+    act(() => useUiStore.getState().setCommitTitle("Draft title"));
+    await rename(user);
+    await tickClear(user);
+    await user.click(submit());
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    // The poll reports HEAD under the new name while the push still runs.
+    branch = "feat2";
+    rerenderWith({});
+    expect(useUiStore.getState().commitTitle).toBe("Draft title");
+    act(() => useUiStore.getState().setCommitTitle("Edited title"));
+    await act(async () => act$.resolve({ status: "renamed", warning: null }));
+    await waitFor(() => expect(spies.success).toHaveBeenCalled());
+    expect(useUiStore.getState().commitTitle).toBe("Edited title");
+    expect(
+      useUiStore.getState().commitDrafts[commitDraftKey(REPO, "feat2")]?.title,
+    ).toBe("Edited title");
+  });
+
+  it("keeps a draft saved under the new name when the act rejects", async () => {
+    let branch = "feat";
+    function Draft() {
+      useBranchCommitDraft(REPO, branch);
+      return null;
+    }
+    const act$ = deferred<RemoteRenameOutcome>();
+    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+    const { user, rerenderWith } = renderDialog({}, () => <Draft />);
+    act(() => {
+      useUiStore.setState({ commitDrafts: {}, activeDraftKey: null });
+      const ui = useUiStore.getState();
+      ui.loadCommitDraft(commitDraftKey(REPO, "feat2"));
+      ui.setCommitTitle("New name's draft");
+      ui.loadCommitDraft(commitDraftKey(REPO, "feat"));
+      ui.setCommitTitle("Old name's draft");
+    });
+    await rename(user);
+    await tickClear(user);
+    await user.click(submit());
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    // HEAD reaches the existing new name while the act still runs.
+    branch = "feat2";
+    rerenderWith({});
+    expect(useUiStore.getState().commitTitle).toBe("New name's draft");
+    await act(async () => act$.reject({ kind: "git", message: "fatal: boom" }));
+    await waitFor(() => expect(spies.error).toHaveBeenCalled());
+    const drafts = useUiStore.getState().commitDrafts;
+    expect(drafts[commitDraftKey(REPO, "feat")]?.title).toBe(
+      "Old name's draft",
+    );
+    expect(drafts[commitDraftKey(REPO, "feat2")]?.title).toBe(
+      "New name's draft",
+    );
+  });
+
+  it("moves the old name's draft when the fields left it before the poll reports the new name", async () => {
+    let branch = "feat";
+    function Draft() {
+      useBranchCommitDraft(REPO, branch);
+      return null;
+    }
+    const act$ = deferred<RemoteRenameOutcome>();
+    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+    const { user, rerenderWith } = renderDialog({}, () => <Draft />);
+    act(() => {
+      useUiStore.setState({ commitDrafts: {}, activeDraftKey: null });
+      const ui = useUiStore.getState();
+      ui.loadCommitDraft(commitDraftKey(REPO, "feat"));
+      ui.setCommitTitle("Draft title");
+    });
+    await rename(user);
+    await tickClear(user);
+    await user.click(submit());
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    // A repository round trip leaves no live key.
+    act(() => useUiStore.setState({ activeDraftKey: null, commitTitle: "" }));
+    branch = "feat2";
+    rerenderWith({});
+    expect(useUiStore.getState().commitTitle).toBe("Draft title");
+    act(() => useUiStore.getState().setCommitTitle("Edited title"));
+    await act(async () => act$.resolve({ status: "renamed", warning: null }));
+    await waitFor(() => expect(spies.success).toHaveBeenCalled());
+    expect(useUiStore.getState().commitTitle).toBe("Edited title");
+    expect(
+      useUiStore.getState().commitDrafts[commitDraftKey(REPO, "feat")],
+    ).toBe(undefined);
+  });
+
+  it("leaves a dialog reopened after a switch open, focus included, when the older run settles", async () => {
+    const act$ = deferred<RemoteRenameOutcome>();
+    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+    const { user, onClose, rerenderWith, switchRepo } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    await user.click(submit());
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    await user.click(footerClose() as HTMLElement);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBe(null));
+    switchRepo(OTHER);
+    // The same name in the next repository: its own branch, never this run.
+    rerenderWith({ target: "feat" });
     await waitFor(() => expect(nameField()).toHaveFocus());
+    expect(nameField()).toHaveValue("feat");
+    expect(box()).not.toBeChecked();
+    expect(box()).not.toHaveAttribute("aria-disabled", "true");
     const closes = onClose.mock.calls.length;
     await act(async () => act$.resolve({ status: "renamed", warning: null }));
     await waitFor(() =>
       expect(spies.success).toHaveBeenCalledWith(
-        "Renamed to feat2 here and on origin in ren",
+        "Renamed to feat2 in ren and on origin",
         { description: undefined },
       ),
     );
     expect(onClose).toHaveBeenCalledTimes(closes);
     expect(nameField()).toHaveFocus();
+  });
+
+  it("closes once a rejected act leaves the old name gone", async () => {
+    vi.mocked(gitRenameBranchRemote).mockRejectedValue({
+      kind: "git",
+      message: "fatal: boom",
+    });
+    vi.mocked(gitBranches).mockResolvedValue([{ name: "feat2" }] as never);
+    const { user, onClose } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    await user.click(submit());
+    await waitFor(() => expect(spies.error).toHaveBeenCalled());
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("holds the form through a rejected act's branch read and closes without giving it back", async () => {
+    const act$ = deferred<RemoteRenameOutcome>();
+    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+    const read$ = deferred<never>();
+    const { user, onClose } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    await user.click(submit());
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    vi.mocked(gitBranches).mockReturnValue(read$.promise);
+    await act(async () => act$.reject({ kind: "git", message: "fatal: boom" }));
+    await waitFor(() => expect(spies.error).toHaveBeenCalled());
+    await waitFor(() => expect(gitBranches).toHaveBeenCalled());
+    expect(status()).toHaveTextContent("Renaming feat to feat2 on origin…");
+    expect(footerClose()).not.toBe(null);
+    expectHeld();
+    const frames: Frame[] = [];
+    onCommit = () => {
+      frames.push(frame(onClose.mock.calls.length > 0));
+    };
+    await act(async () => read$.resolve([{ name: "feat2" }] as never));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBe(null));
+    const shown = frames.filter((f) => f !== null);
+    expect(shown.filter((f) => f.closed).length).toBeGreaterThan(0);
+    for (const f of shown)
+      expect(f).toMatchObject({ running: true, held: true });
+  });
+
+  it("leaves a dialog opened during a rejected act's branch read open", async () => {
+    const act$ = deferred<RemoteRenameOutcome>();
+    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+    const read$ = deferred<never>();
+    const { user, onClose, rerenderWith } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    await user.click(submit());
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    vi.mocked(gitBranches).mockReturnValue(read$.promise);
+    await act(async () => act$.reject({ kind: "git", message: "fatal: boom" }));
+    await waitFor(() => expect(gitBranches).toHaveBeenCalled());
+    await user.click(footerClose() as HTMLElement);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBe(null));
+    rerenderWith({ target: "feat2", remoteRename: null });
+    await waitFor(() => expect(nameField()).toHaveValue("feat2"));
+    const closes = onClose.mock.calls.length;
+    await act(async () => read$.resolve([{ name: "feat2" }] as never));
+    expect(onClose).toHaveBeenCalledTimes(closes);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("keeps a dialog reopened on the old name ticked when its run's act rejects", async () => {
+    const act$ = deferred<RemoteRenameOutcome>();
+    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+    const { user, onClose, rerenderWith } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    await user.click(submit());
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    await user.click(footerClose() as HTMLElement);
+    rerenderWith({ target: "feat" });
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    const closes = onClose.mock.calls.length;
+    await act(async () => act$.reject({ kind: "git", message: "fatal: boom" }));
+    await waitFor(() => expect(spies.error).toHaveBeenCalled());
+    await waitFor(() => expect(footerClose()).toBe(null));
+    expect(box()).toBeChecked();
+    expect(nameField()).toHaveValue("feat2");
+    expect(onClose).toHaveBeenCalledTimes(closes);
+  });
+
+  it("names the repository on a rejected act that settles after a switch", async () => {
+    const act$ = deferred<RemoteRenameOutcome>();
+    vi.mocked(gitRenameBranchRemote).mockReturnValue(act$.promise);
+    const { user, switchRepo } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    await user.click(submit());
+    await waitFor(() => expect(footerClose()).not.toBe(null));
+    switchRepo(OTHER);
+    await act(async () => act$.reject({ kind: "git", message: "fatal: boom" }));
+    await waitFor(() => expect(spies.error).toHaveBeenCalled());
+    expect(spies.error.mock.calls[0][1]).toMatchObject({
+      description: "In ren",
+    });
   });
 
   it.each<[RemoteRenameRefusal, string]>([

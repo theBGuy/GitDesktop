@@ -40,7 +40,7 @@ export function lateForkMatchCopy(
   remote: string,
 ): { title: string; description: string } {
   return {
-    title: `${branch} is also the head of ${prRef("github", match.number)}`,
+    title: `${branch} includes ${prRef("github", match.number)}'s commits`,
     description: `Publish made a separate copy on ${remote}; the pull request from ${match.headRepoOwner}/${match.headRepoName} was not updated.`,
   };
 }

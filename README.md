@@ -194,9 +194,10 @@ Switch (with a bring-changes / stash prompt), create, rename, delete, and
 **archive** (hide from the switcher without deleting); renaming a branch in
 GitDesktop moves its open local pull requests to the new name. Renaming
 can also rename the branch on its remote, after a check of the remote that
-lists any open pull or merge requests still using the old name and asks
-for **Rename anyway** before going ahead; while it runs, the branch's row
-shows it and holds what a push of the branch would, apart from Rename, which
+lists any open pull or merge requests still using the old name and, when
+it finds any or couldn't check a repository for them, asks for **Rename
+anyway** before going ahead; while it runs, the branch's row shows it
+and holds what a push of the branch would, apart from Rename, which
 reopens the dialog. Each switcher row shows the branch's push/pull state
 vs. its upstream (↑ to push, ↓ to pull, plus markers for never-published
 and upstream-deleted branches), its +/− divergence vs. the default branch
@@ -255,15 +256,16 @@ beside its arrows, and a branch marked Keep local wears a `kept local` chip.
   shows) or publish an unpushed one, choosing the remote when there's more
   than one. Works even when the branch is checked out in another worktree.
   A branch tracking a differently named one offers **Publish as
-  _origin/name_**; one still tracking the remote's default branch it started
-  from gets that in place of a push into the default branch. A publish that
-  would create the branch on the remote asks first, naming the branch and
-  its destination, and the list closes for the prompt. Otherwise the list
-  stays open while it runs: the branch's row shows the push's progress and
-  destination ("Publishing" only when the push creates the branch there),
-  and you can keep switching and browsing. A row also shows a push of its
-  branch running in another worktree of the repository, and the sync bar's
-  check before it publishes the branch, and holds its push items until that
+  _origin/name_**, unless its push settings send it to another remote; one
+  still tracking the remote's default branch it started from gets that in
+  place of a push into the default branch. A publish that would create the
+  branch on the remote asks first, naming the branch and its destination,
+  and the list closes for the prompt. Otherwise the list stays open while
+  it runs: the branch's row shows the push's progress and destination
+  ("Publishing" only when the push creates the branch there), and you can
+  keep switching and browsing. A row also shows a push of its branch
+  running in another worktree of the repository, and the sync bar's check
+  before it publishes the branch, and holds its push items until that
   finishes. While a branch pushes, renaming, deleting, archiving, resetting
   or updating it is held until the push finishes, and history rewrites
   (undo, reset, amend, squash, Edit history, Edit dates), Cherry-pick to
@@ -410,20 +412,21 @@ Pushes to a mirror remote, and pushes of a branch into the local branch it
 tracks, are refused with the reason before Git runs. A push that would
 create a branch on a remote asks first, naming the branch and where it's
 going, with **Cancel** focused so a stray Enter backs out; a branch the
-remote already has (as of the last fetch) just pushes. When the *remote*
-itself was rewritten (a server-side rebase) and every local commit already
-landed there under new ids, the Pull menu offers a confirmed **Reset to
-_origin/…_** that lines the two up instead. Pulling with rebase pre-checks
-the upstream for a rewrite that would take commits of yours off the branch,
-names them, and asks whether to keep or drop them, recording a drop in
-**Operation history**. When a repo has an `upstream` remote, the Pull menu
-adds **Update from upstream**: one click fetches upstream and brings your
-branch up to date (fast-forward when it can, a merge commit when cleanly
-diverged, the conflict editor otherwise), for keeping a fork current.
-**Auto-fetch** (on by default) quietly runs a background `git fetch` on an
-interval while the window is focused, so the behind-count and incoming
-commits stay current without pressing Fetch; it never pulls or merges, and
-pushing and pulling stay manual.
+remote already has (as of the last fetch) just pushes, and one this clone
+hasn't fetched, at another commit there, stops the publish with the reason.
+When the *remote* itself was rewritten (a server-side rebase) and every
+local commit already landed there under new ids, the Pull menu offers a
+confirmed **Reset to _origin/…_** that lines the two up instead. Pulling
+with rebase pre-checks the upstream for a rewrite that would take commits
+of yours off the branch, names them, and asks whether to keep or drop them,
+recording a drop in **Operation history**. When a repo has an `upstream`
+remote, the Pull menu adds **Update from upstream**: one click fetches
+upstream and brings your branch up to date (fast-forward when it can, a
+merge commit when cleanly diverged, the conflict editor otherwise), for
+keeping a fork current. **Auto-fetch** (on by default) quietly runs a
+background `git fetch` on an interval while the window is focused, so the
+behind-count and incoming commits stay current without pressing Fetch; it
+never pulls or merges, and pushing and pulling stay manual.
 
 - **Conflict editor**: an in-progress merge, rebase, cherry-pick, or revert
   gets a conflict banner naming it, with gated Continue / Abort. Selecting

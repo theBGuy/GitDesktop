@@ -874,7 +874,8 @@ pub(crate) async fn git_rename_branch_core(
         // each skips, logged, and the local-PR one warns.
         Err(e) => Err(e),
     };
-    // The lock's wait reopens the window the check above guards.
+    // The lock's wait reopens the window the check above guards; the publish hold is
+    // re-checked inside the minting hold, past both waits.
     crate::git::update_marker::refuse_if_branch_updating(state, &repo_path, &old_name).await?;
     #[cfg(test)]
     rename_phase(RenamePhase::BeforeGit).await;
@@ -946,8 +947,8 @@ pub(crate) async fn git_rename_branch_core(
 /// directory's spelling, so a directory change keeps `-m` and git's refusal), where ref
 /// names can alias ([`refs_can_alias_strict`]; a failed probe keeps `-m`) and no exact ref
 /// [`exact_branch_tip`] has the new name: git reads the old loose ref under the new spelling
-/// and `-m` refuses it. The read runs before the rename's hold, so a branch of the new
-/// spelling that another write creates between the read and the rename would be replaced.
+/// and `-m` refuses it. [`run_minting_write`] re-reads the exact ref inside its hold and
+/// falls back to `-m`, so a branch of the new spelling created since this read is refused.
 async fn rename_mode(repo_path: &str, old_name: &str, new_name: &str) -> AppResult<&'static str> {
     let (old_dir, new_dir) = (old_name.rsplit_once('/'), new_name.rsplit_once('/'));
     if !is_case_only_rename(old_name, Some(new_name))
@@ -1661,6 +1662,8 @@ pub(crate) async fn delete_branch_ref_at(
     // The guards run inside the mutex, whose wait is unbounded, so a checkout landing
     // during that wait is still seen; each is a read that takes no lock of its own.
     with_config_write_lock(repo_path, |held| async move {
+        // The mutex wait reopens the publish window the check above guards.
+        refuse_while_publishing(repo_path, name).await?;
         let (mut git_dirs, mut heads) = (None, None);
         refuse_if_branch_in_use(state, repo_path, name, tip, &mut git_dirs, &mut heads).await?;
         #[cfg(test)]
@@ -2131,6 +2134,9 @@ pub(crate) async fn git_delete_remote_branch_core(
 ) -> AppResult<()> {
     validate_ref_name(&remote)?;
     validate_ref_name(&name)?;
+    if name == "HEAD" {
+        return Err(AppError::InvalidArgument(REMOTE_HEAD_POINTER.into()));
+    }
     crate::git::status::refuse_mirror_push(
         &repo_path,
         crate::git::status::PushRemote::Named(&remote),
@@ -2161,6 +2167,7 @@ pub(crate) async fn git_delete_remote_branch_core(
             "\"{name}\" is the default branch on {remote} and can't be deleted from here."
         )));
     }
+    drop_symbolic_tracking_ref(&repo_path, &remote, &name).await?;
 
     let cred = crate::forge::credential_config_for_remote(&repo_path, &remote).await?;
     let branch_ref = format!("refs/heads/{name}");
@@ -2183,7 +2190,12 @@ pub(crate) async fn git_delete_remote_branch_core(
         {
             let _ = run_git_raw(
                 Some(&repo_path),
-                &["update-ref", "-d", &format!("refs/remotes/{remote}/{name}")],
+                &[
+                    "update-ref",
+                    "--no-deref",
+                    "-d",
+                    &format!("refs/remotes/{remote}/{name}"),
+                ],
                 DEFAULT_TIMEOUT,
             )
             .await;
@@ -2205,6 +2217,10 @@ pub enum RemoteRenameRefusal {
     NotTracking,
     /// The branch is marked Keep local.
     KeepLocal,
+    /// The branch's configured push remote (`branch.<old>.pushRemote`, else
+    /// `remote.pushDefault`) is another remote, which the setting would keep after the
+    /// rename; `push_remote` is the name as configured.
+    PushesElsewhere { push_remote: String },
     /// `remote.<remote>.mirror` is set.
     Mirror,
     /// The remote pushes somewhere other than the repository it fetches from, or to several.
@@ -2258,7 +2274,8 @@ pub enum OldKeptCause {
     Moved,
     /// The remote refused the delete; its reason verbatim.
     Rejected { detail: String },
-    /// A transport failure, a timeout, or a failed read after the delete.
+    /// A transport failure, a timeout, or a failed read after the delete: nothing reads
+    /// back, so the delete may have landed.
     Failed { error: AppError },
 }
 
@@ -2281,7 +2298,8 @@ pub enum RemoteRenameOutcome {
         error: AppError,
     },
     /// The new name is pushed (and tracked, unless `warning` says otherwise; a failed config
-    /// read adds no warning); the old remote branch was not deleted.
+    /// read adds no warning); the old remote branch was not deleted, except after `Failed`,
+    /// where it may have been.
     OldKept {
         warning: Option<String>,
         cause: OldKeptCause,
@@ -2335,24 +2353,23 @@ pub async fn git_rename_branch_remote(
 
 /// The act: renames `old_name` here, pushes `new_name` with `-u` under the push's
 /// create-only lease, proves the pushed branch contains the old remote tip, then deletes
-/// the old remote branch under a lease pinned to that tip. The MCP server's entry passes
-/// `None` for the pin. Every stop after the local rename is an outcome that says what is where.
+/// the old remote branch under a lease pinned to that tip. An MCP entry, when one is
+/// added, passes `None` for the pin. Every stop after the local rename is an outcome that
+/// says what is where.
 ///
 /// - An `Err` means nothing was renamed, except one arm of the rename core: `branch -m`
 ///   moved the ref and the config-lock repair failed, so the ref is renamed already.
-/// - The one loss window left: someone rewinds the remote `new_name` after the push (the
-///   tracked arm reads the tracking ref the push wrote; the live arm reads the remote once)
-///   and before the leased delete, which then removes the old name while the new one no
-///   longer holds its tip. The commit survives here: the local branch held it at the check.
+/// - The one loss window left: someone rewinds the remote `new_name` between the proof's
+///   live read and the leased delete, which then removes the old name while the new one
+///   no longer holds its tip. The commit survives here: the local branch held it at the check.
 /// - A `-u` that lost the config lock exits 0 with `new_name` still tracking the old
-///   upstream, so the proof trusts `%(upstream)` only when it names `<remote>/<new_name>`
-///   and otherwise reads the live tip; the warning then says the upstream wasn't set.
+///   upstream; the warning then says the upstream wasn't set.
 /// - A proof that could not compare (a failed read, no row, a tip not here) deletes nothing.
-/// - The stale tracking-ref removal before the push holds no lock: a fetch between it and
-///   the push re-creates the ref and disarms the create-only lease for that push.
+/// - The push always carries the create-only lease, whatever the tracking ref says, so a
+///   `new_name` created on the remote since the check refuses it. A creation at the very
+///   commit being pushed still reads as pushed: git's up-to-date check runs first.
 /// - An upstream outside the remote's fetch refspec reads as not live, so the dialog
-///   offers no remote step and this answers `NotTracking`; a `new_name` outside it is
-///   proven by a live read.
+///   offers no remote step and this answers `NotTracking`.
 pub(crate) async fn git_rename_branch_remote_core(
     state: &AppState,
     repo_path: String,
@@ -2381,17 +2398,15 @@ pub(crate) async fn git_rename_branch_remote_core(
         git_rename_branch_core(state, repo_path.clone(), old_name.clone(), new_name.clone())
             .await?
             .warning;
-    // The check read `new_name` absent on the remote, so a tracking ref for it is stale, and
-    // it would keep the push's create-only lease off.
+    // The check read `new_name` absent on the remote, so a tracking ref for it is stale.
     drop_stale_tracking_ref(repo, &remote, &new_name).await;
     #[cfg(test)]
     remote_rename_phase(RemoteRenamePhase::BeforePush).await;
-    let pushed = crate::git::remote::git_push_same_name_core(
+    let pushed = crate::git::remote::git_push_creating_core(
         state,
         repo_path.clone(),
-        true,
-        Some(new_name.clone()),
-        Some(remote.clone()),
+        new_name.clone(),
+        remote.clone(),
     )
     .await;
     if let Err(error) = pushed {
@@ -2473,13 +2488,32 @@ pub(crate) async fn remote_rename_check(
         Err(AppError::BranchKeptLocal { .. }) => return refused(Refusal::KeepLocal),
         other => other?,
     }
+    // The setting moves with the rename, so the next plain push would publish the new name
+    // there beside a stale copy of the old one. An empty value gives git no push remote.
+    let config = crate::git::status::push_config_strict(repo_path).await?;
+    if let Some((_, push_remote)) = config.push_remote_setting(old) {
+        if !push_remote.is_empty() && push_remote != remote {
+            return refused(Refusal::PushesElsewhere {
+                push_remote: push_remote.to_string(),
+            });
+        }
+    }
     let target = crate::git::status::PushRemote::Named(remote);
     match crate::git::status::refuse_mirror_push(repo_path, target).await {
         Err(AppError::PushRemoteIsMirror { .. }) => return refused(Refusal::Mirror),
         other => other?,
     }
-    let fetch_url =
-        crate::git::remote::git_remote_url(repo_path.to_string(), remote.to_string()).await?;
+    // Read uncached: the push URLs below are live, and a cached fetch URL could compare a
+    // `set-url` from the last few seconds against the one before it.
+    let fetch_url = run_git(
+        Some(repo_path),
+        &["remote", "get-url", remote],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy()
+    .trim()
+    .to_string();
     // `--all`: a plain `get-url --push` prints only the first of several push URLs.
     let listed = run_git(
         Some(repo_path),
@@ -2525,18 +2559,56 @@ pub(crate) async fn remote_rename_check(
     let Some(old_tip) = read.old_tip else {
         return refused(Refusal::RemoteGone);
     };
+    // Exit 1 is a commit this store lacks (the remote is ahead); any other failure, such as
+    // a corrupt object, is the read's `Err`.
     let present = run_git_raw(
         Some(repo_path),
-        &["cat-file", "-e", &format!("{old_tip}^{{commit}}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{old_tip}^{{commit}}"),
+        ],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    if present.code != 0
-        || !crate::git::worktree::is_ancestor(repo_path, &old_tip, &local_tip).await?
-    {
+    match present.code {
+        0 => {}
+        1 => return refused(Refusal::RemoteAhead),
+        _ => {
+            present.exit_verdict()?;
+        }
+    }
+    if !is_strict_ancestor(repo_path, &old_tip, &local_tip).await? {
         return refused(Refusal::RemoteAhead);
     }
     Ok(RemoteRenameCheck::Clear { old_tip })
+}
+
+/// `merge-base --is-ancestor` over the commits as stored, for the remote rename's two
+/// destructive decisions: replace refs off and `GIT_GRAFT_FILE` at a path under a regular
+/// file, which cannot exist, so a local graft or replacement never proves a containment the
+/// remote lacks. A shallow boundary can only answer false, toward keeping. Exit 0 is true,
+/// 1 false, anything else the `Err`.
+async fn is_strict_ancestor(repo_path: &str, ancestor: &str, descendant: &str) -> AppResult<bool> {
+    let exe = std::env::current_exe()
+        .map_err(|e| AppError::Command(format!("couldn't resolve the app's path: {e}")))?;
+    let no_grafts = exe.join("no-grafts");
+    let out = crate::git::runner::run_git_raw_env(
+        Some(repo_path),
+        &["merge-base", "--is-ancestor", ancestor, descendant],
+        &[
+            ("GIT_NO_REPLACE_OBJECTS", "1"),
+            ("GIT_GRAFT_FILE", &no_grafts.to_string_lossy()),
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    match out.code {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => out.exit_verdict().map(|_| false),
+    }
 }
 
 /// Whether `new` differs from `old` only in letter case. The remote rename refuses such a
@@ -2547,8 +2619,11 @@ fn is_case_only_rename(old: &str, new: Option<&str>) -> bool {
 }
 
 /// Whether a push to `push_urls` writes the repository `fetch_url` reads: exactly one push
-/// URL, textually the fetch URL or the same host (case-insensitive) and path by
-/// `forge::remote_host` / `forge::remote_path`. A side either fn can't parse refuses.
+/// URL, textually the fetch URL or the same path by `forge::remote_path` and, within one
+/// transport family ([`url_transport`]), the same authority by `forge::remote_authority`
+/// (port included unless it is the scheme's default, case-insensitive) and the same ssh
+/// user, whose home a relative scp path starts from. Across families (ssh beside https) only
+/// the host must match, since each serves its own port. A side these fns can't parse refuses.
 fn same_push_repository(fetch_url: &str, push_urls: &[&str]) -> bool {
     let [push_url] = push_urls else {
         return false;
@@ -2557,17 +2632,61 @@ fn same_push_repository(fetch_url: &str, push_urls: &[&str]) -> bool {
         return true;
     }
     let identity = |url: &str| {
+        let authority = crate::forge::remote_authority(url)?;
+        // git connects to these ports when a URL names none.
+        let default_port = match url.split_once("://").map(|(s, _)| s.to_ascii_lowercase()) {
+            Some(scheme) if matches!(scheme.as_str(), "ssh" | "git+ssh" | "ssh+git") => ":22",
+            Some(scheme) if scheme == "https" => ":443",
+            Some(scheme) if scheme == "http" => ":80",
+            _ => "",
+        };
+        let authority = match authority.strip_suffix(default_port) {
+            Some(bare) if !default_port.is_empty() => bare.to_string(),
+            _ => authority,
+        };
         Some((
+            url_transport(url),
+            authority,
             crate::forge::remote_host(url)?,
             crate::forge::remote_path(url)?,
         ))
     };
     match (identity(fetch_url), identity(push_url)) {
-        (Some((fetch_host, fetch_path)), Some((push_host, push_path))) => {
-            fetch_host.eq_ignore_ascii_case(&push_host) && fetch_path == push_path
+        (
+            Some((fetch_transport, fetch_authority, fetch_host, fetch_path)),
+            Some((push_transport, push_authority, push_host, push_path)),
+        ) => {
+            if fetch_path != push_path {
+                return false;
+            }
+            if fetch_transport.0 != push_transport.0 {
+                return fetch_host.eq_ignore_ascii_case(&push_host);
+            }
+            fetch_authority.eq_ignore_ascii_case(&push_authority)
+                && fetch_transport.1 == push_transport.1
         }
         _ => false,
     }
+}
+
+/// A URL's transport family (`http` for http and https; `ssh` for ssh, git+ssh, ssh+git and
+/// scp form; otherwise its scheme) and, in the ssh family, the user name it logs in as.
+fn url_transport(url: &str) -> (String, Option<String>) {
+    let (scheme, authority) = match url.split_once("://") {
+        Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest.split('/').next()),
+        None => ("ssh".to_string(), url.split(':').next()),
+    };
+    let family = match scheme.as_str() {
+        "http" | "https" => "http",
+        "ssh" | "git+ssh" | "ssh+git" => "ssh",
+        other => other,
+    }
+    .to_string();
+    let user = (family == "ssh")
+        .then(|| authority?.rsplit_once('@'))
+        .flatten()
+        .map(|(userinfo, _)| userinfo.split(':').next().unwrap_or(userinfo).to_string());
+    (family, user)
 }
 
 /// What the check's `ls-remote --symref <remote> HEAD <old> [<new>]` listed.
@@ -2625,6 +2744,11 @@ fn remote_side_refusal(
     read.new_exists.then_some(RemoteRenameRefusal::NewExists)
 }
 
+/// The budget of a live `ls-remote` that a dialog or a gate waits on: room for a slow
+/// transport, short of [`NETWORK_TIMEOUT`], which would hold the rename check pending for
+/// ten minutes.
+const REMOTE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// `ls-remote [--symref] <remote> <patterns>` with the remote's credentials, lock-free
 /// with one ambient retry (`run_git_with_creds_once`): stdout on exit 0, a non-zero exit
 /// as [`AppError::Git`] carrying git's text.
@@ -2641,8 +2765,9 @@ async fn ls_remote_refs(
     }
     argv.push(remote);
     argv.extend_from_slice(patterns);
-    let out = crate::git::remote::run_git_with_creds_once(repo_path, cred, &argv, DEFAULT_TIMEOUT)
-        .await?;
+    let out =
+        crate::git::remote::run_git_with_creds_once(repo_path, cred, &argv, REMOTE_READ_TIMEOUT)
+            .await?;
     if out.code != 0 {
         return Err(AppError::Git {
             code: out.code,
@@ -2699,6 +2824,7 @@ async fn drop_stale_tracking_ref(repo_path: &str, remote: &str, name: &str) {
         Some(repo_path),
         &[
             "update-ref",
+            "--no-deref",
             "-d",
             &format!("refs/remotes/{remote}/{name}"),
             &value,
@@ -2720,32 +2846,25 @@ enum PushedCopy {
     Unknown,
 }
 
-/// Whether the pushed `new` holds `old_tip`, and whether `new`'s upstream reads as
-/// `<remote>/<new>`. Only then is its `%(upstream)` the target (the `-u` wrote it under
-/// whatever fetch refspec maps it); otherwise the live remote tip.
+/// Whether the pushed `new` holds `old_tip`, proven against the remote's live tip (a
+/// tracking ref the push wrote can be held at an older value by a leftover lock), and
+/// whether `new`'s upstream reads as `<remote>/<new>`, which only steers the lost-upstream
+/// warning (a failed read counts as not).
 async fn pushed_branch_contains(
     repo_path: &str,
     remote: &str,
     new: &str,
     old_tip: &str,
 ) -> (PushedCopy, bool) {
-    let tracking = match read_branch_upstream(repo_path, new).await {
-        Ok(upstream) => upstream
-            .filter(|up| {
-                up.live_branch() == Some(new) && up.remote == remote && !up.tracking_ref.is_empty()
-            })
-            .map(|up| up.tracking_ref),
-        Err(_) => return (PushedCopy::Unknown, false),
+    let tracked = read_branch_upstream(repo_path, new)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|up| up.live_branch() == Some(new) && up.remote == remote);
+    let Some(target) = live_pushed_tip(repo_path, remote, new).await else {
+        return (PushedCopy::Unknown, tracked);
     };
-    let tracked = tracking.is_some();
-    let target = match tracking {
-        Some(tracking) => tracking,
-        None => match live_pushed_tip(repo_path, remote, new).await {
-            Some(tip) => tip,
-            None => return (PushedCopy::Unknown, tracked),
-        },
-    };
-    let copy = match crate::git::worktree::is_ancestor(repo_path, old_tip, &target).await {
+    let copy = match is_strict_ancestor(repo_path, old_tip, &target).await {
         Ok(true) => PushedCopy::Contains,
         Ok(false) => PushedCopy::Missing,
         Err(_) => PushedCopy::Unknown,
@@ -2839,6 +2958,10 @@ async fn delete_remote_branch_leased(
                 .then_some(())
                 .ok_or_else(|| AppError::InvalidArgument(format!("invalid remote: {remote}")))
         })
+        .and_then(|()| match name {
+            "HEAD" => Err(AppError::InvalidArgument(REMOTE_HEAD_POINTER.into())),
+            _ => Ok(()),
+        })
         .and_then(|()| Ok((branch_full_ref(name)?, full_object_id(expected_tip)?)));
     let (full_ref, tip) = match checked {
         Ok(checked) => checked,
@@ -2848,20 +2971,27 @@ async fn delete_remote_branch_leased(
         Ok(cred) => cred,
         Err(e) => return failed(e),
     };
+    if let Err(e) = drop_symbolic_tracking_ref(repo_path, remote, name).await {
+        return failed(e);
+    }
     let lease = format!("--force-with-lease={full_ref}:{tip}");
     let delete = format!(":{full_ref}");
+    // `--no-follow-tags`: under `push.followTags` a tag the remote refuses would fail a
+    // delete that landed.
     let out = crate::git::remote::run_git_mutating_with_creds(
         state,
         repo_path,
         &cred,
-        &["push", &lease, remote, &delete],
+        &["push", "--no-follow-tags", &lease, remote, &delete],
         NETWORK_TIMEOUT,
     )
     .await;
     match out {
         Ok(_) => RemoteDeleteLeased::Deleted,
         // A lease also refuses a ref that is already gone; only a read tells the two apart.
-        Err(AppError::Git { stderr, .. }) if stderr.contains("(stale info)") => {
+        Err(AppError::Git { stderr, .. })
+            if crate::git::remote::is_stale_lease_rejection(&stderr) =>
+        {
             match ls_remote_refs(repo_path, &cred, remote, false, &[&full_ref]).await {
                 Ok(stdout) if listed_row(&stdout, &full_ref).is_some() => {
                     RemoteDeleteLeased::Kept(OldKeptCause::Moved)
@@ -2869,7 +2999,12 @@ async fn delete_remote_branch_leased(
                 Ok(_) => {
                     let _ = run_git_raw(
                         Some(repo_path),
-                        &["update-ref", "-d", &format!("refs/remotes/{remote}/{name}")],
+                        &[
+                            "update-ref",
+                            "--no-deref",
+                            "-d",
+                            &format!("refs/remotes/{remote}/{name}"),
+                        ],
                         DEFAULT_TIMEOUT,
                     )
                     .await;
@@ -2878,13 +3013,54 @@ async fn delete_remote_branch_leased(
                 Err(error) => failed(error),
             }
         }
-        Err(AppError::Git { stderr, .. }) if stderr.contains("[remote rejected]") => {
+        Err(AppError::Git { stderr, .. }) if is_remote_rejection(&stderr) => {
             RemoteDeleteLeased::Kept(OldKeptCause::Rejected {
                 detail: remote_rejection_detail(&stderr),
             })
         }
         Err(error) => failed(error),
     }
+}
+
+/// The refusal of a remote delete of `HEAD`: its tracking ref is the clone-made
+/// `refs/remotes/<remote>/HEAD`, which the symbolic drop below would remove.
+const REMOTE_HEAD_POINTER: &str = "HEAD is the remote's default-branch pointer, not a branch";
+
+/// Removes `refs/remotes/<remote>/<name>` when it is a symbolic ref, before a push deletes
+/// `name` there: git's own tracking update follows a symbolic ref and deletes the branch it
+/// names. A failed read pushes as before; a failed removal is the `Err`, nothing pushed.
+async fn drop_symbolic_tracking_ref(repo_path: &str, remote: &str, name: &str) -> AppResult<()> {
+    let tracking = format!("refs/remotes/{remote}/{name}");
+    let read = run_git_raw(
+        Some(repo_path),
+        &["symbolic-ref", "-q", &tracking],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    if !read.is_ok_and(|out| out.code == 0) {
+        return Ok(());
+    }
+    run_git_raw(
+        Some(repo_path),
+        &[
+            "update-ref",
+            "--no-deref",
+            "-d",
+            &format!("refs/remotes/{remote}/{name}"),
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .exit_verdict()
+    .map(|_| ())
+}
+
+/// Whether git reports a `! [remote rejected]` ref status line; the words anywhere else (a
+/// path in a fatal line) are no rejection.
+fn is_remote_rejection(stderr: &str) -> bool {
+    stderr.lines().any(|line| {
+        crate::git::remote::rejection_status_line(line).starts_with("! [remote rejected]")
+    })
 }
 
 /// The remote's reason for refusing a push: every `remote:` line with the prefix and
@@ -3190,7 +3366,8 @@ pub(crate) async fn git_create_branch_core(
 /// minted branch carries only its own settings (a rename, or a create whose name is not
 /// marked Keep local, removes it whole). A create keeps a true Keep local mark and drops
 /// the section's other keys: Restore marks the name before it creates the branch and keeps
-/// the mark when that create fails.
+/// the mark when that create fails. A rename that does not land puts back what the drop
+/// removed while the new name still has no ref.
 ///
 /// [`run_git_mutating_config_write`]: crate::git::runner::run_git_mutating_config_write
 async fn run_minting_write<F, Fut>(
@@ -3209,11 +3386,33 @@ where
     let label = holder_label(subcommand_of(args));
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, label).await?;
     with_config_write_lock(repo_path, |held| async move {
+        if let Some(old) = replaces {
+            // Both waits above reopen the window of the rename's pre-wait publish check.
+            refuse_while_publishing(repo_path, old).await?;
+        }
         refuse_new_name_twin(repo_path, name, replaces).await?;
-        drop_leftover_branch_settings(&held, repo_path, name, replaces.is_some()).await?;
+        let mut argv = args.to_vec();
+        // A rename's `-M` was read before the hold: an exact `name` minted since then
+        // takes `-m`, so git refuses instead of replacing it.
+        if replaces.is_some() {
+            if let Some(flag) = argv.iter_mut().find(|arg| **arg == "-M") {
+                if exact_branch_tip(repo_path, name).await?.is_some() {
+                    *flag = "-m";
+                }
+            }
+        }
+        let dropped =
+            drop_leftover_branch_settings(&held, repo_path, name, replaces.is_some()).await?;
         #[cfg(test)]
         run_test_hook(&MINT_CLEANUP_HOOK).await;
-        let out = run_git_raw_index_retry(repo_path, args, DEFAULT_TIMEOUT).await?;
+        let out = run_git_raw_index_retry(repo_path, &argv, DEFAULT_TIMEOUT).await;
+        // A refusal or a run that never finished (spawn error, timeout) restores; the
+        // run's own result stays the answer.
+        let landed = out.as_ref().is_ok_and(|out| out.code == 0);
+        if !landed && replaces.is_some() && !dropped.is_empty() {
+            restore_dropped_branch_settings(&held, repo_path, name, &dropped).await;
+        }
+        let out = out?;
         if is_config_lock_contention(&out.stderr) {
             return repair(out, held).await;
         }
@@ -4837,7 +5036,13 @@ pub(crate) async fn branch_spelling(
 /// `name` as git stores it: the stored name when git reads `name` as that one case
 /// variant's ref ([`BranchSpelling::StoredAs`]), else `name` itself, folded twins
 /// included: no single stored name answers there, and [`bare_move_tip`] refuses them.
+/// A branch literally named `@` (which git stores and pushes, but no rev-taking site
+/// admits) passes [`validate_ref_name`] alone and answers itself: it has no case variant.
 pub(crate) async fn stored_branch_spelling(repo_path: &str, name: &str) -> AppResult<String> {
+    if name == "@" {
+        validate_ref_name(name)?;
+        return Ok(name.to_string());
+    }
     Ok(match branch_spelling(repo_path, name, false).await? {
         BranchSpelling::StoredAs(stored) => stored,
         _ => name.to_string(),
@@ -5504,15 +5709,16 @@ pub(crate) async fn refuse_while_publishing(repo_path: &str, name: &str) -> AppR
 /// removes `branch.<name>` whole, and a create of a marked name unsets every other key of
 /// the section, the mark itself never removed and rewritten. A name whose section holds no
 /// local key writes nothing, so a mint with no leftovers never contends for the config
-/// lock. Any failure is the `Err` and nothing is minted.
+/// lock. Any failure is the `Err` and nothing is minted. A rename gets back the records it
+/// removed, for [`restore_dropped_branch_settings`]; every other arm gets none.
 async fn drop_leftover_branch_settings(
     held: &ConfigWriteHeld,
     repo_path: &str,
     name: &str,
     renaming: bool,
-) -> AppResult<()> {
+) -> AppResult<Vec<(String, Option<String>)>> {
     if exact_branch_tip(repo_path, name).await?.is_some() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let listed = run_git(
         Some(repo_path),
@@ -5520,16 +5726,22 @@ async fn drop_leftover_branch_settings(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let keys = branch_section_keys(&listed.stdout_lossy(), name);
+    let listed = listed.stdout_lossy();
+    let records = branch_section_records(&listed, name);
+    let keys = branch_section_keys(&listed, name);
     if keys.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     if renaming || !branch_keep_local(repo_path, name).await? {
         let section = format!("branch.{name}");
         let args = ["config", "--remove-section", &section];
         let out = run_git_config_write_held(held, repo_path, &args, DEFAULT_TIMEOUT).await?;
-        if out.code == 0 || out.stderr.contains("no such section") {
-            return Ok(());
+        if out.code == 0 {
+            return Ok(if renaming { records } else { Vec::new() });
+        }
+        // Not found, so nothing was removed and nothing is restored.
+        if out.stderr.contains("no such section") {
+            return Ok(Vec::new());
         }
         return Err(AppError::Git {
             code: out.code,
@@ -5553,28 +5765,63 @@ async fn drop_leftover_branch_settings(
             });
         }
     }
-    Ok(())
+    Ok(Vec::new())
 }
 
-/// The keys of the `[branch "<name>"]` section in a `config --null --list` text, each
-/// once: a record is `<key>\n<value>`, or `<key>` alone for a value-less key. The key
+/// Puts back the `branch.<name>` records a rename removed when git refused it or never
+/// finished (a spawn error, a timeout), under the same held mutex, while `name` still has
+/// no ref (a rename that left a ref there minted its own section). Best-effort and logged:
+/// the rename's own failure is the answer.
+/// A value-less key comes back as `true`, the same boolean.
+async fn restore_dropped_branch_settings(
+    held: &ConfigWriteHeld,
+    repo_path: &str,
+    name: &str,
+    dropped: &[(String, Option<String>)],
+) {
+    if !matches!(exact_branch_tip(repo_path, name).await, Ok(None)) {
+        return;
+    }
+    for (key, value) in dropped {
+        let value = value.as_deref().unwrap_or("true");
+        let args = ["config", "--local", "--add", key.as_str(), value];
+        let restored = run_git_config_write_held(held, repo_path, &args, DEFAULT_TIMEOUT).await;
+        if !restored.as_ref().is_ok_and(|out| out.code == 0) {
+            eprintln!("gitdesktop: couldn't restore {key} after a refused rename");
+        }
+    }
+}
+
+/// The records of the `[branch "<name>"]` section in a `config --null --list` text, in
+/// order: a record is `<key>\n<value>`, or `<key>` alone for a value-less key. The key
 /// splits at its first dot (section, any case) and its last (variable); the subsection
 /// between may hold dots and must equal `name` exactly, as git compares it.
-fn branch_section_keys(list_output: &str, name: &str) -> Vec<String> {
-    let mut keys: Vec<String> = Vec::new();
+fn branch_section_records(list_output: &str, name: &str) -> Vec<(String, Option<String>)> {
+    let mut records = Vec::new();
     for record in list_output.split('\0') {
-        let key = record.split_once('\n').map_or(record, |(key, _)| key);
+        let (key, value) = match record.split_once('\n') {
+            Some((key, value)) => (key, Some(value)),
+            None => (record, None),
+        };
         let Some((section, rest)) = key.split_once('.') else {
             continue;
         };
         let Some((subsection, _)) = rest.rsplit_once('.') else {
             continue;
         };
-        if section.eq_ignore_ascii_case("branch")
-            && subsection == name
-            && !keys.iter().any(|k| k == key)
-        {
-            keys.push(key.to_string());
+        if section.eq_ignore_ascii_case("branch") && subsection == name {
+            records.push((key.to_string(), value.map(str::to_string)));
+        }
+    }
+    records
+}
+
+/// [`branch_section_records`]' keys, each once.
+fn branch_section_keys(list_output: &str, name: &str) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for (key, _) in branch_section_records(list_output, name) {
+        if !keys.contains(&key) {
+            keys.push(key);
         }
     }
     keys
@@ -5700,7 +5947,7 @@ pub(crate) async fn live_remote_default(
         repo_path,
         &cred,
         &["ls-remote", "--symref", remote, "HEAD"],
-        DEFAULT_TIMEOUT,
+        REMOTE_READ_TIMEOUT,
     )
     .await?;
     if out.code != 0 {
@@ -5855,9 +6102,10 @@ pub(crate) async fn renamed_copy_of(
 }
 
 /// Create PR's gate: the renamed copy whose create of `head` into `base` is refused, or
-/// None. It keeps two rules: Create PR on a branch whose upstream is a different,
-/// NON-default name is refused with guidance, and a branch that tracks its start point
-/// is never refused here (its reflog holds no rename entry). Every create
+/// None. It refuses, with guidance, a renamed copy ([`renamed_copy_of`]: a reflog rename
+/// entry, an upstream under a different name) of an origin branch that is neither `base`
+/// nor origin's default; a branch that tracks its start point is never refused here (its
+/// reflog holds no rename entry). Every create
 /// push on every forge, and the MCP tool's, runs behind it. With no local
 /// `refs/remotes/origin/HEAD` the default is read live; that read's failure is the `Err`.
 pub(crate) async fn renamed_copy_refusing_create(
@@ -6044,6 +6292,213 @@ pub(crate) mod tests {
             true,
         )
         .await
+    }
+
+    /// A refused rename puts back the destination's leftover section it dropped, a Keep
+    /// local mark included: git ran with the source gone, so the new name has no ref.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_refused_rename_restores_the_dropped_leftover_settings() {
+        use super::{TestHook, MINT_CLEANUP_HOOK};
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store.path());
+        let (_g, _base, repo) = keep_local_repo("orphan-rename-refused").await;
+        run(&repo, &["branch", "src"]).await;
+        append_config(
+            &repo,
+            "[branch \"dst\"]\n\tremote = stale\n\tgitdesktopLocalOnly = true\n",
+        );
+        let hook: TestHook = {
+            let repo = repo.clone();
+            Arc::new(move || {
+                let repo = repo.clone();
+                Box::pin(async move {
+                    run(&repo, &["update-ref", "-d", "refs/heads/src"]).await;
+                })
+            })
+        };
+        let state = AppState::default();
+        let rename =
+            super::git_rename_branch_core(&state, repo.clone(), "src".into(), "dst".into());
+        let renamed = MINT_CLEANUP_HOOK.scope(hook.clone(), rename).await;
+        assert!(renamed.is_err(), "git refused the rename");
+        assert!(!branch_exists(&repo, "dst").await);
+        let section = branch_section(&repo, "dst").await;
+        assert!(section.contains("branch.dst.remote stale"), "{section}");
+        assert!(
+            section.contains("branch.dst.gitdesktoplocalonly true"),
+            "{section}"
+        );
+
+        // A hand-capitalised header is no section `--remove-section` finds: nothing was
+        // dropped, so the refused rename adds nothing to it.
+        run(&repo, &["branch", "src"]).await;
+        append_config(&repo, "[Branch \"dup\"]\n\tremote = stale\n");
+        let rename =
+            super::git_rename_branch_core(&state, repo.clone(), "src".into(), "dup".into());
+        let renamed = MINT_CLEANUP_HOOK.scope(hook, rename).await;
+        assert!(renamed.is_err(), "git refused the rename onto dup");
+        assert_eq!(
+            run(&repo, &["config", "--get-all", "branch.dup.remote"])
+                .await
+                .trim(),
+            "stale"
+        );
+    }
+
+    /// A rename whose git never ran (its spawn failed) also puts back the destination's
+    /// dropped leftover section, and answers that spawn's own error.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_rename_that_never_ran_restores_the_dropped_leftover_settings() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store.path());
+        let (_g, _base, repo) = keep_local_repo("orphan-rename-unspawned").await;
+        run(&repo, &["branch", "src"]).await;
+        append_config(
+            &repo,
+            "[branch \"dst\"]\n\tremote = stale\n\tgitdesktopLocalOnly = true\n",
+        );
+        // The rename's spawn finds the repository moved away; the next spawn moves it back.
+        let away = format!("{repo}-away");
+        let steps = Arc::new(AtomicUsize::new(0));
+        let log = {
+            let (repo, away, steps) = (repo.clone(), away.clone(), steps.clone());
+            Arc::new(move |args: &[&str]| match steps.load(SeqCst) {
+                0 if args.first() == Some(&"branch") && args.contains(&"--") => {
+                    move_dir(&repo, &away);
+                    steps.store(1, SeqCst);
+                }
+                1 => {
+                    move_dir(&away, &repo);
+                    steps.store(2, SeqCst);
+                }
+                _ => {}
+            })
+        };
+        let state = AppState::default();
+        let rename =
+            super::git_rename_branch_core(&state, repo.clone(), "src".into(), "dst".into());
+        let renamed = GIT_SPAWN_LOG.scope(log, rename).await;
+        assert_eq!(steps.load(SeqCst), 2, "fixture: away and back: {renamed:?}");
+        assert!(
+            matches!(
+                renamed,
+                Err(crate::error::AppError::Io(_) | crate::error::AppError::GitNotFound)
+            ),
+            "{renamed:?}"
+        );
+        assert!(branch_exists(&repo, "src").await);
+        assert!(!branch_exists(&repo, "dst").await);
+        let section = branch_section(&repo, "dst").await;
+        assert!(section.contains("branch.dst.remote stale"), "{section}");
+        assert!(
+            section.contains("branch.dst.gitdesktoplocalonly true"),
+            "{section}"
+        );
+    }
+
+    /// Moves a folder, retrying while Windows still holds a handle in it (a scanner, say).
+    /// A spawn whose working directory was moved away fails before git runs.
+    fn move_dir(from: &str, to: &str) {
+        for _ in 0..100 {
+            if std::fs::rename(from, to).is_ok() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("couldn't move {from} to {to}");
+    }
+
+    /// A publish of the branch that starts while a rename waits for its locks refuses the
+    /// rename inside its hold.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_publish_during_a_renames_waits_refuses_it() {
+        use super::{RenamePhase, RenamePhaseHook, RENAME_PHASE_HOOK};
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store.path());
+        let (_g, _base, repo) = keep_local_repo("rename-publish-late").await;
+        run(&repo, &["branch", "src"]).await;
+        let held = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook: RenamePhaseHook = {
+            let (repo, held) = (repo.clone(), held.clone());
+            Arc::new(move |phase| {
+                let (repo, held) = (repo.clone(), held.clone());
+                Box::pin(async move {
+                    if phase == RenamePhase::BeforeGit {
+                        let hold = super::hold_publishing_branch(&repo, "src").await;
+                        held.lock().unwrap().push(hold);
+                    }
+                })
+            })
+        };
+        let state = AppState::default();
+        let rename =
+            super::git_rename_branch_core(&state, repo.clone(), "src".into(), "dst".into());
+        let renamed = RENAME_PHASE_HOOK.scope(hook, rename).await;
+        assert!(
+            matches!(&renamed, Err(crate::error::AppError::Busy { holder }) if holder == super::PUBLISH_HOLDER),
+            "the rename ran under a publish"
+        );
+        held.lock().unwrap().clear();
+        assert!(branch_exists(&repo, "src").await);
+        assert!(!branch_exists(&repo, "dst").await);
+    }
+
+    /// A publish of the branch that starts before the delete's mutex refuses the delete.
+    #[tokio::test]
+    async fn a_publish_before_a_deletes_guards_refuses_it() {
+        use super::{DeletePhase, DeletePhaseHook, DELETE_PHASE_HOOK};
+        let (_g, _base, repo) = keep_local_repo("delete-publish-late").await;
+        run(&repo, &["branch", "victim"]).await;
+        let tip = full_ref_tip(&repo, "refs/heads/victim").await.unwrap();
+        let held = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook: DeletePhaseHook = {
+            let (repo, held) = (repo.clone(), held.clone());
+            Arc::new(move |phase| {
+                let (repo, held) = (repo.clone(), held.clone());
+                Box::pin(async move {
+                    if phase == DeletePhase::BeforeGuards {
+                        let hold = super::hold_publishing_branch(&repo, "victim").await;
+                        held.lock().unwrap().push(hold);
+                    }
+                })
+            })
+        };
+        let state = AppState::default();
+        let delete = super::delete_branch_ref_at(&state, &repo, "victim", &tip);
+        let deleted = DELETE_PHASE_HOOK.scope(hook, delete).await;
+        assert!(
+            matches!(&deleted, Err(crate::error::AppError::Busy { .. })),
+            "the delete ran under a publish"
+        );
+        held.lock().unwrap().clear();
+        assert!(branch_exists(&repo, "victim").await);
+    }
+
+    /// A branch literally named `@` is its own stored spelling, so the publishing refusal
+    /// every push runs passes it, and still reads its Keep local mark.
+    #[tokio::test]
+    async fn a_branch_named_at_passes_the_publishing_refusal() {
+        let (_g, _base, repo) = keep_local_repo("at-spelling").await;
+        run(&repo, &["update-ref", "refs/heads/@", "HEAD"]).await;
+        assert_eq!(
+            super::stored_branch_spelling(&repo, "@").await.unwrap(),
+            "@"
+        );
+        crate::git::remote::refuse_publishing_branch(&repo, "@")
+            .await
+            .unwrap();
+        run(&repo, &["config", "branch.@.gitdesktopLocalOnly", "true"]).await;
+        assert!(matches!(
+            crate::git::remote::refuse_publishing_branch(&repo, "@").await,
+            Err(crate::error::AppError::BranchKeptLocal { .. })
+        ));
     }
 
     /// A create drops a leftover section; with a true mark in it, the mark stays and the
@@ -18242,6 +18697,43 @@ pub(crate) mod tests {
         }
     }
 
+    /// A case-only rename of a packed branch whose exact new spelling is minted while it
+    /// waits on the config-write mutex is refused, with the minted branch where it was.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_case_only_rename_keeps_a_new_spelling_minted_during_its_wait() {
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store_dir = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store_dir.path());
+        let (_g, base) = temp_base("rename-case-minted");
+        let repo = base.to_string_lossy().into_owned();
+        init_repo(&repo, "r.txt").await;
+        // Branch names no other test uses: the marker root override is process-wide.
+        run(&repo, &["branch", "cmw-topic"]).await;
+        run(&repo, &["pack-refs", "--all"]).await;
+        commit_file(&repo, "b.txt", "next\n").await;
+        let minted = full_ref_tip(&repo, "HEAD").await.unwrap();
+        let (holder, release) = hold_config_mutex(&repo).await;
+        let (events, waiting) = on_first_waiting();
+        let renamed = repo.clone();
+        let rename = async move {
+            let state = AppState::default();
+            git_rename_branch_core(&state, renamed, "cmw-topic".into(), "Cmw-topic".into()).await
+        };
+        let task = tokio::spawn(CONFIG_WRITE_LOCK_EVENTS.scope(events, rename));
+        waiting.await.expect("the rename reached the mutex");
+        run(&repo, &["update-ref", "refs/heads/Cmw-topic", &minted]).await;
+        release.send(()).unwrap();
+        holder.await.unwrap();
+        let result = tokio::time::timeout(TEST_GIT_HANG_GUARD, task)
+            .await
+            .expect("the rename finishes once released")
+            .unwrap();
+        assert!(result.is_err(), "{result:?}");
+        let tip = full_ref_tip(&repo, "refs/heads/Cmw-topic").await;
+        assert_eq!(tip, Some(minted), "the minted branch kept its tip");
+    }
+
     /// Renaming a branch to its own case variant is never a twin refusal: packed or loose,
     /// checked out or not, it succeeds and only the new spelling is stored.
     #[allow(clippy::await_holding_lock)]
@@ -18582,7 +19074,8 @@ pub(crate) mod tests {
     }
 
     /// A reftable repository with one commit, whose ref names never alias; `None` with a
-    /// note when this git can't create one.
+    /// note only when this git says it doesn't know the option or the format, so any
+    /// other init failure fails the test.
     async fn reftable_rename_repo(tag: &str) -> Option<(tempfile::TempDir, String)> {
         let (g, base) = temp_base(tag);
         let repo = base.to_string_lossy().into_owned();
@@ -18594,6 +19087,11 @@ pub(crate) mod tests {
         .await
         .unwrap();
         if init.code != 0 {
+            let stderr = init.stderr.to_lowercase();
+            let unsupported = init.code == 129
+                || stderr.contains("unknown option")
+                || stderr.contains("unknown ref storage format");
+            assert!(unsupported, "reftable init failed: {}", init.stderr);
             eprintln!("note: this git can't create a reftable repo; skipping");
             return None;
         }
@@ -18831,7 +19329,7 @@ pub(crate) mod tests {
     mod remote_rename {
         use super::super::{
             git_rename_branch_core, git_rename_branch_remote_core, is_case_only_rename,
-            live_pushed_tip, parse_remote_rename_read, pushed_branch_contains,
+            is_remote_rejection, live_pushed_tip, parse_remote_rename_read, pushed_branch_contains,
             remote_rejection_detail, remote_rename_check, remote_side_refusal,
             same_push_repository, set_branch_keep_local_core, unreachable_detail, OldKeptCause,
             PushedCopy, RemoteRenameCheck, RemoteRenameOutcome, RemoteRenamePhase,
@@ -19044,6 +19542,13 @@ pub(crate) mod tests {
                     json!({"code": "pushUrlDiffers"}),
                 ),
                 (
+                    to_value(RemoteRenameRefusal::PushesElsewhere {
+                        push_remote: "fork".into(),
+                    })
+                    .unwrap(),
+                    json!({"code": "pushesElsewhere", "pushRemote": "fork"}),
+                ),
+                (
                     to_value(RemoteRenameRefusal::Unreachable { detail: "d".into() }).unwrap(),
                     json!({"code": "unreachable", "detail": "d"}),
                 ),
@@ -19116,7 +19621,34 @@ pub(crate) mod tests {
 
         #[test]
         fn same_push_repository_compares_repository_identity() {
-            let rows: [(&str, &[&str], bool); 9] = [
+            let rows: [(&str, &[&str], bool); 20] = [
+                // A scheme's default port is the port git uses when the URL names none.
+                ("https://h:443/o/r.git", &["https://h/o/r.git"], true),
+                ("http://h/o/r.git", &["http://h:80/o/r.git"], true),
+                ("ssh://git@h:22/o/r.git", &["git@h:o/r.git"], true),
+                ("git+ssh://git@h:22/o/r.git", &["ssh://git@h/o/r.git"], true),
+                ("https://h:80/o/r.git", &["https://h/o/r.git"], false),
+                ("ssh://git@h:2222/o/r.git", &["git@h:o/r.git"], false),
+                // A missing ssh user is still another user.
+                ("ssh://h:22/o/r.git", &["git@h:o/r.git"], false),
+                // Within one transport family the port and the ssh user tell two
+                // repositories apart; across families each serves its own port.
+                (
+                    "ssh://git@host:2222/a/b.git",
+                    &["ssh://git@host:2200/a/b.git"],
+                    false,
+                ),
+                (
+                    "https://host:8443/a/b.git",
+                    &["https://host:9443/a/b.git"],
+                    false,
+                ),
+                ("alice@host:repo.git", &["bob@host:repo.git"], false),
+                (
+                    "ssh://git@host:2222/a/b.git",
+                    &["https://host/a/b.git"],
+                    true,
+                ),
                 (
                     "https://github.com/a/b.git",
                     &["git@github.com:a/b.git"],
@@ -19259,6 +19791,22 @@ pub(crate) mod tests {
                 remote_rejection_detail(gh006),
                 "error: GH006: Protected branch update failed for refs/heads/old.\n- Cannot delete this branch"
             );
+            // Only a ref status line, colored or not, is the remote's rejection.
+            let colored = "To C:/x/nb\n \x1b[31m! [remote rejected]\x1b[m old (declined)\n";
+            let fatal_path = "fatal: could not read from 'C:/[remote rejected]/x.git'\n";
+            let rows = [
+                (deny, true),
+                (current, true),
+                (checked_out, true),
+                (gh006, true),
+                (colored, true),
+                (fatal_path, false),
+                ("remote: ! [remote rejected] old (hook text)\n", false),
+                ("", false),
+            ];
+            for (stderr, want) in rows {
+                assert_eq!(is_remote_rejection(stderr), want, "{stderr:?}");
+            }
 
             let git = |stderr: &str| AppError::Git {
                 code: 128,
@@ -19525,6 +20073,427 @@ pub(crate) mod tests {
                 config_get(&f.repo, "branch.new.merge").await,
                 "refs/heads/old"
             );
+
+            // A fetch after the stale-ref cleanup re-creates `origin/new`; the push's
+            // create-only lease still refuses.
+            let g = fixture_beside(&f, "rr-push-fetched").await;
+            let (c3, repo) = (second_clone(&g).await, g.repo.clone());
+            let hook = hook_at(RemoteRenamePhase::BeforePush, move || {
+                let (c3, repo) = (c3.clone(), repo.clone());
+                async move {
+                    run(&c3, &["push", "-q", "origin", "main:refs/heads/new"]).await;
+                    run(&repo, &["fetch", "-q", "origin"]).await;
+                }
+            });
+            let outcome = act_hooked(&g, hook).await;
+            assert!(
+                matches!(
+                    &outcome,
+                    RemoteRenameOutcome::PushFailed {
+                        error: AppError::PushDestinationExists { .. },
+                        ..
+                    }
+                ),
+                "{outcome:?}"
+            );
+            assert_eq!(remote_tip(&g, "old").await, Some(g.old.clone()));
+            assert_eq!(remote_tip(&g, "new").await, Some(g.main.clone()));
+        }
+
+        /// A push remote other than the remote being renamed on refuses the remote step
+        /// before the network read; the branch's own key outranks `remote.pushDefault`.
+        #[tokio::test]
+        async fn a_push_remote_elsewhere_refuses_the_remote_step() {
+            let f = fixture("rr-pushremote").await;
+            let repo = f.repo.as_str();
+            let fork = RemoteRenameRefusal::PushesElsewhere {
+                push_remote: "fork".into(),
+            };
+            run(repo, &["config", "branch.old.pushRemote", "fork"]).await;
+            assert_eq!(local_refusal(&f, "new").await, fork, "pushRemote");
+            run(repo, &["config", "remote.pushDefault", "origin"]).await;
+            assert_eq!(local_refusal(&f, "new").await, fork, "the own key wins");
+            run(repo, &["config", "--unset", "branch.old.pushRemote"]).await;
+            run(repo, &["config", "remote.pushDefault", "fork"]).await;
+            assert_eq!(local_refusal(&f, "new").await, fork, "pushDefault");
+
+            let state = AppState::default();
+            let check = || remote_rename_check(&state, repo, "old", Some("new"), "origin", None);
+            let clear = RemoteRenameCheck::Clear {
+                old_tip: f.old.clone(),
+            };
+            run(repo, &["config", "branch.old.pushRemote", "origin"]).await;
+            assert_eq!(check().await.unwrap(), clear, "the remote itself");
+            run(repo, &["config", "--unset", "branch.old.pushRemote"]).await;
+            run(repo, &["config", "--unset", "remote.pushDefault"]).await;
+            assert_eq!(check().await.unwrap(), clear, "unset");
+
+            // An empty value gives git no push remote; the branch's own empty key still wins.
+            run(repo, &["config", "remote.pushDefault", "fork"]).await;
+            run(repo, &["config", "branch.old.pushRemote", ""]).await;
+            assert_eq!(check().await.unwrap(), clear, "an empty pushRemote");
+            run(repo, &["config", "--unset", "branch.old.pushRemote"]).await;
+            run(repo, &["config", "remote.pushDefault", ""]).await;
+            assert_eq!(check().await.unwrap(), clear, "an empty pushDefault");
+        }
+
+        /// A tracking ref a leftover lock holds at a value containing the old tip is never
+        /// the proof: the live tip is, and it lacks the old tip.
+        #[tokio::test]
+        async fn a_stale_tracking_ref_is_never_the_containment_proof() {
+            let f = fixture("rr-stale-tracking").await;
+            let (repo, main, old) = (f.repo.clone(), f.main.clone(), f.old.clone());
+            let hook = hook_at(RemoteRenamePhase::BeforePush, move || {
+                let (repo, main, old) = (repo.clone(), main.clone(), old.clone());
+                async move {
+                    run(&repo, &["update-ref", "refs/remotes/origin/new", &old]).await;
+                    let lock =
+                        std::path::Path::new(&repo).join(".git/refs/remotes/origin/new.lock");
+                    std::fs::write(lock, "").unwrap();
+                    run(&repo, &["update-ref", "refs/heads/new", &main]).await;
+                }
+            });
+            let outcome = act_hooked(&f, hook).await;
+            assert!(
+                matches!(
+                    outcome,
+                    RemoteRenameOutcome::OldKept {
+                        cause: OldKeptCause::NotInPush,
+                        ..
+                    }
+                ),
+                "{outcome:?}"
+            );
+            assert_eq!(remote_tip(&f, "old").await, Some(f.old.clone()));
+            assert_eq!(remote_tip(&f, "new").await, Some(f.main.clone()));
+        }
+
+        /// The check's ancestry reads the commits as stored: a replace ref or a graft that
+        /// makes the remote's tip look contained still answers `remoteAhead`.
+        #[tokio::test]
+        async fn replace_refs_and_grafts_never_prove_containment() {
+            let f = fixture("rr-graft").await;
+            let c2 = second_clone(&f).await;
+            commit(&c2, "remote only").await;
+            run(&c2, &["push", "-q", "origin", "old"]).await;
+            run(&f.repo, &["fetch", "-q", "origin"]).await;
+            let ahead_tip = remote_tip(&f, "old").await.unwrap();
+            let state = AppState::default();
+            let check = || remote_rename_check(&state, &f.repo, "old", Some("new"), "origin", None);
+            let ahead = RemoteRenameCheck::Refused {
+                refusal: RemoteRenameRefusal::RemoteAhead,
+            };
+            let looks_contained: [&str; 4] = ["merge-base", "--is-ancestor", &ahead_tip, &f.old];
+
+            run(&f.repo, &["replace", "--graft", &f.old, &ahead_tip]).await;
+            assert!(git_ok(&f.repo, &looks_contained).await, "fixture: replaced");
+            assert_eq!(check().await.unwrap(), ahead, "replace ref");
+            run(&f.repo, &["replace", "-d", &f.old]).await;
+
+            let grafts = std::path::Path::new(&f.repo).join(".git/info/grafts");
+            std::fs::create_dir_all(grafts.parent().unwrap()).unwrap();
+            std::fs::write(&grafts, format!("{} {ahead_tip}\n", f.old)).unwrap();
+            // Every git through 2.51 reads info/grafts; its removal is slated for Git 3.0,
+            // where this row has nothing to prove. CI must still run it.
+            let probe = run_git_raw(Some(&f.repo), &looks_contained, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
+            // Exit 1 is a git that ignores the file; any other failure is the fixture's.
+            assert!(matches!(probe.code, 0 | 1), "graft probe: {}", probe.stderr);
+            if probe.code == 0 {
+                assert_eq!(check().await.unwrap(), ahead, "graft file");
+            } else {
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "CI's git must honour info/grafts for the graft row"
+                );
+                eprintln!("skipped graft row: this git ignores info/grafts");
+            }
+        }
+
+        /// The proof after the push reads the commits as stored too: a pushed tip that only
+        /// a replace ref makes contain the old tip keeps the old branch.
+        #[tokio::test]
+        async fn a_replace_ref_never_proves_the_push_contains_the_old_tip() {
+            let f = fixture("rr-graft-proof").await;
+            let (repo, main, old) = (f.repo.clone(), f.main.clone(), f.old.clone());
+            let side = Arc::new(std::sync::Mutex::new(String::new()));
+            let hook = hook_at(RemoteRenamePhase::BeforePush, {
+                let side = side.clone();
+                move || {
+                    let (repo, main, old, side) =
+                        (repo.clone(), main.clone(), old.clone(), side.clone());
+                    async move {
+                        let tree = format!("{main}^{{tree}}");
+                        let tip = run(&repo, &["commit-tree", "-p", &main, "-m", "side", &tree])
+                            .await
+                            .trim()
+                            .to_string();
+                        run(&repo, &["replace", "--graft", &tip, &main, &old]).await;
+                        let contained = ["merge-base", "--is-ancestor", &old, &tip];
+                        assert!(git_ok(&repo, &contained).await, "fixture: replaced");
+                        run(&repo, &["update-ref", "refs/heads/new", &tip]).await;
+                        *side.lock().unwrap() = tip;
+                    }
+                }
+            });
+            let outcome = act_hooked(&f, hook).await;
+            assert!(
+                matches!(
+                    outcome,
+                    RemoteRenameOutcome::OldKept {
+                        cause: OldKeptCause::NotInPush,
+                        ..
+                    }
+                ),
+                "{outcome:?}"
+            );
+            assert_eq!(remote_tip(&f, "old").await, Some(f.old.clone()));
+            let side = side.lock().unwrap().clone();
+            assert_eq!(remote_tip(&f, "new").await, Some(side));
+        }
+
+        /// `refs/remotes/origin/old` made a symbolic ref to `keep`, which `keep_symbolic`
+        /// creates at the old tip; git's own tracking update after a delete would follow it.
+        async fn keep_symbolic(f: &Fixture) {
+            run(&f.repo, &["branch", "keep", &f.old]).await;
+            run(&f.repo, &["update-ref", "-d", "refs/remotes/origin/old"]).await;
+            run(
+                &f.repo,
+                &["symbolic-ref", "refs/remotes/origin/old", "refs/heads/keep"],
+            )
+            .await;
+        }
+
+        /// The rename's delete of the old name removes a symbolic tracking ref first, so
+        /// the local branch it names survives.
+        #[tokio::test]
+        async fn a_symbolic_tracking_ref_never_costs_the_rename_a_branch() {
+            let f = fixture("rr-symbolic").await;
+            keep_symbolic(&f).await;
+            let outcome = act(&f, "new", None).await;
+            assert!(
+                matches!(outcome, RemoteRenameOutcome::Renamed { .. }),
+                "{outcome:?}"
+            );
+            assert_eq!(
+                full_ref_tip(&f.repo, "refs/heads/keep").await,
+                Some(f.old.clone())
+            );
+            assert!(!git_ok(&f.repo, &["symbolic-ref", "-q", "refs/remotes/origin/old"]).await);
+            assert_eq!(remote_tip(&f, "old").await, None);
+        }
+
+        /// The plain remote delete: a symbolic tracking ref it can't remove refuses before
+        /// the push; removed, the branch it named survives; and a read of it that fails
+        /// never fails a delete.
+        #[tokio::test]
+        async fn a_symbolic_tracking_ref_never_costs_a_remote_delete_a_branch() {
+            use crate::git::runner::GIT_SPAWN_LOG;
+            let f = fixture("rr-symbolic-delete").await;
+            keep_symbolic(&f).await;
+            let state = AppState::default();
+            let delete = || {
+                super::super::git_delete_remote_branch_core(
+                    &state,
+                    f.repo.clone(),
+                    "origin".into(),
+                    "old".into(),
+                )
+            };
+            let lock = std::path::Path::new(&f.repo).join(".git/refs/remotes/origin/old.lock");
+            std::fs::write(&lock, "").unwrap();
+            let refused = delete().await;
+            assert!(matches!(refused, Err(AppError::Git { .. })), "{refused:?}");
+            assert_eq!(remote_tip(&f, "old").await, Some(f.old.clone()));
+            std::fs::remove_file(&lock).unwrap();
+
+            delete().await.unwrap();
+            assert_eq!(remote_tip(&f, "old").await, None);
+            assert_eq!(
+                full_ref_tip(&f.repo, "refs/heads/keep").await,
+                Some(f.old.clone())
+            );
+
+            run(&f.repo, &["push", "-q", "origin", "keep:refs/heads/old"]).await;
+            let away = format!("{}-away", f.repo);
+            let steps = Arc::new(AtomicUsize::new(0));
+            let log = {
+                let (repo, away, steps) = (f.repo.clone(), away.clone(), steps.clone());
+                Arc::new(move |args: &[&str]| match steps.load(Ordering::SeqCst) {
+                    0 if args.starts_with(&["symbolic-ref", "-q"]) => {
+                        super::move_dir(&repo, &away);
+                        steps.store(1, Ordering::SeqCst);
+                    }
+                    1 => {
+                        super::move_dir(&away, &repo);
+                        steps.store(2, Ordering::SeqCst);
+                    }
+                    _ => {}
+                })
+            };
+            let deleted = GIT_SPAWN_LOG.scope(log, delete()).await;
+            assert_eq!(steps.load(Ordering::SeqCst), 2, "fixture: {deleted:?}");
+            deleted.unwrap();
+            assert_eq!(remote_tip(&f, "old").await, None);
+        }
+
+        /// A remote delete of `HEAD`, plain or the rename's leased one, refuses before it
+        /// reads, drops or pushes anything, so the clone-made `origin/HEAD` symref survives.
+        #[tokio::test]
+        async fn a_remote_delete_of_head_refuses_and_keeps_the_default_pointer() {
+            use super::super::{delete_remote_branch_leased, RemoteDeleteLeased};
+            use crate::git::runner::GIT_SPAWN_LOG;
+            const REFUSAL: &str = "HEAD is the remote's default-branch pointer, not a branch";
+            let f = fixture("rr-delete-head").await;
+            run(&f.repo, &["fetch", "-q", "origin"]).await;
+            run(
+                &f.repo,
+                &[
+                    "symbolic-ref",
+                    "refs/remotes/origin/HEAD",
+                    "refs/remotes/origin/main",
+                ],
+            )
+            .await;
+            let state = AppState::default();
+            let spawned = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let log = {
+                let spawned = spawned.clone();
+                Arc::new(move |args: &[&str]| spawned.lock().unwrap().push(args.join(" ")))
+            };
+            let plain = GIT_SPAWN_LOG
+                .scope(
+                    log.clone(),
+                    super::super::git_delete_remote_branch_core(
+                        &state,
+                        f.repo.clone(),
+                        "origin".into(),
+                        "HEAD".into(),
+                    ),
+                )
+                .await;
+            assert!(
+                matches!(&plain, Err(AppError::InvalidArgument(m)) if m == REFUSAL),
+                "{plain:?}"
+            );
+            let leased = GIT_SPAWN_LOG
+                .scope(
+                    log,
+                    delete_remote_branch_leased(&state, &f.repo, "origin", "HEAD", &f.main),
+                )
+                .await;
+            assert!(matches!(
+                &leased,
+                RemoteDeleteLeased::Kept(OldKeptCause::Failed {
+                    error: AppError::InvalidArgument(m),
+                }) if m == REFUSAL
+            ));
+            let spawned = spawned.lock().unwrap().clone();
+            assert!(spawned.is_empty(), "nothing read or pushed: {spawned:?}");
+            let head = run_git_raw(
+                Some(&f.repo),
+                &["symbolic-ref", "refs/remotes/origin/HEAD"],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await
+            .unwrap();
+            assert_eq!(head.stdout_lossy().trim(), "refs/remotes/origin/main");
+            assert_eq!(remote_tip(&f, "main").await, Some(f.main.clone()));
+        }
+
+        /// The check's read of the remote tip: a commit this store lacks is `remoteAhead`,
+        /// one it holds goes on to the ancestry test, and a corrupt one is the check's `Err`.
+        #[tokio::test]
+        async fn the_remote_tip_read_tells_absent_from_corrupt() {
+            let f = fixture("rr-tip-read").await;
+            let state = AppState::default();
+            let check = || remote_rename_check(&state, &f.repo, "old", Some("new"), "origin", None);
+            let clear = RemoteRenameCheck::Clear {
+                old_tip: f.old.clone(),
+            };
+            assert_eq!(check().await.unwrap(), clear, "held and contained");
+
+            let c2 = second_clone(&f).await;
+            commit(&c2, "remote only").await;
+            run(&c2, &["push", "-q", "origin", "old"]).await;
+            let ahead_tip = remote_tip(&f, "old").await.unwrap();
+            assert!(
+                !git_ok(&f.repo, &["cat-file", "-e", &ahead_tip]).await,
+                "fixture: the remote tip is absent here"
+            );
+            let ahead = RemoteRenameCheck::Refused {
+                refusal: RemoteRenameRefusal::RemoteAhead,
+            };
+            assert_eq!(check().await.unwrap(), ahead, "absent");
+
+            let loose = std::path::Path::new(&f.repo)
+                .join(".git/objects")
+                .join(&ahead_tip[..2])
+                .join(&ahead_tip[2..]);
+            std::fs::create_dir_all(loose.parent().unwrap()).unwrap();
+            std::fs::write(&loose, "garbage").unwrap();
+            let read = check().await;
+            assert!(
+                matches!(&read, Err(AppError::Git { .. })),
+                "corrupt: {read:?}"
+            );
+        }
+
+        /// The check reads the fetch URL past the remote URL cache, so a `set-url` made
+        /// since a cached read is the URL it compares with the live push URL.
+        #[tokio::test]
+        async fn the_check_reads_the_fetch_url_uncached() {
+            let f = fixture("rr-url-uncached").await;
+            let moved = format!("{}/moved.git", f.base);
+            run(&f.base, &["clone", "-q", "--bare", &f.bare, &moved]).await;
+            let url = || crate::git::remote::git_remote_url(f.repo.clone(), "origin".into());
+            let cached = url().await.unwrap();
+            run(&f.repo, &["remote", "set-url", "origin", &moved]).await;
+            assert_eq!(
+                url().await.unwrap(),
+                cached,
+                "fixture: the cache answers the old URL"
+            );
+            let state = AppState::default();
+            let check = remote_rename_check(&state, &f.repo, "old", Some("new"), "origin", None);
+            let clear = RemoteRenameCheck::Clear {
+                old_tip: f.old.clone(),
+            };
+            assert_eq!(check.await.unwrap(), clear);
+        }
+
+        /// Under `push.followTags`, a tag the remote refuses fails neither the push nor the
+        /// delete: both carry `--no-follow-tags`.
+        #[tokio::test]
+        async fn follow_tags_never_fails_a_rename_that_landed() {
+            let f = fixture("rr-follow-tags").await;
+            run(&f.repo, &["config", "push.followTags", "true"]).await;
+            run(&f.repo, &["tag", "-a", "v-follow", "-m", "v", &f.old]).await;
+            let hook = std::path::Path::new(&f.bare).join("hooks").join("update");
+            std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+            std::fs::write(
+                &hook,
+                "#!/bin/sh\ncase \"$1\" in refs/tags/*) echo no tags >&2; exit 1;; esac\nexit 0\n",
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let outcome = act(&f, "new", None).await;
+            assert!(
+                matches!(outcome, RemoteRenameOutcome::Renamed { warning: None }),
+                "{outcome:?}"
+            );
+            assert_eq!(remote_tip(&f, "old").await, None);
+            assert_eq!(remote_tip(&f, "new").await, Some(f.old.clone()));
+            assert_eq!(
+                config_get(&f.repo, "branch.new.merge").await,
+                "refs/heads/new"
+            );
+            assert_eq!(full_ref_tip(&f.bare, "refs/tags/v-follow").await, None);
         }
 
         /// A branch moved back before the push leaves the old remote branch alone.
@@ -19684,6 +20653,36 @@ pub(crate) mod tests {
             );
             assert_eq!(full_ref_tip(&g.repo, "refs/remotes/origin/old").await, None);
             assert_eq!(remote_tip(&g, "new").await, Some(g.old.clone()));
+
+            // The lease names its tip: an implicit one would read the tracking ref, which a
+            // fetch moved to the new tip, and delete the moved branch.
+            let h = fixture_beside(&f, "rr-moved-fetched").await;
+            let (c3, repo) = (second_clone(&h).await, h.repo.clone());
+            let moved_in = c3.clone();
+            let hook = hook_at(RemoteRenamePhase::BeforeDelete, move || {
+                let (c3, repo) = (c3.clone(), repo.clone());
+                async move {
+                    commit(&c3, "moved").await;
+                    run(&c3, &["push", "-q", "origin", "old"]).await;
+                    run(&repo, &["fetch", "-q", "origin"]).await;
+                }
+            });
+            let outcome = act_hooked(&h, hook).await;
+            assert!(
+                matches!(
+                    outcome,
+                    RemoteRenameOutcome::OldKept {
+                        cause: OldKeptCause::Moved,
+                        ..
+                    }
+                ),
+                "{outcome:?}"
+            );
+            let moved = full_ref_tip(&moved_in, "refs/heads/old").await;
+            assert!(moved.is_some() && moved != Some(h.old.clone()));
+            let tracking = full_ref_tip(&h.repo, "refs/remotes/origin/old").await;
+            assert_eq!(tracking, moved, "fixture: the fetch moved the tracking ref");
+            assert_eq!(remote_tip(&h, "old").await, moved);
         }
 
         /// The remote's own refusal comes back verbatim, without its padding.
@@ -19704,8 +20703,8 @@ pub(crate) mod tests {
             assert_eq!(remote_tip(&f, "new").await, Some(f.old.clone()));
         }
 
-        /// The proof reads `new`'s own `%(upstream)` under a remapped fetch refspec,
-        /// and the live tip under one that does not cover `new`.
+        /// The proof reads the live tip under a remapped fetch refspec and under one that
+        /// does not cover `new`; the `-u` still writes the remapped tracking ref.
         #[tokio::test]
         async fn the_containment_proof_follows_the_fetch_refspec() {
             let f = fixture("rr-mapped").await;

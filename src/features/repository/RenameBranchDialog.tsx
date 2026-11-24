@@ -21,6 +21,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { clipTitle } from "@/lib/clip-title";
 import {
   GIT_PUSH_TIMEOUT_MESSAGE,
@@ -30,10 +31,15 @@ import {
 import { focusIsLost } from "@/lib/focus-lost";
 import { required, useAppForm } from "@/lib/form";
 import {
+  branchesOptions,
+  branchPushHoldReason,
+  publishHoldsBranch,
+  publishHoldsBranchNow,
   refuseWhileBranchPushes,
   refuseWhilePushRuns,
   remoteBranchPullsOptions,
   remoteRenameCheckOptions,
+  usePendingBranchPushes,
   usePendingPublishes,
   usePendingRemoteRenames,
   useRenameBranch,
@@ -61,10 +67,10 @@ import {
   useOfflineHold,
 } from "@/lib/offline-writes";
 import { PR_HEAD_DELETED, PR_NOUN, prRef } from "@/lib/pulls/pr-state";
-import { landedIn } from "@/lib/stores/notifications";
+import { landedIn, originNoteFor } from "@/lib/stores/notifications";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import type { AppError } from "@/lib/tauri/invoke";
-import { toastError } from "@/lib/toast";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
   ARIA_DISABLED_CLASS,
@@ -98,7 +104,7 @@ const OTHER_REMOTE_RENAME_REASON =
   "Another branch is being renamed on its remote";
 
 /** How long the name settles before the remote check reads it: each check runs
- *  `ls-remote` with the remote's credentials, so never one per keystroke. */
+ *  `ls-remote` with the remote's credentials, so it runs once the name settles. */
 const CHECK_DEBOUNCE_MS = 400;
 
 /** The field's warning for a name in the agent-session namespace. A warning, not
@@ -110,10 +116,11 @@ function sessionNameWarning(name: string): string | null {
 }
 
 /** The remote step this rename may offer; null hides the checkbox. */
-export type RemoteRenameOffer = {
-  remote: string;
-  blocked: "remoteDefault" | "keepLocal" | null;
-} | null;
+export type RemoteRenameOffer =
+  | { remote: string; blocked: "remoteDefault" | "keepLocal" | null }
+  /** The branch's push remote is another remote than the one it tracks. */
+  | { remote: string; blocked: "pushesElsewhere"; pushRemote: string }
+  | null;
 
 type Names = { old: string; new: string; remote: string };
 
@@ -167,13 +174,40 @@ function cappedDetail(text: string): string {
   return `${chars.join("").replace(/[\s.!?…]+$/, "")}…`;
 }
 
-const BLOCK_REASON: Record<
-  "remoteDefault" | "keepLocal",
-  (n: Names) => string
-> = {
-  remoteDefault: (n) => `${n.old} is the default branch on ${n.remote}`,
-  keepLocal: (n) => `${n.old} is marked Keep local`,
-};
+/** A capped detail closed as one sentence: a last line that runs on gives up
+ *  its `:`, `;` or `,` to the period. */
+function closedDetail(text: string): string {
+  return sentence(
+    cappedDetail(text)
+      .trimEnd()
+      .replace(/[:;,]$/, ""),
+  );
+}
+
+/** Why the offer holds the box; null while it doesn't. */
+function blockReason(
+  n: Names,
+  offer: NonNullable<RemoteRenameOffer>,
+): string | null {
+  switch (offer.blocked) {
+    case "remoteDefault":
+      return `${n.old} is the default branch on ${n.remote}`;
+    case "keepLocal":
+      return `${n.old} is marked Keep local`;
+    case "pushesElsewhere":
+      return `${n.old} pushes to ${offer.pushRemote}, not ${n.remote}`;
+    case null:
+      return null;
+  }
+}
+
+/** The field's own message for a name it won't submit. */
+function nameError(value: string, target: string | null): string | undefined {
+  return (
+    required(value) ??
+    (sanitizeRefName(value) === target ? "Unchanged" : undefined)
+  );
+}
 
 type RefusalCopy = { reason: string; advice: string };
 
@@ -197,7 +231,7 @@ const REFUSAL_COPY: {
     advice: "Choose another name, or untick to rename only here.",
   }),
   unreachable: (n, r) => ({
-    reason: `Couldn't reach ${n.remote}: ${sentence(cappedDetail(r.detail))}`,
+    reason: `Couldn't reach ${n.remote}: ${closedDetail(r.detail)}`,
     advice: UNTICK,
   }),
   mirror: (n) => ({
@@ -232,6 +266,10 @@ const REFUSAL_COPY: {
     reason: `${n.remote}/${n.old} changed since it was checked.`,
     advice: "Checking again…",
   }),
+  pushesElsewhere: (n, r) => ({
+    reason: `${n.old} pushes to ${r.pushRemote}, not ${n.remote}.`,
+    advice: UNTICK,
+  }),
 };
 
 function refusalCopy(n: Names, r: RemoteRenameRefusal): RefusalCopy {
@@ -260,17 +298,13 @@ function pullsNeedConfirm(pulls: RemoteBranchPulls | undefined): boolean {
   }
 }
 
-/** A toast title that ends in a period takes the repository note before it. */
-function titled(title: string, away: string): string {
-  return title.endsWith(".") ? `${title.slice(0, -1)}${away}.` : title + away;
-}
-
 function withWarning(description: string, warning: string | null): string {
   return warning ? `${description} ${warning}` : description;
 }
 
-const OLD_KEPT_TITLE = (n: Names) =>
-  `Renamed to ${n.new}, but ${n.remote}/${n.old} is still there`;
+/** `away` is the repository note, which follows the local rename it qualifies. */
+const OLD_KEPT_TITLE = (n: Names, away: string) =>
+  `Renamed to ${n.new}${away}, but ${n.remote}/${n.old} is still there`;
 const REMOTE_GROUP_DELETE = (n: Names) =>
   `Delete ${n.old} on ${n.remote} from the branch menu's Remote group`;
 
@@ -280,46 +314,50 @@ const OLD_KEPT_COPY: {
     n: Names,
     c: Extract<OldKeptCause, { reason: K }>,
     forge: string | null,
+    away: string,
   ) => { title: string; description: string };
 } = {
-  notInPush: (n) => ({
-    title: OLD_KEPT_TITLE(n),
+  notInPush: (n, _c, _forge, away) => ({
+    title: OLD_KEPT_TITLE(n, away),
     description: `${n.new} changed while the rename ran, so the pushed copy doesn't include everything on ${n.remote}/${n.old}. Compare the two before deleting ${n.old} on ${n.remote}.`,
   }),
-  unverified: (n) => ({
-    title: OLD_KEPT_TITLE(n),
+  unverified: (n, _c, _forge, away) => ({
+    title: OLD_KEPT_TITLE(n, away),
     description: `Couldn't confirm that ${n.remote}/${n.new} includes everything on ${n.remote}/${n.old}, so ${n.old} wasn't deleted there. Compare the two before deleting ${n.old} on ${n.remote}.`,
   }),
-  moved: (n) => ({
-    title: OLD_KEPT_TITLE(n),
+  moved: (n, _c, _forge, away) => ({
+    title: OLD_KEPT_TITLE(n, away),
     description: `${n.remote}/${n.old} changed while the rename ran, so it wasn't deleted. Delete it from the branch menu's Remote group once you've checked it.`,
   }),
-  rejected: (n, c, forge) => {
-    const detail = cappedDetail(c.detail);
+  rejected: (n, c, forge, away) => {
+    // A detail with nothing left once its run-on mark goes closes as a bare
+    // period, which says nothing: the delete's own sentence stands in.
+    const detail = closedDetail(c.detail);
     return {
-      title: OLD_KEPT_TITLE(n),
-      description: `${detail === "" ? `${n.remote} refused the delete.` : sentence(detail)} ${REMOTE_GROUP_DELETE(n)}${forge ? `, or on ${forge}` : ""}.`,
+      title: OLD_KEPT_TITLE(n, away),
+      description: `${detail === "." ? `${n.remote} refused the delete.` : detail} ${REMOTE_GROUP_DELETE(n)}${forge ? `, or on ${forge}` : ""}.`,
     };
   },
-  failed: (n, c) => ({
-    title: `Renamed to ${n.new}, but ${n.remote}/${n.old} may still be there`,
+  failed: (n, c, _forge, away) => ({
+    title: `Renamed to ${n.new}${away}, but ${n.remote}/${n.old} may still be there`,
     description: `${sentence(presentError(c.error).summary)} ${REMOTE_GROUP_DELETE(n)}.`,
   }),
 };
 
-/** The one toast a settled remote rename raises; `refused` is the caller's. */
+/** The one toast a settled remote rename raises; `refused` is the caller's.
+ *  After a repository switch the note (`away`) stands where "here" would. */
 function toastRemoteOutcome(
   outcome: Exclude<RemoteRenameOutcome, { status: "refused" }>,
   n: Names,
   away: string,
   forge: string | null,
 ) {
+  const where = away === "" ? " here" : away;
   switch (outcome.status) {
     case "renamed":
-      toast.success(
-        titled(`Renamed to ${n.new} here and on ${n.remote}`, away),
-        { description: outcome.warning ?? undefined },
-      );
+      toast.success(`Renamed to ${n.new}${where} and on ${n.remote}`, {
+        description: outcome.warning ?? undefined,
+      });
       return;
     case "pushFailed": {
       const e: AppError = outcome.error;
@@ -328,12 +366,9 @@ function toastRemoteOutcome(
         (e.kind === "timeout" && e.message === GIT_PUSH_TIMEOUT_MESSAGE);
       const summary = sentence(presentError(e).summary);
       toast.warning(
-        titled(
-          hedged
-            ? `Renamed to ${n.new} here. Couldn't confirm the push to ${n.remote}.`
-            : `Renamed to ${n.new} here. Couldn't push it to ${n.remote}.`,
-          away,
-        ),
+        hedged
+          ? `Renamed to ${n.new}${where}. Couldn't confirm the push to ${n.remote}.`
+          : `Renamed to ${n.new}${where}. Couldn't push it to ${n.remote}.`,
         {
           description: withWarning(
             hedged
@@ -351,9 +386,10 @@ function toastRemoteOutcome(
           n: Names,
           c: OldKeptCause,
           forge: string | null,
+          away: string,
         ) => { title: string; description: string }
-      )(n, outcome.cause, forge);
-      toast.warning(titled(copy.title, away), {
+      )(n, outcome.cause, forge, away);
+      toast.warning(copy.title, {
         description: withWarning(copy.description, outcome.warning),
       });
       return;
@@ -588,6 +624,12 @@ export function RenameBranchDialog({
       sessionRef.current = null;
     };
   }, [target, repoPath]);
+  // The open target and repository as the last commit left them, for a settle
+  // that outlives the render it was pressed in.
+  const liveRef = useRef({ target, repoPath });
+  useLayoutEffect(() => {
+    liveRef.current = { target, repoPath };
+  });
   // Every close path routes through here: the dialog stays mounted, so an
   // in-flight suggestion would otherwise land in the field on the NEXT open,
   // which may be naming a different branch.
@@ -613,7 +655,8 @@ export function RenameBranchDialog({
   const nameFieldId = useId();
   const remote = shownRemoteRename?.remote ?? null;
   const offlineHold = useOfflineHold();
-  const publishActive = usePendingPublishes(repoPath).length > 0;
+  const pendingPublishes = usePendingPublishes(repoPath);
+  const publishActive = pendingPublishes.length > 0;
   const pendingRemoteRenames = usePendingRemoteRenames(repoPath);
   // A rename of the shown branch, under either name: a branches re-read after
   // the local step drops the old name's row (and the offer) while the push runs.
@@ -630,6 +673,13 @@ export function RenameBranchDialog({
   // A local-only rename that landed, through the close it makes: the form
   // stops submitting before the popup is gone.
   const [localDone, setLocalDone] = useState(false);
+  // The local-only rename in flight, by its press: form-core's one
+  // `isSubmitting` is cleared by an older dismissed submit's settle too. It
+  // holds only the repository it was pressed in.
+  const [localPress, setLocalPress] = useState<{
+    token: object;
+    repoPath: string;
+  } | null>(null);
   // The box section's remote: the running rename's first, so it stays mounted
   // (held read-only) until that rename settles; null hides the section.
   const boxRemote = running?.remote ?? remote;
@@ -677,9 +727,16 @@ export function RenameBranchDialog({
       const newName = sanitizeRefName(value.name);
       const session = sessionRef.current;
       if (!remoteStep) {
-        // A repository publish pushes the checked-out branch by name.
-        const isHead = target === currentName;
-        if (isHead && refuseWhilePublishing(queryClient, repoPath)) return;
+        // A repository publish pushes its checkout's branch by name.
+        const held = publishHoldsBranchNow(
+          queryClient,
+          repoPath,
+          target,
+          currentName,
+        );
+        if (held && refuseWhilePublishing(queryClient, repoPath)) return;
+        const token = {};
+        setLocalPress({ token, repoPath });
         try {
           const outcome = await renameBranch.mutateAsync({
             oldName: target,
@@ -695,6 +752,8 @@ export function RenameBranchDialog({
           }
         } catch (e) {
           toastError(e);
+        } finally {
+          setLocalPress((p) => (p?.token === token ? null : p));
         }
         return;
       }
@@ -709,6 +768,9 @@ export function RenameBranchDialog({
           ? providerLabel(pulls.data.provider)
           : null;
       const sentTip = clearTip;
+      // The check answer the press was made under; a newer one retires the
+      // act's refusal.
+      const checkAt = check.dataUpdatedAt;
       const press: Pressed = {
         oldName: target,
         newName,
@@ -719,6 +781,27 @@ export function RenameBranchDialog({
       setPressed(press);
       // Only an outcome that keeps the dialog open gives the form back.
       const release = () => setPressed((p) => (p === press ? null : p));
+      // The open session this settle answers to: the pressing one, or one
+      // reopened in this repository on the run's old or new name, which shows
+      // this run. Never a dialog open on another branch or repository.
+      const showingSession = (): {
+        session: object;
+        reopenedOn: string;
+      } | null => {
+        const open = sessionRef.current;
+        if (open === null) return null;
+        if (open === session) return { session: open, reopenedOn: "" };
+        const live = liveRef.current;
+        return live.repoPath === repoPath &&
+          (live.target === target || live.target === newName)
+          ? { session: open, reopenedOn: live.target }
+          : null;
+      };
+      const closeShowing = () => {
+        if (showingSession() === null) return;
+        sessionRef.current = null;
+        onClose();
+      };
       try {
         const outcome = await renameOnRemote.mutateAsync({
           oldName: target,
@@ -727,18 +810,28 @@ export function RenameBranchDialog({
           expectedOldTip: sentTip,
         });
         const { away } = landedIn(repoPath);
-        const stillOpen = sessionRef.current === session && session !== null;
         if (outcome.status === "refused") {
           release();
-          if (stillOpen) {
+          const showing = showingSession();
+          // A dialog reopened on the new name shows a branch that never got it.
+          // The latch keys on the press's check answer, so a check entry dropped
+          // or re-answered since the press takes the toast instead.
+          if (
+            showing !== null &&
+            showing.reopenedOn !== newName &&
+            queryClient.getQueryState(checkOptions.queryKey)?.dataUpdatedAt ===
+              checkAt
+          ) {
+            // Reopening reset the tick; the refusal reads under a ticked box.
+            if (showing.reopenedOn !== "") setTick(true);
             setActRefusal({
-              session,
+              session: showing.session,
               newName,
-              tip: sentTip,
+              checkAt,
               refusal: outcome.refusal,
             });
-            // No refetch of its own: the mutation's whole-repo settle already
-            // re-read the check once, so `moved` resolves into a fresh verdict.
+            // No refetch of its own: the mutation's whole-repo settle marked the
+            // check stale, so the reads coming back on re-read it once.
           } else {
             toast.info(
               `Didn't rename ${target}${away}: ${refusalCopy(names, outcome.refusal).reason}`,
@@ -747,13 +840,41 @@ export function RenameBranchDialog({
           return;
         }
         toastRemoteOutcome(outcome, names, away, forge);
-        if (stillOpen) {
-          sessionRef.current = null;
-          onClose();
-        }
+        closeShowing();
       } catch (e) {
+        const note = originNoteFor(repoPath);
+        if (note) toastErrorWithNote(e, note);
+        else toastError(e);
+        // Taken before the read: a dialog opened during it is never closed.
+        const following = showingSession();
+        if (following === null) {
+          release();
+          return;
+        }
+        // Reopening reset the tick; the form given back renames on the remote.
+        if (following.reopenedOn === target) setTick(true);
+        // An error after the local step leaves the form naming a branch that is
+        // gone; a failed read keeps the dialog open. The form stays held through
+        // the read: the dialog that showed the error closes unreleased when the old
+        // name is gone, and every other answer gives the form back, a dialog closed
+        // during the read included; a dialog reopened during the read is live.
+        try {
+          const branches = await queryClient.fetchQuery({
+            ...branchesOptions(repoPath),
+            staleTime: 0,
+          });
+          if (
+            !branches.some((b) => b.name === target) &&
+            sessionRef.current === following.session
+          ) {
+            sessionRef.current = null;
+            onClose();
+            return;
+          }
+        } catch {
+          // Unknown: the dialog stays open.
+        }
         release();
-        toastError(e);
       }
     },
   });
@@ -795,8 +916,11 @@ export function RenameBranchDialog({
     settledName === "" || settledName === shownTarget ? null : settledName;
   const isSubmitting = useSelector(renameForm.store, (s) => s.isSubmitting);
   // A local-only rename from its press until the form is given back or the
-  // popup is gone (a remote one shows as `running`).
-  const localRunning = isSubmitting || localDone;
+  // popup is gone (a remote one shows as `running`). `isSubmitting` covers the
+  // press's synchronous edge before the token lands.
+  const localPressHere = localPress?.repoPath === repoPath;
+  const localRunning = isSubmitting || localDone || localPressHere;
+  const canSubmit = useSelector(renameForm.store, (s) => s.canSubmit);
   const readsOn =
     remoteStep && running === undefined && !localRunning && target !== null;
   const checkOptions = remoteRenameCheckOptions(
@@ -825,11 +949,12 @@ export function RenameBranchDialog({
   };
 
   // A refusal the act answered in this session holds while the field still
-  // names what was sent and the shown check still carries the tip it pinned.
+  // names what was sent and the check still shows the answer the press was made
+  // under: any newer answer, clear or refused, retires it.
   const [actRefusal, setActRefusal] = useState<{
     session: object;
     newName: string;
-    tip: string;
+    checkAt: number;
     refusal: RemoteRenameRefusal;
   } | null>(null);
   const clearTip = check.data?.status === "clear" ? check.data.oldTip : null;
@@ -837,7 +962,7 @@ export function RenameBranchDialog({
     actRefusal !== null &&
     actRefusal.session === openSession &&
     actRefusal.newName === liveName &&
-    clearTip === actRefusal.tip
+    check.dataUpdatedAt === actRefusal.checkAt
       ? actRefusal.refusal
       : null;
   const names: Names = {
@@ -868,6 +993,22 @@ export function RenameBranchDialog({
       ? `Couldn't check ${names.remote}: ${presentError(readError).summary}`
       : null;
   const refusalLine = refusal !== null ? refusalText(names, refusal) : null;
+  const retryRescue = useRetryFocusRescue(readErrorLine !== null);
+  // Beside the region, never in it: an action read as part of the status.
+  const retryShown =
+    running === undefined && !checking && readErrorLine !== null;
+  const retryReads = () => {
+    void check.refetch();
+    void pulls.refetch();
+  };
+  // Another branch's push in this checkout: the press would queue behind it.
+  const pendingPushes = usePendingBranchPushes(repoPath);
+  // A ticked box whose remote step went off offline: Rename renames here only.
+  const offlineDropBack =
+    ticked &&
+    running === undefined &&
+    shownRemoteRename?.blocked === null &&
+    offlineHold !== undefined;
 
   // The box's tick hold, arms in precedence. While this dialog's rename runs,
   // remote or local-only (until its form is given back or the popup is gone),
@@ -878,8 +1019,8 @@ export function RenameBranchDialog({
         return RENAME_PENDING_GENERATE_REASON;
       case localRunning:
         return RENAME_PENDING_GENERATE_REASON;
-      case shownRemoteRename?.blocked != null:
-        return BLOCK_REASON[shownRemoteRename.blocked](names);
+      case shownRemoteRename != null && shownRemoteRename.blocked !== null:
+        return blockReason(names, shownRemoteRename);
       case offlineHold !== undefined:
         return OFFLINE_ITEM_REASON;
       case otherRunning:
@@ -913,12 +1054,22 @@ export function RenameBranchDialog({
   // rename (the press re-checks the network for a remote step).
   const submitHeld = (() => {
     if (running !== undefined) return RENAME_PENDING_GENERATE_REASON;
+    if (isSubmitting || localPressHere) return RENAME_PENDING_GENERATE_REASON;
     if (branchNameGen.generating) return GENERATING_REASON;
     // The same predicate as the press's publish refusal.
-    if (publishActive && (remoteStep || shownTarget === currentName))
+    if (
+      remoteStep
+        ? publishActive
+        : publishHoldsBranch(pendingPublishes, shownTarget, currentName)
+    )
       return PUBLISH_HOLD_REASON;
+    // The validator's hold, explained by the field's own message.
+    if (!canSubmit) return nameError(fieldName, target) ?? null;
     if (!remoteStep) return null;
     if (otherRunning) return OTHER_REMOTE_RENAME_REASON;
+    // The same scope as the press's refusal while a push runs.
+    if (pendingPushes.length > 0)
+      return branchPushHoldReason(pendingPushes.some((p) => p.paused));
     if (checking) return checkingLine;
     return readErrorLine ?? refusalLine;
   })();
@@ -947,12 +1098,13 @@ export function RenameBranchDialog({
   // here whenever it may fire, generate-capable or not (the hook mirrors the
   // global listener's own guards). A running rename holds it like the button:
   // the name it would revise has already been sent.
-  const renameRunning = isSubmitting || localDone || running !== undefined;
+  const renameRunning = localRunning || running !== undefined;
   const generateChord = useGenerateChord({
+    // `isSubmitting` is spelled out for the guard; `localRunning` holds it too.
     enabled:
       generateAction.enabled &&
       !isSubmitting &&
-      !localDone &&
+      !localRunning &&
       running === undefined,
     run: generateAction.run,
   });
@@ -960,13 +1112,17 @@ export function RenameBranchDialog({
   // An empty or unchanged field names no branch, so the lines say what it is.
   const newLabel =
     liveName === "" || liveName === names.old ? "the renamed branch" : liveName;
-  // Outside the live region: it follows every keystroke in the field.
+  const keepsLine = (
+    <>
+      {names.remote}/{names.old} keeps its name and {newLabel} keeps tracking
+      it.
+    </>
+  );
+  // Outside the live region: it follows every keystroke in the field. The
+  // offline drop-back says it inside the region instead, so the change is heard.
   const helperLine =
-    running === undefined && !remoteStep ? (
-      <p className="pl-6 text-muted-foreground wrap-break-word">
-        {names.remote}/{names.old} keeps its name and {newLabel} keeps tracking
-        it.
-      </p>
+    running === undefined && !remoteStep && !offlineDropBack ? (
+      <p className="pl-6 text-muted-foreground wrap-break-word">{keepsLine}</p>
     ) : null;
   const statusLine = (() => {
     if (running !== undefined)
@@ -974,6 +1130,10 @@ export function RenameBranchDialog({
         <p className="text-muted-foreground wrap-break-word">
           Renaming {running.oldName} to {running.newName} on {running.remote}…
         </p>
+      );
+    if (offlineDropBack)
+      return (
+        <p className="text-muted-foreground wrap-break-word">{keepsLine}</p>
       );
     if (!remoteStep) return null;
     if (checking)
@@ -1078,20 +1238,27 @@ export function RenameBranchDialog({
             <renameForm.AppField
               name="name"
               validators={{
-                onChange: ({ value }) =>
-                  required(value) ??
-                  (sanitizeRefName(value) === target ? "Unchanged" : undefined),
+                onChange: ({ value }) => nameError(value, target),
               }}
             >
               {(field) => (
-                <field.TextField
-                  id={nameFieldId}
-                  label="New name"
-                  warning={(value) =>
-                    sessionNameWarning(sanitizeRefName(value)) ??
-                    refNameWarning(value)
+                // The Retry's focus host: the name field itself.
+                <div
+                  ref={(node) =>
+                    retryRescue.hostRef(node?.querySelector("input") ?? null)
                   }
-                />
+                >
+                  <field.TextField
+                    id={nameFieldId}
+                    label="New name"
+                    // Sent already: an edit while it runs would apply to nothing.
+                    readOnly={renameRunning}
+                    warning={(value) =>
+                      sessionNameWarning(sanitizeRefName(value)) ??
+                      refNameWarning(value)
+                    }
+                  />
+                </div>
               )}
             </renameForm.AppField>
             <GenerateBranchNameButton
@@ -1184,6 +1351,19 @@ export function RenameBranchDialog({
                 <div role="status" className="space-y-1.5 pl-6 empty:-mt-2">
                   {statusLine}
                 </div>
+                {retryShown && (
+                  <div className="pl-6">
+                    <Button
+                      ref={retryRescue.retryRef}
+                      type="button"
+                      variant="outline"
+                      size="xs"
+                      onClick={retryReads}
+                    >
+                      Retry
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1200,8 +1380,9 @@ export function RenameBranchDialog({
             >
               <renameForm.AppForm>
                 <renameForm.SubmitButton
-                  // Every hold carries a reason, so the button is never
-                  // natively disabled and keeps its tab stop.
+                  // Every hold but the close a landed local rename makes
+                  // carries a reason (that one sits under the spinner), so the
+                  // button is never natively disabled and keeps its tab stop.
                   focusableWhenDisabled
                   render={heldButtonRender(submitHeld !== null || localDone)}
                   disabled={submitHeld !== null || localDone}

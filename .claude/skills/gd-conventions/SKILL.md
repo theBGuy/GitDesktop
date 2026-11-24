@@ -1467,14 +1467,15 @@ one grep away on the named symbol. Grows via Conventions-sync.
   Merge hands them because a Bitbucket fast-forward puts the PR's head sha on
   the base, and Bitbucket's checks read that sha's statuses; for any other
   merge it is a precaution. A later arm re-arms the per-repo timer, and its
-  one fire covers every coalesced arm's reads. A remote-branch delete, and a
-  remote rename that deleted the old name (`renamed`), instead schedule
-  `recheckListsLater` with `headDeletePrListKeys` (`queries/branches.ts`)
-  (GitHub closes a head-deleted PR asynchronously); a PR merge (unless queued),
-  close or reopen and an issue close or reopen arm the same re-read with
-  lens-scoped list keys, since the forge's list membership lags the row's own
-  state. A merge also owes that re-read the lens's issue lists and issue
-  detail reads, since the forge closes the issues a merge resolves after it
+  one fire covers every coalesced arm's reads. A remote-branch delete instead
+  schedules `recheckListsLater` with `headDeletePrListKeys`, and a remote
+  rename that deleted the old name (`renamed`) schedules the same re-read
+  besides its run recheck (both in `queries/branches.ts`; GitHub closes a
+  head-deleted PR asynchronously); a PR merge (unless queued), close or
+  reopen and an issue close or reopen arm the same re-read with lens-scoped
+  list keys, since the forge's list membership lags the row's own state. A
+  merge also owes that re-read the lens's issue lists and issue detail
+  reads, since the forge closes the issues a merge resolves after it
   answers. Its per-repo entry holds the union of the keys owed and fires ONE
   invalidation. Guards: `scripts/push-recheck-family.test.mjs` pins the arm
   sites (the run rechecks, keyed on the api callees; the branch-delete,
@@ -1626,8 +1627,8 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `pendingIssueWrite`, `pendingDiscussionWrite`), matched on the record its
   variables name.
 - **Branch-push family** — a branch push and a remote rename share one mutation
-  key (`branchPushKey`, `queries/push-writes.ts`), so every hold that reads the
-  family (`usePendingBranchPushes`, `refuseWhilePushRuns`,
+  key (`branchPushKey`, `queries/push-writes.ts`), so every hold that
+  reads the family (`usePendingBranchPushes`, `refuseWhilePushRuns`,
   `refuseWhileBranchPushes`) covers both. `pendingBranchPushesFor` reads a
   rename (`RemoteRenameVars`) as TWO states, the old name and the new, marked
   `renaming`: the row carries either one while it runs. A new write that sends

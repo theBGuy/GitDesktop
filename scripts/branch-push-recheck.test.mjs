@@ -40,8 +40,8 @@ const PINS = [
       "promotionBlocksCheckout(repoPath)",
       "remoteStep && refuseWhileOffline()",
       "remoteStep && refuseWhilePushRuns(queryClient, repoPath)",
-      "const isHead = target === currentName;",
-      "isHead && refuseWhilePublishing(queryClient, repoPath)",
+      "const held = publishHoldsBranchNow(",
+      "held && refuseWhilePublishing(queryClient, repoPath)",
       "await renameBranch.mutateAsync",
       "if (refuseWhilePublishing(queryClient, repoPath)) return;",
       "await renameOnRemote.mutateAsync",
@@ -50,7 +50,7 @@ const PINS = [
       "refuseWhileBranchPushes(queryClient, repoPath, target, currentName)",
       "remoteStep && refuseWhileOffline()",
       "remoteStep && refuseWhilePushRuns(queryClient, repoPath)",
-      "isHead && refuseWhilePublishing(queryClient, repoPath)",
+      "held && refuseWhilePublishing(queryClient, repoPath)",
       "if (refuseWhilePublishing(queryClient, repoPath)) return;",
     ],
   },
@@ -1120,13 +1120,22 @@ function checkPushCalls(
         }
         if (!file.startsWith("src/test/")) {
           const has = (name) => keys.some((k) => k.key === name);
-          if (has("startedOn") && !has("expectedBranch"))
+          // A pin spelled as an absent value pins nothing (`creates:
+          // undefined` drops the create lease); shorthand keeps its binding.
+          const pinned = (name) =>
+            keys.some(
+              (k) =>
+                k.key === name &&
+                (k.value === null ||
+                  !/^(?:undefined|null|void\s+0)$/.test(k.value)),
+            );
+          if (has("startedOn") && !pinned("expectedBranch"))
             fails.push(
               `${where}: records startedOn without an expectedBranch pin`,
             );
-          if (has("force") && !has("expectedHead"))
+          if (has("force") && !pinned("expectedHead"))
             fails.push(`${where}: a force key without an expectedHead pin`);
-          if (has("branch") && !has("creates")) {
+          if (has("branch") && !pinned("creates")) {
             const up = keys.find((k) => k.key === "setUpstream")?.value ?? null;
             const row = noCreates.find(
               (r) => r.file === file && r.fn === fn && r.setUpstream === up,
@@ -1319,8 +1328,35 @@ test("the usePush call scan fails closed on every shape it can't prove", () => {
       "await push.mutateAsync({ setUpstream: true, branch: x.name });",
       "in probe: names its branch without a creates key",
     ],
+    // A pin spelled as an absent value is no pin.
+    [
+      "await push.mutateAsync({ setUpstream: false, branch: x.name, startedOn: x.name, expectedBranch: undefined, creates: false });",
+      "in probe: records startedOn without an expectedBranch pin",
+    ],
+    [
+      "await push.mutateAsync({ setUpstream: false, branch: x.name, force: true, expectedBranch: x.name, expectedHead: null, creates: false });",
+      "in probe: a force key without an expectedHead pin",
+    ],
+    [
+      "await push.mutateAsync({ setUpstream: true, branch: x.name, creates: void 0 });",
+      "in probe: names its branch without a creates key",
+    ],
   ])
     scanFailsWith(probe(body), fragment, undefined, body);
+  // Shorthand pins keep their bindings.
+  {
+    const fails = checkPushCalls(
+      probe(
+        "await push.mutateAsync({ setUpstream: false, branch: x.name, startedOn: x.name, expectedBranch, force: true, expectedHead, creates });",
+      ),
+    );
+    for (const rule of [
+      "expectedBranch pin",
+      "expectedHead pin",
+      "creates key",
+    ])
+      assert.ok(!fails.some((f) => f.includes(rule)), `${rule}: ${fails}`);
+  }
   // An allowlist row covers only its own function and setUpstream text.
   const probeRow = { file: fg, fn: "probe", setUpstream: "false", reason: "" };
   const withRow = [...NO_CREATES, probeRow];

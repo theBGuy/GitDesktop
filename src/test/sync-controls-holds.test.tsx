@@ -488,6 +488,7 @@ describe("a sibling worktree pushing the same branch", () => {
         headRefName: "feat",
         headRepoOwner: "someone",
         headRepoName: "sync",
+        headRepoHost: "example.test",
         maintainerCanModify: true,
         aheadCount: 1,
       }),

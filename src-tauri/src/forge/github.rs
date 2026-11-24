@@ -1447,12 +1447,18 @@ pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
     })
 }
 
+/// GitHub's cross-fork basehead, `{base}...{owner}%3A{branch}`. Branch names ride
+/// unencoded (the capture is greedy and a ref can never contain `..`), but the
+/// colon is `%3A`: `gh api` rewrites `:owner`/`:repo`/`:branch` at a word
+/// boundary anywhere in the path, so a branch like `repo-fix` would change.
+fn fork_compare_basehead(fork_owner: &str, base_branch: &str, fork_branch: &str) -> String {
+    format!("{base_branch}...{fork_owner}%3A{fork_branch}")
+}
+
 /// How far `fork_owner`'s `fork_branch` has diverged from this repo's `base_branch`.
-/// The `{base}...{owner}:{branch}` basehead is GitHub's cross-fork compare form;
-/// branch names ride unencoded (the capture is greedy and a ref can never contain
-/// `..`, so slashed names stay unambiguous), and `per_page=1` trims the commits array
-/// while `ahead_by`/`behind_by` remain exact totals. Callers validate both branch
-/// names and the fork slug first (`forge::forge_fork_divergence`).
+/// `per_page=1` trims the commits array while `ahead_by`/`behind_by` remain exact
+/// totals. Callers validate both branch names and the fork slug first
+/// (`forge::forge_fork_divergence`).
 pub async fn fork_divergence(
     repo_path: &str,
     fork_owner: &str,
@@ -1460,8 +1466,8 @@ pub async fn fork_divergence(
     fork_branch: &str,
 ) -> AppResult<ForgeForkDivergence> {
     let slug = crate::github::gh_origin_slug(repo_path).await?;
-    let endpoint =
-        format!("repos/{slug}/compare/{base_branch}...{fork_owner}:{fork_branch}?per_page=1");
+    let basehead = fork_compare_basehead(fork_owner, base_branch, fork_branch);
+    let endpoint = format!("repos/{slug}/compare/{basehead}?per_page=1");
     let out = run_gh(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await?;
     let compare: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gh_unreadable(
@@ -1498,6 +1504,20 @@ mod tests {
         assert!(!list.truncated);
         assert_eq!(list.ceiling, crate::forge::USER_LIST_CEILING);
         assert!(assignable_list_from(vec!["a".into()], true).truncated);
+    }
+
+    /// Fork branches `gh api`'s legacy `:owner`/`:repo`/`:branch` rewrite would
+    /// replace after a literal colon, plus an ordinary name.
+    #[test]
+    fn fork_compare_basehead_encodes_the_owner_colon() {
+        for branch in ["repo-fix", "owner", "branch-x", "repo/x", "feature"] {
+            let basehead = fork_compare_basehead("contrib", "main", branch);
+            assert_eq!(basehead, format!("main...contrib%3A{branch}"), "{branch}");
+            assert!(
+                !basehead.contains(':'),
+                "a literal colon reached {basehead}"
+            );
+        }
     }
 
     #[test]

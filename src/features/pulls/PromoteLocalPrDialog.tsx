@@ -24,8 +24,15 @@ import {
   presentError,
 } from "@/lib/error-summary";
 import { forgePrComment } from "@/lib/git/api";
-import { useBranches, useCreatePr, useForgeStatus } from "@/lib/git/queries";
-import { providerLabel } from "@/lib/git/types";
+import {
+  branchesOptions,
+  remotesOptions,
+  repoStatusOptions,
+  useBranches,
+  useCreatePr,
+  useForgeStatus,
+} from "@/lib/git/queries";
+import { type Branch, providerLabel, type RepoStatus } from "@/lib/git/types";
 import {
   createFailedAtPush,
   createTimedOutAtPush,
@@ -353,13 +360,23 @@ export function PromoteLocalPrDialog({
       }
     } catch (e) {
       if (created === null) {
-        // A renamed copy's refusal names the Push menu, which acts on HEAD; a
-        // head that isn't checked out is pointed at its own row instead. Every
-        // toast form and the notification carry this one sentence.
-        const headIsCurrent =
-          branches.data?.some((b) => b.name === pr.head && b.isCurrent) ===
-          true;
-        const guided = withCrossNameGuidance(e, headIsCurrent);
+        // A renamed copy's refusal names the control this head's routing
+        // offers. Every toast form and the notification carry this one sentence.
+        // Status and remotes come from the cache at the refusal, and branches
+        // from the cache, else the render's list; no read adds an observer, and
+        // an unread entry words the terminal remedy.
+        const guided = withCrossNameGuidance(e, {
+          head: queryClient.getQueryData<RepoStatus>(
+            repoStatusOptions(repoPath).queryKey,
+          )?.branch,
+          branches:
+            queryClient.getQueryData<Branch[]>(
+              branchesOptions(repoPath).queryKey,
+            ) ?? branches.data,
+          remoteNames: queryClient.getQueryData<string[]>(
+            remotesOptions(repoPath).queryKey,
+          ),
+        });
         // The create call rejected and no remote PR is known to exist: keep the
         // dialog open either way (a may-have-landed error says to check before
         // retrying). A failed local close attempted no create: nothing to undo.

@@ -394,8 +394,12 @@ export function rowSyncIndicator(
     };
   if (row.upstream && !row.upstreamGone) {
     const mismatch = rowNameMismatch(row, remoteNames);
+    // A push routed off the upstream copies the branch elsewhere, so the menu
+    // offers neither the start point's publish nor its "track it".
+    const target = rowPushTarget(row);
+    const pushesElsewhere = target.kind === "to" && !target.toUpstream;
     // Created from the remote's default branch: nothing of it is published.
-    if (mismatch?.isRemoteDefault) {
+    if (mismatch?.isRemoteDefault && !pushesElsewhere) {
       if (row.keepLocal) return { kind: "none" };
       return {
         kind: "startPoint",

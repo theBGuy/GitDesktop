@@ -2067,8 +2067,9 @@ fn parent_scope_read(
 
 /// The parent scope's rows: headed on `head` and sourced from the fork whose project id is
 /// `own_id`, so another fork's same-named branch never counts. Also returns how many rows
-/// wouldn't parse, or were this fork's without an `iid` or a source branch. A row without
-/// a `source_project_id` is skipped uncounted: a deleted source project's. Pure.
+/// wouldn't parse, carried no `source_project_id` key, or were this fork's without an
+/// `iid` or a source branch. A null `source_project_id` is skipped uncounted: a deleted
+/// source project's. Pure.
 fn fork_mr_rows(
     rows: Vec<serde_json::Value>,
     own_id: u64,
@@ -2078,6 +2079,10 @@ fn fork_mr_rows(
     let mut dropped = 0;
     let mut kept = Vec::new();
     for row in rows {
+        if row.get("source_project_id").is_none() {
+            dropped += 1;
+            continue;
+        }
         let Ok(m) = serde_json::from_value::<GlabParentMr>(row) else {
             dropped += 1;
             continue;
@@ -2173,12 +2178,14 @@ mod remote_branch_pull_tests {
             json!({"iid": 9, "source_project_id": 7}),
             json!({"iid": 10, "source_project_id": 8}),
             row(11, json!(null), ""),
+            json!({"iid": 12, "web_url": "x", "source_branch": "feat"}),
         ];
         let (kept, dropped) = fork_mr_rows(rows, 7, "feat", "up/proj");
         let numbers: Vec<u64> = kept.iter().map(|r| r.number).collect();
         assert_eq!(numbers, [1, 2]);
-        // No iid, an unparsable iid, not a row, and three of this fork's without a branch.
-        assert_eq!(dropped, 6);
+        // No iid, an unparsable iid, not a row, three of this fork's without a branch, and
+        // a row with no `source_project_id` key (a null one is a deleted source: skipped).
+        assert_eq!(dropped, 7);
         let (_, clean) = fork_mr_rows(vec![row(1, json!(7), "feat")], 7, "feat", "up/proj");
         assert_eq!(clean, 0);
         assert!(kept

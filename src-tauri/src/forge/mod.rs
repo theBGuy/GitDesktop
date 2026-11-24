@@ -1673,21 +1673,74 @@ pub async fn forge_prs_for_branch(
     let provider = detect_non_github(&repo_path)
         .await
         .map(|(provider, _)| provider);
-    let mut found = Vec::new();
-    for name in pr_lookup_heads(&repo_path, &head, None).await {
-        found.push(match provider {
-            Some(Provider::GitLab) => {
-                reject_upstream_on_non_github(lens.as_deref())?;
-                gitlab::prs_for_branch(&repo_path, &name).await?
-            }
-            Some(Provider::Bitbucket) => {
-                reject_upstream_on_non_github(lens.as_deref())?;
-                bitbucket::prs_for_branch(&repo_path, &name).await?
-            }
-            _ => github::prs_for_branch(&repo_path, &name, lens.clone()).await?,
-        });
+    if matches!(provider, Some(Provider::GitLab | Provider::Bitbucket)) {
+        reject_upstream_on_non_github(lens.as_deref())?;
     }
-    Ok(unique_by_number(found))
+    prs_for_branch_heads(&repo_path, &head, |name| {
+        let (repo_path, lens) = (repo_path.clone(), lens.clone());
+        async move {
+            match provider {
+                Some(Provider::GitLab) => gitlab::prs_for_branch(&repo_path, &name).await,
+                Some(Provider::Bitbucket) => bitbucket::prs_for_branch(&repo_path, &name).await,
+                _ => github::prs_for_branch(&repo_path, &name, lens).await,
+            }
+        }
+    })
+    .await
+}
+
+/// [`forge_prs_for_branch`]'s lookup: `head` and the names [`pr_lookup_heads`] adds, each
+/// read by `read`.
+async fn prs_for_branch_heads<F, Fut>(
+    repo_path: &str,
+    head: &str,
+    read: F,
+) -> AppResult<Vec<crate::github::pr::PrInfo>>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<Vec<crate::github::pr::PrInfo>>>,
+{
+    prs_for_heads(pr_lookup_heads(repo_path, head, None).await, read).await
+}
+
+/// [`forge_prs_for_branch`]'s lookup over `heads`, each name read by `read` and the
+/// answers folded by [`fold_head_reads`].
+async fn prs_for_heads<F, Fut>(
+    heads: Vec<String>,
+    read: F,
+) -> AppResult<Vec<crate::github::pr::PrInfo>>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<Vec<crate::github::pr::PrInfo>>>,
+{
+    let mut reads = Vec::new();
+    for name in heads {
+        reads.push(read(name).await);
+    }
+    fold_head_reads(reads)
+}
+
+/// The head names' answers as one list: any rows found win over another name's failed
+/// read (the caller then offers View instead of a create that would refuse); no rows and
+/// a failure is that failure; otherwise none. Pure.
+fn fold_head_reads(
+    reads: Vec<AppResult<Vec<crate::github::pr::PrInfo>>>,
+) -> AppResult<Vec<crate::github::pr::PrInfo>> {
+    let mut found = Vec::new();
+    let mut first_error = None;
+    for read in reads {
+        match read {
+            Ok(rows) => found.push(rows),
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    let rows = unique_by_number(found);
+    match first_error {
+        Some(e) if rows.is_empty() => Err(e),
+        _ => Ok(rows),
+    }
 }
 
 /// Each head name's rows in lookup order, a request found under two names kept once, at
@@ -1780,18 +1833,19 @@ pub enum PullScope {
 enum RemoteForge {
     NoForge,
     Unidentified(String),
-    /// `gh_host` is the host spelling gh holds a stored login for, when it holds one.
+    /// `host` is the host both scopes read on ([`lookup_host`]).
     GitHub {
-        gh_host: Option<String>,
+        host: String,
     },
     GitLab,
     Bitbucket,
 }
 
 /// The host of a remote URL that names one, decided by its SHAPE before [`remote_host`]
-/// (which reads `C:/x` as host `c`): a `file:` URL, a drive path, and anything without
-/// `://` that is not scp form are paths. Scp form, git's rule: the first `:` comes before
-/// any `/`, and what precedes it (less a `user@`) is longer than one character. Pure.
+/// (which reads `C:/x` as host `c`): a `file:` URL, a drive path on Windows, and anything
+/// without `://` that is not scp form are paths. Scp form, git's rule: the first `:` comes
+/// before any `/`, is not a drive letter's (on Windows only: one ASCII letter then `:`,
+/// decided on the whole string before a `user@` is stripped), and leaves a host. Pure.
 fn forge_url_host(url: &str) -> Option<String> {
     let url = url.trim();
     if url
@@ -1805,8 +1859,12 @@ fn forge_url_host(url: &str) -> Option<String> {
         if url.find('/').is_some_and(|slash| slash < colon) {
             return None;
         }
+        // git's `has_dos_drive_prefix` exists on Windows only; elsewhere `c:x` is host `c`.
+        if cfg!(windows) && colon == 1 && url.as_bytes()[0].is_ascii_alphabetic() {
+            return None;
+        }
         let host = url[..colon].rsplit('@').next().unwrap_or_default();
-        if host.chars().count() <= 1 {
+        if host.is_empty() {
             return None;
         }
     }
@@ -1824,10 +1882,12 @@ fn remote_forge(url: &str, glab_hosts: &[String], gh_host: Option<&str>) -> Remo
     match provider_for_remote_host(&host, glab_hosts) {
         Some(Provider::GitLab) => RemoteForge::GitLab,
         Some(Provider::Bitbucket) => RemoteForge::Bitbucket,
-        _ if host == "github.com" || gh_host.is_some() => RemoteForge::GitHub {
-            gh_host: gh_host.map(str::to_string),
+        _ => match lookup_host(gh_host, &host) {
+            Some(lookup) => RemoteForge::GitHub {
+                host: lookup.to_string(),
+            },
+            None => RemoteForge::Unidentified(host),
         },
-        _ => RemoteForge::Unidentified(host),
     }
 }
 
@@ -1846,6 +1906,26 @@ impl ScopeRead {
         let incomplete = (raw >= page)
             .then(|| AppError::Command(format!("GitDesktop read only the first {page} matches.")));
         Self { rows, incomplete }
+    }
+
+    /// As [`Self::paged`], also incomplete when the forge said `more` pages follow; a short
+    /// page that names more gets a sentence without a count.
+    pub(crate) fn paged_more(
+        rows: Vec<RemoteBranchPull>,
+        raw: usize,
+        page: usize,
+        more: bool,
+    ) -> Self {
+        if more && raw < page {
+            let incomplete = AppError::Command(
+                "GitDesktop read only the first page of matches.".to_string(),
+            );
+            return Self {
+                rows,
+                incomplete: Some(incomplete),
+            };
+        }
+        Self::paged(rows, raw, page)
     }
 
     /// `dropped` rows wouldn't parse: `unreadable`'s error, which outranks a full page.
@@ -1911,8 +1991,8 @@ pub(crate) fn repository_scope_rows(
         .collect()
 }
 
-/// GitLab's and Bitbucket's repository scope from the rows a read of `page` per page
-/// answered: the page is judged on the raw rows, before the filter. Pure.
+/// GitLab's repository scope from the rows a read of `page` per page answered: the page
+/// is judged on the raw rows, before the filter. Pure.
 fn repository_scope_read(
     rows: Vec<crate::github::pr::PrInfo>,
     branch: &str,
@@ -1941,7 +2021,7 @@ pub async fn forge_prs_on_remote_branch(
     Box::pin(open_prs_on_remote_branch(&repo_path, &remote, &branch)).await
 }
 
-/// [`forge_prs_on_remote_branch`]'s body, for the MCP server.
+/// [`forge_prs_on_remote_branch`]'s body, the entry an MCP tool calls when one is added.
 pub(crate) async fn open_prs_on_remote_branch(
     repo_path: &str,
     remote: &str,
@@ -1949,6 +2029,9 @@ pub(crate) async fn open_prs_on_remote_branch(
 ) -> AppResult<RemoteBranchPulls> {
     crate::git::branches::validate_ref_name(remote)?;
     crate::git::branches::validate_ref_name(branch)?;
+    // Drop the cached URL and re-read it, so the forge decision and origin's reads in the
+    // GitLab and Bitbucket arms below answer for one fresh URL.
+    crate::git::remote::invalidate_remote_url_cache(repo_path, remote);
     let url = crate::git::remote::git_remote_url(repo_path.to_string(), remote.to_string()).await?;
     let Some(host) = forge_url_host(&url) else {
         return Ok(RemoteBranchPulls::NoForge);
@@ -1968,15 +2051,9 @@ pub(crate) async fn open_prs_on_remote_branch(
         match remote_forge(&url, &glab_hosts, gh_host.as_deref()) {
             RemoteForge::NoForge => return Ok(RemoteBranchPulls::NoForge),
             RemoteForge::Unidentified(host) => return Ok(RemoteBranchPulls::Unidentified { host }),
-            RemoteForge::GitHub { gh_host } => {
-                let (repository, parent) = Box::pin(github_scopes(
-                    repo_path,
-                    remote,
-                    &url,
-                    gh_host.as_deref(),
-                    branch,
-                ))
-                .await;
+            RemoteForge::GitHub { host } => {
+                let (repository, parent) =
+                    Box::pin(github_scopes(repo_path, remote, &url, &host, branch)).await;
                 ("github", repository, parent)
             }
             RemoteForge::GitLab if !is_origin => (
@@ -2005,16 +2082,7 @@ pub(crate) async fn open_prs_on_remote_branch(
                 Err(origin_only("pull requests")),
             ),
             RemoteForge::Bitbucket => {
-                let repository = Box::pin(async {
-                    let (ws, slug) = bitbucket::workspace_slug(repo_path).await?;
-                    let rows = bitbucket::prs_for_branch(repo_path, branch).await?;
-                    Ok::<_, AppError>(repository_scope_read(
-                        rows,
-                        branch,
-                        &format!("{ws}/{slug}"),
-                        bitbucket::SOURCE_BRANCH_PAGELEN,
-                    ))
-                });
+                let repository = Box::pin(bitbucket::repository_open_prs(repo_path, branch));
                 let parent = Box::pin(bitbucket::parent_open_prs(repo_path, branch));
                 let (repository, parent) = tokio::join!(repository, parent);
                 ("bitbucket", repository, parent)
@@ -2023,14 +2091,13 @@ pub(crate) async fn open_prs_on_remote_branch(
     Ok(fold_remote_branch_pulls(provider, repository, parent))
 }
 
-/// GitHub's two scopes, both on the remote's own host: `run_gh` pins origin's host and
-/// would read this remote's slug on the wrong one. No stored login for the host leaves
-/// both unchecked.
+/// GitHub's two scopes, both on `host`, the remote's own host as [`lookup_host`] spells
+/// it: `run_gh` pins origin's host and would read this remote's slug on the wrong one.
 async fn github_scopes(
     repo_path: &str,
     remote: &str,
     url: &str,
-    gh_host: Option<&str>,
+    host: &str,
     branch: &str,
 ) -> (AppResult<ScopeRead>, AppResult<ScopeRead>) {
     let url_host = remote_host(url).unwrap_or_default();
@@ -2043,17 +2110,6 @@ async fn github_scopes(
             return (Err(e), Err(again));
         }
     };
-    let Some(host) = gh_host else {
-        // The stored-login probe also answers no for a gh that isn't installed.
-        let probe = crate::github::runner::run_gh_on_host(
-            Some(repo_path),
-            None,
-            &["--version"],
-            GH_VERSION_TIMEOUT,
-        )
-        .await;
-        return no_login_scopes(&probe, &url_host);
-    };
     // GitHub answers an old name or owner with the moved repository, so both scopes read
     // its canonical spelling from this one answer, never the URL's.
     let repo = match Box::pin(crate::github::pr::gh_lookup_repo_on_host(
@@ -2062,10 +2118,7 @@ async fn github_scopes(
     .await
     {
         Ok(repo) => repo,
-        Err(e) => {
-            let twin = twin_read_error(&e);
-            return (Err(e), Err(twin));
-        }
+        Err(e) => return failed_read_scopes(e),
     };
     let repository = Box::pin(crate::github::pr::gh_open_prs_on_host(
         repo_path, host, &repo, branch,
@@ -2076,9 +2129,18 @@ async fn github_scopes(
     tokio::join!(repository, parent)
 }
 
-/// `gh --version` reads nothing remote; the stored-login probe before it already spent
-/// its own seconds, so a wedged gh must not hold the lookup for the full gh budget.
-const GH_VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The host both GitHub scopes read on: gh's stored-login spelling, else github.com itself,
+/// which an env token (never counted by the stored-login probe) also signs in; a failed
+/// sign-in there is the read's own error. Any other host without a stored login: None. Pure.
+fn lookup_host<'a>(gh_host: Option<&'a str>, url_host: &str) -> Option<&'a str> {
+    gh_host.or_else(|| (url_host == "github.com").then_some("github.com"))
+}
+
+/// Both scopes of a repository read that failed: the same error on each. Pure.
+fn failed_read_scopes(e: AppError) -> (AppResult<ScopeRead>, AppResult<ScopeRead>) {
+    let twin = twin_read_error(&e);
+    (Err(e), Err(twin))
+}
 
 /// The same failure for the second scope of one read (`AppError` isn't Clone): the
 /// variants a gh read returns keep their kind; any other keeps its message as a gh error.
@@ -2097,23 +2159,6 @@ fn gh_signed_out(host: &str) -> AppError {
     AppError::Gh(format!(
         "The GitHub CLI has no sign-in for {host}. To sign in, run: gh auth login --hostname {host}"
     ))
-}
-
-/// Both scopes when gh holds no login for `host`, from `gh --version`'s answer: a CLI
-/// that isn't installed is `GhNotFound`, any other answer the signed-out sentence. Pure.
-fn no_login_scopes<T>(
-    probe: &AppResult<T>,
-    host: &str,
-) -> (AppResult<ScopeRead>, AppResult<ScopeRead>) {
-    let missing = matches!(probe, Err(AppError::GhNotFound));
-    let error = || {
-        if missing {
-            AppError::GhNotFound
-        } else {
-            gh_signed_out(host)
-        }
-    };
-    (Err(error()), Err(error()))
 }
 
 /// Full details for one merge/pull request's read view, behind the abstraction.
@@ -5728,7 +5773,8 @@ mod publish_hook {
 
     tokio::task_local! {
         /// Awaited in [`super::forge_publish_repo_core`] after the branch hold and its
-        /// refusal, before the provider call.
+        /// refusal, before the provider call, and again once the provider call returned
+        /// while the hold is still in scope.
         pub(super) static PUBLISH_HELD_HOOK: Hook;
     }
 
@@ -5737,11 +5783,16 @@ mod publish_hook {
             wait.await;
         }
     }
+
+    pub(super) async fn returned() {
+        reached().await;
+    }
 }
 
 #[cfg(not(test))]
 mod publish_hook {
     pub(super) async fn reached() {}
+    pub(super) async fn returned() {}
 }
 
 /// The provider-dispatch core of [`forge_publish_repo`], taking a plain `&AppState` so
@@ -5771,7 +5822,7 @@ pub(crate) async fn forge_publish_repo_core(
         None => None,
     };
     publish_hook::reached().await;
-    match provider {
+    let published = match provider {
         Provider::GitLab => {
             gitlab::publish_repo(state, &repo_path, &name, private, &description, &topics).await
         }
@@ -5801,7 +5852,9 @@ pub(crate) async fn forge_publish_repo_core(
             )
             .await
         }
-    }
+    };
+    publish_hook::returned().await;
+    published
 }
 
 /// Create a merge/pull request, behind the abstraction. Every arm pushes the head
@@ -7842,7 +7895,6 @@ mod tests {
     /// remote HEAD, else live; a failed live read fails the create with that read's error.
     #[tokio::test]
     async fn create_pr_refuses_a_renamed_copy_of_a_non_default_branch() {
-        use crate::git::runner::TestGitEnv;
         let (_dir, work, bare, url) = renamed_copy_fixture();
         let required = "a PR title is required";
         pin_origin_head(&work, Some("main"));
@@ -7891,27 +7943,36 @@ mod tests {
             "old",
             "(ii)",
         );
-        // (iii) a failed live read is the create's error, and the remote is untouched.
-        let listing = || {
-            std::process::Command::new("git")
-                .test_git_env()
-                .current_dir(&bare)
-                .args(["for-each-ref"])
-                .output()
-                .unwrap()
-                .stdout
-        };
-        let before = listing();
+        // (iii) a failed live read is the create's error, and no push runs after it.
         let missing = format!("{url}-missing");
         keep_local_git(
             std::path::Path::new(&work),
             &["config", "remote.origin.url", &missing],
         );
-        match pr_create_into(&work, "new", "main").await {
+        let spawned = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = {
+            let spawned = spawned.clone();
+            std::sync::Arc::new(move |args: &[&str]| {
+                spawned
+                    .lock()
+                    .unwrap()
+                    .push(args.first().copied().unwrap_or("").to_string());
+            })
+        };
+        let created = crate::git::runner::GIT_SPAWN_LOG
+            .scope(log, pr_create_into(&work, "new", "main"))
+            .await;
+        match created {
             Err(AppError::Git { .. }) => {}
             other => panic!("(iii): expected the live read's git error, got {other:?}"),
         }
-        assert_eq!(listing(), before);
+        let verbs = spawned.lock().unwrap().clone();
+        assert!(!verbs.iter().any(|v| v == "push"), "(iii): {verbs:?}");
+        assert_eq!(
+            verbs.iter().filter(|v| *v == "ls-remote").count(),
+            1,
+            "(iii): {verbs:?}"
+        );
         keep_local_git(
             std::path::Path::new(&work),
             &["config", "remote.origin.url", &url],
@@ -7927,11 +7988,13 @@ mod tests {
             required,
             "(iv) into its upstream",
         );
-        // A head failing branch validation reaches its provider as today.
-        assert!(matches!(
+        // A head failing branch validation reaches its provider as today, whose own
+        // branch refusal answers word for word.
+        is_local_refusal(
             pr_create_into(&work, "a~1", "main").await,
-            Err(AppError::InvalidArgument(_))
-        ));
+            "invalid branch name: a~1",
+            "invalid head reaches the provider",
+        );
     }
 
     /// Lookups add the origin name a head is a renamed copy of, unless it is the base;
@@ -7981,19 +8044,51 @@ mod tests {
         );
     }
 
-    /// Which forge serves a remote, by URL shape first: a path of any spelling is no forge
-    /// (`remote_host` alone reads `C:/x` as host `c`), an ssh-config alias is an
-    /// unidentified host, and an unknown host is GitHub only with a stored gh login.
+    /// The branch lookup reads the names `pr_lookup_heads` adds: a request only the
+    /// renamed copy's origin name has is found. Network-free.
+    #[tokio::test]
+    async fn the_branch_lookup_reads_the_renamed_copys_origin_name() {
+        let (_dir, work, _bare, _url) = renamed_copy_fixture();
+        pin_origin_head(&work, Some("main"));
+        let found = prs_for_branch_heads(&work, "new", |name| async move {
+            Ok(if name == "old" {
+                vec![serde_json::from_value(serde_json::json!({
+                    "number": 7, "url": "u7", "title": "t", "baseRefName": "main",
+                    "headRefName": "old", "isDraft": false, "state": "OPEN",
+                    "isCrossRepository": false,
+                }))
+                .unwrap()]
+            } else {
+                Vec::new()
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(found.iter().map(|p| p.number).collect::<Vec<_>>(), [7]);
+    }
+
+    /// Which forge serves a remote, by URL shape first: a path is no forge, and so is a
+    /// drive spelling on Windows (`remote_host` alone reads `C:/x` as host `c`); an
+    /// ssh-config alias is an unidentified host, and an unknown host is GitHub only with a
+    /// stored gh login.
     #[test]
     fn remote_forge_decides_by_url_shape_then_host() {
         let glab = vec!["git.corp.example".to_string()];
-        let github = |gh: Option<&str>| RemoteForge::GitHub {
-            gh_host: gh.map(str::to_string),
+        let github = |host: &str| RemoteForge::GitHub { host: host.into() };
+        // A drive letter is a path only on Windows; elsewhere git reads ssh to host `c`.
+        let drive = || {
+            if cfg!(windows) {
+                RemoteForge::NoForge
+            } else {
+                github("c")
+            }
         };
-        let rows: [(&str, Option<&str>, RemoteForge); 22] = [
-            ("C:/x", Some("c"), RemoteForge::NoForge),
-            ("C:\\x", Some("c"), RemoteForge::NoForge),
-            ("c:/Users/me/repo.git", Some("c"), RemoteForge::NoForge),
+        let rows: [(&str, Option<&str>, RemoteForge); 24] = [
+            ("git@h:o/r.git", None, RemoteForge::Unidentified("h".into())),
+            ("C@h:o/r.git", None, RemoteForge::Unidentified("h".into())),
+            ("C:/x", Some("c"), drive()),
+            ("C:\\x", Some("c"), drive()),
+            ("c:/Users/me/repo.git", Some("c"), drive()),
             ("../x.git", None, RemoteForge::NoForge),
             ("/srv/x.git", None, RemoteForge::NoForge),
             ("/srv/a:b/x.git", Some("srv"), RemoteForge::NoForge),
@@ -8007,11 +8102,11 @@ mod tests {
                 None,
                 RemoteForge::Unidentified("github-work".into()),
             ),
-            ("https://github.com/o/r.git", None, github(None)),
+            ("https://github.com/o/r.git", None, github("github.com")),
             (
                 "git@github.com:o/r.git",
                 Some("github.com"),
-                github(Some("github.com")),
+                github("github.com"),
             ),
             (
                 "https://gitlab.com/g/p.git",
@@ -8028,7 +8123,7 @@ mod tests {
             (
                 "https://ghe.corp.example/o/r.git",
                 Some("ghe.corp.example"),
-                github(Some("ghe.corp.example")),
+                github("ghe.corp.example"),
             ),
             (
                 "https://ghe.corp.example/o/r.git",
@@ -8184,8 +8279,8 @@ mod tests {
         assert!(none.incomplete.is_none());
     }
 
-    /// GitLab's and Bitbucket's repository scope: a full page of other repositories' rows
-    /// keeps no item and is incomplete, since the page is judged on the raw rows.
+    /// GitLab's repository scope: a full page of other repositories' rows keeps no item
+    /// and is incomplete, since the page is judged on the raw rows.
     #[test]
     fn a_full_repository_page_of_forks_is_incomplete() {
         let fork_rows = |n: usize| -> Vec<crate::github::pr::PrInfo> {
@@ -8200,10 +8295,8 @@ mod tests {
                 })
                 .collect()
         };
-        for (provider, page) in [
-            ("gitlab", gitlab::SOURCE_BRANCH_PAGE),
-            ("bitbucket", bitbucket::SOURCE_BRANCH_PAGELEN),
-        ] {
+        {
+            let (provider, page) = ("gitlab", gitlab::SOURCE_BRANCH_PAGE);
             let read = repository_scope_read(fork_rows(page), "feat", "o/r", page);
             assert!(read.rows.is_empty(), "{provider}");
             let want = format!("GitDesktop read only the first {page} matches.");
@@ -8257,28 +8350,99 @@ mod tests {
         assert!(unique_by_number(Vec::new()).is_empty());
     }
 
-    /// No stored gh login: a gh that isn't installed is `GhNotFound` on both scopes; any
-    /// other answer to the probe keeps the signed-out sentence on both.
-    #[test]
-    fn no_login_scopes_tell_a_missing_cli_from_signed_out() {
-        let (repository, parent) = no_login_scopes::<()>(&Err(AppError::GhNotFound), "ghe.test");
-        assert!(matches!(repository, Err(AppError::GhNotFound)));
-        assert!(matches!(parent, Err(AppError::GhNotFound)));
-        let signed_out = "The GitHub CLI has no sign-in for ghe.test. To sign in, run: gh auth login --hostname ghe.test";
-        let probes: [AppResult<()>; 3] = [
-            Ok(()),
-            Err(AppError::Timeout(30)),
-            Err(AppError::Gh("broken".into())),
-        ];
-        for probe in probes {
-            let (repository, parent) = no_login_scopes(&probe, "ghe.test");
-            for read in [repository, parent] {
-                assert!(
-                    matches!(&read, Err(AppError::Gh(m)) if m == signed_out),
-                    "{probe:?}: {read:?}"
-                );
+    /// A renamed copy's lookup asks under both names: one name's rows survive the other
+    /// name's failed read; no rows and a failure is the failure; nothing found is none.
+    #[tokio::test]
+    async fn the_head_lookup_keeps_one_names_rows_over_the_others_failure() {
+        let row = |number: u64, head: &str| -> crate::github::pr::PrInfo {
+            serde_json::from_value(serde_json::json!({
+                "number": number, "url": format!("u{number}"), "title": "t",
+                "baseRefName": "main", "headRefName": head, "isDraft": false,
+                "state": "OPEN", "isCrossRepository": false,
+            }))
+            .unwrap()
+        };
+        let heads = || vec!["new".to_string(), "old".to_string()];
+        let numbers = |r: AppResult<Vec<crate::github::pr::PrInfo>>| {
+            r.map(|rows| rows.iter().map(|p| p.number).collect::<Vec<_>>())
+        };
+        // Only the old name has the request.
+        let only_old = prs_for_heads(heads(), |name| async move {
+            Ok(if name == "old" {
+                vec![row(7, "old")]
+            } else {
+                Vec::new()
+            })
+        })
+        .await;
+        assert_eq!(numbers(only_old).unwrap(), [7]);
+        // The new name's read fails; the old name's row still comes back.
+        let new_fails = prs_for_heads(heads(), |name| async move {
+            if name == "new" {
+                Err(AppError::Gh("boom".into()))
+            } else {
+                Ok(vec![row(7, "old")])
             }
-        }
+        })
+        .await;
+        assert_eq!(numbers(new_fails).unwrap(), [7]);
+        // No rows anywhere and one failure: the failure, never "none open".
+        let failed = prs_for_heads(heads(), |name| async move {
+            if name == "old" {
+                Err(AppError::Gh("boom".into()))
+            } else {
+                Ok(Vec::new())
+            }
+        })
+        .await;
+        assert!(matches!(failed, Err(AppError::Gh(m)) if m == "boom"));
+        let none = prs_for_heads(heads(), |_| async { Ok(Vec::new()) }).await;
+        assert!(none.unwrap().is_empty());
+        // Both names are asked, in order.
+        let asked = std::sync::Mutex::new(Vec::new());
+        let _ = prs_for_heads(heads(), |name| {
+            asked.lock().unwrap().push(name);
+            async { Ok(Vec::new()) }
+        })
+        .await;
+        assert_eq!(*asked.lock().unwrap(), ["new", "old"]);
+    }
+
+    /// github.com reads without a stored login (an env token signs gh in there); any other
+    /// host needs one.
+    #[test]
+    fn the_lookup_reads_github_com_without_a_stored_login() {
+        assert_eq!(lookup_host(None, "github.com"), Some("github.com"));
+        assert_eq!(
+            lookup_host(Some("GitHub.com"), "github.com"),
+            Some("GitHub.com")
+        );
+        assert_eq!(lookup_host(Some("ghe.test"), "ghe.test"), Some("ghe.test"));
+        assert_eq!(lookup_host(None, "ghe.test"), None);
+        assert_eq!(lookup_host(None, "github.com.evil.test"), None);
+        assert_eq!(lookup_host(None, ""), None);
+    }
+
+    /// A gh that isn't installed, met at the repository read, is `GhNotFound` on both
+    /// scopes of the answer.
+    #[test]
+    fn a_missing_gh_is_gh_not_found_on_both_scopes() {
+        let (repository, parent) = failed_read_scopes(AppError::GhNotFound);
+        let RemoteBranchPulls::Checked {
+            items, unchecked, ..
+        } = fold_remote_branch_pulls("github", repository, parent)
+        else {
+            panic!("a folded read is checked");
+        };
+        assert!(items.is_empty());
+        let scopes: Vec<PullScope> = unchecked
+            .iter()
+            .map(|u| {
+                assert!(matches!(u.error, AppError::GhNotFound), "{:?}", u.error);
+                u.scope
+            })
+            .collect();
+        assert_eq!(scopes, [PullScope::Repository, PullScope::Parent]);
     }
 
     /// The repository scope keeps only requests headed on the branch exactly from this
@@ -8407,6 +8571,57 @@ mod tests {
             .is_err());
     }
 
+    /// The lookup reads the remote's URL uncached: a `set-url` made after a cached read
+    /// is the URL it answers for. Network-free: a non-origin gitlab.com remote makes no
+    /// forge call.
+    #[tokio::test]
+    async fn the_lookup_reads_the_remote_url_uncached() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-forge-remote-pulls-")
+            .tempdir()
+            .unwrap();
+        let p = dir.path();
+        keep_local_git(p, &["init", "-q", "-b", "main"]);
+        keep_local_git(p, &["remote", "add", "fork", "../x.git"]);
+        let repo = p.to_string_lossy().into_owned();
+        let cached = crate::git::remote::git_remote_url(repo.clone(), "fork".into())
+            .await
+            .unwrap();
+        assert_eq!(cached, "../x.git");
+        keep_local_git(p, &["remote", "set-url", "fork", "https://gitlab.com/o/r.git"]);
+        let read = open_prs_on_remote_branch(&repo, "fork", "feat").await;
+        assert!(
+            matches!(read, Ok(RemoteBranchPulls::Checked { provider: "gitlab", .. })),
+            "{read:?}"
+        );
+    }
+
+    /// The lookup re-seeds the cached URL it read, so origin's later cached reads (the
+    /// GitLab and Bitbucket arms' project and slug) answer for the same fresh URL.
+    /// Network-free: a path is no forge.
+    #[tokio::test]
+    async fn the_lookup_reseeds_the_cached_remote_url() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-forge-remote-pulls-")
+            .tempdir()
+            .unwrap();
+        let p = dir.path();
+        keep_local_git(p, &["init", "-q", "-b", "main"]);
+        keep_local_git(p, &["remote", "add", "origin", "../a.git"]);
+        let repo = p.to_string_lossy().into_owned();
+        let cached = crate::git::remote::git_remote_url(repo.clone(), "origin".into())
+            .await
+            .unwrap();
+        assert_eq!(cached, "../a.git");
+        keep_local_git(p, &["remote", "set-url", "origin", "../b.git"]);
+        let read = open_prs_on_remote_branch(&repo, "origin", "feat").await;
+        assert!(matches!(read, Ok(RemoteBranchPulls::NoForge)), "{read:?}");
+        let after = crate::git::remote::git_remote_url(repo.clone(), "origin".into())
+            .await
+            .unwrap();
+        assert_eq!(after, "../b.git");
+    }
+
     /// A non-origin GitLab or Bitbucket remote answers both scopes unchecked with the
     /// origin-only error. Their canonical hosts skip the glab host read and the gh login
     /// probe, and the arm makes no forge call, so nothing leaves the machine.
@@ -8453,18 +8668,19 @@ mod tests {
     }
 
     /// The repository publish holds HEAD's branch from before its refusal until the
-    /// provider call returns, so a rename or delete of it is `Busy` meanwhile.
+    /// provider call returns, so a rename or delete of it is `Busy` meanwhile: sampled
+    /// before the provider call and again after it returned.
     #[tokio::test]
     async fn the_repository_publish_holds_its_branch_through_the_provider_call() {
         let (_dir, repo) = keep_local_hostless_origin_repo();
-        let busy = std::sync::Arc::new(std::sync::Mutex::new(None::<bool>));
+        let busy = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
         let hook: publish_hook::Hook = {
             let (repo, busy) = (repo.clone(), busy.clone());
             std::sync::Arc::new(move || {
                 let (repo, busy) = (repo.clone(), busy.clone());
                 Box::pin(async move {
                     let held = crate::git::branches::refuse_while_publishing(&repo, "feat/x").await;
-                    *busy.lock().unwrap() = Some(matches!(
+                    busy.lock().unwrap().push(matches!(
                         held,
                         Err(AppError::Busy { ref holder }) if holder == "a repository publish"
                     ));
@@ -8477,8 +8693,8 @@ mod tests {
         is_local_refusal(result, "a repository name is required", "after the hook");
         assert_eq!(
             *busy.lock().unwrap(),
-            Some(true),
-            "the branch must be held while the provider call runs"
+            [true, true],
+            "the branch must be held before the provider call and until it returns"
         );
         crate::git::branches::refuse_while_publishing(&repo, "feat/x")
             .await

@@ -85,6 +85,12 @@ const numberOf = (it: MyWorkItem) => {
   return row.querySelector(".tabular-nums")?.textContent;
 };
 
+/** The accessible name of a row's kind glyph. */
+const glyphOf = (it: MyWorkItem) =>
+  document
+    .querySelector(`[data-my-work-url="${it.url}"] [role="img"]`)
+    ?.getAttribute("aria-label");
+
 afterEach(cleanup);
 afterAll(() => expect(unmockedCommands).toEqual([]));
 
@@ -106,10 +112,10 @@ describe("My work numbers a request by its forge's sigil and an issue with #", (
     }
   });
 
-  it.each<[ForgeProvider, string]>([
-    ["gitlab", "!2"],
-    ["github", "#2"],
-  ])("%s: the request reads %s, the issue #1", (provider, requestNumber) => {
+  it.each<[ForgeProvider, string, string]>([
+    ["gitlab", "!2", "Merge request"],
+    ["github", "#2", "Pull request"],
+  ])("%s: the request reads %s, the issue #1", (provider, ref, kind) => {
     const issue = item(provider, 1, false);
     const request = item(provider, 2, true);
     data.provider = provider;
@@ -124,7 +130,9 @@ describe("My work numbers a request by its forge's sigil and an issue with #", (
         <MyWorkScreen />
       </QueryClientProvider>,
     );
-    expect(numberOf(request)).toBe(requestNumber);
+    expect(numberOf(request)).toBe(ref);
     expect(numberOf(issue)).toBe("#1");
+    expect(glyphOf(request)).toBe(kind);
+    expect(glyphOf(issue)).toBe("Issue");
   });
 });

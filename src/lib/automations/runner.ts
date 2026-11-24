@@ -50,12 +50,13 @@ import { repoKeys } from "@/lib/git/queries";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import {
   type DiffStatEntry,
+  type ForgeProvider,
   type ForgeStatus,
   prHeadSha,
 } from "@/lib/git/types";
 import { emitNotification } from "@/lib/notifications/emit";
 import { listLocalPrs, reloadLocalPrs, updateLocalPr } from "@/lib/pulls/local";
-import { prRef } from "@/lib/pulls/pr-state";
+import { PR_NOUN, type PrNoun, prRef } from "@/lib/pulls/pr-state";
 import {
   listReviews,
   type PersistedReview,
@@ -211,14 +212,24 @@ function targetRef(event: PrAutomationEvent): string {
     : event.target.id;
 }
 
-/** A remote PR's `#N` / `!N` from the forge status the cache already holds:
- *  a print never spawns a probe, so an unloaded status reads as GitHub. */
+/** The provider from the forge status the cache already holds: a print never
+ *  spawns a probe, so an unloaded status reads as GitHub. */
+function cachedProvider(repoPath: string): ForgeProvider | null | undefined {
+  return queryClient.getQueryData<ForgeStatus>([
+    "repo",
+    repoPath,
+    "forge-status",
+  ])?.provider;
+}
+
+/** A remote PR's `#N` / `!N`, from the cached provider. */
 function cachedPrRef(repoPath: string, number: number): string {
-  return prRef(
-    queryClient.getQueryData<ForgeStatus>(["repo", repoPath, "forge-status"])
-      ?.provider,
-    number,
-  );
+  return prRef(cachedProvider(repoPath), number);
+}
+
+/** What the repo's forge calls a remote PR, from the cached provider. */
+export function cachedPrNoun(repoPath: string): PrNoun {
+  return PR_NOUN[cachedProvider(repoPath) ?? "github"];
 }
 
 function modeLabel(mode: ReviewMode): "security audit" | "review" {
@@ -1446,14 +1457,22 @@ export function runAutomationNow(
       const preview = await resolveTarget(false);
       if (!preview) return;
 
+      // One cache read names both the number and the noun; a local PR is a
+      // pull request on every forge.
+      const provider =
+        target.kind === "remote" ? cachedProvider(repoPath) : undefined;
       const reference =
         target.kind === "remote"
-          ? `${cachedPrRef(repoPath, target.number)} · ${preview.title}`
+          ? `${prRef(provider, target.number)} · ${preview.title}`
           : preview.title;
+      const noun: PrNoun =
+        target.kind === "remote"
+          ? PR_NOUN[provider ?? "github"]
+          : "pull request";
       const modeList = modes.map((m) => ACTION_LABELS[m]).join(" and ");
       const ok = await useConfirm.getState().ask({
-        title: "Run automations on this pull request?",
-        body: `${reference} — runs ${modeList}. The result is posted as a comment on the pull request.`,
+        title: `Run automations on this ${noun}?`,
+        body: `${reference} — runs ${modeList}. The result is posted as a comment on the ${noun}.`,
         confirmLabel: "Run",
       });
       if (!ok) return;

@@ -1977,6 +1977,8 @@ test("the Keep local, mirror, local-upstream and agent-session push refusals lab
     '{"kind":"pushHeadMoved","message":"HEAD is no longer on feat, so nothing was pushed.","expected":"feat"}',
     '{"kind":"pushHeadMoved","message":"HEAD is no longer detached, so nothing was pushed.","expected":"HEAD"}',
     '{"kind":"pushTipMoved","message":"feat changed after you confirmed, so nothing was pushed. Review it and push again.","branch":"feat"}',
+    `{"kind":"pushForceMultiRef","message":"push.default is \\"matching\\" in this repository, so a force push could also rewrite other matching branches. Nothing was pushed. Force-push feat from a terminal, naming the branch.","branch":"feat","remote":"origin","cause":"matching"}`,
+    '{"kind":"pushForceMultiRef","message":"origin has push refspecs of its own, so a force push could rewrite other branches too. Nothing was pushed. Force-push feat from a terminal, naming the branch.","branch":"feat","remote":"origin","cause":"refspecs"}',
   ];
   for (const wire of payloads) {
     const e = JSON.parse(wire);

@@ -24,6 +24,7 @@ import {
   gitRemotes,
   gitStatus,
 } from "@/lib/git/api";
+import { branchesOptions } from "@/lib/git/queries";
 import type {
   Branch,
   CommitSummary,
@@ -130,6 +131,8 @@ const REFUSAL = {
 const CURRENT_LINE = REFUSAL.message;
 const ROW_LINE =
   "Push blocked — feat tracks origin/old, which has a different name. Choose where to push it from feat's menu in the branch list.";
+const TERMINAL_LINE =
+  "Push blocked — feat tracks origin/old, which has a different name. Publish it under its own name first, for example with git push -u origin refs/heads/feat:refs/heads/feat in a terminal.";
 const NOTE = "The pull request for feat wasn't created.";
 
 const COMMIT = {
@@ -138,7 +141,27 @@ const COMMIT = {
   subject: "feature work",
 } as unknown as CommitSummary;
 
-const rows = (current: string, flagged = false) =>
+/** feat is the renamed copy: it tracks origin/old, and a named push of it lands
+ *  back on origin/old, so its row offers the publish item. */
+const RENAMED_COPY: Partial<Branch> = {
+  upstream: "origin/old",
+  upstreamGone: false,
+  upstreamRemote: "origin",
+  upstreamRemoteRef: "refs/heads/old",
+  upstreamAhead: 0,
+  upstreamBehind: 0,
+  upstreamIsRemoteDefault: false,
+  namedPushRemote: "origin",
+  namedPushBranch: "old",
+  namedPushRefused: false,
+};
+/** A push of feat that a pushRemote routes to another remote. */
+const PUSHES_ELSEWHERE: Partial<Branch> = {
+  namedPushRemote: "fork",
+  namedPushBranch: "feat",
+};
+
+const rows = (current: string, flagged = false, feat: Partial<Branch> = {}) =>
   ["feat", "main"].map(
     (name) =>
       ({
@@ -147,8 +170,24 @@ const rows = (current: string, flagged = false) =>
         keepLocal: false,
         isCurrent: name === current,
         renamedFromUpstream: flagged && name === "feat",
+        ...(name === "feat" ? { ...RENAMED_COPY, ...feat } : {}),
       }) as Branch,
   );
+
+/** HEAD as the status read reports it; `pushMenu` = git would refuse a bare
+ *  push, so the sync bar shows its destination menu. */
+const statusOf = (current: string, pushMenu = current === "feat") =>
+  ({
+    branch: {
+      name: current,
+      upstream: current === "feat" ? "origin/old" : null,
+      upstreamRemote: current === "feat" ? "origin" : null,
+      upstreamBranch: current === "feat" ? "old" : null,
+      upstreamGone: false,
+      pushNameMismatch: pushMenu,
+    },
+    entries: [],
+  }) as unknown as RepoStatus;
 
 let error: ReturnType<typeof vi.spyOn>;
 
@@ -193,12 +232,13 @@ async function refusalSurfaces() {
 }
 
 describe("CreatePrDialog over a renamed copy's refusal", () => {
-  async function submit(current: string, defaultHead?: string) {
-    vi.mocked(gitStatus).mockResolvedValue({
-      branch: { name: current },
-      entries: [],
-    } as unknown as RepoStatus);
-    vi.mocked(gitBranches).mockResolvedValue(rows(current));
+  async function submit(
+    current: string,
+    defaultHead?: string,
+    { pushMenu, feat }: { pushMenu?: boolean; feat?: Partial<Branch> } = {},
+  ) {
+    vi.mocked(gitStatus).mockResolvedValue(statusOf(current, pushMenu));
+    vi.mocked(gitBranches).mockResolvedValue(rows(current, false, feat));
     forgePrCreate.mockRejectedValueOnce(REFUSAL);
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -252,6 +292,35 @@ describe("CreatePrDialog over a renamed copy's refusal", () => {
     });
     stillOpenWithDraft();
   });
+
+  it("a checked-out head without the Push menu is pointed at its row menu", async () => {
+    const seen = await submit("feat", undefined, { pushMenu: false });
+    expect(seen).toEqual({
+      title: ROW_LINE,
+      description: NOTE,
+      notified: ROW_LINE,
+    });
+    stillOpenWithDraft();
+  });
+
+  it.each([
+    ["checked out", "feat", undefined],
+    ["not checked out", "main", "feat"],
+  ] as const)(
+    "a head %s whose push goes to another remote is pointed at the terminal",
+    async (_variant, current, defaultHead) => {
+      const seen = await submit(current, defaultHead, {
+        pushMenu: false,
+        feat: PUSHES_ELSEWHERE,
+      });
+      expect(seen).toEqual({
+        title: TERMINAL_LINE,
+        description: NOTE,
+        notified: TERMINAL_LINE,
+      });
+      stillOpenWithDraft();
+    },
+  );
 });
 
 const PR: LocalPr = {
@@ -268,10 +337,21 @@ const PR: LocalPr = {
 };
 
 describe("PromoteLocalPrDialog over a renamed copy's refusal", () => {
+  /** What the repo view keeps cached for the dialog to read at the refusal;
+   *  `null` leaves both reads uncached. */
+  let cached: string | null = "main";
+  beforeEach(() => {
+    cached = "main";
+  });
+
   function renderPromote(onOpenChange = vi.fn()) {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
+    if (cached !== null) {
+      client.setQueryData(["repo", REPO, "status"], statusOf(cached));
+      client.setQueryData(["repo", REPO, "remotes"], ["origin"]);
+    }
     render(
       <QueryClientProvider client={client}>
         <PromoteLocalPrDialog
@@ -295,12 +375,19 @@ describe("PromoteLocalPrDialog over a renamed copy's refusal", () => {
   }
 
   it.each([
-    { variant: "checked out", current: "feat", line: CURRENT_LINE },
-    { variant: "not checked out", current: "main", line: ROW_LINE },
+    { variant: "checked out", current: "feat", line: CURRENT_LINE, feat: {} },
+    { variant: "not checked out", current: "main", line: ROW_LINE, feat: {} },
+    {
+      variant: "pushing to another remote",
+      current: "main",
+      line: TERMINAL_LINE,
+      feat: PUSHES_ELSEWHERE,
+    },
   ])(
     "a head $variant: closes, reopens, and carries one guided sentence",
-    async ({ current, line }) => {
-      vi.mocked(gitBranches).mockResolvedValue(rows(current));
+    async ({ current, line, feat }) => {
+      cached = current;
+      vi.mocked(gitBranches).mockResolvedValue(rows(current, false, feat));
       vi.mocked(updateLocalPr)
         .mockImplementationOnce(async (_r, _id, mutate) => mutate(PR))
         .mockImplementationOnce(async (_r, _id, mutate) => mutate(PR));
@@ -326,6 +413,67 @@ describe("PromoteLocalPrDialog over a renamed copy's refusal", () => {
       });
     },
   );
+
+  it("with nothing cached, a head is pointed at the terminal", async () => {
+    cached = null;
+    vi.mocked(gitBranches).mockResolvedValue(rows("main"));
+    vi.mocked(updateLocalPr)
+      .mockImplementationOnce(async (_r, _id, mutate) => mutate(PR))
+      .mockImplementationOnce(async (_r, _id, mutate) => mutate(PR));
+    forgePrCreate.mockRejectedValueOnce(REFUSAL);
+    renderPromote();
+    await press();
+    const seen = await refusalSurfaces();
+    expect(seen).toEqual({
+      title: TERMINAL_LINE,
+      description: NOTE,
+      notified: TERMINAL_LINE,
+    });
+  });
+
+  it("branches re-read while the create runs: the remedy follows the cached rows", async () => {
+    vi.mocked(gitBranches).mockResolvedValue(
+      rows("main", false, PUSHES_ELSEWHERE),
+    );
+    vi.mocked(updateLocalPr)
+      .mockImplementationOnce(async (_r, _id, mutate) => mutate(PR))
+      .mockImplementationOnce(async (_r, _id, mutate) => mutate(PR));
+    let refuse: (e: unknown) => void = () => undefined;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        refuse = reject;
+      }),
+    );
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    client.setQueryData(["repo", REPO, "status"], statusOf("main"));
+    client.setQueryData(["repo", REPO, "remotes"], ["origin"]);
+    render(
+      <QueryClientProvider client={client}>
+        <PromoteLocalPrDialog
+          repoPath={REPO}
+          pr={PR}
+          open
+          onOpenChange={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+    await press();
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    // Any later re-read answers the new routing too.
+    vi.mocked(gitBranches).mockResolvedValue(rows("main"));
+    act(() => {
+      client.setQueryData(branchesOptions(REPO).queryKey, rows("main"));
+    });
+    await act(async () => refuse(REFUSAL));
+    const seen = await refusalSurfaces();
+    expect(seen).toEqual({
+      title: ROW_LINE,
+      description: NOTE,
+      notified: ROW_LINE,
+    });
+  });
 
   it("the refusal, then a failed reopen: the composed toast's create half is guided", async () => {
     vi.mocked(gitBranches).mockResolvedValue(rows("main"));

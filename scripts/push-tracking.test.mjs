@@ -203,7 +203,8 @@ test("both push-to-origin routes confirm tracking before pushing", () => {
     src,
     "async function pushCurrentBranchToOrigin(",
   );
-  assert.match(current, /!headTrackingMatchesRow\(fresh, listed\)/);
+  assert.match(current, /freshRows = await gitBranches\(pushIn\)/);
+  assert.match(current, /!rowTrackingMatches\(freshRow, listed\)/);
   const listed = functionBody(src, "async function pushListedBranchToOrigin(");
   assert.match(listed, /!rowTrackingMatches\(freshRow, row\)/);
   // The open-list arm goes through the confirming route, never straight to the

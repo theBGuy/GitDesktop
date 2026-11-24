@@ -351,7 +351,7 @@ function routeProblems(sync, switcher) {
     ...decidedProblems(
       "beginPush",
       fnBody(sync, "beginPush"),
-      "const create = willCreateOnRemote({...facts, remoteHasSameName: presence});",
+      "const create = willCreateOnRemote({...rowFacts, remoteHasSameName: presence});",
     ),
     ...decidedProblems(
       "beginBarePush",

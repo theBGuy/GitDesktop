@@ -14,6 +14,10 @@ import {
   vi,
 } from "vitest";
 import { BranchSwitcher } from "@/features/repository/BranchSwitcher";
+import {
+  PUBLISH_FORK_CHECK_NOTE,
+  PUBLISH_FORK_CHECK_REASON,
+} from "@/features/repository/publish-confirm";
 import { SyncControls } from "@/features/repository/SyncControls";
 import {
   forgeDetectForkPrForBranch,
@@ -140,10 +144,11 @@ const MATCH: ForkPrMatch = {
   headRefName: "feat",
   headRepoOwner: "someone",
   headRepoName: "late",
+  headRepoHost: "example.test",
   maintainerCanModify: true,
   aheadCount: 1,
 };
-const TITLE = "feat is also the head of #7";
+const TITLE = "feat includes #7's commits";
 const DESCRIPTION =
   "Publish made a separate copy on origin; the pull request from someone/late was not updated.";
 
@@ -258,8 +263,9 @@ interface Route {
   press: () => Promise<void>;
 }
 
-const ROUTES: Route[] = [
-  {
+/** The sync bar's Publish of `feat`, its row extended by `over`. */
+function syncBarRoute(over: Partial<Branch> = {}): Route {
+  return {
     name: "sync bar",
     press: async () => {
       vi.mocked(gitStatus).mockResolvedValue({
@@ -267,7 +273,7 @@ const ROUTES: Route[] = [
         entries: [],
       });
       vi.mocked(gitBranches).mockResolvedValue([
-        row("feat", { isCurrent: true }),
+        row("feat", { isCurrent: true, ...over }),
       ]);
       const user = userEvent.setup();
       const client = new QueryClient({
@@ -282,8 +288,12 @@ const ROUTES: Route[] = [
         await screen.findByRole("button", { name: /^Publish branch/ }),
       );
     },
-  },
-  {
+  };
+}
+
+/** The branch switcher's `item` on the `feat` row, extended by `over`. */
+function switcherRoute(item: string, over: Partial<Branch> = {}): Route {
+  return {
     name: "branch switcher",
     press: async () => {
       vi.mocked(gitStatus).mockResolvedValue({
@@ -298,7 +308,7 @@ const ROUTES: Route[] = [
           upstreamRemoteRef: "refs/heads/main",
           upstreamIsRemoteDefault: true,
         }),
-        row("feat"),
+        row("feat", over),
       ]);
       const user = userEvent.setup();
       const client = new QueryClient({
@@ -318,18 +328,36 @@ const ROUTES: Route[] = [
       });
       await user.pointer({ keys: "[MouseRight]", target });
       const menu = await screen.findByRole("menu");
-      await user.click(
-        within(menu).getByRole("menuitem", { name: "Publish to origin" }),
-      );
+      await user.click(within(menu).getByRole("menuitem", { name: item }));
     },
-  },
-];
+  };
+}
 
-/** Presses Publish, lets the bound pass, then answers the prompt. */
+const ROUTES: Route[] = [syncBarRoute(), switcherRoute("Publish to origin")];
+
+/** Presses Publish, waits for the bound to swap the check's hold for its note,
+ *  then answers the prompt. */
 async function publishPastTheBound(route: Route, answer: boolean) {
-  await route.press();
-  await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
-  await settle();
+  // Every hold the prompt shows, in order: the bound can pass between polls.
+  const holds: unknown[] = [];
+  const off = useConfirm.subscribe((s, prev) => {
+    if (s.requestHold !== prev.requestHold) holds.push(s.requestHold);
+  });
+  try {
+    await route.press();
+    await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
+    await waitFor(() =>
+      expect(useConfirm.getState().requestHold).toEqual({
+        note: PUBLISH_FORK_CHECK_NOTE,
+      }),
+    );
+  } finally {
+    off();
+  }
+  expect(holds.filter((h) => h !== null)).toEqual([
+    { reason: PUBLISH_FORK_CHECK_REASON },
+    { note: PUBLISH_FORK_CHECK_NOTE },
+  ]);
   act(() => useConfirm.getState().answer(answer));
 }
 
@@ -441,5 +469,23 @@ for (const route of ROUTES)
       await settle();
       expect(lateToasts()).toEqual([]);
       expect(noticeSubs).toEqual([{ released: true }]);
+    });
+  });
+
+// The notice names the remote the route published to, never a fixed origin.
+const ROUTED_TO_FORK = { namedPushRemote: "fork", namedPushBranch: "feat" };
+for (const route of [
+  syncBarRoute(ROUTED_TO_FORK),
+  switcherRoute("Publish to fork", ROUTED_TO_FORK),
+])
+  it(`a fork match after a ${route.name} publish to fork names fork`, async () => {
+    await publishPastTheBound(route, true);
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledTimes(1));
+    expect(pushSpy.mock.calls[0][4]).toBe("fork");
+    await act(async () => check.resolve(MATCH));
+    await waitFor(() => expect(lateToasts()).toHaveLength(1));
+    expect(lateToasts()[0][1]).toMatchObject({
+      description:
+        "Publish made a separate copy on fork; the pull request from someone/late was not updated.",
     });
   });

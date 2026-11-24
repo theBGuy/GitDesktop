@@ -224,12 +224,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // hint. These respect Settings → Keyboard rebindings for free.
   const bindings = useEffectiveBindings();
   // The force-push confirm, holding the branch its divergence verdict was
-  // measured on and that branch's upstream, so a HEAD move never retitles the
-  // dialog. A closed confirm keeps its capture so the exit transition still
-  // shows it.
+  // measured on, that branch's upstream and its tip, so a HEAD move never
+  // retitles the dialog. A closed confirm keeps its capture so the exit
+  // transition still shows it.
   const [forceConfirm, setForceConfirm] = useState<{
     branch: string | null;
     upstream: string | null;
+    tip: string | null;
     open: boolean;
   } | null>(null);
   const closeForceConfirm = () =>
@@ -864,10 +865,17 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     const confirmRepo = repoPath;
     const confirm = forceConfirm;
     const branch = confirm.branch;
-    // The tip the confirm's evidence described, as rendered at the click.
-    const tip = head?.oid ?? null;
+    // The tip the confirm opened on, which its evidence described.
+    const tip = confirm.tip;
     if (tip === null) {
       toast.info("Couldn't confirm the current branch — nothing was pushed.");
+      closeForceConfirm();
+      return;
+    }
+    if ((head?.oid ?? null) !== tip) {
+      toast.info(
+        `${branch ?? "HEAD"} changed while the dialog was open — nothing was pushed.`,
+      );
       closeForceConfirm();
       return;
     }
@@ -914,6 +922,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     setForceConfirm({
       branch: head?.name ?? null,
       upstream: head?.upstream ?? null,
+      tip: head?.oid ?? null,
       open: true,
     });
   }
@@ -1066,7 +1075,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       return;
     }
     const row = rows?.find((r) => r.name === branch);
-    if (row === undefined) {
+    // The press's gate read the cached status; the fresh row decides, so an
+    // upstream set out of app since that read never publishes over it.
+    const rowFacts = row && {
+      upstream: row.upstream,
+      upstreamGone: row.upstreamGone,
+    };
+    if (row === undefined || !rowFacts || !willPublish(rowFacts)) {
       releaseMark();
       toast.info(
         `Couldn't confirm where ${branch} publishes — nothing was published.`,
@@ -1127,7 +1142,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         pushUrl,
       );
       const create = willCreateOnRemote({
-        ...facts,
+        ...rowFacts,
         remoteHasSameName: presence,
       });
       outcome = pushOutcome({ willPublish: true, create, presence });
@@ -1151,9 +1166,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             visibility: visibilityApplies(destination, fetchUrl, pushUrl)
               ? recordedVisibility(settings.data?.recentRepos, pushedIn)
               : null,
-            goneUpstream: facts.upstreamGone,
-            upstreamRemote: head?.upstreamRemote ?? null,
-            upstreamBranch: head?.upstreamBranch ?? null,
+            goneUpstream: rowFacts.upstreamGone,
+            upstreamRemote: row.upstreamRemote,
+            upstreamBranch: upstreamBranchName(row.upstreamRemoteRef),
             heldReason: probe.settled ? undefined : PUBLISH_FORK_CHECK_REASON,
           },
           publishAsk,

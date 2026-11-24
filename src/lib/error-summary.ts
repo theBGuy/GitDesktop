@@ -53,6 +53,7 @@ const KIND_LABELS: Record<AppError["kind"], string> = {
   pushDestinationExists: "Push blocked",
   pushHeadMoved: "Push blocked",
   pushTipMoved: "Push blocked",
+  pushForceMultiRef: "Push blocked",
 };
 
 /** The lowercase lead a kind's Rust `#[error]` attribute writes ahead of its

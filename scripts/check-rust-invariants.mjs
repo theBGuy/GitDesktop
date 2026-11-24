@@ -317,6 +317,12 @@ const REFSPEC_ALLOWLIST = [
       "read-only for-each-ref tracking read of HEAD's branch (never a refspec); the name is git's own status branch.head, checked with validate_ref_name first",
   },
   {
+    file: "git/status.rs",
+    fn: "has_standard_fetch_refspec",
+    rationale:
+      "builds the standard fetch refspec only to compare it with a config value already listed; it never reaches git's argv",
+  },
+  {
     file: "github/pr.rs",
     fn: "gh_delete_remote_head_branch",
     rationale:

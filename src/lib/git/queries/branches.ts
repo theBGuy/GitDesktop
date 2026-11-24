@@ -279,25 +279,45 @@ export interface PendingRemoteRename {
 
 const NO_PENDING_REMOTE_RENAMES: PendingRemoteRename[] = [];
 
+/** The branch-push entries among `entries` whose variables name a rename. */
+function remoteRenamesAmong(
+  entries: ReturnType<MutationCache["findAll"]>,
+): PendingRemoteRename[] {
+  return entries.flatMap((m): PendingRemoteRename[] => {
+    const v = m.state.variables as Partial<RemoteRenameVars> | undefined;
+    return typeof v?.oldName === "string" &&
+      typeof v.newName === "string" &&
+      typeof v.remote === "string"
+      ? [{ oldName: v.oldName, newName: v.newName, remote: v.remote }]
+      : [];
+  });
+}
+
 /** The repository's remote renames in flight, from the mutation cache, so a
  *  dismissed and reopened dialog reads the same running state: this checkout's
  *  branch-push entries whose variables name a rename. */
 export function usePendingRemoteRenames(repo: string): PendingRemoteRename[] {
   const select = useCallback(
     (cache: MutationCache) =>
-      cache
-        .findAll({ mutationKey: branchPushKey(repo), status: "pending" })
-        .flatMap((m): PendingRemoteRename[] => {
-          const v = m.state.variables as Partial<RemoteRenameVars> | undefined;
-          return typeof v?.oldName === "string" &&
-            typeof v.newName === "string" &&
-            typeof v.remote === "string"
-            ? [{ oldName: v.oldName, newName: v.newName, remote: v.remote }]
-            : [];
-        }),
+      remoteRenamesAmong(
+        cache.findAll({ mutationKey: branchPushKey(repo), status: "pending" }),
+      ),
     [repo],
   );
   return useMutationCacheSnapshot(select, NO_PENDING_REMOTE_RENAMES);
+}
+
+/** Fire-time twin of {@link usePendingRemoteRenames}, for an effect that must
+ *  read the cache as it stands when it runs. */
+export function pendingRemoteRenamesNow(
+  queryClient: QueryClient,
+  repo: string,
+): PendingRemoteRename[] {
+  return remoteRenamesAmong(
+    queryClient
+      .getMutationCache()
+      .findAll({ mutationKey: branchPushKey(repo), status: "pending" }),
+  );
 }
 
 export function useSetBranchArchived(repo: string) {

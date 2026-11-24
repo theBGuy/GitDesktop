@@ -516,6 +516,40 @@ describe("a remote rename on the branch rows", () => {
   });
 });
 
+describe("the rename offer's push routing", () => {
+  it.each([
+    ["to another remote", { namedPushRemote: "fork", namedPushBranch: "old" }],
+    ["to its upstream", { namedPushRemote: "origin", namedPushBranch: "old" }],
+    ["unknown", {}],
+  ] as const)(
+    "a row whose push goes %s",
+    async (kind, routing: Partial<Branch>) => {
+      vi.mocked(gitRemotes).mockResolvedValue(["origin", "fork"]);
+      reads.branches = [
+        trackedRow("main", { upstreamAhead: 0 }),
+        trackedRow("feat", { isCurrent: true, upstreamAhead: 0 }),
+        trackedRow("old", routing),
+      ];
+      const { user } = renderSwitcher();
+      await openList(user);
+      const menu = await openRowMenu(user, "old");
+      await user.click(menuItem(menu, "Rename branch…"));
+      const box = await screen.findByRole("checkbox", {
+        name: "Also rename on origin",
+      });
+      if (kind === "to another remote") {
+        expect(box).toHaveAttribute("aria-disabled", "true");
+        expect(box).toHaveAccessibleDescription(
+          "old pushes to fork, not origin",
+        );
+      } else {
+        expect(box).not.toHaveAttribute("aria-disabled", "true");
+        expect(box).not.toHaveAccessibleDescription(/pushes to/);
+      }
+    },
+  );
+});
+
 describe("another worktree holding the current branch", () => {
   it.each(["rename", "push"] as const)(
     "a sibling's %s: the hotkey and the footer row say another worktree holds it",

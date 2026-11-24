@@ -141,7 +141,7 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "Push or publish a branch to any remote — no checkout needed, following Git's push-remote settings, with its progress on the branch's row; publishing a new branch asks first and names where it's going",
+      "Push or publish a branch to any remote — no checkout needed, with its progress on the branch's row; pushes follow Git's push-remote settings, and publishing a new branch asks first and names where it's going",
   },
   {
     group: "Branches & history",

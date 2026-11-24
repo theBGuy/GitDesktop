@@ -1099,11 +1099,25 @@ impl PushPins {
 }
 
 /// A force push's lease pinned to an explicit expected tip: only [`git_push_core`]'s
-/// tracking-reflog degrade retry passes one.
+/// tracking-reflog degrade retry passes one. The tip was read for `remote`, so a retry
+/// that git would now route elsewhere returns `refusal` (the first attempt's `code` and
+/// `stderr`) instead of spawning.
 #[derive(Debug, Clone, PartialEq)]
 struct LeasePin {
+    remote: String,
     dest: String,
     sha: String,
+    refusal: (i32, String),
+}
+
+/// The degrade retry's routing check, run early and again at spawn: `remote` is where git
+/// routes the push now.
+fn refuse_moved_lease_route(pin: &LeasePin, remote: Option<&str>) -> AppResult<()> {
+    if remote == Some(pin.remote.as_str()) {
+        return Ok(());
+    }
+    let (code, stderr) = pin.refusal.clone();
+    Err(AppError::Git { code, stderr })
 }
 
 /// Which guarantee a completed push actually ran under. Only meaningful for a
@@ -1170,6 +1184,7 @@ async fn git_push_core(
         CrossNameUpstream::Follow,
         pins.as_ref(),
         creates,
+        false,
         None,
     )
     .await;
@@ -1177,16 +1192,18 @@ async fn git_push_core(
         (Err(AppError::Git { code, stderr }), Some(pre))
             if stderr.contains(IF_INCLUDES_REJECTION) =>
         {
-            let allowed = tracking_reflog_retry_allowed(
-                &repo_path,
-                &pre.branch_ref,
-                &pre.tracking,
-                &pre.lease.sha,
-            )
-            .await;
+            let allowed =
+                tracking_reflog_retry_allowed(&repo_path, &pre.branch_ref, &pre.tracking, &pre.sha)
+                    .await;
             if !allowed {
                 return Err(AppError::Git { code, stderr });
             }
+            let lease = LeasePin {
+                remote: pre.remote,
+                dest: pre.dest,
+                sha: pre.sha,
+                refusal: (code, stderr),
+            };
             git_push_with_policy(
                 state,
                 repo_path,
@@ -1198,7 +1215,8 @@ async fn git_push_core(
                 CrossNameUpstream::Follow,
                 pins.as_ref(),
                 creates,
-                Some(&pre.lease),
+                false,
+                Some(&lease),
             )
             .await?;
             Ok(PushGuardWire::LeasePinnedNoTrackingReflog)
@@ -1213,17 +1231,24 @@ async fn git_push_core(
 struct DegradePreread {
     /// `refs/heads/<pinned branch>`.
     branch_ref: String,
-    /// The destination's remote-tracking ref, git's own `%(push)`.
+    /// The destination's remote-tracking ref: git's own `%(push)`, or for a triangular
+    /// `simple` push the standard `refs/remotes/<push remote>/<branch>`.
     tracking: String,
-    /// The destination branch and the tracking ref's commit id when read.
-    lease: LeasePin,
+    /// The push remote, the destination branch and the tracking ref's commit id when read.
+    remote: String,
+    dest: String,
+    sha: String,
 }
 
 /// Position of `%(push)` among the push-destination atoms.
 const PUSH_TRACKING_ATOM_INDEX: usize = 2;
 
 /// Reads [`DegradePreread`] for a pinned branch; None (the arm off) when the pin is not
-/// a branch or the destination, its tracking ref or that ref's id doesn't resolve.
+/// a branch or the destination, its tracking ref or that ref's id doesn't resolve. Where
+/// `%(push)` resolves nothing, a triangular `simple` push still lands on its push remote
+/// under the local name, so that destination is read when the remote keeps git's
+/// standard fetch layout (any other layout leaves the arm off); matching never gets here
+/// with a pin, since its pinned force push is refused first.
 async fn tracking_degrade_preread(repo_path: &str, pins: &PushPins) -> Option<DegradePreread> {
     use crate::git::commit::{CasRef, ExpectedRef};
     let ExpectedRef::Branch(name) = &pins.branch else {
@@ -1239,21 +1264,41 @@ async fn tracking_degrade_preread(repo_path: &str, pins: &PushPins) -> Option<De
     )
     .await
     .ok()?;
-    let (Some(_), Some(dest)) = bare_push_destination(&text, &branch_ref, name) else {
-        return None;
+    let line = tracking_line(&text, &branch_ref)?;
+    let (remote, dest, tracking) = match bare_push_destination(&text, &branch_ref, name) {
+        (Some(remote), Some(dest)) => {
+            let tracking = line
+                .atoms()
+                .get(PUSH_TRACKING_ATOM_INDEX)
+                .copied()
+                .filter(|t| t.starts_with("refs/"))?
+                .to_string();
+            (remote, dest, tracking)
+        }
+        _ => {
+            let config = crate::git::status::push_config_strict(repo_path)
+                .await
+                .ok()?;
+            let (Some(remote), Some(dest)) =
+                config.triangular_simple_destination(name, line.upstream_remote())
+            else {
+                return None;
+            };
+            if !config.has_standard_fetch_refspec(&remote) {
+                return None;
+            }
+            let tracking = format!("refs/remotes/{remote}/{dest}");
+            (remote, dest, tracking)
+        }
     };
     crate::git::branches::validate_ref_name(&dest).ok()?;
-    let tracking = tracking_line(&text, &branch_ref)?
-        .atoms()
-        .get(PUSH_TRACKING_ATOM_INDEX)
-        .copied()
-        .filter(|t| t.starts_with("refs/"))?
-        .to_string();
     let sha = ref_commit(repo_path, &tracking).await?;
     Some(DegradePreread {
         branch_ref,
         tracking,
-        lease: LeasePin { dest, sha },
+        remote,
+        dest,
+        sha,
     })
 }
 
@@ -1275,8 +1320,9 @@ async fn ref_commit(repo_path: &str, full_ref: &str) -> Option<String> {
 /// present, a non-zero exit, a failed spawn) keeps git's refusal:
 /// 1. `tracking` has zero reflog entries (`reflog show -n 1` exits 0 and prints nothing);
 /// 2. `tracking` still points at `pre_id`;
-/// 3. `pre_id` is reachable from an entry of `branch_ref`'s reflog, the test
-///    `--force-if-includes` itself makes: one `rev-list --stdin` fed `pre_id` and a
+/// 3. `pre_id` is reachable from an entry of `branch_ref`'s reflog: `--force-if-includes`'s
+///    test, made on the pushed branch, where git uses the destination-named local ref
+///    (the two differ for a cross-name push): one `rev-list --stdin` fed `pre_id` and a
 ///    `^<entry>` line per entry prints nothing (`--not --stdin` does not negate stdin
 ///    lines on git 2.51.1, measured).
 async fn tracking_reflog_retry_allowed(
@@ -1352,6 +1398,34 @@ pub(crate) async fn git_push_same_name_core(
         CrossNameUpstream::Refuse,
         None,
         false,
+        false,
+        None,
+    )
+    .await
+}
+
+/// The remote rename's push of its new name: the same-name `-u` publish of `branch` to
+/// `remote`, always under the create-only lease (a fetch that re-created the tracking ref
+/// can't disarm it) and with `--no-follow-tags`, so `push.followTags` can't turn a refused
+/// tag into a failed push of a branch that landed.
+pub(crate) async fn git_push_creating_core(
+    state: &AppState,
+    repo_path: String,
+    branch: String,
+    remote: String,
+) -> AppResult<PushGuard> {
+    git_push_with_policy(
+        state,
+        repo_path,
+        true,
+        false,
+        Some(branch),
+        Some(remote),
+        None,
+        CrossNameUpstream::Refuse,
+        None,
+        true,
+        true,
         None,
     )
     .await
@@ -1372,6 +1446,7 @@ pub(crate) async fn git_force_push_head_core(
         None,
         CrossNameUpstream::Refuse,
         None,
+        false,
         false,
         None,
     )
@@ -1492,6 +1567,10 @@ pub(crate) enum HeadRoute {
 struct SpawnRecheck<'a> {
     route: RecheckRoute<'a>,
     pins: Option<&'a PushPins>,
+    /// A HEAD route's force flag and degrade lease, which [`refuse_head_push`] and
+    /// [`refuse_moved_lease_route`] re-read; a named route ignores both.
+    force: bool,
+    lease: Option<&'a LeasePin>,
 }
 
 /// `Head` re-runs every HEAD read; `Named` is an argv pinned to a branch, remote and
@@ -1509,14 +1588,19 @@ impl<'a> SpawnRecheck<'a> {
         SpawnRecheck {
             route: RecheckRoute::Named(branch),
             pins: None,
+            force: false,
+            lease: None,
         }
     }
 
     async fn run(self, repo_path: &str) -> AppResult<()> {
         match self.route {
-            RecheckRoute::Head(route) => refuse_head_push(repo_path, route, self.pins)
-                .await
-                .map(drop)?,
+            RecheckRoute::Head(route) => {
+                let head = refuse_head_push(repo_path, route, self.pins, self.force).await?;
+                if let Some(pin) = self.lease {
+                    refuse_moved_lease_route(pin, head.remote.as_deref())?;
+                }
+            }
             RecheckRoute::Named(branch) => refuse_publishing_branch(repo_path, branch).await?,
         }
         #[cfg(test)]
@@ -1546,12 +1630,15 @@ struct HeadPush {
 /// The remote a HEAD push authenticates against and is mirror-checked on. `Bare` is
 /// git's own routing ([`PushConfig::bare_push_remote`]), None when the winning value is
 /// empty; `Publish` is HEAD's configured push remote (unusable refuses), else origin.
-/// `remotes` is consulted only for a configured push remote of a validly named HEAD.
+/// `remotes` is consulted only for a validly named HEAD. With no push remote configured,
+/// `tracking` (HEAD's upstream read) refuses an Untracked HEAD as the named route does
+/// ([`untracked_branch_remote`]); it never picks the destination.
 fn head_push_remote(
     config: &crate::git::status::PushConfig,
     route: HeadRoute,
     head: Option<&str>,
     remotes: &[String],
+    tracking: Option<(&Upstream, &str)>,
 ) -> AppResult<Option<String>> {
     match route {
         HeadRoute::Bare => Ok(config.bare_push_remote(head).map(str::to_string)),
@@ -1561,6 +1648,9 @@ fn head_push_remote(
                 Some(b) => configured_push_remote_checked(config, remotes, b)?,
                 None => None,
             };
+            if let (None, Some(b), Some((upstream, remotename))) = (configured, valid, tracking) {
+                untracked_branch_remote(config, remotes, b, upstream, remotename)?;
+            }
             Ok(Some(configured.unwrap_or("origin").to_string()))
         }
     }
@@ -1593,11 +1683,15 @@ fn configured_push_remote_checked<'c>(
 /// Every pre-spawn read of a HEAD push, run early and again at spawn for an argv that
 /// resolves HEAD there: HEAD's branch (`None` when detached), its publishing refusal,
 /// and one config listing for the push remote and its mirror refusal. `pins`' branch is
-/// compared first, so a moved HEAD answers that and never the other branch's refusal.
+/// compared first, so a moved HEAD answers that and never the other branch's refusal. A
+/// pinned bare FORCE push (the sync bar's) is refused where git's routing would send more
+/// refs than the pinned one ([`PushForceMultiRef`](AppError::PushForceMultiRef)); a plain
+/// or unpinned push keeps git's configured routing.
 async fn refuse_head_push(
     repo_path: &str,
     route: HeadRoute,
     pins: Option<&PushPins>,
+    force: bool,
 ) -> AppResult<HeadPush> {
     use crate::git::status::{mirror_refusal, push_config_strict, PushRemote};
     // git's own full ref, so the destination read's pattern is never rebuilt from a name.
@@ -1613,16 +1707,30 @@ async fn refuse_head_push(
         refuse_publishing_branch(repo_path, b).await?;
     }
     let config = push_config_strict(repo_path).await?;
-    let needs_remotes = route == HeadRoute::Publish
-        && head
-            .as_deref()
-            .is_some_and(|b| config.push_remote_setting(b).is_some());
-    let remotes = if needs_remotes {
+    let publish_head = head.as_deref().filter(|_| route == HeadRoute::Publish);
+    let configured = publish_head.is_some_and(|b| config.push_remote_setting(b).is_some());
+    // Only an unconfigured HEAD with `branch.<b>.remote` set can meet the untracked refusal.
+    let branch_remote = !configured
+        && publish_head.is_some_and(|b| config.branch_remote(b).is_some_and(|n| !n.is_empty()));
+    let remotes = if configured || branch_remote {
         git_remotes(repo_path.to_string()).await?
     } else {
         Vec::new()
     };
-    let remote = head_push_remote(&config, route, head.as_deref(), &remotes)?;
+    let tracking = match (branch_remote, head_ref.as_deref()) {
+        (true, Some(refname)) => {
+            let out = run_git(
+                Some(repo_path),
+                &["for-each-ref", refname, UPSTREAM_TRACKING_FORMAT],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            parse_upstream_tracking(&out.stdout_lossy(), refname)
+        }
+        _ => None,
+    };
+    let tracking = tracking.as_ref().map(|(up, name, _)| (up, name.as_str()));
+    let remote = head_push_remote(&config, route, head.as_deref(), &remotes, tracking)?;
     // A bare push git has no destination for is git's own failure, never a mirror push.
     match (route, remote.as_deref()) {
         (HeadRoute::Bare, Some(_)) => mirror_refusal(
@@ -1633,6 +1741,15 @@ async fn refuse_head_push(
         )?,
         (HeadRoute::Publish, Some(r)) => mirror_refusal(&config, PushRemote::Named(r))?,
         (_, None) => {}
+    }
+    if let (HeadRoute::Bare, true, Some(_), Some(r)) = (route, force, pins, remote.as_deref()) {
+        if let Some(cause) = config.multi_ref_cause(r) {
+            return Err(AppError::PushForceMultiRef {
+                branch: head.clone().unwrap_or_else(|| "HEAD".to_string()),
+                remote: r.to_string(),
+                cause,
+            });
+        }
     }
     // A bare push of a non-session HEAD lands on a session branch only under
     // push.default=upstream, which the push atoms resolve; matching and a push remote's
@@ -1679,6 +1796,7 @@ async fn git_push_with_policy(
     cross_name: CrossNameUpstream,
     pins: Option<&PushPins>,
     creates: bool,
+    no_follow_tags: bool,
     lease_pin: Option<&LeasePin>,
 ) -> AppResult<PushGuard> {
     if remote_branch.is_some() && (branch.is_none() || remote.is_none()) {
@@ -1713,7 +1831,10 @@ async fn git_push_with_policy(
             } else {
                 HeadRoute::Bare
             };
-            let head = refuse_head_push(&repo_path, route, pins).await?;
+            let head = refuse_head_push(&repo_path, route, pins, force).await?;
+            if let Some(pin) = lease_pin {
+                refuse_moved_lease_route(pin, head.remote.as_deref())?;
+            }
             if let Some(pins) = pins {
                 pins.check(&repo_path, head.head_ref.as_deref()).await?;
             }
@@ -1830,6 +1951,11 @@ async fn git_push_with_policy(
             } else {
                 None
             };
+            let remotename = if remote.is_none() && configured.is_none() {
+                untracked_branch_remote(&config, &remotes, b, &upstream, &remotename)?
+            } else {
+                remotename
+            };
             let route = NamedRoute {
                 branch: b,
                 upstream: &upstream,
@@ -1857,6 +1983,10 @@ async fn git_push_with_policy(
             args
         }
     };
+    let mut args = args;
+    if no_follow_tags {
+        args.insert(1, "--no-follow-tags".to_string());
+    }
     let cred = match &cred_remote {
         Some(r) => crate::forge::credential_config_for_remote(&repo_path, r).await?,
         None => Vec::new(),
@@ -1868,7 +1998,12 @@ async fn git_push_with_policy(
         (None, false) => RecheckRoute::Head(HeadRoute::Bare),
         (None, true) => RecheckRoute::Head(HeadRoute::Publish),
     };
-    let recheck = Some(SpawnRecheck { route, pins });
+    let recheck = Some(SpawnRecheck {
+        route,
+        pins,
+        force,
+        lease: lease_pin,
+    });
     let (repo, timeout) = (repo_path.as_str(), NETWORK_TIMEOUT);
     match run_git_mutating_with_creds_checked(state, repo, &cred, &argv, timeout, recheck).await {
         Ok(_) => Ok(PushGuard::LeaseAndIncludes),
@@ -1907,8 +2042,16 @@ async fn git_push_with_policy(
             Ok(PushGuard::LeaseOnlyNoReflog)
         }
         // The create-only lease refuses only a destination that exists at another commit.
+        // Several `To` blocks (one per push URL) may have created it on another URL first,
+        // so only a one-destination report is named; the rest keeps git's text.
         Err(AppError::Git { stderr, .. })
-            if create_lease.is_some() && stderr.contains("(stale info)") =>
+            if create_lease.is_some()
+                && is_stale_lease_rejection(&stderr)
+                && stderr
+                    .lines()
+                    .filter(|l| l.trim().starts_with("To "))
+                    .count()
+                    == 1 =>
         {
             let (branch, remote, dest) = create_lease.unwrap_or_default();
             Err(AppError::PushDestinationExists {
@@ -1928,6 +2071,31 @@ async fn git_push_with_policy(
         }
         Err(other) => Err(other),
     }
+}
+
+/// Whether git's push report refuses a ref for a stale lease: a line whose status start
+/// ([`rejection_status_line`]) is `! [rejected]` and whose end is `(stale info)` (`<src>
+/// -> <dest>` and `(delete) -> <dest>` alike). Server text arrives behind `remote:`, so it
+/// never matches.
+pub(crate) fn is_stale_lease_rejection(stderr: &str) -> bool {
+    stderr.lines().any(|line| {
+        let line = rejection_status_line(line);
+        line.starts_with("! [rejected]") && line.ends_with("(stale info)")
+    })
+}
+
+/// One push-report line, trimmed and without its leading SGR color sequences: under
+/// `color.transport=always` git colors the status flag even though the runner pins
+/// `color.ui=false`.
+pub(crate) fn rejection_status_line(line: &str) -> &str {
+    let mut rest = line.trim();
+    while let Some(after) = rest.strip_prefix("\x1b[") {
+        match after.find(|c: char| !(c.is_ascii_digit() || c == ';')) {
+            Some(end) if after[end..].starts_with('m') => rest = &after[end + 1..],
+            _ => break,
+        }
+    }
+    rest
 }
 
 /// git's `push.default=simple` refusal for an upstream with a different name
@@ -2163,7 +2331,9 @@ pub(crate) fn upstream_from_remoteref(remoteref: &str) -> Upstream {
 /// 4. a git without the `%(push)` atoms (unmeasured): documented, destinations read unknown;
 /// 5. force pushes: closed by the branch and tip pins;
 /// 6. presence as last-fetch remote-tracking state: open, no network read before a push;
-///    the create-only lease bounds its damage on the arms that set the upstream.
+///    the create-only lease bounds its damage on the arms that set the upstream. A single
+///    pushurl naming another repository than the fetch URL is this class too: the
+///    presence read describes the fetch side.
 ///
 /// The lease's presence probe can misread two shapes: a remote whose name contains a
 /// slash (`refs/remotes/a/b/c` is both remote `a/b` branch `c` and remote `a` branch
@@ -2184,6 +2354,35 @@ fn resolve_push_target<'a>(
         None if !remotename.is_empty() && !gone => remotename,
         None => "origin",
     }
+}
+
+/// The upstream remote a named push naming no remote, with no configured push remote,
+/// routes by; the argv builder and [`NamedPushRouting::destination`] both read it, so the
+/// row and the push agree. It is `remotename` except on an untracked read, which publishes
+/// by D2 (the empty answer: the configured push remote, else origin) when
+/// `branch.<b>.remote` names a listed remote, or holds a value with a leading `.`, or one
+/// holding `/`, a backslash or `:`; any other unlisted name is `unknown remote` (never a
+/// silent retarget at origin). The HEAD publish applies the same refusal
+/// ([`head_push_remote`]).
+fn untracked_branch_remote(
+    config: &crate::git::status::PushConfig,
+    remotes: &[String],
+    branch: &str,
+    upstream: &Upstream,
+    remotename: &str,
+) -> AppResult<String> {
+    if !matches!(upstream, Upstream::Untracked) || !remotename.is_empty() {
+        return Ok(remotename.to_string());
+    }
+    let Some(name) = config.branch_remote(branch).filter(|n| !n.is_empty()) else {
+        return Ok(String::new());
+    };
+    let url_or_path =
+        name.starts_with('.') || name.contains('/') || name.contains(':') || name.contains('\\');
+    if remotes.iter().any(|r| r == name) || url_or_path {
+        return Ok(String::new());
+    }
+    Err(AppError::InvalidArgument(format!("unknown remote: {name}")))
 }
 
 /// The tracked arm's destination, shared by the argv builder and the MCP policy: the
@@ -2342,10 +2541,14 @@ impl<'a> NamedRoute<'a> {
         // Both names can come from config and reach argv: the remote bare, where `-x` would
         // read as an option; the destination only behind `refs/heads/`, where a leading dash
         // is valid, so it passes exactly where that full ref passes `validate_ref_name`.
-        let valid = crate::git::branches::validate_ref_name(target).is_ok();
-        if !valid || !remotes.iter().any(|r| r == target) {
+        if !remotes.iter().any(|r| r == target) {
             return Err(AppError::InvalidArgument(format!(
                 "unknown remote: {target}"
+            )));
+        }
+        if crate::git::branches::validate_ref_name(target).is_err() {
+            return Err(AppError::InvalidArgument(format!(
+                "invalid remote name: {target}"
             )));
         }
         let dest = self.dest();
@@ -2494,7 +2697,8 @@ impl NamedPushRouting {
     /// for a routing reason: an unusable configured push remote, a `.` remote beside a
     /// branch upstream, a mirror remote, a remote that is not configured, a remote name
     /// that fails `validate_ref_name` or a destination that would fail it as `refs/heads/<dest>`,
-    /// a destination in gd/session/, or a branch name that fails it or is itself a session
+    /// a destination in gd/session/, a `branch.<b>.remote` no remote has
+    /// ([`untracked_branch_remote`]), or a branch name that fails it or is itself a session
     /// branch. Keep local and an unborn branch are not routing refusals.
     pub(crate) fn destination(
         &self,
@@ -2512,10 +2716,23 @@ impl NamedPushRouting {
         else {
             return NamedPushDestination::Refused;
         };
+        let remotename = match configured {
+            Some(_) => remotename.to_string(),
+            None => match untracked_branch_remote(
+                &self.config,
+                &self.remotes,
+                branch,
+                upstream,
+                remotename,
+            ) {
+                Ok(r) => r,
+                Err(_) => return NamedPushDestination::Refused,
+            },
+        };
         let route = NamedRoute {
             branch,
             upstream,
-            remotename,
+            remotename: &remotename,
             gone,
             set_upstream: false,
             requested: None,
@@ -8923,6 +9140,7 @@ and the repository exists.
             ("unusable push remote", "b", "branch.b.pushremote\nnope\0", Upstream::Untracked, "", 'c'),
             ("unlisted upstream remote", "b", "", b("b"), "ghost", 'r'),
             ("dash-named upstream remote", "b", "", b("b"), "-x", 'r'),
+            ("branch remote no remote has", "b", "branch.b.remote\nmissing\0", Upstream::Untracked, "", 'u'),
             ("destination holding a colon", "b", "", b("a:b"), "origin", 'r'),
             ("session destination", "b", "", b("gd/session/x"), "origin", 'r'),
             ("invalid branch name", "bad:name", "", Upstream::Untracked, "", 'v'),
@@ -8944,6 +9162,10 @@ and the repository exists.
                 'v' => crate::git::branches::validate_ref_name(branch).err(),
                 's' => super::refuse_publishing_session_branch(branch).err(),
                 'c' => super::configured_push_remote_checked(config, &remotes, branch).err(),
+                'u' => {
+                    super::untracked_branch_remote(config, &remotes, branch, &upstream, remotename)
+                        .err()
+                }
                 _ => {
                     let configured =
                         super::configured_push_remote_checked(config, &remotes, branch).unwrap();
@@ -8963,6 +9185,43 @@ and the repository exists.
                 }
             };
             assert!(refusal.is_some(), "{label}: the push's own check");
+        }
+
+        // An untracked read publishes by D2 whatever `branch.<b>.remote` holds: a listed
+        // remote (no merge key, or no fetch refspec, reads untracked), `.`, a URL or a path
+        // goes to the configured push remote, else origin, on the row and the push alike.
+        for (listing, remote) in [
+            ("branch.b.remote\nfork\0", "origin"),
+            ("branch.b.remote\nfork\0remote.pushdefault\nup\0", "up"),
+            ("branch.b.remote\n.\0", "origin"),
+            ("branch.b.remote\nhttps://example.invalid/r.git\0", "origin"),
+            ("branch.b.remote\n../r.git\0", "origin"),
+            ("branch.b.remote\nmirrors/fork.git\0", "origin"),
+        ] {
+            let routing = super::NamedPushRouting {
+                config: crate::git::status::PushConfig::from_listing(listing),
+                remotes: remotes.clone(),
+            };
+            assert_eq!(
+                routing.destination("b", &Upstream::Untracked, "", false),
+                To {
+                    remote: remote.to_string(),
+                    branch: "b".to_string()
+                },
+                "{listing:?}"
+            );
+            assert_eq!(
+                super::untracked_branch_remote(
+                    &routing.config,
+                    &remotes,
+                    "b",
+                    &Upstream::Untracked,
+                    ""
+                )
+                .unwrap(),
+                "",
+                "{listing:?}: the push"
+            );
         }
 
         // A destination with a leading dash is a valid ref behind `refs/heads/`: it routes.
@@ -9041,10 +9300,11 @@ and the repository exists.
     fn head_push_remote_follows_the_route() {
         use super::HeadRoute::{Bare, Publish};
         let remotes = sv(&["origin", "fork"]);
-        let on = |listing: &str, route, head: Option<&str>| {
+        let read = |listing: &str, route, head: Option<&str>, tracking| {
             let config = crate::git::status::PushConfig::from_listing(listing);
-            super::head_push_remote(&config, route, head, &remotes)
+            super::head_push_remote(&config, route, head, &remotes, tracking)
         };
+        let on = |listing: &str, route, head: Option<&str>| read(listing, route, head, None);
         let some = |r: &str| Some(r.to_string());
         assert_eq!(
             on("remote.solo.url\nu\0", Bare, Some("feat")).unwrap(),
@@ -9090,6 +9350,37 @@ and the repository exists.
             on("branch.feat.pushremote\nnope\0", Publish, Some("feat")),
             Err(AppError::PushRemoteUnusable { .. })
         ));
+
+        // An Untracked HEAD publishes by D2 whatever `branch.<b>.remote` holds, except an
+        // unlisted plain name with no push remote configured, refused as the named route
+        // refuses it; a tracked HEAD and a configured push remote are not.
+        let untracked = Some((&Upstream::Untracked, ""));
+        let ghost = "branch.feat.remote\nghost\0";
+        assert!(matches!(
+            read(ghost, Publish, Some("feat"), untracked),
+            Err(AppError::InvalidArgument(m)) if m == "unknown remote: ghost"
+        ));
+        for listing in [
+            "branch.feat.remote\nfork\0",
+            "branch.feat.remote\nmirrors/fork.git\0",
+            "",
+        ] {
+            assert_eq!(
+                read(listing, Publish, Some("feat"), untracked).unwrap(),
+                some("origin"),
+                "{listing:?}"
+            );
+        }
+        let pushdefault = format!("{ghost}remote.pushdefault\nfork\0");
+        assert_eq!(
+            read(&pushdefault, Publish, Some("feat"), untracked).unwrap(),
+            some("fork")
+        );
+        let tracked = Upstream::Branch("feat".to_string());
+        assert_eq!(
+            read(ghost, Publish, Some("feat"), Some((&tracked, "ghost"))).unwrap(),
+            some("origin")
+        );
     }
 
     #[test]
@@ -9260,6 +9551,39 @@ and the repository exists.
         assert_eq!(tip_of(&origin, "refs/heads/c").await, None);
     }
 
+    /// The HEAD publish of an untracked branch with no push remote: an unlisted
+    /// `branch.<b>.remote` refuses with nothing pushed; a listed one publishes to origin.
+    #[tokio::test]
+    async fn head_publish_refuses_an_unlisted_branch_remote() {
+        let (_guard, base, origin, _url) =
+            seeded_origin_unpinned_push_default("head-publish-ghost").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let fork = add_fork(&base, &work).await;
+        let state = AppState::default();
+        run(&work, &["checkout", "-q", "-b", "feat"]).await;
+        run(&work, &["commit", "-qm", "on feat", "--allow-empty"]).await;
+        run(&work, &["config", "branch.feat.remote", "ghost"]).await;
+        let err = git_push_same_name_core(&state, work.clone(), true, None, None)
+            .await
+            .expect_err("an unlisted branch remote refuses");
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m == "unknown remote: ghost"),
+            "{err:?}"
+        );
+        assert_eq!(tip_of(&origin, "refs/heads/feat").await, None);
+        assert_eq!(tip_of(&fork, "refs/heads/feat").await, None);
+
+        run(&work, &["config", "branch.feat.remote", "fork"]).await;
+        git_push_same_name_core(&state, work.clone(), true, None, None)
+            .await
+            .expect("a listed branch remote publishes to origin");
+        assert_eq!(
+            tip_of(&origin, "refs/heads/feat").await,
+            tip_of(&work, "refs/heads/feat").await
+        );
+        assert_eq!(tip_of(&fork, "refs/heads/feat").await, None);
+    }
+
     /// An empty `remote.pushDefault` leaves a bare push no destination: no credentials
     /// are built and git's own refusal stands.
     #[tokio::test]
@@ -9374,17 +9698,27 @@ and the repository exists.
             tip_of(&work, "refs/heads/main").await
         );
 
-        // Negative control: unpinned, the moved-HEAD push runs (and pushes `other`).
+        // Negative control: unpinned, the moved-HEAD push runs and pushes `other`, which
+        // tracks a same-named branch so `simple` sends it.
+        run(&work, &["push", "-q", "-u", "origin", "other"]).await;
+        run(&work, &["symbolic-ref", "HEAD", "refs/heads/other"]).await;
+        run(&work, &["commit", "-qm", "on other", "--allow-empty"]).await;
+        run(&work, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
+        let main_published = tip_of(&origin, "refs/heads/main").await;
         let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
             let work = work.clone();
             move || git_sync(&work, &["symbolic-ref", "HEAD", "refs/heads/other"])
         });
         let push = git_push_core_unpinned(&state, work.clone(), false, false, None, None, None);
-        let result = NETWORK_LOCK_WAIT_HOOK.scope(hook, push).await;
-        assert!(
-            !matches!(result, Err(AppError::PushHeadMoved { .. })),
-            "an unpinned push never answers PushHeadMoved: {result:?}"
+        NETWORK_LOCK_WAIT_HOOK
+            .scope(hook, push)
+            .await
+            .expect("an unpinned push follows the moved HEAD");
+        assert_eq!(
+            tip_of(&origin, "refs/heads/other").await,
+            tip_of(&work, "refs/heads/other").await
         );
+        assert_eq!(tip_of(&origin, "refs/heads/main").await, main_published);
     }
 
     /// The no-local-reflog degrade retry is a second spawn, so it re-checks the pins: HEAD
@@ -9482,6 +9816,8 @@ and the repository exists.
         let recheck = Some(super::SpawnRecheck {
             route: super::RecheckRoute::Named("feat/x"),
             pins: Some(&pinned),
+            force: false,
+            lease: None,
         });
         let result =
             super::run_git_with_creds_rechecked(&work, &moving, &argv, NETWORK_TIMEOUT, recheck)
@@ -9825,7 +10161,14 @@ and the repository exists.
         }
 
         let (_guard, base, origin, url, fresh, amended) = fresh_clone_amended("fii-e2e").await;
-        let guard = super::git_push_core(
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+            let fired = std::sync::Arc::clone(&fired);
+            move || {
+                fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let push = super::git_push_core(
             &state,
             fresh.clone(),
             false,
@@ -9835,15 +10178,19 @@ and the repository exists.
             None,
             Some(pins("a", Some(&amended))),
             false,
-        )
-        .await
-        .expect("the pinned force push lands");
+        );
+        let guard = NETWORK_LOCK_WAIT_HOOK
+            .scope(hook, push)
+            .await
+            .expect("the pinned force push lands");
         eprintln!("the pinned force push reported {guard:?}");
-        assert!(matches!(
-            guard,
-            super::PushGuardWire::LeaseAndIncludes
-                | super::PushGuardWire::LeasePinnedNoTrackingReflog
-        ));
+        // One lock wait is the first attempt landing; two is the degrade retry, which
+        // must say so.
+        match fired.load(std::sync::atomic::Ordering::SeqCst) {
+            1 => assert_eq!(guard, super::PushGuardWire::LeaseAndIncludes),
+            2 => assert_eq!(guard, super::PushGuardWire::LeasePinnedNoTrackingReflog),
+            n => panic!("{n} lock waits: {guard:?}"),
+        }
         assert_eq!(
             tip_of(&origin, "refs/heads/a").await.as_deref(),
             Some(amended.as_str())
@@ -9897,8 +10244,10 @@ and the repository exists.
     fn the_head_force_argv_takes_one_lease_or_the_pair() {
         let sha = "c".repeat(40);
         let pin = super::LeasePin {
+            remote: "origin".to_string(),
             dest: "a".to_string(),
             sha: sha.clone(),
+            refusal: (1, String::new()),
         };
         let pinned = format!("--force-with-lease=refs/heads/a:{sha}");
         assert_eq!(
@@ -9915,7 +10264,8 @@ and the repository exists.
 
     /// The degrade retry runs under the lease pinned to the pre-read tracking tip: a
     /// commit another clone pushes between the first attempt and the retry (the hook's
-    /// SECOND firing) refuses the retry and stays on the remote.
+    /// SECOND firing), fetched into this clone's tracking ref so an implicit lease would
+    /// pass, refuses the retry and stays on the remote.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_degrade_retry_keeps_its_pinned_lease() {
         let (_guard, base, origin, url, fresh, amended) = fresh_clone_amended("fii-race").await;
@@ -9933,10 +10283,15 @@ and the repository exists.
         let theirs = tip_of(&other, "refs/heads/a").await.unwrap();
         let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
-            let (fired, other) = (std::sync::Arc::clone(&fired), other.clone());
+            let (fired, other, fresh) =
+                (std::sync::Arc::clone(&fired), other.clone(), fresh.clone());
             move || {
                 if fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
                     git_sync(&other, &["push", "-q", "origin", "a"]);
+                    git_sync(
+                        &fresh,
+                        &["fetch", "-q", "origin", "a:refs/remotes/origin/a"],
+                    );
                 }
             }
         });
@@ -9958,10 +10313,16 @@ and the repository exists.
         );
         let result = NETWORK_LOCK_WAIT_HOOK.scope(hook, push).await;
         let firings = fired.load(std::sync::atomic::Ordering::SeqCst);
-        if firings == 1 && result.is_ok() {
-            eprintln!("the first attempt landed on this git; the retry row is moot");
+        // A git whose `--force-if-includes` accepts a tracking ref with no reflog lands the
+        // first attempt (one firing); one that refuses it runs the degrade retry (two).
+        if firings == 1 && matches!(result, Ok(super::PushGuardWire::LeaseAndIncludes)) {
+            assert_eq!(
+                tip_of(&origin, "refs/heads/a").await.as_deref(),
+                Some(amended.as_str())
+            );
             return;
         }
+        // Two firings: the first attempt is refused and the degrade retry runs.
         assert_eq!(firings, 2, "{result:?}");
         match &result {
             Err(AppError::Git { stderr, .. }) => {
@@ -9975,6 +10336,356 @@ and the repository exists.
         );
     }
 
+    /// The degrade retry's tip was read for origin: a `remote.pushDefault` switched to
+    /// another remote before the retry (the hook's SECOND firing) repeats the first
+    /// attempt's refusal, and that remote's branch, sitting at exactly the pinned tip,
+    /// keeps it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_degrade_retry_refuses_a_moved_route() {
+        let (_guard, base, origin, _url, fresh, amended) = fresh_clone_amended("fii-route").await;
+        let base_s = base.to_string_lossy().into_owned();
+        run(
+            &base_s,
+            &["init", "-q", "--bare", "-b", "main", "second.git"],
+        )
+        .await;
+        let second = base.join("second.git").to_string_lossy().into_owned();
+        let second_url = format!("file://{}", second.replace('\\', "/"));
+        run(&fresh, &["remote", "add", "second", &second_url]).await;
+        run(&fresh, &["config", "remote.second.mirror", "false"]).await;
+        run(
+            &fresh,
+            &["push", "-q", "second", "refs/remotes/origin/a:refs/heads/a"],
+        )
+        .await;
+        let pinned_tip = tip_of(&second, "refs/heads/a").await;
+        let published = tip_of(&origin, "refs/heads/a").await;
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+            let (fired, fresh) = (std::sync::Arc::clone(&fired), fresh.clone());
+            move || {
+                if fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                    git_sync(&fresh, &["config", "remote.pushDefault", "second"]);
+                }
+            }
+        });
+        let state = AppState::default();
+        let push = super::git_push_core(
+            &state,
+            fresh.clone(),
+            false,
+            true,
+            None,
+            None,
+            None,
+            Some(pins("a", Some(&amended))),
+            false,
+        );
+        let result = NETWORK_LOCK_WAIT_HOOK.scope(hook, push).await;
+        let firings = fired.load(std::sync::atomic::Ordering::SeqCst);
+        if firings == 1 && matches!(result, Ok(super::PushGuardWire::LeaseAndIncludes)) {
+            assert_eq!(
+                tip_of(&origin, "refs/heads/a").await.as_deref(),
+                Some(amended.as_str())
+            );
+            assert_eq!(tip_of(&second, "refs/heads/a").await, pinned_tip);
+            return;
+        }
+        // Two firings: the first attempt is refused and the degrade retry runs.
+        assert_eq!(firings, 2, "{result:?}");
+        match &result {
+            Err(AppError::Git { stderr, .. }) => {
+                assert_rejection_reason(stderr, IF_INCLUDES_REJECTION)
+            }
+            other => panic!("the retry over a moved route: {other:?}"),
+        }
+        assert_eq!(tip_of(&second, "refs/heads/a").await, pinned_tip);
+        assert_eq!(tip_of(&origin, "refs/heads/a").await, published);
+    }
+
+    /// The fresh-clone fallback also covers a triangular `simple` push (upstream on one
+    /// remote, `remote.pushDefault` another), where `%(push)` resolves nothing: the pinned
+    /// force push lands on the push remote and the upstream's remote is untouched.
+    #[tokio::test]
+    async fn a_pinned_triangular_force_push_lands_on_a_fresh_clone() {
+        let (_guard, base, origin, url, fresh, amended) = fresh_clone_amended("fii-tri").await;
+        let base_s = base.to_string_lossy().into_owned();
+        run(&base_s, &["clone", "-q", "--bare", &url, "upstream.git"]).await;
+        let upstream = base.join("upstream.git").to_string_lossy().into_owned();
+        let upstream_url = format!("file://{}", upstream.replace('\\', "/"));
+        run(&fresh, &["remote", "add", "upstream", &upstream_url]).await;
+        run(&fresh, &["config", "remote.upstream.mirror", "false"]).await;
+        run(&fresh, &["fetch", "-q", "upstream"]).await;
+        run(
+            &fresh,
+            &["branch", "-q", "--set-upstream-to=upstream/a", "a"],
+        )
+        .await;
+        run(&fresh, &["config", "remote.pushDefault", "origin"]).await;
+        let upstream_tip = tip_of(&upstream, "refs/heads/a").await;
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+            let fired = std::sync::Arc::clone(&fired);
+            move || {
+                fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let state = AppState::default();
+        let push = super::git_push_core(
+            &state,
+            fresh.clone(),
+            false,
+            true,
+            None,
+            None,
+            None,
+            Some(pins("a", Some(&amended))),
+            false,
+        );
+        let result = NETWORK_LOCK_WAIT_HOOK.scope(hook, push).await;
+        let firings = fired.load(std::sync::atomic::Ordering::SeqCst);
+        if firings == 1 && matches!(result, Ok(super::PushGuardWire::LeaseAndIncludes)) {
+            assert_eq!(
+                tip_of(&origin, "refs/heads/a").await.as_deref(),
+                Some(amended.as_str())
+            );
+            assert_eq!(tip_of(&upstream, "refs/heads/a").await, upstream_tip);
+            return;
+        }
+        let guard = result.expect("the pinned triangular force push lands");
+        // Two lock waits: the first attempt is refused and the triangular fallback retries.
+        assert_eq!(firings, 2);
+        assert_eq!(guard, super::PushGuardWire::LeasePinnedNoTrackingReflog);
+        assert_eq!(
+            tip_of(&origin, "refs/heads/a").await.as_deref(),
+            Some(amended.as_str())
+        );
+        assert_eq!(tip_of(&upstream, "refs/heads/a").await, upstream_tip);
+    }
+
+    /// A pinned bare FORCE push is refused where git's routing sends more than HEAD's
+    /// branch: under `push.default=matching` nothing lands, `other`'s rewrite included,
+    /// while the pinned PLAIN push still runs as git routes it; a push remote with push
+    /// refspecs is refused the same way. Unpinned (the MCP shape), the force push keeps
+    /// git's routing and rewrites `other`, the control that the fixture reaches it.
+    #[tokio::test]
+    async fn a_pinned_force_push_refuses_a_multi_ref_route() {
+        use crate::error::PushMultiRefCause;
+        let (_guard, base, origin, _url) = seeded_origin("force-multi-ref").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let state = AppState::default();
+        run(&work, &["branch", "other"]).await;
+        run(&work, &["push", "-q", "origin", "other"]).await;
+        run(&work, &["config", "push.default", "matching"]).await;
+        run(&work, &["checkout", "-q", "other"]).await;
+        run(&work, &["commit", "-qm", "plain other", "--allow-empty"]).await;
+        run(&work, &["checkout", "-q", "main"]).await;
+        run(&work, &["commit", "-qm", "plain", "--allow-empty"]).await;
+        super::git_push_core(
+            &state,
+            work.clone(),
+            false,
+            false,
+            None,
+            None,
+            None,
+            Some(pins("main", None)),
+            false,
+        )
+        .await
+        .expect("a pinned plain push under matching runs");
+        assert_eq!(
+            tip_of(&origin, "refs/heads/main").await,
+            tip_of(&work, "refs/heads/main").await
+        );
+        assert_eq!(
+            tip_of(&origin, "refs/heads/other").await,
+            tip_of(&work, "refs/heads/other").await,
+            "the plain push keeps git's matching routing"
+        );
+
+        let tree = run(&work, &["rev-parse", "HEAD^{tree}"]).await;
+        let root = run(
+            &work,
+            &["commit-tree", tree.trim(), "-m", "rewritten other"],
+        )
+        .await;
+        run(&work, &["branch", "-f", "other", root.trim()]).await;
+        run(
+            &work,
+            &["commit", "-q", "--allow-empty", "--amend", "-m", "amended"],
+        )
+        .await;
+        let tip = tip_of(&work, "refs/heads/main").await.unwrap();
+        let main_before = tip_of(&origin, "refs/heads/main").await;
+        let other_before = tip_of(&origin, "refs/heads/other").await;
+        let force = || {
+            super::git_push_core(
+                &state,
+                work.clone(),
+                false,
+                true,
+                None,
+                None,
+                None,
+                Some(pins("main", Some(&tip))),
+                false,
+            )
+        };
+        let result = force().await;
+        assert!(
+            matches!(&result, Err(AppError::PushForceMultiRef { branch, remote, cause: PushMultiRefCause::Matching }) if branch == "main" && remote == "origin"),
+            "{result:?}"
+        );
+        assert_eq!(tip_of(&origin, "refs/heads/main").await, main_before);
+        assert_eq!(tip_of(&origin, "refs/heads/other").await, other_before);
+
+        run(&work, &["config", "--unset", "push.default"]).await;
+        run(
+            &work,
+            &[
+                "config",
+                "remote.origin.push",
+                "refs/heads/main:refs/heads/main",
+            ],
+        )
+        .await;
+        let result = force().await;
+        assert!(
+            matches!(&result, Err(AppError::PushForceMultiRef { branch, remote, cause: PushMultiRefCause::Refspecs }) if branch == "main" && remote == "origin"),
+            "{result:?}"
+        );
+        assert_eq!(tip_of(&origin, "refs/heads/main").await, main_before);
+
+        // Matching set between the early check and the spawn: the spawn recheck refuses.
+        run(&work, &["config", "--unset", "remote.origin.push"]).await;
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+            let (fired, work) = (std::sync::Arc::clone(&fired), work.clone());
+            move || {
+                if fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    git_sync(&work, &["config", "push.default", "matching"]);
+                }
+            }
+        });
+        let result = NETWORK_LOCK_WAIT_HOOK.scope(hook, force()).await;
+        assert_eq!(
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "{result:?}"
+        );
+        assert!(
+            matches!(
+                &result,
+                Err(AppError::PushForceMultiRef {
+                    cause: PushMultiRefCause::Matching,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(tip_of(&origin, "refs/heads/main").await, main_before);
+        assert_eq!(tip_of(&origin, "refs/heads/other").await, other_before);
+
+        run(&work, &["config", "push.default", "matching"]).await;
+        git_push_core_unpinned(&state, work.clone(), false, true, None, None, None)
+            .await
+            .expect("an unpinned force push keeps git's routing");
+        assert_eq!(
+            tip_of(&origin, "refs/heads/other").await.as_deref(),
+            Some(root.trim())
+        );
+    }
+
+    /// The rename's push always arms the create-only lease, even with the destination's
+    /// tracking ref present, and never follows tags; the same-name core, under the same
+    /// `push.followTags`, does follow them (the control that the setting is live).
+    #[tokio::test]
+    async fn the_creating_core_always_leases_and_never_follows_tags() {
+        let (_guard, base, origin, _url) = seeded_origin("creating-core").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let state = AppState::default();
+        let main = tip_of(&work, "refs/heads/main").await.unwrap();
+        run(&work, &["checkout", "-q", "-b", "feat"]).await;
+        run(&work, &["commit", "-qm", "feat", "--allow-empty"]).await;
+        run(&work, &["push", "-q", "origin", "main:feat"]).await;
+        assert!(tip_of(&work, "refs/remotes/origin/feat").await.is_some());
+        let err =
+            super::git_push_creating_core(&state, work.clone(), "feat".into(), "origin".into())
+                .await
+                .expect_err("an ancestor already at the name");
+        assert!(
+            matches!(&err, AppError::PushDestinationExists { branch, remote, dest } if branch == "feat" && remote == "origin" && dest == "feat"),
+            "{err:?}"
+        );
+        assert_eq!(
+            tip_of(&origin, "refs/heads/feat").await.as_deref(),
+            Some(main.as_str())
+        );
+
+        run(&work, &["config", "push.followTags", "true"]).await;
+        run(&work, &["checkout", "-q", "-b", "fresh"]).await;
+        run(&work, &["commit", "-qm", "fresh", "--allow-empty"]).await;
+        run(&work, &["tag", "-a", "v-fresh", "-m", "t"]).await;
+        super::git_push_creating_core(&state, work.clone(), "fresh".into(), "origin".into())
+            .await
+            .expect("the new name publishes");
+        assert_eq!(
+            tip_of(&origin, "refs/heads/fresh").await,
+            tip_of(&work, "refs/heads/fresh").await
+        );
+        assert_eq!(tip_of(&origin, "refs/tags/v-fresh").await, None);
+        assert_eq!(
+            run(&work, &["config", "--get", "branch.fresh.remote"])
+                .await
+                .trim(),
+            "origin"
+        );
+
+        run(&work, &["checkout", "-q", "-b", "tagged"]).await;
+        run(&work, &["commit", "-qm", "tagged", "--allow-empty"]).await;
+        run(&work, &["tag", "-a", "v-tagged", "-m", "t"]).await;
+        super::git_push_same_name_core(&state, work.clone(), true, Some("tagged".into()), None)
+            .await
+            .expect("the same-name core publishes");
+        assert!(
+            tip_of(&origin, "refs/tags/v-tagged").await.is_some(),
+            "push.followTags is live in this fixture"
+        );
+    }
+
+    /// The stale-lease predicate reads git's own ref status line, the create and delete
+    /// shapes measured on git 2.51.1; `remote:` text and other rejections never match.
+    #[test]
+    fn the_stale_lease_predicate_reads_only_gits_status_line() {
+        use super::is_stale_lease_rejection as stale;
+        assert!(stale(
+            " ! [rejected]        feature -> feature (stale info)\nerror: failed to push some refs to 'C:/temp/remote.git'"
+        ));
+        assert!(stale(
+            "To ../o.git\n ! [rejected]        (delete) -> old (stale info)\nerror: failed to push some refs to '../o.git'"
+        ));
+        assert!(stale(
+            "To x\r\n ! [rejected]        a -> a (stale info)\r\n"
+        ));
+        assert!(!stale(
+            "remote: ! [rejected] a -> a (stale info)\nTo x\n ! [remote rejected] a -> a (pre-receive hook declined)"
+        ));
+        assert!(!stale(
+            "remote: hook text (stale info)\nTo x\n ! [rejected]        a -> a (non-fast-forward)"
+        ));
+        assert!(!stale(" ! [rejected]        a -> a (fetch first)"));
+        assert!(!stale(""));
+        // color.transport=always colors the flag; the status line reads through it.
+        assert!(stale(
+            "To x\n \x1b[31m! [rejected]        \x1b[m a -> a (stale info)\n"
+        ));
+        assert!(stale(" \x1b[1m\x1b[31;1m! [rejected] a -> a (stale info)"));
+        assert!(!stale("remote: \x1b[31m! [rejected] a -> a (stale info)"));
+        assert_eq!(super::rejection_status_line(" \x1b[31m! x "), "! x");
+        assert_eq!(super::rejection_status_line("\x1b[31x! x"), "\x1b[31x! x");
+    }
+
     /// The HEAD `-u` publish carries the create-only lease: an unfetched ancestor on the
     /// destination is refused and the remote is unchanged.
     #[tokio::test]
@@ -9986,15 +10697,58 @@ and the repository exists.
         run(&work, &["checkout", "-q", "-b", "feat"]).await;
         run(&work, &["commit", "-qm", "feat", "--allow-empty"]).await;
         plant_unfetched(&work, "origin", &main).await;
+        // The same refusal under color.transport=always, which colors git's status line.
+        for color in ["false", "always"] {
+            run(&work, &["config", "color.transport", color]).await;
+            let err = super::git_push_same_name_core(&state, work.clone(), true, None, None)
+                .await
+                .expect_err("an unfetched ancestor");
+            assert!(
+                matches!(&err, AppError::PushDestinationExists { branch, remote, dest } if branch == "feat" && remote == "origin" && dest == "feat"),
+                "color.transport={color}: {err:?}"
+            );
+            assert_eq!(
+                tip_of(&origin, "refs/heads/feat").await.as_deref(),
+                Some(main.as_str())
+            );
+        }
+    }
+
+    /// A remote with two push URLs reports one `To` block per URL, and the first may have
+    /// created the branch: a stale lease on the second keeps git's own text, never
+    /// "nothing was pushed".
+    #[tokio::test]
+    async fn a_two_push_url_publish_keeps_gits_report() {
+        let (_guard, base, origin, url) = seeded_origin("two-push-urls").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let base_s = base.to_string_lossy().into_owned();
+        let state = AppState::default();
+        run(&base_s, &["clone", "-q", "--bare", &url, "second.git"]).await;
+        let second = base.join("second.git").to_string_lossy().into_owned();
+        let second_url = format!("file://{}", second.replace('\\', "/"));
+        let main = tip_of(&work, "refs/heads/main").await.unwrap();
+        run(&second, &["update-ref", "refs/heads/feat", &main]).await;
+        run(&work, &["config", "--add", "remote.origin.pushurl", &url]).await;
+        run(
+            &work,
+            &["config", "--add", "remote.origin.pushurl", &second_url],
+        )
+        .await;
+        run(&work, &["checkout", "-q", "-b", "feat"]).await;
+        run(&work, &["commit", "-qm", "feat", "--allow-empty"]).await;
         let err = super::git_push_same_name_core(&state, work.clone(), true, None, None)
             .await
-            .expect_err("an unfetched ancestor");
-        assert!(
-            matches!(&err, AppError::PushDestinationExists { branch, remote, dest } if branch == "feat" && remote == "origin" && dest == "feat"),
-            "{err:?}"
+            .expect_err("the second URL holds the name");
+        match &err {
+            AppError::Git { stderr, .. } => assert_rejection_reason(stderr, STALE_LEASE_REJECTION),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            tip_of(&origin, "refs/heads/feat").await,
+            tip_of(&work, "refs/heads/feat").await
         );
         assert_eq!(
-            tip_of(&origin, "refs/heads/feat").await.as_deref(),
+            tip_of(&second, "refs/heads/feat").await.as_deref(),
             Some(main.as_str())
         );
     }
@@ -10074,7 +10828,8 @@ and the repository exists.
     }
 
     /// A named push of a branch tracking a remote named `-x` (a live upstream through its
-    /// fetch refspec) is refused as an unknown remote before anything is spawned toward it.
+    /// fetch refspec) is refused as an invalid remote name before anything is spawned toward
+    /// it; a branch whose `branch.<b>.remote` names no remote at all is refused as unknown.
     #[tokio::test]
     async fn a_dash_named_upstream_remote_is_refused() {
         let (_guard, base, _origin, _url) =
@@ -10126,10 +10881,46 @@ and the repository exists.
         };
         let result = push().await;
         assert!(
-            matches!(&result, Err(AppError::InvalidArgument(m)) if m == "unknown remote: -x"),
+            matches!(&result, Err(AppError::InvalidArgument(m)) if m == "invalid remote name: -x"),
             "{result:?}"
         );
         assert_eq!(tip_of(&dash, "refs/heads/feat").await, None);
+
+        // A missing remote empties every upstream atom: refused, never published to origin.
+        let origin = base.join("origin.git").to_string_lossy().into_owned();
+        run(&work, &["branch", "topic"]).await;
+        run(&work, &["config", "branch.topic.remote", "missing"]).await;
+        run(&work, &["config", "branch.topic.merge", "refs/heads/topic"]).await;
+        let format = "--format=%(upstream:remotename)|%(upstream:remoteref)";
+        assert_eq!(
+            run(&work, &["for-each-ref", format, "refs/heads/topic"])
+                .await
+                .trim(),
+            "|",
+            "the atoms read empty"
+        );
+        let result = git_push_core_unpinned(
+            &state,
+            work.clone(),
+            false,
+            false,
+            Some("topic".into()),
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(AppError::InvalidArgument(m)) if m == "unknown remote: missing"),
+            "{result:?}"
+        );
+        assert_eq!(tip_of(&origin, "refs/heads/topic").await, None);
+        assert_eq!(
+            run(&work, &["config", "--get", "branch.topic.remote"])
+                .await
+                .trim(),
+            "missing",
+            "tracking is left alone"
+        );
     }
 
     /// A `HEAD` pin matches only a detached HEAD and a branch pin never does; over an

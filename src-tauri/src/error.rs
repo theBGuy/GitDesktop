@@ -145,6 +145,40 @@ pub enum AppError {
         "{branch} changed after you confirmed, so nothing was pushed. Review it and push again."
     )]
     PushTipMoved { branch: String },
+    /// A pinned bare FORCE push of `branch` refused before any spawn because git's own
+    /// routing would also send other refs: `push.default=matching`, or `remote` (git's
+    /// bare push remote) carrying `remote.<r>.push` refspecs.
+    #[error("{}", push_force_multi_ref_message(branch, remote, *cause))]
+    PushForceMultiRef {
+        branch: String,
+        remote: String,
+        cause: PushMultiRefCause,
+    },
+}
+
+/// Why a bare push would send more than one ref; serialized as `cause`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushMultiRefCause {
+    /// `push.default=matching`.
+    Matching,
+    /// The push remote's own `remote.<r>.push` refspecs.
+    Refspecs,
+}
+
+impl PushMultiRefCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PushMultiRefCause::Matching => "matching",
+            PushMultiRefCause::Refspecs => "refspecs",
+        }
+    }
+}
+
+fn push_force_multi_ref_message(branch: &str, remote: &str, cause: PushMultiRefCause) -> String {
+    match cause {
+        PushMultiRefCause::Matching => format!("push.default is \"matching\" in this repository, so a force push could also rewrite other matching branches. Nothing was pushed. Force-push {branch} from a terminal, naming the branch."),
+        PushMultiRefCause::Refspecs => format!("{remote} has push refspecs of its own, so a force push could rewrite other branches too. Nothing was pushed. Force-push {branch} from a terminal, naming the branch."),
+    }
 }
 
 fn push_remote_unusable_message(branch: &str, key: &str, value: &str) -> String {
@@ -247,6 +281,7 @@ impl Serialize for AppError {
             AppError::PushDestinationExists { .. } => "pushDestinationExists",
             AppError::PushHeadMoved { .. } => "pushHeadMoved",
             AppError::PushTipMoved { .. } => "pushTipMoved",
+            AppError::PushForceMultiRef { .. } => "pushForceMultiRef",
         };
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("kind", kind)?;
@@ -355,6 +390,15 @@ impl Serialize for AppError {
             }
             AppError::PushTipMoved { branch } => {
                 map.serialize_entry("branch", branch)?;
+            }
+            AppError::PushForceMultiRef {
+                branch,
+                remote,
+                cause,
+            } => {
+                map.serialize_entry("branch", branch)?;
+                map.serialize_entry("remote", remote)?;
+                map.serialize_entry("cause", cause.as_str())?;
             }
             _ => {}
         }
@@ -669,6 +713,30 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&err).unwrap(),
             r#"{"kind":"pushTipMoved","message":"feat changed after you confirmed, so nothing was pushed. Review it and push again.","branch":"feat"}"#
+        );
+    }
+
+    /// The TS union reads `branch`, `remote` and `cause`; both causes' sentences are pinned.
+    #[test]
+    fn push_force_multi_ref_serializes_to_the_pinned_wire_shape() {
+        use super::PushMultiRefCause;
+        let matching = AppError::PushForceMultiRef {
+            branch: "feat".to_string(),
+            remote: "origin".to_string(),
+            cause: PushMultiRefCause::Matching,
+        };
+        assert_eq!(
+            serde_json::to_string(&matching).unwrap(),
+            r#"{"kind":"pushForceMultiRef","message":"push.default is \"matching\" in this repository, so a force push could also rewrite other matching branches. Nothing was pushed. Force-push feat from a terminal, naming the branch.","branch":"feat","remote":"origin","cause":"matching"}"#
+        );
+        let refspecs = AppError::PushForceMultiRef {
+            branch: "feat".to_string(),
+            remote: "fork".to_string(),
+            cause: PushMultiRefCause::Refspecs,
+        };
+        assert_eq!(
+            serde_json::to_string(&refspecs).unwrap(),
+            r#"{"kind":"pushForceMultiRef","message":"fork has push refspecs of its own, so a force push could rewrite other branches too. Nothing was pushed. Force-push feat from a terminal, naming the branch.","branch":"feat","remote":"fork","cause":"refspecs"}"#
         );
     }
 

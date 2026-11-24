@@ -827,13 +827,13 @@ export function CreatePrDialog({
         const awayRepo = landedIn(repoPath).live
           ? null
           : repoNameFromPath(repoPath);
-        // A renamed copy's refusal names the Push menu, which acts on HEAD; a
-        // head that isn't checked out is pointed at its own row instead. Every
-        // toast form and the notification carry this one sentence.
-        const headIsCurrent =
-          branches.data?.some((b) => b.name === value.head && b.isCurrent) ===
-          true;
-        const guided = withCrossNameGuidance(e, headIsCurrent);
+        // A renamed copy's refusal names the control this head's routing
+        // offers. Every toast form and the notification carry this one sentence.
+        const guided = withCrossNameGuidance(e, {
+          head: status.data?.branch,
+          branches: branches.data,
+          remoteNames: remotes.data,
+        });
         if (outcome === "error") {
           if (mayHaveLanded(guided)) {
             if (awayRepo) toastErrorWithNote(guided, `In ${awayRepo}`);

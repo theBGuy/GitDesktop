@@ -40,6 +40,7 @@ import {
   branchPushHoldReason,
   endHeaderDetection,
   headerDetectionFor,
+  repoStatusOptions,
   useRenameBranchOnRemote,
 } from "@/lib/git/queries";
 import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
@@ -149,7 +150,12 @@ const routedToFork = (name: string) =>
 const remoteHas = (remote: string, name: string) =>
   ({ remote, name }) as unknown as RemoteBranch;
 
-function forkMatch(owner: string, name: string, ref: string): ForkPrMatch {
+function forkMatch(
+  owner: string,
+  name: string,
+  ref: string,
+  host = "github.com",
+): ForkPrMatch {
   return {
     number: 7,
     title: "Fork work",
@@ -157,6 +163,7 @@ function forkMatch(owner: string, name: string, ref: string): ForkPrMatch {
     headRefName: ref,
     headRepoOwner: owner,
     headRepoName: name,
+    headRepoHost: host,
     maintainerCanModify: true,
     aheadCount: 1,
   };
@@ -337,6 +344,19 @@ describe("Publish names its remote", () => {
         vi.mocked(gitBranches).mockRejectedValueOnce(new Error("boom"));
       },
     ],
+    [
+      // An upstream set out of app since the status the press read.
+      "a row that now tracks a remote branch",
+      () => {
+        reads.branches = [
+          branchRow("feat", {
+            upstream: "origin/release",
+            upstreamRemote: "origin",
+            upstreamRemoteRef: "refs/heads/release",
+          }),
+        ];
+      },
+    ],
   ] as const)
     it(`${what} publishes nothing`, async () => {
       reads.head = unpublished("feat");
@@ -353,6 +373,52 @@ describe("Publish names its remote", () => {
       expect(pushSpy).not.toHaveBeenCalled();
       expect(headerDetectionFor(REPO)).toBeNull();
     });
+
+  // branch.<b>.remote never picks a first publish's destination: the backend
+  // predicts the push remote, else origin, and the bar sends that prediction.
+  it("a first publish goes where the backend predicts, never to another listed remote", async () => {
+    reads.head = unpublished("feat");
+    reads.branches = [
+      branchRow("feat", { namedPushRemote: "origin", namedPushBranch: "feat" }),
+    ];
+    reads.remotes = ["origin", "fork"];
+    const { user } = await renderBar();
+    await user.click(pushButton());
+    await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
+    expect(gitRemotePushUrl).toHaveBeenCalledWith(REPO, "origin");
+    expect(gitRemotePushUrl).not.toHaveBeenCalledWith(REPO, "fork");
+    expect(confirmBody()).not.toContain("fork");
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledTimes(1));
+    expect(pushCall()).toMatchObject({ branch: "feat", remote: "origin" });
+  });
+
+  it("an unlisted branch.<name>.remote reaches the user as the backend's refusal", async () => {
+    const error = vi.spyOn(toast, "error");
+    reads.head = unpublished("feat");
+    reads.branches = [branchRow("feat", { namedPushRefused: true })];
+    reads.remotes = ["origin", "fork"];
+    pushSpy.mockRejectedValue({
+      kind: "invalidArgument",
+      message: "invalid argument: unknown remote: ghost",
+    });
+    try {
+      const { user } = await renderBar();
+      await user.click(pushButton());
+      await waitFor(() =>
+        expect(error).toHaveBeenCalledWith(
+          "Unknown remote: ghost",
+          expect.anything(),
+        ),
+      );
+      expect(pushSpy).toHaveBeenCalledTimes(1);
+      expect(pushCall()).toMatchObject({ branch: "feat", remote: undefined });
+      expect(useConfirm.getState().request).toBeNull();
+      expect(success).not.toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  });
 
   it("a row routed to fork publishes to fork while the remotes list is stale", async () => {
     reads.head = unpublished("feat");
@@ -418,6 +484,34 @@ describe("pins and creates the bar sends", () => {
     );
     await settle();
     expect(pushSpy).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("dialog", { name: "Force push?" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a tip move the poll saw before the click pushes nothing", async () => {
+    const { user, force, queryClient } = await openForce();
+    reads.head = headOn("feat", { behind: 1, oid: MOVED_OID });
+    await act(() =>
+      queryClient.refetchQueries({
+        queryKey: repoStatusOptions(REPO).queryKey,
+      }),
+    );
+    await settle();
+    expect(
+      screen.getByRole("dialog", { name: "Force push?" }),
+    ).toBeInTheDocument();
+    const statusReads = vi.mocked(gitStatus).mock.calls.length;
+    await user.click(force);
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "feat changed while the dialog was open — nothing was pushed.",
+      ),
+    );
+    await settle();
+    expect(pushSpy).not.toHaveBeenCalled();
+    // Refused at the click, before the direct read.
+    expect(vi.mocked(gitStatus).mock.calls.length).toBe(statusReads);
     expect(
       screen.queryByRole("dialog", { name: "Force push?" }),
     ).not.toBeInTheDocument();
@@ -641,6 +735,11 @@ describe("a fork match that IS the destination opens no guard", () => {
     [
       "another repository's pull request",
       () => forkMatch("other", "routing", "feat"),
+      true,
+    ],
+    [
+      "the same owner and repository name on another host",
+      () => forkMatch("someone", "routing", "feat", "gitlab.com"),
       true,
     ],
   ] as const)

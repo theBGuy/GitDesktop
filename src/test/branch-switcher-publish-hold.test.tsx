@@ -29,6 +29,7 @@ import {
   PUBLISH_HOLD_REASON,
   publishRunningMessage,
 } from "@/features/repository/PublishPendingBanner";
+import { switchedAndKept } from "@/lib/deleted-branches/copy";
 import {
   forgePrsOnRemoteBranch,
   forgeStatus,
@@ -36,7 +37,9 @@ import {
   gitBranchDivergence,
   gitBranches,
   gitBranchTips,
+  gitCheckoutBranch,
   gitDefaultBranch,
+  gitDeleteBranch,
   gitKeepLocalHookStatus,
   gitRemoteBranches,
   gitRemoteRenameCheck,
@@ -83,8 +86,10 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgeStatus: vi.fn(),
   getSecret: vi.fn(),
   gitKeepLocalHookStatus: vi.fn(),
-  // The delete confirm's tip read.
+  // The delete confirm's tip read, and the current-branch delete's writes.
   gitBranchTips: vi.fn(),
+  gitCheckoutBranch: vi.fn(),
+  gitDeleteBranch: vi.fn(),
   // The rename dialog's remote-step reads.
   gitRemoteRenameCheck: vi.fn(),
   forgePrsOnRemoteBranch: vi.fn(),
@@ -343,7 +348,11 @@ const settle = () =>
 
 const HELD_RENAME = `Rename branch… (${PUBLISH_HOLD_ITEM_REASON})`;
 const HELD_DELETE = `Delete branch… (${PUBLISH_HOLD_ITEM_REASON})`;
-const RUNNING = publishRunningMessage({ provider: "github", name: "hold" });
+const RUNNING = publishRunningMessage({
+  provider: "github",
+  name: "hold",
+  branch: null,
+});
 
 // ---- Render holds.
 
@@ -383,6 +392,41 @@ describe("a repository publish holds the current branch", () => {
     menu = await openRowMenu(user, "topic");
     for (const name of ["Rename branch…", "Delete branch…", "Archive"])
       expect(menuItem(menu, name)).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("keeps holding the published branch after a checkout moves HEAD off it", async () => {
+    const { user, queryClient, startPublish } = renderSwitcher();
+    // The publish records the branch its checkout's status names at the press.
+    await waitFor(() =>
+      expect(queryClient.getQueryData(["repo", REPO, "status"])).toBeDefined(),
+    );
+    await startPublish();
+    await act(async () => {
+      reads.head = headOn("topic");
+      reads.branches = reads.branches.map((b) => ({
+        ...b,
+        isCurrent: b.name === "topic",
+      }));
+      void queryClient.invalidateQueries({ queryKey: ["repo", REPO] });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    await openList(user, "topic");
+    let menu = await openRowMenu(user, "feat");
+    for (const name of [
+      HELD_RENAME,
+      HELD_DELETE,
+      `Archive (${PUBLISH_HOLD_ITEM_REASON})`,
+    ])
+      await waitFor(() =>
+        expect(menuItem(menu, name)).toHaveAttribute("aria-disabled", "true"),
+      );
+    await user.keyboard("{Escape}");
+    menu = await openRowMenu(user, "topic");
+    for (const name of ["Rename branch…", "Delete branch…"])
+      expect(menuItem(menu, name)).not.toHaveAttribute("aria-disabled", "true");
+    await user.keyboard("{Escape}");
+    for (const name of ["Rename current branch…", "Delete current branch…"])
+      expect(footerRow(name)).not.toHaveAttribute("aria-disabled", "true");
   });
 
   it("holds both footer rows with the publish reason, and frees them", async () => {
@@ -467,6 +511,95 @@ describe("the rename and delete hotkeys while a publish runs", () => {
     });
     expect(await screen.findByLabelText("New name")).toBeInTheDocument();
     expect(info).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("a current-branch delete that a publish overtakes", () => {
+  /** Presses Delete on feat's confirm. */
+  async function pressDelete(user: User) {
+    await openList(user);
+    const menu = await openRowMenu(user, "feat");
+    await user.click(menuItem(menu, "Delete branch…"));
+    const confirm = screen.getByRole("button", { name: "Delete" });
+    await waitFor(() =>
+      expect(confirm).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await user.click(confirm);
+  }
+
+  it("re-checks the publish after the worktree read, before the fallback checkout", async () => {
+    const { user, startPublish } = renderSwitcher();
+    let answer: (() => void) | null = null;
+    await screen.findByRole("button", { name: /^feat/ });
+    vi.mocked(listUserWorktrees).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = () => resolve([]);
+        }),
+    );
+    await pressDelete(user);
+    await waitFor(() => expect(answer).not.toBeNull());
+    await startPublish();
+    await act(async () => {
+      answer?.();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    await waitFor(() => expect(info).toHaveBeenCalledWith(RUNNING));
+    expect(gitCheckoutBranch).not.toHaveBeenCalled();
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+  });
+
+  it("after the fallback checkout, a publish shows the hold notice and deletes nothing", async () => {
+    const { user, startPublish } = renderSwitcher();
+    let land: (() => void) | null = null;
+    vi.mocked(gitCheckoutBranch).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          land = () => resolve(undefined);
+        }),
+    );
+    await pressDelete(user);
+    await waitFor(() => expect(gitCheckoutBranch).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(gitCheckoutBranch).mock.calls[0][1]).toBe("main");
+    await startPublish();
+    await act(async () => {
+      land?.();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(PUBLISH_HOLD_REASON, {
+        description: switchedAndKept("main", "feat"),
+      }),
+    );
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+  });
+
+  it("after the fallback checkout, a publish that recorded no branch holds the fallback and the delete proceeds", async () => {
+    const { user, queryClient, startPublish } = renderSwitcher();
+    let land: (() => void) | null = null;
+    vi.mocked(gitCheckoutBranch).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          land = () => resolve(undefined);
+        }),
+    );
+    await pressDelete(user);
+    await waitFor(() => expect(gitCheckoutBranch).toHaveBeenCalledTimes(1));
+    // Mid-checkout the status reads detached, so the publish records no branch.
+    act(() => {
+      queryClient.setQueryData(["repo", REPO, "status"], {
+        branch: { ...headOn("feat"), detached: true },
+        entries: [],
+      });
+    });
+    await startPublish();
+    await act(async () => {
+      land?.();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    await waitFor(() => expect(gitDeleteBranch).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(gitDeleteBranch).mock.calls[0][1]).toBe("feat");
+    expect(JSON.stringify(info.mock.calls)).not.toContain(PUBLISH_HOLD_REASON);
   });
 });
 

@@ -27,6 +27,7 @@ import {
 } from "@/lib/git/api";
 import type { Branch, BranchHead, ForgeStatus, PrInfo } from "@/lib/git/types";
 import { listUserWorktrees } from "@/lib/git/worktree";
+import { type LocalPr, listLocalPrs } from "@/lib/pulls/local";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useUiStore } from "@/lib/stores/ui";
@@ -73,6 +74,10 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
 vi.mock("@/lib/git/worktree", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/worktree")>()),
   listUserWorktrees: vi.fn(),
+}));
+vi.mock("@/lib/pulls/local", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/pulls/local")>()),
+  listLocalPrs: vi.fn(),
 }));
 vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
@@ -139,6 +144,22 @@ function pr(
     labels: [],
     createdAt: "2026-11-01T10:00:00Z",
     headSha: "",
+  };
+}
+
+/** A local PR whose head is `head`: someone's new local branch named after it. */
+function localPr(head: string): LocalPr {
+  return {
+    id: `local-${head}`,
+    title: `Local ${head}`,
+    body: "",
+    base: "main",
+    head,
+    status: "open",
+    approved: false,
+    labels: [],
+    comments: [],
+    createdAt: "2026-11-01T10:00:00Z",
   };
 }
 
@@ -220,6 +241,7 @@ beforeEach(() => {
       : [pr(5, "old", "MERGED"), pr(6, "done", "MERGED")],
   );
   vi.mocked(listUserWorktrees).mockResolvedValue([]);
+  vi.mocked(listLocalPrs).mockResolvedValue([]);
   cleanupProps.merged = new Map();
   cleanupProps.closed = new Map();
   useUiStore.setState({ repoPath: REPO });
@@ -282,6 +304,33 @@ describe("the switcher's PR chip for a renamed copy", () => {
     const { user } = renderSwitcher();
     await settled(user);
     expect(await chipOf("away")).toBeNull();
+  });
+
+  it("the fallback reads remote requests only: a local one on the old name never lights it", async () => {
+    vi.mocked(listLocalPrs).mockResolvedValue([localPr("old")]);
+    const { user } = renderSwitcher();
+    await settled(user);
+    // The open local PR outranks merged #5 on `old`, yet the copy keeps #5.
+    const chip = await chipOf("new");
+    expect(chip).toHaveTextContent("#5");
+    expect(chip).toHaveAttribute("aria-label", "Merged pull request #5");
+  });
+
+  it("with no remote request on the old name, a local one leaves the copy unchipped", async () => {
+    // `topic`'s own local PR is the marker that the local list has landed.
+    vi.mocked(listLocalPrs).mockResolvedValue([
+      localPr("old"),
+      localPr("topic"),
+    ]);
+    vi.mocked(forgePrList).mockImplementation(async (_repo, state) =>
+      state === "open" ? [pr(9, "same", "OPEN")] : [pr(6, "done", "MERGED")],
+    );
+    const { user } = renderSwitcher();
+    await settled(user);
+    await waitFor(async () =>
+      expect(await chipOf("topic")).toHaveTextContent("local"),
+    );
+    expect(await chipOf("new")).toBeNull();
   });
 
   it("a same-name branch keeps its own chip", async () => {

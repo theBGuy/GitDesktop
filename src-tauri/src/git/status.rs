@@ -1,6 +1,6 @@
 use tauri::State;
 
-use crate::error::{AppError, AppResult};
+use crate::error::{AppError, AppResult, PushMultiRefCause};
 use crate::git::branches::{
     push_destination_fields, read_refs_with_push_destination, validate_ref_name,
 };
@@ -258,6 +258,45 @@ impl PushConfig {
     /// the winning value is empty, where git has no push destination at all.
     pub(crate) fn bare_push_remote(&self, head: Option<&str>) -> Option<&str> {
         Some(bare_push_remote(&self.0, head)).filter(|r| !r.is_empty())
+    }
+
+    /// Why a bare push to `remote` can send more refs than HEAD's branch: `remote`'s own
+    /// non-empty `remote.<r>.push` refspecs, which git uses ahead of push.default, else
+    /// `push.default=matching` (git compares the value case-sensitively); None otherwise.
+    pub(crate) fn multi_ref_cause(&self, remote: &str) -> Option<PushMultiRefCause> {
+        if config_values(&self.0, &format!("remote.{remote}.push"))
+            .any(|refspec| !refspec.trim().is_empty())
+        {
+            return Some(PushMultiRefCause::Refspecs);
+        }
+        (config_last(&self.0, "push.default") == Some("matching"))
+            .then_some(PushMultiRefCause::Matching)
+    }
+
+    /// [`triangular_simple_destination`] over this listing.
+    pub(crate) fn triangular_simple_destination(
+        &self,
+        name: &str,
+        upstream_remote: &str,
+    ) -> (Option<String>, Option<String>) {
+        triangular_simple_destination(&self.0, name, upstream_remote)
+    }
+
+    /// Whether `remote.<r>.fetch` is exactly git's standard refspec for `remote`, the one
+    /// layout under which `refs/remotes/<r>/<b>` is branch `b`'s tracking ref. Any other
+    /// entry beside it (a branch refspec, a negative `^` one) can move or hide that ref.
+    pub(crate) fn has_standard_fetch_refspec(&self, remote: &str) -> bool {
+        let standard = format!("refs/heads/*:refs/remotes/{remote}/*");
+        let mut fetch = config_values(&self.0, &format!("remote.{remote}.fetch"));
+        matches!(
+            (fetch.next(), fetch.next()),
+            (Some(refspec), None) if refspec.trim().trim_start_matches('+') == standard
+        )
+    }
+
+    /// `branch.<b>.remote`, the last value set; None when unset.
+    pub(crate) fn branch_remote(&self, branch: &str) -> Option<&str> {
+        config_last(&self.0, &format!("branch.{branch}.remote"))
     }
 
     /// A listing parsed from `git config -z --list` text, for pure tests.
@@ -1568,6 +1607,65 @@ mod tests {
             pair("branch.feat.pushRemote", "")
         );
         assert_eq!(on("remote.pushdefault\n\0"), pair("remote.pushDefault", ""));
+    }
+
+    /// A multi-ref bare push: the remote's refspecs outrank matching, an empty refspec
+    /// and another remote's refspec claim nothing, and git's value compare is exact.
+    #[test]
+    fn multi_ref_cause_reads_the_remotes_refspecs_then_matching() {
+        use crate::error::PushMultiRefCause::{Matching, Refspecs};
+        let on = |text: &str| PushConfig::from_listing(text).multi_ref_cause("origin");
+        assert_eq!(on(""), None);
+        assert_eq!(on("push.default\nsimple\0"), None);
+        assert_eq!(on("push.default\nMatching\0"), None);
+        assert_eq!(on("push.default\nmatching\0"), Some(Matching));
+        assert_eq!(
+            on("push.default\nmatching\0push.default\ncurrent\0"),
+            None,
+            "the last value wins"
+        );
+        assert_eq!(
+            on("remote.origin.push\nrefs/heads/a:refs/heads/a\0"),
+            Some(Refspecs)
+        );
+        assert_eq!(on("remote.origin.push\n \0"), None);
+        assert_eq!(on("remote.fork.push\nrefs/heads/a:refs/heads/a\0"), None);
+        assert_eq!(
+            on("push.default\nmatching\0remote.origin.push\nrefs/heads/a:refs/heads/a\0"),
+            Some(Refspecs)
+        );
+        assert_eq!(
+            on("push.default\nmatching\0remote.origin.push\n \0"),
+            Some(Matching)
+        );
+    }
+
+    /// Only git's standard layout for that remote counts, forced or not, and only as the
+    /// remote's one fetch refspec.
+    #[test]
+    fn has_standard_fetch_refspec_reads_the_remotes_own_layout() {
+        let on = |text: &str| PushConfig::from_listing(text).has_standard_fetch_refspec("fork");
+        assert!(on("remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0"));
+        assert!(on("remote.fork.fetch\nrefs/heads/*:refs/remotes/fork/*\0"));
+        assert!(!on(""));
+        assert!(!on(
+            "remote.fork.fetch\n+refs/heads/*:refs/remotes/team/*\0"
+        ));
+        assert!(!on(
+            "remote.origin.fetch\n+refs/heads/*:refs/remotes/fork/*\0"
+        ));
+        assert!(!on(
+            "remote.fork.fetch\n+refs/heads/main:refs/remotes/fork/main\0"
+        ));
+        assert!(!on(
+            "remote.fork.fetch\n+refs/heads/main:refs/remotes/fork/other\0remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0"
+        ));
+        assert!(!on(
+            "remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0remote.fork.fetch\n^refs/heads/main\0"
+        ));
+        assert!(on(
+            "remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0remote.origin.fetch\n^refs/heads/main\0"
+        ));
     }
 
     /// A bare push's remote is None only when the winning value is empty.

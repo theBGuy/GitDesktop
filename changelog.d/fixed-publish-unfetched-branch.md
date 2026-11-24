@@ -1,3 +1,3 @@
-- Publishing a branch only ever creates it: when the remote already has a
-  branch of that name at another commit (one this clone hasn't fetched), the
-  publish stops and says so, and nothing is pushed.
+- Publishing a branch leaves alone a branch of the same name that this clone
+  hasn't fetched: when the remote has one at another commit, the publish stops
+  and says so, and nothing is pushed.

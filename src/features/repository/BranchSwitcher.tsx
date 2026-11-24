@@ -86,7 +86,6 @@ import {
 import { FULL_OID_RE } from "@/lib/git/oid";
 import { normPath } from "@/lib/git/path";
 import {
-  headTrackingMatchesRow,
   rowTrackingMatches,
   upstreamBranchName,
 } from "@/lib/git/push-tracking";
@@ -104,12 +103,13 @@ import {
   headerDetectionFor,
   type ListedBranchTips,
   nextPushLatch,
+  publishHoldsBranch,
+  publishHoldsBranchNow,
   REMOTE_BRANCHES_STALE_TIME,
   refuseWhileBranchPushes,
   refuseWhilePushRuns,
   remoteBranchesOptions,
   repoKeys,
-  repoStatusOptions,
   useBranchAhead,
   useBranchDivergence,
   useBranches,
@@ -152,7 +152,6 @@ import {
 import { isSessionBranchName } from "@/lib/git/ref-name";
 import type {
   Branch,
-  BranchHead,
   BranchRewriteStatus,
   ForkPrMatch,
   RemoteBranch,
@@ -1088,14 +1087,23 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const setLens = useSetRepoLens(repoPath);
 
   const prProvider = gh.data?.provider;
-  const prByBranch = useMemo(() => {
+  // Two maps from one pass: `remote` holds only origin's PRs, for the renamed
+  // copy's fallback below, where a local PR on the old name is someone else's.
+  const prMaps = useMemo(() => {
     const map = new Map<string, BranchPr>();
-    const consider = (branchName: string, cand: BranchPr) => {
-      const cur = map.get(branchName);
+    const remote = new Map<string, BranchPr>();
+    const best = (
+      into: Map<string, BranchPr>,
+      branchName: string,
+      cand: BranchPr,
+    ) => {
+      const cur = into.get(branchName);
       if (!cur || PR_RANK[cand.state] > PR_RANK[cur.state]) {
-        map.set(branchName, cand);
+        into.set(branchName, cand);
       }
     };
+    const consider = (branchName: string, cand: BranchPr) =>
+      best(map, branchName, cand);
     // Remote PRs first, so they win ties against a local PR of equal state.
     for (const pr of [...(openPrs.data ?? []), ...(closedPrs.data ?? [])]) {
       // A cross-repository PR's head lives in a contributor's fork, so it must not
@@ -1108,13 +1116,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         pr.isDraft && pr.state === "OPEN"
           ? "draft"
           : (REMOTE_AUDIT_STATE[pr.state] ?? "open");
-      consider(pr.headRefName, {
+      const cand: BranchPr = {
         state,
         label: prRef(prProvider, pr.number),
         base: pr.baseRefName,
         headSha: pr.headSha || null,
         select: { kind: "remote", id: String(pr.number) },
-      });
+      };
+      consider(pr.headRefName, cand);
+      best(remote, pr.headRefName, cand);
     }
     for (const pr of localPrs.data ?? []) {
       const state: PrAuditState = LOCAL_AUDIT_STATE[pr.status];
@@ -1126,8 +1136,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         select: { kind: "local", id: pr.id },
       });
     }
-    return map;
+    return { all: map, remote };
   }, [openPrs.data, closedPrs.data, localPrs.data, prProvider]);
+  const prByBranch = prMaps.all;
 
   // A renamed copy (the backend's reflog read) still tracks the origin branch it
   // was renamed from, whose PR is its own, so the chip falls back to that name.
@@ -1141,7 +1152,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     )
       return undefined;
     const upstream = upstreamBranchName(branch.upstreamRemoteRef);
-    return upstream === null ? undefined : prByBranch.get(upstream);
+    return upstream === null ? undefined : prMaps.remote.get(upstream);
   };
 
   // Branch name → the merged PR that carries it, for the cleanup dialog. Remote
@@ -1476,19 +1487,22 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     renameTargetUpstream !== null &&
     renameTargetUpstream.branch === renameTarget &&
     (remotes.data ?? []).includes(renameTargetUpstream.remote)
-      ? {
-          remote: renameTargetUpstream.remote,
-          blocked: (() => {
-            switch (true) {
-              case renameRow.upstreamIsRemoteDefault:
-                return "remoteDefault" as const;
-              case renameRow.keepLocal:
-                return "keepLocal" as const;
-              default:
-                return null;
-            }
-          })(),
-        }
+      ? ((): NonNullable<RemoteRenameOffer> => {
+          const remote = renameTargetUpstream.remote;
+          if (renameRow.upstreamIsRemoteDefault)
+            return { remote, blocked: "remoteDefault" };
+          if (renameRow.keepLocal) return { remote, blocked: "keepLocal" };
+          // A push remote other than the upstream's would publish the new name
+          // there; an unknown routing leaves the call to the backend's check.
+          const pushTarget = rowPushTarget(rowUpstreamFacts(renameRow));
+          if (pushTarget.kind === "to" && pushTarget.remote !== remote)
+            return {
+              remote,
+              blocked: "pushesElsewhere",
+              pushRemote: pushTarget.remote,
+            };
+          return { remote, blocked: null };
+        })()
       : null;
   // The same ref in rev form: a branch by its full ref (a bare name resolves to a
   // same-named tag first); the detached literal stays as it is.
@@ -1996,11 +2010,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
     // Outside the try, whose `.finally` cleanup would close the confirm.
     if (refuseWhileRowPushes(deleteTarget)) return;
-    // A repository publish pushes the checked-out branch by name.
-    if (
-      deleteTarget === currentName &&
-      refuseWhilePublishing(queryClient, repoPath)
-    )
+    // A repository publish pushes its checkout's branch by name.
+    const publishHoldsTarget = () =>
+      publishHoldsBranchNow(queryClient, repoPath, deleteTarget, currentName);
+    if (publishHoldsTarget() && refuseWhilePublishing(queryClient, repoPath))
       return;
     // The button already holds without a pin; this backstop leaves the confirm
     // open. The one tip read here is what the delete sends, on both routes.
@@ -2062,6 +2075,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           // Inside the try, so the `.finally` clearTarget closes the confirm on
           // this refusal; the one before the try leaves it open.
           if (refuseWhileRowPushes(deleteTarget)) return;
+          if (
+            publishHoldsTarget() &&
+            refuseWhilePublishing(queryClient, repoPath)
+          )
+            return;
           const free = (b: string | null | undefined): b is string =>
             Boolean(b) && b !== deleteTarget && !occupied.has(b as string);
           if (free(defaultName)) {
@@ -2107,6 +2125,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           // The checkout is long enough for a promote to start and free its branch.
           if (promotionBlocksCheckout(repoPath)) {
             toast.info(PROMOTION_BLOCKS_CHECKOUT, {
+              description: switchedAndKept(fallback, deleteTarget),
+            });
+            return;
+          }
+          // HEAD is on `fallback` now, so a publish recorded with no branch holds it.
+          if (
+            publishHoldsBranchNow(queryClient, repoPath, deleteTarget, fallback)
+          ) {
+            toast.info(PUBLISH_HOLD_REASON, {
               description: switchedAndKept(fallback, deleteTarget),
             });
             return;
@@ -3109,13 +3136,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // `outcome` is decided before the push from last-fetch presence: the push
   // IPC reports no created-vs-updated signal. `tracks`: whether the push sets
   // or keeps this branch's tracking (false for a copy to another remote).
-  // Resolves true only when the push mutation resolved.
+  // `remoteBranch` pins the destination branch and turns off `-u` in the
+  // backend, so publishes leave it unset. Resolves true only when the push
+  // mutation resolved.
   async function runPushBranch(
     branch: Branch,
     remote: string | undefined,
     outcome: PushOutcome,
     retrack = false,
     tracks = true,
+    remoteBranch?: string,
   ): Promise<boolean> {
     // The fork-PR guard's "Publish anyway" and the detection's fall-through land
     // here without passing doPushBranch.
@@ -3139,6 +3169,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         setUpstream: retrack,
         branch: branch.name,
         remote,
+        remoteBranch,
         creates: outcome === "created",
       });
       const { away } = landedIn(pushedIn);
@@ -3242,13 +3273,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       if (switchedAway()) return;
     }
     releaseMark();
-    // runPushBranch re-checks offline and running pushes at its own entry.
+    // runPushBranch re-checks offline and running pushes at its own entry. The
+    // destination branch is pinned: the backend would otherwise re-derive it
+    // from the upstream it reads at push time.
     void runPushBranch(
       branch,
       target.remote,
       pushOutcome({ willPublish: create === true, create, presence }),
       false,
       false,
+      target.branch,
     );
   }
 
@@ -3333,7 +3367,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const pushActive = pendingPushes.length > 0 || detections.length > 0;
   // A repository publish (from any worktree) holds every push route; the
   // handlers re-check at the press.
-  const publishActive = usePendingPublishes(repoPath).length > 0;
+  const pendingPublishes = usePendingPublishes(repoPath);
+  const publishActive = pendingPublishes.length > 0;
+  // A publish pushes its checkout's branch by name, so that branch's rename,
+  // delete and archive wait for it (the viewer's own HEAD when it recorded none).
+  const publishHolds = (name: string | null) =>
+    publishHoldsBranch(pendingPublishes, name, currentName);
   // Feeds the parked-write copy: a push parked offline is waiting, not running.
   const pushPaused = pendingPushes.some((p) => p.paused);
   const pushOnBranch = (name: string) =>
@@ -3433,8 +3472,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       return "Agent-session branches can't be renamed — renaming one breaks the session's Resume.";
     if (currentName === null)
       return "HEAD is detached — there's no current branch to rename.";
-    // A repository publish pushes the checked-out branch by name.
-    if (publishActive) return PUBLISH_HOLD_REASON;
+    if (publishHolds(currentName)) return PUBLISH_HOLD_REASON;
     return null;
   })();
   const deleteCurrentBlockedReason = (() => {
@@ -3446,7 +3484,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     if (isDeletionBlocked(rulesConfig, currentName)) return null;
     // A delete removes the ref the running push is sending.
     if (currentRowPushing) return branchPushHoldReason(pushPaused);
-    if (publishActive) return PUBLISH_HOLD_REASON;
+    if (publishHolds(currentName)) return PUBLISH_HOLD_REASON;
     return null;
   })();
   const updateFromDefaultBlockedReason = (() => {
@@ -3561,8 +3599,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     return true;
   }
   // The branch list refreshes on focus and after in-app actions, never on the
-  // status poll, so its current row can lag a checkout or tracking change made
-  // outside the app; a fresh status read confirms HEAD before this route acts.
+  // status poll, so its current row can lag a checkout, tracking or push-routing
+  // change made outside the app; a fresh branch-list read confirms HEAD's row
+  // before this route acts.
   async function pushCurrentBranchToOrigin(listed: Branch) {
     if (refuseKeptLocalPush(listed)) return;
     if (pushHotkeyChecking.current) return;
@@ -3571,19 +3610,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // read confirms both, since the backend re-reads tracking when it pushes.
     const pushIn = repoPath;
     pushHotkeyChecking.current = true;
-    let fresh: BranchHead | undefined;
+    let freshRows: Branch[] | undefined;
     await (async () => {
       try {
-        // The factory's queryFn straight, never fetchQuery: that joins an
-        // in-flight poll, which may have been spawned before the press.
-        fresh = (await repoStatusOptions(pushIn).queryFn()).branch;
+        // The api read straight, never fetchQuery: that can join a refetch spawned
+        // before the press.
+        freshRows = await gitBranches(pushIn);
       } catch {
         toast.info("Couldn't confirm the current branch — nothing was pushed.");
       }
     })().finally(() => {
       pushHotkeyChecking.current = false;
     });
-    if (fresh === undefined) return;
+    if (freshRows === undefined) return;
     // `push` follows the live repo, so a switch during the read refuses.
     if (
       refuseIfSwitched(pushIn, "nothing was pushed", "before the push started")
@@ -3594,14 +3633,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const liveRow = queryClient
       .getQueryData<Branch[]>(repoKeys.branches(pushIn))
       ?.find((b) => b.isCurrent);
+    const freshRow = freshRows.find((b) => b.isCurrent);
     if (
-      fresh.name !== listed.name ||
+      freshRow?.name !== listed.name ||
       liveRow !== listed ||
-      !headTrackingMatchesRow(fresh, listed)
+      !rowTrackingMatches(freshRow, listed)
     ) {
       refuseWhileListCatchesUp(pushIn);
       return;
     }
+    if (refuseKeptLocalPush(freshRow)) return;
     pushBranchToOrigin(listed, false);
   }
   // Opening the list doesn't refetch it, so the highlighted row's tracking can
@@ -3675,9 +3716,28 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       );
       return;
     }
+    // Routed to origin, but not onto the upstream: the row's routed push, which
+    // asks before it creates the branch there.
+    const pushesElsewhere = target.kind === "to" && !target.toUpstream;
+    if (pushesElsewhere && hasPushItem) {
+      doPushBranch(branch);
+      return;
+    }
+    if (
+      pushesElsewhere &&
+      rowPushItem(rowUpstreamFacts(branch), remoteNames) === "held"
+    ) {
+      toast.info(
+        `${branch.name} has diverged — update it from its upstream first`,
+      );
+      return;
+    }
     // The rows' one different-name predicate (merge-ref split; a non-branch
-    // upstream is no cross-name push). `enabled` guarantees origin exists.
-    const mismatch = rowNameMismatch(rowUpstreamFacts(branch), remoteNames);
+    // upstream is no cross-name push). `enabled` guarantees origin exists. A
+    // routed push offers neither the start point's publish nor "track it".
+    const mismatch = pushesElsewhere
+      ? null
+      : rowNameMismatch(rowUpstreamFacts(branch), remoteNames);
     if (mismatch?.remote === "origin") {
       // An origin push of this branch would land on a differently-named
       // branch, which this origin-scoped shortcut never decides for the user.
@@ -3839,8 +3899,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     "rename-branch",
     () => {
       if (refuseRenameWhilePushes()) return;
-      // A repository publish pushes the checked-out branch by name.
-      if (refuseWhilePublishing(queryClient, repoPath)) return;
+      if (
+        publishHoldsBranchNow(
+          queryClient,
+          repoPath,
+          currentName,
+          currentName,
+        ) &&
+        refuseWhilePublishing(queryClient, repoPath)
+      )
+        return;
       if (currentName) openRename(currentName);
     },
     Boolean(currentName) && !isSessionBranchName(currentName ?? ""),
@@ -3849,7 +3917,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     "delete-branch",
     () => {
       if (refuseWhileCurrentPushes()) return;
-      if (refuseWhilePublishing(queryClient, repoPath)) return;
+      if (
+        publishHoldsBranchNow(
+          queryClient,
+          repoPath,
+          currentName,
+          currentName,
+        ) &&
+        refuseWhilePublishing(queryClient, repoPath)
+      )
+        return;
       setOpen(false);
       if (currentName) openDelete(currentName);
     },
@@ -4351,9 +4428,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       }
     })();
     const pushRunningReason = branchPushHoldItemReason(pushPaused);
-    // A repository publish pushes the checked-out branch by name, so its rename
-    // and delete wait for it.
-    const rowPublishHeld = publishActive && branch.name === currentName;
+    const rowPublishHeld = publishHolds(branch.name);
     // Archiving hides a branch from the branch surfaces, so it's refused for a
     // branch that is somewhere in use: the one you're on, the default, and one
     // another worktree has checked out. Unarchiving is never refused — an
@@ -4445,6 +4520,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       if (branch.name === defaultName) return "default branch";
       // Ahead of the removal arm, whose null would leave the item enabled.
       if (rowPushing) return rowPushHeldReason;
+      if (rowPublishHeld) return PUBLISH_HOLD_ITEM_REASON;
       if (removals.some((r) => r.branch === branch.name && !r.promotePhase))
         return null;
       if (userWorktrees.data === undefined && !userWorktrees.isError)
@@ -5384,7 +5460,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     currentRenameHold !== null ||
                     !currentName ||
                     isSessionBranchName(currentName) ||
-                    publishActive
+                    publishHolds(currentName)
                   }
                   reason={renameCurrentBlockedReason}
                   onClick={() => {
@@ -5400,7 +5476,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     !currentName ||
                     isDeletionBlocked(rulesConfig, currentName) ||
                     currentRowPushing ||
-                    publishActive
+                    publishHolds(currentName)
                   }
                   reason={deleteCurrentBlockedReason}
                   onClick={() => {
@@ -5710,7 +5786,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               return branchPushHoldReason(
                 pushOnBranch(deleteTarget)?.paused ?? false,
               );
-            case publishActive && deleteTarget === currentName:
+            case publishHolds(deleteTarget):
               return PUBLISH_HOLD_REASON;
             case deletePin !== null && "held" in deletePin:
               return DELETE_PIN_HELD[deletePin.held];

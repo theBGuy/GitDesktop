@@ -143,6 +143,11 @@ const EXCLUDED = {
     reason:
       "a Vitest harness whose remote rename and pushes never reach the backend; it starts them only to test the branch rows' push-family paint and holds",
   },
+  "test/rename-branch-remote.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts another branch's push only to test the rename dialog's push hold",
+  },
   "test/sync-bar-push-routing.test.tsx": {
     hooks: ["useRenameBranchOnRemote"],
     reason:
@@ -219,7 +224,7 @@ const HANDLERS = [
     order: [
       "remoteStep && refuseWhileOffline()",
       "remoteStep && refuseWhilePushRuns(",
-      "isHead && refuseWhilePublishing(",
+      "held && refuseWhilePublishing(",
       "renameBranch.mutateAsync(",
       "if (refuseWhilePublishing(queryClient, repoPath)) return;",
       "renameOnRemote.mutateAsync(",
@@ -280,7 +285,7 @@ const HANDLERS = [
 const RENDER_PINS = {
   [`${R}BranchSwitcher.tsx`]: {
     need: [
-      "const publishActive = usePendingPublishes(repoPath).length > 0;",
+      "const publishActive = pendingPublishes.length > 0;",
       // The publish arm comes first, ahead of the push arms.
       "const pushItemSuffix = (() => {switch (true) {case branch.keepLocal: return KEPT_LOCAL_SUFFIX; case publishActive: return ` (${PUBLISH_HOLD_ITEM_REASON})`; case rowPushing:",
       "const pushItemDisabled = branch.keepLocal || rowPushing || rowUpdating || pushActive || busy || !!offlineHold || publishActive;",

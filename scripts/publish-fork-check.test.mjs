@@ -233,7 +233,9 @@ function routeProblems(route, src) {
     from = i + step.length;
   }
 
-  // (9) The route's own push carries the one late-match notice.
+  // (9) Exactly one late-match notice call in the route; its arguments are
+  // pinned by src/test/publish-late-fork-match.test.tsx, whose fork routes
+  // pin the remote on each surface.
   if (body.split("noticeLateForkMatch(").length !== 2)
     out.push(p("not one late-match notice"));
 
@@ -845,8 +847,8 @@ test("the sync push hotkey refuses a kept-local branch and the listed route re-c
     mutate(
       real,
       SWITCHER,
-      "    if (refuseKeptLocalPush(freshRow)) return;\n",
-      "",
+      "    if (refuseKeptLocalPush(freshRow)) return;\n    pushBranchToOrigin(row, true);",
+      "    pushBranchToOrigin(row, true);",
     ),
     "pushListedBranchToOrigin: the fresh row is not re-checked",
   );

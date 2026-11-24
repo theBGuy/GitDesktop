@@ -14,7 +14,10 @@ export type RemoteRenameRefusal =
   | { code: "remoteGone" }
   | { code: "moved" }
   | { code: "newExists" }
-  | { code: "remoteAhead" };
+  | { code: "remoteAhead" }
+  /** The branch's configured push remote (`pushRemote`, as configured) isn't
+   *  the remote being renamed on. */
+  | { code: "pushesElsewhere"; pushRemote: string };
 
 export type RemoteRenameRefusalCode = RemoteRenameRefusal["code"];
 

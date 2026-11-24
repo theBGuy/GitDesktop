@@ -105,6 +105,16 @@ export type AppError =
   | { kind: "pushHeadMoved"; message: string; expected: string }
   /** A pinned force push refused because `branch` moved after its confirm. */
   | { kind: "pushTipMoved"; message: string; branch: string }
+  /** A pinned force push refused because it would also rewrite other branches:
+   *  `push.default` is `matching` (`cause` "matching") or `remote` has push
+   *  refspecs of its own (`cause` "refspecs"). */
+  | {
+      kind: "pushForceMultiRef";
+      message: string;
+      branch: string;
+      remote: string;
+      cause: "matching" | "refspecs";
+    }
   | { kind: PlainErrorKind; message: string };
 
 export function isAppError(e: unknown): e is AppError {

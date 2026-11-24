@@ -1503,6 +1503,47 @@ test("rowSyncIndicator: a start point whose own name is on the remote points at 
   );
 });
 
+test("rowSyncIndicator: a start point whose push goes to another remote advises nothing", () => {
+  const toFork = { namedPushRemote: "fork", namedPushBranch: "feat" };
+  for (const ownNameOnRemote of [true, false]) {
+    assert.deepEqual(
+      rowSyncIndicator(
+        rowFacts(toFork),
+        REMOTES,
+        "Right-click",
+        ownNameOnRemote,
+      ),
+      { kind: "none" },
+      `ownNameOnRemote=${ownNameOnRemote}`,
+    );
+    assert.deepEqual(
+      rowSyncIndicator(
+        rowFacts({ ...toFork, upstreamAhead: 1 }),
+        REMOTES,
+        "Right-click",
+        ownNameOnRemote,
+      ),
+      {
+        kind: "arrows",
+        label: "1 to push — vs origin/main",
+        ahead: 1,
+        behind: 0,
+        upstreamName: "origin/main",
+      },
+    );
+  }
+  // A push routed to the upstream itself keeps the start point's advice.
+  assert.deepEqual(
+    rowSyncIndicator(
+      rowFacts({ namedPushRemote: "origin", namedPushBranch: "main" }),
+      REMOTES,
+      "Right-click",
+      false,
+    ),
+    { kind: "startPoint", label: NOT_PUBLISHED_START },
+  );
+});
+
 test("a mutant dropping the own-name start-point arm fails the row", async () => {
   const noOwnName = await mutant(
     "        label: ownNameOnRemote\n",

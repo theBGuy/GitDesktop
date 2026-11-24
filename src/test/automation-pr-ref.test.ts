@@ -42,12 +42,13 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
 
 const ask = vi.fn(async () => false);
 
-/** The confirm body the run-now preview asks with, for PR 12. */
-async function confirmBody(): Promise<string> {
+/** The confirm the run-now preview asks with, for PR 12. */
+async function confirmAsked(): Promise<{ title: string; body: string }> {
   runAutomationNow(REPO, { kind: "remote", number: 12 });
   await vi.waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
-  return (ask.mock.calls[0] as unknown as [{ body: string }])[0].body;
+  return (ask.mock.calls[0] as unknown as [{ title: string; body: string }])[0];
 }
+const confirmBody = async () => (await confirmAsked()).body;
 
 describe("runAutomationNow names the remote PR by its forge's sigil", () => {
   beforeEach(() => {
@@ -74,5 +75,22 @@ describe("runAutomationNow names the remote PR by its forge's sigil", () => {
         provider,
       } as ForgeStatus);
     expect(await confirmBody()).toMatch(new RegExp(`^${lead} — runs `));
+  });
+
+  it.each<[ForgeStatus["provider"] | "uncached", string]>([
+    ["gitlab", "merge request"],
+    ["github", "pull request"],
+    ["bitbucket", "pull request"],
+    ["uncached", "pull request"],
+  ])("%s: the confirm calls it a %s", async (provider, noun) => {
+    if (provider !== "uncached")
+      queryClient.setQueryData(["repo", REPO, "forge-status"], {
+        provider,
+      } as ForgeStatus);
+    const { title, body } = await confirmAsked();
+    expect(title).toBe(`Run automations on this ${noun}?`);
+    expect(
+      body.endsWith(`. The result is posted as a comment on the ${noun}.`),
+    ).toBe(true);
   });
 });

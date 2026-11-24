@@ -308,19 +308,50 @@ export function destinationSlug(
   return url !== null && forgeShapedUrl(url) ? slugOf(url) : null;
 }
 
+/** The lowercased host of a forge-shaped URL (see {@link forgeShapedUrl}),
+ *  without user or port; a bracketed IPv6 literal keeps its brackets, as Rust
+ *  `remote_host` spells it. Null for anything it can't read. */
+export function forgeUrlHost(url: string): string | null {
+  const u = url.trim();
+  if (!forgeShapedUrl(u)) return null;
+  // An http(s) authority ends at the first `/`, `?` or `#`, an ssh one at `/`,
+  // an scp one at the first `:`, as Rust `split_remote_url` cuts them; the user
+  // part ends at the last `@`. An scp `@[` before the first `/` reads null here.
+  const scheme = /^(?:https?:\/\/([^/?#]*)|ssh:\/\/([^/]*))/i.exec(u);
+  if (!scheme && u.split("/")[0].includes("@[")) return null;
+  const span = scheme ? (scheme[1] ?? scheme[2]) : u.slice(0, u.indexOf(":"));
+  const authority = span.slice(span.lastIndexOf("@") + 1);
+  const host = authority.startsWith("[")
+    ? /^\[[^\]/]+\]/.exec(authority)?.[0]
+    : authority.split(":")[0];
+  return host ? host.toLowerCase() : null;
+}
+
 /** Whether publishing `branch` to the remote behind `pushUrl` updates the fork
  *  pull request `match` describes (its head repository and head branch) rather
  *  than creating a separate copy: then the fork guard has nothing to warn about.
- *  Slugs compare case-insensitively; a null or unparsable URL answers false. */
+ *  Host and slug compare case-insensitively; a null or unparsable URL, or an
+ *  empty `headRepoHost`, answers false, so the guard shows. */
 export function publishUpdatesForkPr(
-  match: { headRepoOwner: string; headRepoName: string; headRefName: string },
+  match: {
+    headRepoOwner: string;
+    headRepoName: string;
+    headRefName: string;
+    headRepoHost: string;
+  },
   pushUrl: string | null,
   branch: string,
   slugOf: (url: string) => string | null,
 ): boolean {
   if (branch !== match.headRefName) return false;
   const slug = destinationSlug(pushUrl, slugOf);
-  if (slug === null) return false;
+  if (slug === null || pushUrl === null) return false;
+  const host = forgeUrlHost(pushUrl);
+  // Typed required, but a wire match from a backend that doesn't fill it yet
+  // arrives without it: anything but a non-empty string is not exempt.
+  const headHost: unknown = match.headRepoHost;
+  if (typeof headHost !== "string" || headHost === "") return false;
+  if (host === null || host !== headHost.toLowerCase()) return false;
   return (
     slug.toLowerCase() ===
     `${match.headRepoOwner}/${match.headRepoName}`.toLowerCase()

@@ -24,6 +24,7 @@ import {
   vi,
 } from "vitest";
 import { BranchSwitcher } from "@/features/repository/BranchSwitcher";
+import { keptLocalReason } from "@/features/repository/sync-controls-state";
 import {
   forgeDetectForkPrForBranch,
   forgeStatus,
@@ -379,7 +380,7 @@ describe("a row whose push routes to another remote", () => {
         false,
         "feat",
         "fork",
-        undefined,
+        "feat",
         pins(false),
       ),
     );
@@ -407,7 +408,7 @@ describe("a row whose push routes to another remote", () => {
         false,
         "feat",
         "fork",
-        undefined,
+        "feat",
         pins(false),
       ),
     );
@@ -433,7 +434,7 @@ describe("a row whose push routes to another remote", () => {
         false,
         "feat",
         "fork",
-        undefined,
+        "feat",
         pins(true),
       ),
     );
@@ -464,7 +465,7 @@ describe("a row whose push routes to another remote", () => {
         false,
         "feat",
         "fork",
-        undefined,
+        "feat",
         pins(false),
       ),
     );
@@ -657,6 +658,110 @@ describe("the push-to-origin hotkey on a branch routed elsewhere", () => {
       ),
     );
     expect(JSON.stringify(info.mock.calls)).not.toContain("not origin");
+  });
+
+  /** topic tracks upstream/topic, its named push routed to origin/topic. */
+  const toOriginRow = (overrides: Partial<Branch> = {}) =>
+    trackingRow("topic", "upstream", "topic", {
+      upstreamAhead: 1,
+      namedPushRemote: "origin",
+      namedPushBranch: "topic",
+      ...overrides,
+    });
+
+  it("from the list, a branch routed to origin off its upstream takes its routed push", async () => {
+    reads.remotes = ["origin", "upstream"];
+    reads.branches.push(toOriginRow());
+    reads.remoteBranches = [
+      { name: "topic", remote: "origin", lastCommitDate: "2026-11-01" },
+    ];
+    const { user } = renderSwitcher();
+    await openList(user);
+    await hotkeyOnRow("topic");
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledTimes(1));
+    expect(pushSpy.mock.calls[0].slice(3, 6)).toEqual([
+      "topic",
+      "origin",
+      "topic",
+    ]);
+    expect(JSON.stringify(info.mock.calls)).not.toContain("tracks upstream");
+  });
+
+  it("from the list, the same branch diverged pushes nothing and says why", async () => {
+    reads.remotes = ["origin", "upstream"];
+    reads.branches.push(toOriginRow({ upstreamBehind: 1 }));
+    const { user } = renderSwitcher();
+    await openList(user);
+    await hotkeyOnRow("topic");
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "topic has diverged — update it from its upstream first",
+      ),
+    );
+    await settle();
+    expect(pushSpy).not.toHaveBeenCalled();
+  });
+
+  it("on the current branch, a fresh list read that routes it elsewhere refuses", async () => {
+    reads.branches = [
+      trackingRow("main", "origin", "main", {
+        isCurrent: true,
+        upstreamAhead: 1,
+        upstreamIsRemoteDefault: true,
+      }),
+    ];
+    const { user } = renderSwitcher();
+    await openList(user);
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByPlaceholderText("Filter branches")).toBeNull(),
+    );
+    // A pushRemote set outside the app: only a fresh branch-list read sees it.
+    reads.branches = [
+      trackingRow("main", "origin", "main", {
+        isCurrent: true,
+        upstreamAhead: 1,
+        upstreamIsRemoteDefault: true,
+        namedPushRemote: "fork",
+        namedPushBranch: "main",
+      }),
+    ];
+    act(() => {
+      dispatchAction("push-to-origin");
+    });
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "The branch list is catching up — try again in a moment.",
+      ),
+    );
+    await settle();
+    expect(pushSpy).not.toHaveBeenCalled();
+  });
+
+  it("on the current branch, Keep local set since the list was read refuses", async () => {
+    reads.branches = [
+      trackingRow("main", "origin", "main", {
+        isCurrent: true,
+        upstreamAhead: 1,
+        upstreamIsRemoteDefault: true,
+      }),
+    ];
+    const { user } = renderSwitcher();
+    await openList(user);
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByPlaceholderText("Filter branches")).toBeNull(),
+    );
+    // Set from another window: only the fresh branch-list read sees it.
+    reads.branches = [{ ...reads.branches[0], keepLocal: true }];
+    act(() => {
+      dispatchAction("push-to-origin");
+    });
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(keptLocalReason("main", "push")),
+    );
+    await settle();
+    expect(pushSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -873,6 +978,8 @@ const forkMatch = (overrides: Partial<ForkPrMatch> = {}): ForkPrMatch => ({
   headRefName: "feat",
   headRepoOwner: "alice",
   headRepoName: "r",
+  // Case-insensitive against the push URL's host.
+  headRepoHost: "GitHub.com",
   maintainerCanModify: true,
   aheadCount: 1,
   ...overrides,
@@ -931,6 +1038,11 @@ describe("publishing to the fork pull request's own head", () => {
   for (const [what, match] of [
     ["another repository", forkMatch({ headRepoOwner: "bob" })],
     ["another branch name", forkMatch({ headRefName: "feat-2" })],
+    [
+      "the same owner and repository name on another host",
+      forkMatch({ headRepoHost: "gitlab.com" }),
+    ],
+    ["a head repository with no host", forkMatch({ headRepoHost: "" })],
   ] as const)
     it(`a match on ${what} still opens the guard`, async () => {
       vi.mocked(forgeDetectForkPrForBranch).mockResolvedValue(match);

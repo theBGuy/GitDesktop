@@ -1319,6 +1319,7 @@ const FORK_MATCH: ForkPrMatch = {
   headRefName: "feat",
   headRepoOwner: "someone",
   headRepoName: "keep",
+  headRepoHost: "example.test",
   maintainerCanModify: true,
   aheadCount: 1,
 };
