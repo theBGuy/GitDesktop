@@ -155,9 +155,12 @@ Click the **⋮** menu next to the repo name for repo-wide actions:
 
 **Submodules…** (in the ⋮ menu, or the command palette) manages the repositories this one
 references. Each row shows the submodule's folder, the commit it's checked out at,
-and a status badge — **Up to date**, **Not initialized**, **Modified**, or **Conflict**.
-A submodule marked **Conflict** resolves in the conflict editor: select its row in
-**Changes** and pick the commit to keep (see *Resolving conflicts* below).
+and a status badge — **Up to date**, **Not initialized**, **Modified**, **Conflict**, or
+**Unreadable**. A submodule marked **Conflict** resolves in the conflict editor: select its
+row in **Changes** and pick the commit to keep (see *Resolving conflicts* below).
+A submodule marked **Unreadable** is one git can't open, usually because its repository
+data under \`.git/modules\` is gone; its row says what git reported, and **Remove…** still
+works on it.
 Arrow keys move between rows and Enter runs the row's button, which reads **Initialize**
 for a submodule that has never been checked out and **Update** for the rest.
 
@@ -171,19 +174,20 @@ row stays out of **Stash change** and you stash from inside it. **Open submodule
 double-click on the row) opens it as its own repository, where you stage, commit and stash
 what's inside.
 
-- **Update** follows the submodule's \`update\` setting in your Git config. By default
-  that checks out the commit your repo records; with \`rebase\` your local commits in the
-  submodule are replayed on top of it; with \`merge\` it is merged into the submodule's
-  current branch; with \`none\` the submodule is left alone. It initializes the submodule
-  and any nested submodules on the way, and **Update all** in the footer does the whole
-  set.
+- **Update** follows the submodule's \`update\` setting from your Git config, or from
+  \`.gitmodules\` when your config has none. By default that checks out the commit your
+  repo records; with \`rebase\` your local commits in the submodule are replayed on top of
+  it; with \`merge\` it is merged into the submodule's current branch; with \`none\` the
+  submodule is left alone. It initializes the submodule and any nested submodules on the
+  way, and **Update all** in the footer does the whole set.
 - **Update to latest** (on a row's ⋮, or **Update all to latest** in the footer's ⋮)
   updates a submodule from the tip of the branch it tracks instead: the branch recorded
   in \`.gitmodules\`, or the remote's default branch when none is recorded. By default it
-  checks that tip out; with \`rebase\` your local commits are replayed on top of it, and
-  with \`merge\` it is merged into the submodule's current branch. Nested submodules
-  follow to the commits the moved submodule records, not their own tips. That changes the
-  commit your repo points at, so it arrives as a change to review and stage in **Changes**.
+  checks that tip out; with \`rebase\` your local commits are replayed on top of it; with
+  \`merge\` it is merged into the submodule's current branch; with \`none\` the submodule
+  is left alone. Nested submodules follow to the commits the moved submodule records, not
+  their own tips. That changes the commit your repo points at, so it arrives as a change
+  to review and stage in **Changes**.
 - **Choose commit…** (on a row's ⋮) lists the history of a branch or tag inside the
   submodule; search the commit messages, or paste a commit id to reach any other commit.
   Arrow keys move through the commits, and {{key:enter}} on one, or **Check out and
@@ -192,8 +196,7 @@ what's inside.
   leave commits behind, isn't fetched yet, or isn't on a remote, and the checkout itself
   never overwrites local changes or files in its way. **Fetch** reaches the network,
   as does **Fetch full history** on a shallow submodule; in a partial clone, checking out
-  a commit can download its files, and looking up a pasted id can download the
-  repository's configured mailmap.
+  a commit can download its files.
   *Choose submodule commit* is a command palette entry that opens straight onto the
   picker when the repository has one initialized submodule.
 - **Add submodule…** clones another repository into a folder of this one. Give it a URL;
@@ -207,7 +210,8 @@ what's inside.
   repository data under \`.git/modules\` is kept so the submodule can be restored — tick
   **Also delete cached repository data** in the confirmation to erase that too. A
   submodule with local changes, or one at a different commit than this repository
-  records, asks a second time before that state is discarded.
+  records, asks a second time before that state is discarded, and so does one git can't
+  read, since its local changes can't be checked.
 
 Updating fetches over the network; adding, removing, editing, and choosing a commit stage
 their change for you to commit. When you clone a repository, the **Clone submodules** checkbox initializes

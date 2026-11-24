@@ -84,6 +84,11 @@ const STATUS: Record<
     className: "border-warning/40 bg-warning/10 text-warning",
   },
   conflict: { label: "Conflict", variant: "destructive" },
+  unreadable: {
+    label: "Unreadable",
+    variant: "outline",
+    className: "border-destructive/40 bg-destructive/10 text-destructive",
+  },
 };
 
 /** The `acting` value for the whole-repo actions — no submodule path is empty. */
@@ -96,6 +101,11 @@ const ADDING_REASON = "Adding the submodule…";
 /** A gitlink with no `.gitmodules` entry has no URL to edit and nowhere to
  *  record a branch, so both edits would fail in git. */
 const NO_ENTRY_REASON = "no .gitmodules entry";
+
+/** A submodule git can't read takes no action that runs git inside it; Remove
+ *  stays, and its refusal offers the forced removal. */
+const UNREADABLE_REASON = "Git can't read this submodule";
+const UNREADABLE_ITEM_REASON = "git can't read this submodule";
 
 type SubmodulesMode = "list" | "add" | "choose";
 
@@ -361,8 +371,9 @@ function ChooseResolver({
   const settled = subs.isFetchedAfterMount && !subs.isFetching;
   useLayoutEffect(() => {
     if (done.current) return;
+    // Only a submodule git can read can take a commit.
     const initialized = (subs.data ?? []).filter(
-      (s) => s.status !== "uninitialized",
+      (s) => s.status !== "uninitialized" && s.status !== "unreadable",
     );
     if (initialized.length === 1) {
       done.current = true;
@@ -766,15 +777,47 @@ function SubmoduleRow({
   onOpenAsRepo: () => void;
   onRemove: () => void;
 }) {
-  const { path, sha, describe, url, status } = submodule;
+  const { path, sha, describe, url, status, unreadableReason } = submodule;
   const meta = STATUS[status] ?? { label: status, variant: "outline" as const };
   const action = status === "uninitialized" ? "Initialize" : "Update";
   const uninitialized = status === "uninitialized";
+  const unreadable = status === "unreadable";
   // `describe` falls back to a bare sha prefix on untagged checkouts — showing
   // it beside the sha would read "553c207 · 553c207".
-  const detail = [sha.slice(0, 7), sha.startsWith(describe) ? "" : describe]
-    .filter(Boolean)
-    .join(" · ");
+  const second = ((): string => {
+    switch (true) {
+      case unreadable:
+        return unreadableReason
+          ? `Git can't read it: ${unreadableReason}`
+          : UNREADABLE_REASON;
+      case sha.startsWith(describe):
+        return "";
+      default:
+        return describe;
+    }
+  })();
+  const detail = [sha.slice(0, 7), second].filter(Boolean).join(" · ");
+  const rowReason = ((): string | null => {
+    switch (true) {
+      case busy:
+        return BUSY_REASON;
+      case unreadable:
+        return UNREADABLE_REASON;
+      default:
+        return null;
+    }
+  })();
+  // What Choose commit and Open as repository need: a checkout git can read.
+  const childReason = ((): string | undefined => {
+    switch (true) {
+      case uninitialized:
+        return "initialize this submodule first";
+      case unreadable:
+        return UNREADABLE_ITEM_REASON;
+      default:
+        return undefined;
+    }
+  })();
   // A disabled menu item can't carry a tooltip, so its reason rides the label.
   const itemLabel = (label: string, reason?: string) =>
     reason ? `${label} (${reason})` : label;
@@ -792,14 +835,14 @@ function SubmoduleRow({
         aria-selected={highlighted}
         // Not `disabled`: the row must stay focusable so arrow-key nav can move
         // through it while a mutation runs. onClick already refuses.
-        aria-disabled={busy || undefined}
+        aria-disabled={rowReason !== null || undefined}
         data-sub-row={path}
         onFocus={onFocus}
-        onClick={() => !busy && onUpdate()}
-        title={busy ? BUSY_REASON : `${action} ${path}`}
+        onClick={() => rowReason === null && onUpdate()}
+        title={rowReason ?? `${action} ${path}`}
         className={cn(
           "flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left",
-          busy && "cursor-default",
+          rowReason !== null && "cursor-default",
         )}
       >
         {/* The URL takes its own full-width line — sharing one with the commit
@@ -830,8 +873,8 @@ function SubmoduleRow({
       <DisabledReasonButton
         variant="outline"
         size="xs"
-        disabled={busy}
-        reason={BUSY_REASON}
+        disabled={rowReason !== null}
+        reason={rowReason}
         onClick={onUpdate}
       >
         {acting && <Spinner data-icon="inline-start" />}
@@ -856,16 +899,19 @@ function SubmoduleRow({
           <DotsThreeVerticalIcon />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-60">
-          <DropdownMenuItem onClick={onUpdateRemote}>
+          <DropdownMenuItem disabled={unreadable} onClick={onUpdateRemote}>
             <ArrowsClockwiseIcon />
-            Update to latest
-          </DropdownMenuItem>
-          <DropdownMenuItem disabled={uninitialized} onClick={onChooseCommit}>
-            <GitCommitIcon />
             {itemLabel(
-              "Choose commit…",
-              uninitialized ? "initialize this submodule first" : undefined,
+              "Update to latest",
+              unreadable ? UNREADABLE_ITEM_REASON : undefined,
             )}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            disabled={childReason !== undefined}
+            onClick={onChooseCommit}
+          >
+            <GitCommitIcon />
+            {itemLabel("Choose commit…", childReason)}
           </DropdownMenuItem>
           <DropdownMenuItem disabled={!url} onClick={onEditUrl}>
             <LinkIcon />
@@ -875,12 +921,12 @@ function SubmoduleRow({
             <GitBranchIcon />
             {itemLabel("Set branch…", url ? undefined : NO_ENTRY_REASON)}
           </DropdownMenuItem>
-          <DropdownMenuItem disabled={uninitialized} onClick={onOpenAsRepo}>
+          <DropdownMenuItem
+            disabled={childReason !== undefined}
+            onClick={onOpenAsRepo}
+          >
             <FolderOpenIcon />
-            {itemLabel(
-              "Open as repository",
-              uninitialized ? "initialize this submodule first" : undefined,
-            )}
+            {itemLabel("Open as repository", childReason)}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" onClick={onRemove}>

@@ -25,6 +25,7 @@ import {
   gitSubmoduleRemove,
   gitSubmoduleSetCommit,
   gitSubmodules,
+  gitSubmoduleUpdate,
 } from "@/lib/git/api";
 import type {
   Submodule,
@@ -59,6 +60,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitSubmoduleSetCommit: vi.fn(),
   gitSubmoduleFetch: vi.fn(),
   gitSubmoduleRemove: vi.fn(),
+  gitSubmoduleUpdate: vi.fn(),
 }));
 vi.mock("@/lib/toast", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/toast")>()),
@@ -95,7 +97,11 @@ const E = "e".repeat(40);
 
 type Mode = "list" | "add" | "choose";
 
-const sub = (path: string, status = "ok"): Submodule => ({
+const sub = (
+  path: string,
+  status = "ok",
+  unreadableReason: string | null = null,
+): Submodule => ({
   path,
   name: path,
   url: "https://example.invalid/x.git",
@@ -103,6 +109,7 @@ const sub = (path: string, status = "ok"): Submodule => ({
   sha: P,
   describe: "v1",
   status,
+  unreadableReason,
 });
 
 const ref = (rev: string, name: string) => ({ rev, name, sha: P });
@@ -1297,6 +1304,168 @@ describe("the commit list", () => {
     expect(
       screen.getByText('No commits on origin/main match "1234567".'),
     ).toBeInTheDocument();
+  });
+});
+
+describe("a pasted id that resolves to nothing", () => {
+  const PASTED = "1234567";
+  const UNRESOLVED: [string, SubmodulePickPlan, string][] = [
+    ["notFound", blocked("notFound"), `No commit in ${SUB} matches that id.`],
+    [
+      "ambiguous",
+      blocked("ambiguous", "3 commits start with 1234567"),
+      "More than one commit starts with that id. Paste more of it.",
+    ],
+    ["notACommit", blocked("notACommit"), "That id isn't a commit."],
+  ];
+
+  /** The lookup for `text` answers `plan` with no sha; its message search
+   *  lists `hits`, each with a Ready plan. */
+  async function pasteUnresolved(
+    text: string,
+    plan: SubmodulePickPlan,
+    hits = [commit(D, `Revert ${PASTED}`)],
+  ) {
+    planFor = (sha) =>
+      sha === text
+        ? readOf("", plan, { sha: null, commit: null })
+        : readOf(sha);
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) =>
+        q === text ? page(hits) : page(DEFAULT_ROWS),
+    );
+    const { user } = await pickerWithRows();
+    await user.click(search());
+    await user.paste(text);
+    await waitFor(() => expect(row(D)).not.toBeNull());
+    return user;
+  }
+
+  const selected = () =>
+    screen
+      .queryAllByRole("option")
+      .filter((o) => o.getAttribute("aria-selected") === "true");
+
+  it.each(UNRESOLVED)(
+    "T97 %s: no listed row is highlighted and Apply holds with the lookup line's sentence until a row is picked",
+    async (_why, plan, sentence) => {
+      const user = await pasteUnresolved(PASTED, plan);
+      await waitApplyReason(sentence);
+      expect(selected()).toEqual([]);
+      expect(document.activeElement).toBe(search());
+      fireEvent.click(applyButton());
+      fireEvent.keyDown(row(D) as HTMLElement, { key: "Enter" });
+      await act(async () => undefined);
+      expect(gitSubmoduleSetCommit).not.toHaveBeenCalled();
+
+      // ArrowDown from the box is an explicit pick of the first row.
+      await user.keyboard("{ArrowDown}");
+      expect(row(D)).toHaveAttribute("aria-selected", "true");
+      expect(document.activeElement).toBe(row(D));
+      await waitApplyReady();
+      await user.click(applyButton());
+      await act(async () => undefined);
+      expect(gitSubmoduleSetCommit).toHaveBeenCalledExactlyOnceWith(
+        REPO,
+        SUB,
+        D,
+        P,
+      );
+    },
+  );
+
+  it("T98 a click on a row, or ArrowUp from the box, is an explicit pick", async () => {
+    const user = await pasteUnresolved(PASTED, blocked("notFound"), [
+      commit(D, `Revert ${PASTED}`),
+      commit(E, `Cherry-pick ${PASTED}`),
+    ]);
+    await waitApplyReason(`No commit in ${SUB} matches that id.`);
+    await user.keyboard("{ArrowUp}");
+    expect(row(E)).toHaveAttribute("aria-selected", "true");
+    await waitApplyReady();
+    await user.click(row(D) as HTMLElement);
+    expect(row(D)).toHaveAttribute("aria-selected", "true");
+    await waitApplyReady();
+    fireEvent.keyDown(row(D) as HTMLElement, { key: "Enter" });
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).toHaveBeenCalledExactlyOnceWith(
+      REPO,
+      SUB,
+      D,
+      P,
+    );
+  });
+
+  it("T99 a pick made before the paste does not survive it", async () => {
+    planFor = (sha) =>
+      sha === PASTED
+        ? readOf("", blocked("notFound"), { sha: null, commit: null })
+        : readOf(sha);
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) =>
+        q === PASTED
+          ? page([commit(C, "Older change"), commit(D, `Revert ${PASTED}`)])
+          : page(DEFAULT_ROWS),
+    );
+    const { user } = await pickerWithRows();
+    await user.click(row(C) as HTMLElement);
+    expect(row(C)).toHaveAttribute("aria-selected", "true");
+    await user.click(search());
+    await user.paste(PASTED);
+    await waitFor(() => expect(row(D)).not.toBeNull());
+    await waitApplyReason(`No commit in ${SUB} matches that id.`);
+    expect(selected()).toEqual([]);
+    fireEvent.click(applyButton());
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).not.toHaveBeenCalled();
+  });
+
+  it("T100 a plain word search that is also hex keeps its first row highlighted and applies it", async () => {
+    const user = await pasteUnresolved("added", blocked("notFound"));
+    await waitFor(() =>
+      expect(row(D)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitApplyReady();
+    await user.click(applyButton());
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).toHaveBeenCalledExactlyOnceWith(
+      REPO,
+      SUB,
+      D,
+      P,
+    );
+  });
+
+  it("T101 a pasted id with a digit that resolves still pins and applies its commit", async () => {
+    planFor = (sha) =>
+      sha === PASTED
+        ? readOf(E, READY, { commit: commit(E, "Pinned one") })
+        : readOf(sha);
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) =>
+        q === PASTED
+          ? page([commit(D, `Revert ${PASTED}`)])
+          : page(DEFAULT_ROWS),
+    );
+    const { user } = await pickerWithRows();
+    await user.click(search());
+    await user.paste(PASTED);
+    await waitFor(() =>
+      expect(screen.getAllByRole("option")[0]).toHaveAttribute(
+        "data-pick-row",
+        E,
+      ),
+    );
+    expect(row(E)).toHaveAttribute("aria-selected", "true");
+    await waitApplyReady();
+    await user.click(applyButton());
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).toHaveBeenCalledExactlyOnceWith(
+      REPO,
+      SUB,
+      E,
+      P,
+    );
   });
 });
 
@@ -2729,7 +2898,7 @@ describe("fetching", () => {
     expect(row(C)).toHaveAttribute("aria-selected", "true");
   });
 
-  it("T42 Apply stays available while a fetch runs", async () => {
+  it("T42 Apply holds while a fetch of this submodule runs and returns when it settles", async () => {
     const fetching = held<SubmoduleFetchResult>();
     vi.mocked(gitSubmoduleFetch).mockReturnValue(fetching.promise);
     const { user } = await pickerWithRows();
@@ -2738,10 +2907,16 @@ describe("fetching", () => {
     expect(
       screen.getByRole("button", { name: /Fetch$/ }),
     ).toHaveAccessibleDescription("Fetching…");
-    await waitApplyReady();
-    await user.click(applyButton());
-    expect(gitSubmoduleSetCommit).toHaveBeenCalledTimes(1);
+    await waitApplyReason("Fetching…");
+    fireEvent.click(applyButton());
+    fireEvent.keyDown(row(P) as HTMLElement, { key: "Enter" });
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).not.toHaveBeenCalled();
     await act(async () => fetching.resolve({ shallow: false }));
+    await waitApplyReady();
+    fireEvent.click(applyButton());
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).toHaveBeenCalledTimes(1);
   });
 
   it("T73 Fetch full history over a remote that is itself shallow says older history is still missing", async () => {
@@ -3911,6 +4086,8 @@ describe("the list re-reads on every open", () => {
   });
 });
 
+const UNREADABLE_WHY = "not a git repository: vendor/sub/../.git/modules/sub";
+
 describe("removing", () => {
   const removed = (
     over: Partial<SubmoduleRemoveOutcome> = {},
@@ -3924,8 +4101,9 @@ describe("removing", () => {
 
   /** Opens Remove from the row's kebab, confirms the first prompt, and waits
    *  for the escalation prompt the refusal raises. */
-  async function refusedAsUnreadable() {
+  async function refusedAsUnreadable(list?: Submodule[]) {
     useConfirm.setState({ request: null, requestHold: null });
+    if (list !== undefined) vi.mocked(gitSubmodules).mockResolvedValue(list);
     // A once-answer an earlier test left unread would answer this one first.
     vi.mocked(gitSubmoduleRemove)
       .mockReset()
@@ -3985,5 +4163,92 @@ describe("removing", () => {
         "Submodule removed — staged for you to commit.",
       ),
     );
+  });
+
+  it("R4 an Unreadable row's Remove… reaches the same prompt and its forced retry", async () => {
+    await refusedAsUnreadable([sub(SUB, "unreadable", UNREADABLE_WHY)]);
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() => expect(gitSubmoduleRemove).toHaveBeenCalledTimes(2));
+    expect(gitSubmoduleRemove).toHaveBeenLastCalledWith(REPO, SUB, true, false);
+  });
+});
+
+describe("a submodule git can't read", () => {
+  it("U1 its row reads Unreadable with git's reason, and neither Update nor the row's own press sends anything", async () => {
+    vi.mocked(gitSubmodules).mockResolvedValue([
+      sub(SUB, "unreadable", UNREADABLE_WHY),
+    ]);
+    renderHarness();
+    const option = await screen.findByRole("option", { name: /vendor/ });
+    expect(within(option).getByText("Unreadable")).toBeInTheDocument();
+    expect(option).toHaveTextContent(
+      `bbbbbbb · Git can't read it: ${UNREADABLE_WHY}`,
+    );
+    expect(option).toHaveAttribute("title", "Git can't read this submodule");
+    expect(option).toHaveAttribute("aria-disabled", "true");
+    const update = screen.getByRole("button", { name: "Update" });
+    expect(update).toHaveAttribute("aria-disabled", "true");
+    expect(update).toHaveAccessibleDescription("Git can't read this submodule");
+    fireEvent.click(option);
+    fireEvent.click(update);
+    await act(async () => undefined);
+    expect(gitSubmoduleUpdate).not.toHaveBeenCalled();
+  });
+
+  it("U2 its menu holds every action that runs git inside it, with the reason on the label, and keeps the rest", async () => {
+    vi.mocked(gitSubmodules).mockResolvedValue([
+      sub(SUB, "unreadable", UNREADABLE_WHY),
+    ]);
+    renderHarness();
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: `Actions for ${SUB}` }),
+    );
+    for (const label of [
+      "Update to latest",
+      "Choose commit…",
+      "Open as repository",
+    ])
+      expect(
+        await screen.findByRole("menuitem", {
+          name: `${label} (git can't read this submodule)`,
+        }),
+        label,
+      ).toHaveAttribute("aria-disabled", "true");
+    for (const label of ["Edit URL…", "Set branch…", "Remove…"])
+      expect(
+        screen.getByRole("menuitem", { name: label }),
+        label,
+      ).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("U3 a readable row beside it keeps Update", async () => {
+    vi.mocked(gitSubmodules).mockResolvedValue([
+      sub(SUB, "unreadable", UNREADABLE_WHY),
+      sub(SUB2),
+    ]);
+    vi.mocked(gitSubmoduleUpdate).mockResolvedValue(undefined as never);
+    renderHarness();
+    const readable = await screen.findByRole("option", { name: /libs/ });
+    expect(readable).not.toHaveAttribute("aria-disabled");
+    fireEvent.click(readable);
+    await waitFor(() =>
+      expect(gitSubmoduleUpdate).toHaveBeenCalledWith(REPO, SUB2, false),
+    );
+  });
+
+  it("U4 the palette entry counts only submodules git can read", async () => {
+    vi.mocked(gitSubmodules).mockResolvedValue([
+      sub(SUB2, "unreadable", UNREADABLE_WHY),
+      sub(SUB),
+    ]);
+    renderHarness("choose");
+    expect(
+      await screen.findByRole("heading", { name: "Choose commit" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(gitSubmoduleRefs).toHaveBeenCalledWith(REPO, SUB),
+    );
+    expect(gitSubmoduleRefs).not.toHaveBeenCalledWith(REPO, SUB2);
   });
 });

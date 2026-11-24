@@ -10,8 +10,10 @@ export interface Submodule {
   branch: string | null;
   sha: string;
   describe: string;
-  /** "ok" | "uninitialized" | "modified" | "conflict" */
+  /** "ok" | "uninitialized" | "modified" | "conflict" | "unreadable" */
   status: string;
+  /** Why git can't read it: non-null exactly when `status` is "unreadable". */
+  unreadableReason: string | null;
 }
 
 /** What a submodule removal actually did. Every field matters to the user: the

@@ -377,8 +377,11 @@ pub struct Submodule {
     pub sha: String,
     /// `git describe` of the checked-out commit, when available.
     pub describe: String,
-    /// "ok" | "uninitialized" | "modified" | "conflict".
+    /// "ok" | "uninitialized" | "modified" | "conflict" | "unreadable".
     pub status: String,
+    /// Why git couldn't read this submodule; Some exactly when `status` is
+    /// "unreadable", whose `sha` is the index's gitlink and `describe` "".
+    pub unreadable_reason: Option<String>,
 }
 
 /// What `git_submodule_remove` actually did. A dirty-worktree or unreadable

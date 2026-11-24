@@ -170,6 +170,7 @@ describe("SubmodulesDialog's Open as repository", () => {
         sha: "a".repeat(40),
         describe: "v1",
         status: "ok",
+        unreadableReason: null,
       },
     ]);
     const onOpenChange = vi.fn();

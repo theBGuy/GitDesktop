@@ -316,6 +316,31 @@ const PRE_RESOLUTION: ReadonlySet<SubmodulePickBlock> = new Set([
   "checkFailed",
 ]);
 
+/** A lookup answer that resolved the pasted id to nothing. */
+type UnresolvedWhy = "notFound" | "ambiguous" | "notACommit";
+
+/** The pasted id's lookup line for each unresolved answer; Apply's hold over
+ *  it repeats the line. */
+const UNRESOLVED_COPY: Record<UnresolvedWhy, (path: string) => string> = {
+  notFound: (p) => `No commit in ${p} matches that id.`,
+  ambiguous: () =>
+    "More than one commit starts with that id. Paste more of it.",
+  notACommit: () => "That id isn't a commit.",
+};
+
+const HAS_DIGIT = /\d/;
+
+function unresolvedWhy(
+  read: SubmodulePickRead | undefined,
+): UnresolvedWhy | null {
+  if (read === undefined || read.sha !== null || read.plan.kind !== "blocked")
+    return null;
+  const { why } = read.plan;
+  return why === "notFound" || why === "ambiguous" || why === "notACommit"
+    ? why
+    : null;
+}
+
 /** What a ready checkout does, by how the commit relates to the recorded one.
  *  `diverged` claims another line of history only on complete history. */
 const RELATION_NOTE: Record<
@@ -490,9 +515,13 @@ export function ChooseSubmoduleCommit({
   // The row the user moved to, and the paste whose pin was shown when they did:
   // a pin outranks a move made before it landed or over another paste, so a
   // paste is what Apply acts on.
+  // `text` and `gen` name the search and paste it was made under: over a pasted
+  // id that resolves to nothing, only a move made under that paste counts.
   const [userPick, setUserPick] = useState<{
     sha: string;
     overPaste: number | null;
+    text: string | null;
+    gen: number;
   } | null>(null);
   // A setter refusal for the pressed commit outranks the plan read's note (the
   // plan is advisory) until the highlight moves by any route, another apply or
@@ -770,8 +799,24 @@ export function ChooseSubmoduleCommit({
   const placeholder = commitsData !== undefined && commits.isPlaceholderData;
 
   const pointer = refsData?.pointer ?? null;
+  // A pasted id holding a digit that resolves to nothing: no listed row stands
+  // in for it until the user picks one. An all-letter hex word ("added") is a
+  // plain search and keeps its first row.
+  const unresolved =
+    shaText !== null && HAS_DIGIT.test(shaText)
+      ? unresolvedWhy(lookupRead)
+      : null;
+  const explicitPick =
+    userPick !== null &&
+    seen.has(userPick.sha) &&
+    userPick.text === search &&
+    userPick.gen === pasteGen
+      ? userPick.sha
+      : null;
   const highlighted = ((): string | null => {
     switch (true) {
+      case unresolved !== null:
+        return explicitPick;
       case userPick !== null &&
         seen.has(userPick.sha) &&
         (pin === null || userPick.overPaste === pasteGen):
@@ -895,6 +940,9 @@ export function ChooseSubmoduleCommit({
     switch (true) {
       case pickPending:
         return PICKING_REASON;
+      // A pruning fetch can drop the ref that names the commit Apply leaves.
+      case fetchPending !== null:
+        return FETCHING_REASON;
       case unusableText !== null:
         return unusableText;
       case refsFailed:
@@ -910,6 +958,8 @@ export function ChooseSubmoduleCommit({
         return `${path} has no commits yet.`;
       case lookupBlock !== null:
         return lookupBlock;
+      case unresolved !== null && highlighted === null:
+        return UNRESOLVED_COPY[unresolved](path);
       case failedNoRows:
         return "Commits couldn't be loaded";
       case emptyRead:
@@ -950,8 +1000,24 @@ export function ChooseSubmoduleCommit({
           !freshInCache(submodulePickKeys.plan(repoPath, path, shaText)))
       )
         return;
+      // A pasted id that resolves to nothing never sends a listed row the user
+      // didn't pick under it.
+      if (
+        HAS_DIGIT.test(shaText) &&
+        explicitPick === null &&
+        unresolvedWhy(
+          queryClient.getQueryData<SubmodulePickRead>(
+            submodulePickKeys.plan(repoPath, path, shaText),
+          ),
+        ) !== null
+      )
+        return;
     }
-    if (pressing.current || isSubmodulePickPending(queryClient, repoPath, path))
+    if (
+      pressing.current ||
+      isSubmodulePickPending(queryClient, repoPath, path) ||
+      isSubmoduleFetchPending(queryClient, repoPath, path)
+    )
       return;
     if (refuseIfSwitched(repoPath, "nothing was checked out")) return;
     // Both ids come from the ONE plan read that passed the gate: the pair is the
@@ -1136,7 +1202,12 @@ export function ChooseSubmoduleCommit({
   }
 
   function moveHighlight(sha: string) {
-    setUserPick({ sha, overPaste: pin === null ? null : pasteGen });
+    setUserPick({
+      sha,
+      overPaste: pin === null ? null : pasteGen,
+      text: search,
+      gen: pasteGen,
+    });
   }
 
   // A held block's Check again asks the plan afresh and holds Apply until that
@@ -1187,14 +1258,29 @@ export function ChooseSubmoduleCommit({
 
   function onSearchKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (
-      e.key !== "ArrowDown" ||
+      (e.key !== "ArrowDown" && e.key !== "ArrowUp") ||
       e.shiftKey ||
-      hasChordModifier(e) ||
-      highlighted === null
+      hasChordModifier(e)
     )
       return;
+    // Down enters the list at its highlight; with none, Down and Up pick the
+    // first and last row.
+    const to = ((): string | null => {
+      switch (true) {
+        case e.key === "ArrowDown" && highlighted !== null:
+          return highlighted;
+        case highlighted !== null || rows.length === 0:
+          return null;
+        case e.key === "ArrowDown":
+          return rows[0].sha;
+        default:
+          return rows[rows.length - 1].sha;
+      }
+    })();
+    if (to === null) return;
     e.preventDefault();
-    focusRow(highlighted);
+    if (to !== highlighted) moveHighlight(to);
+    focusRow(to);
   }
 
   // A focused row that leaves the list (a refresh, a narrowed search) hands
@@ -1731,20 +1817,19 @@ function ShaLookupLine({
 }) {
   if (shaText === null) return null;
   if (blockLead !== null) return <p className={LOOKUP_LINE}>{blockLead}</p>;
-  if (lookup === undefined || lookup.plan.kind !== "blocked") return null;
-  if (lookup.plan.why === "ambiguous")
-    return (
-      <p className={LOOKUP_LINE}>
-        More than one commit starts with that id. Paste more of it.
-        {lookup.plan.reason !== null && ` ${lookup.plan.reason}`}
-      </p>
-    );
-  if (lookup.plan.why === "notACommit")
-    return <p className={LOOKUP_LINE}>That id isn't a commit.</p>;
-  // The lookup searched the whole object store, not just this ref's history.
-  if (lookup.plan.why === "notFound")
-    return <p className={LOOKUP_LINE}>No commit in {path} matches that id.</p>;
-  return null;
+  // notFound: the lookup searched the whole object store, not just this ref's
+  // history.
+  const why = unresolvedWhy(lookup);
+  if (why === null || lookup === undefined || lookup.plan.kind !== "blocked")
+    return null;
+  return (
+    <p className={LOOKUP_LINE}>
+      {UNRESOLVED_COPY[why](path)}
+      {why === "ambiguous" &&
+        lookup.plan.reason !== null &&
+        ` ${lookup.plan.reason}`}
+    </p>
+  );
 }
 
 function NoteBody({ note }: { note: Note }) {
