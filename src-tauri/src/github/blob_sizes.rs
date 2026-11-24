@@ -44,8 +44,10 @@ where
         "github.com".to_string()
     } else {
         match stored_login(url).await {
-            Some(host) => host,
-            None => return Ok(None),
+            // `gh api --hostname` refuses a port-qualified host before any request
+            // (gh 2.103.3), and dropping the port would query another endpoint.
+            Some(host) if !host.contains(':') => host,
+            _ => return Ok(None),
         }
     };
     Ok(Some((slug, host)))
@@ -478,12 +480,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_port_qualified_login_stays_unknown() {
+        let remote = "https://ghe.acme.com:8443/owner/repo.git";
+        let (_dir, repo) = remote_repo(Some(remote)).await;
+        let seen = std::sync::Mutex::new(Vec::new());
+        let pinned = sizes_repo_slug_with(&repo, None, lookup(Some("ghe.acme.com:8443"), &seen))
+            .await
+            .unwrap();
+        assert_eq!(pinned, None);
+        assert_eq!(*seen.lock().unwrap(), [remote]);
+    }
+
+    #[tokio::test]
     async fn a_stored_login_pins_its_own_spelling() {
         for (remote, login) in [
-            (
-                "https://ghe.acme.com:8443/owner/repo.git",
-                "ghe.acme.com:8443",
-            ),
+            ("https://ghe.acme.com/owner/repo.git", "ghe.acme.com"),
             ("git@ghe.acme.com:owner/repo.git", "ghe.acme.com"),
         ] {
             let (_dir, repo) = remote_repo(Some(remote)).await;

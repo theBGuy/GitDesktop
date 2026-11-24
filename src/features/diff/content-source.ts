@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { useState } from "react";
 import type { FileBytes } from "@/lib/git/api";
+import { FULL_OID_RE } from "@/lib/git/oid";
 import { fileAtRevOptions, forgeFileAtShaOptions } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 
@@ -50,9 +51,6 @@ export function contentSourceKey(source: DiffContentSource): string {
  *  always over that cap. */
 export const FORGE_CONTENT_BUDGET_BYTES = 300_000;
 
-/** A forge read names its commit by a full object id only. */
-const FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-
 /** One side of a diff at a rev. Local: `rev` is a rev, or null for the working tree. Forge: `rev` must
  *  be a full sha; anything else is a disabled read with no data, never sent to `git_file_base64`.
  *  `maxBytes` applies to a forge read only (null = the 20 MB image cap). */
@@ -65,7 +63,7 @@ export function useFileAtSource(args: {
   maxBytes?: number | null;
 }): UseQueryResult<FileBytes | null> {
   const { repo, source, rev, path, enabled, maxBytes = null } = args;
-  const sha = rev !== null && FULL_SHA.test(rev) ? rev : null;
+  const sha = rev !== null && FULL_OID_RE.test(rev) ? rev : null;
   // One query whatever the source, so a source flip never changes hook order.
   const options: UseQueryOptions<FileBytes | null> =
     source === "local"

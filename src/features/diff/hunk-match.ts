@@ -140,6 +140,9 @@ function matches(diffText: string, oldText: string, newText: string): boolean {
       const oldFrom = oldCount === 0 ? Number(m[1]) : Number(m[1]) - 1;
       const newFrom = newCount === 0 ? Number(m[3]) : Number(m[3]) - 1;
       if (oldFrom < oldEnd || newFrom < newEnd) return false;
+      // A start past the file's end names no line, and the gap walk below
+      // would run to it unbounded; a zero-count hunk at EOF starts AT the end.
+      if (oldFrom > oldLines.length || newFrom > newLines.length) return false;
       if (!sameRun(oldLines, oldEnd, oldFrom, newLines, newEnd, newFrom))
         return false;
       oldTwin ??= inGap(oldLines.length - 1, oldEnd, oldFrom, newEnd);

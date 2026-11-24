@@ -1751,6 +1751,33 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// A `--depth` clone of `origin` at `<dir>/shallow`, over a `file://` URL: git
+    /// ignores `--depth` on a plain-path local clone.
+    async fn shallow_clone(dir: &std::path::Path, origin: &str, depth: &str) -> String {
+        let slashed = origin.replace('\\', "/");
+        let url = if slashed.starts_with('/') {
+            format!("file://{slashed}")
+        } else {
+            format!("file:///{slashed}")
+        };
+        let shallow = dir.join("shallow").to_string_lossy().into_owned();
+        let parent = dir.to_string_lossy().into_owned();
+        git(
+            &parent,
+            &[
+                "clone",
+                "-q",
+                "--depth",
+                depth,
+                "--no-single-branch",
+                &url,
+                &shallow,
+            ],
+        )
+        .await;
+        shallow
+    }
+
     #[tokio::test]
     async fn the_local_arm_answers_git_merge_base() {
         let dir = tempfile::tempdir().unwrap();
@@ -1800,27 +1827,7 @@ mod tests {
         git(&origin, &["commit", "-q", "--allow-empty", "-m", "main"]).await;
         let base = git(&origin, &["rev-parse", "HEAD"]).await;
 
-        let slashed = origin.replace('\\', "/");
-        let url = if slashed.starts_with('/') {
-            format!("file://{slashed}")
-        } else {
-            format!("file:///{slashed}")
-        };
-        let shallow = dir.path().join("shallow").to_string_lossy().into_owned();
-        let parent = dir.path().to_string_lossy().into_owned();
-        git(
-            &parent,
-            &[
-                "clone",
-                "-q",
-                "--depth",
-                "1",
-                "--no-single-branch",
-                &url,
-                &shallow,
-            ],
-        )
-        .await;
+        let shallow = shallow_clone(dir.path(), &origin, "1").await;
         let both = vec![base.clone(), head.clone()];
         assert!(
             crate::git::compare::git_objects_present(shallow.clone(), both)
@@ -1877,27 +1884,7 @@ mod tests {
         git(&origin, &["update-ref", "refs/heads/topic", &head]).await;
         assert_eq!(git(&origin, &["merge-base", &base, &head]).await, fork);
 
-        let slashed = origin.replace('\\', "/");
-        let url = if slashed.starts_with('/') {
-            format!("file://{slashed}")
-        } else {
-            format!("file:///{slashed}")
-        };
-        let shallow = dir.path().join("shallow").to_string_lossy().into_owned();
-        let parent = dir.path().to_string_lossy().into_owned();
-        git(
-            &parent,
-            &[
-                "clone",
-                "-q",
-                "--depth",
-                "2",
-                "--no-single-branch",
-                &url,
-                &shallow,
-            ],
-        )
-        .await;
+        let shallow = shallow_clone(dir.path(), &origin, "2").await;
         let all = vec![base.clone(), head.clone(), fork.clone(), root.clone()];
         assert!(
             crate::git::compare::git_objects_present(shallow.clone(), all)

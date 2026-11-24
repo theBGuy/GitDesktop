@@ -222,7 +222,7 @@ export function PrFilesPane({
   })();
   const source = useLatchedFor(
     contentRevs && lens !== undefined
-      ? `${lens}\0${contentRevs.oldSha}\0${contentRevs.newSha}`
+      ? `${repoPath ?? ""}\0${lens}\0${contentRevs.oldSha}\0${contentRevs.newSha}`
       : null,
     answered,
   );

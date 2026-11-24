@@ -85,9 +85,10 @@ export function ReviewComposer({
 
   // An expanded gap draws lines the forge's patch lacks, and no forge anchors
   // a review comment there. GitHub also refuses a range leaving its end line's
-  // hunk; GitLab and Bitbucket anchor on the end line alone. A side's lines in
-  // one hunk are consecutive and hunks never touch, so every line from start
-  // to end being a patch line means one hunk.
+  // hunk. GitLab and Bitbucket accept a range whose start is outside the diff,
+  // so only the end line must be in it (GitLab still receives the start line).
+  // A side's lines in one hunk are consecutive and hunks never touch, so every
+  // line from start to end being a patch line means one hunk.
   const offPatch = ((): keyof typeof OFF_PATCH_REVIEW_REASON | null => {
     const drawn = patchLines(fileSection)[side];
     if (provider !== "github") return drawn.has(line) ? null : "line";

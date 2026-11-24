@@ -324,6 +324,28 @@ describe("a forge-patch diff", () => {
     await waitFor(() => expect(pane.expands().length).toBeGreaterThan(0));
   });
 
+  it("holds the upgrade while a mounted node's editor mark is on, and releases once it turns off in place", async () => {
+    const land = deferredReads();
+    const pane = renderPane();
+    await waitFor(() => expect(pane.rows().length).toBeGreaterThan(0));
+    const row = pane.rows()[0];
+    // A host's node that stays mounted and flips its mark, as the pending
+    // review bar does around a draft edit.
+    const anchor = marker("data-diff-anchor", "layout");
+    const node = marker("data-stand-in");
+    anchor.append(node);
+    pane.group()?.append(anchor);
+    await act(async () => undefined);
+    act(() => node.setAttribute("data-diff-editor", "true"));
+    await act(async () => undefined);
+    await land(OLD, NEW);
+    await landed(pane);
+    expect(pane.expands().length).toBe(0);
+    expect(row.isConnected).toBe(true);
+    act(() => node.removeAttribute("data-diff-editor"));
+    await waitFor(() => expect(pane.expands().length).toBeGreaterThan(0));
+  });
+
   it("is not held by an editor open in another diff", async () => {
     const land = deferredReads();
     const pane = renderPane();
@@ -496,6 +518,11 @@ describe("a PR host's build across its revs arriving and changing", () => {
     await waitFor(() => expect(text()).not.toContain("line 20"));
     await act(async () => undefined);
     expect(layout.top()).toBe(layout.rowOf(32));
+    // The rebuild is the new pair's content, not hunk-only: its gap draws the
+    // new middle line.
+    for (let i = 0; i < 10 && pane.expands().length > 0; i++)
+      fireEvent.click(pane.expands()[0]);
+    await waitFor(() => expect(text()).toContain("line twenty"));
   });
 
   it("keeps the reader's top line when SVG panes appear above the rows", async () => {
@@ -810,6 +837,36 @@ describe("a PR host's image panes across a pair change", () => {
     pane.update({ ...pairOf(NEW2_SHA), data: png(TEXT2) });
     await land("old-1", "new-2", OLD_SHA, NEW2_SHA);
     await waitFor(() => expect(srcOf(pane, "New")).toBe(pngSrc("new-2")));
+  });
+
+  it("draws a kept side under the path it was read at, never the new pair's", async () => {
+    // A rename whose source moves to another format with the new head; the
+    // reads sniff no type, so the extension names it.
+    const renamed = (oldPath: string): FileDiff => ({
+      ...png(PNG_TEXT),
+      oldPath,
+    });
+    const { pane, land } = await onScreen({
+      ...pairOf(NEW_SHA),
+      data: renamed("pic.png"),
+    });
+    expect(srcOf(pane, "Old")).toBe(pngSrc("old-1"));
+    pane.update({ ...pairOf(NEW2_SHA), data: renamed("pic.jpg") });
+    await act(async () => undefined);
+    expect(forgeFileAtSha).toHaveBeenCalledWith(
+      "/repo",
+      OLD_SHA,
+      "pic.jpg",
+      "origin",
+      null,
+    );
+    expect(srcOf(pane, "Old")).toBe(pngSrc("old-1"));
+    await land("old-2", "new-2", OLD_SHA, NEW2_SHA);
+    await waitFor(() =>
+      expect(srcOf(pane, "Old")).toBe(
+        `data:image/jpeg;base64,${Buffer.from("old-2").toString("base64")}`,
+      ),
+    );
   });
 
   it("keeps the panes, their measurements, the viewer and focus while a new pair reads", async () => {
@@ -1163,9 +1220,12 @@ describe("a binary-to-link typechange on an image path", () => {
   const LINK_TEXT =
     "diff --git a/logo.png b/logo.png\ndeleted file mode 100644\nindex 1111111..0000000\nBinary files a/logo.png and /dev/null differ\n" +
     "diff --git a/logo.png b/logo.png\nnew file mode 120000\nindex 0000000..2222222\n--- /dev/null\n+++ b/logo.png\n@@ -0,0 +1 @@\n+target.png\n\\ No newline at end of file\n";
-  function renderTypechange(typechangeAnchors: boolean) {
-    vi.mocked(forgeFileAtSha).mockImplementation(
-      () => new Promise(() => undefined),
+  /** `answer` is every forge read's bytes; unset, the reads never answer. */
+  function renderTypechange(typechangeAnchors: boolean, answer?: FileBytes) {
+    vi.mocked(forgeFileAtSha).mockImplementation(() =>
+      answer === undefined
+        ? new Promise(() => undefined)
+        : Promise.resolve(answer),
     );
     return mountPane({
       ...FORGE,
@@ -1188,8 +1248,11 @@ describe("a binary-to-link typechange on an image path", () => {
   });
 
   it("keeps the image comparison on a host that doesn't", async () => {
-    const view = renderTypechange(false);
-    await act(async () => undefined);
+    const view = renderTypechange(false, bytes("png"));
+    // The comparison draws both sides, and the link half stays out.
+    await waitFor(() =>
+      expect(view.container.querySelectorAll("figure img").length).toBe(2),
+    );
     await act(async () => undefined);
     expect(linkLine(view)).toBeNull();
   });
@@ -1454,19 +1517,15 @@ describe("Markdown preview on a forge-patch diff with a local source", () => {
     const pane = renderMd(NEW_SHA);
     await waitFor(() => expect(pane.preview()).toBeDefined());
     act(() => pane.preview()?.click());
+    // The preview's own answer for the head, where the file is gone; the
+    // previous version would render its heading under a deleted-file note.
     await waitFor(() =>
-      expect(gitFileBase64).toHaveBeenCalledWith(
-        "/repo",
-        NEW_SHA,
-        "doc.md",
-        false,
-      ),
+      expect(pane.queryByText("Nothing to preview")).not.toBeNull(),
     );
-    await act(async () => undefined);
-    await act(async () => undefined);
     expect(
       pane.queryByText("File deleted — previewing the previous version."),
     ).toBeNull();
+    expect(pane.queryByRole("heading", { name: "Title" })).toBeNull();
   });
 });
 

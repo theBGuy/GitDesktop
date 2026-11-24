@@ -180,7 +180,8 @@ function auditPaths(source, expected) {
 
 // Every call a child makes through the prop it is handed `pickPath` on.
 const PICK_PROP_CHILDREN = {
-  // Both user routes reach it through the settled gate (auditRowGate below).
+  // Both user routes reach it through the settled gate, which the jsdom suite
+  // src/test/pr-diff-context.test.tsx pins.
   "src/features/pulls/RemotePrViewParts.tsx": {
     prop: "onSelectPath",
     calls: [/^\s*if \(filter\.rail\.settled\) onSelectPath\(path\);$/],
@@ -270,70 +271,4 @@ test("mutation control: an automatic call through a child's pick prop fails the 
   );
   assert.notEqual(auto, source, "mutation target not found");
   assert.notDeepEqual(auditChild(auto, PICK_PROP_CHILDREN[file]), []);
-});
-
-// The PR Files rows pick only once the list shows this pull request's own
-// files: a click and the arrow/Enter route both go through `pickRow`.
-const PR_ROW_GATE =
-  /const pickRow = \(path: string\) => \{\n\s*if \(filter\.rail\.settled\) onSelectPath\(path\);\n\s*\};/;
-const PR_ROW_ROUTES = [
-  /^\s*onActivate: \(file\) => pickRow\(file\.path\),$/,
-  /^\s*onClick=\{\(\) => pickRow\(file\.path\)\}$/,
-];
-
-function auditRowGate(source) {
-  const text = source.replace(/\r\n/g, "\n");
-  const problems = [];
-  if (!PR_ROW_GATE.test(text))
-    problems.push("pickRow gate missing or reshaped");
-  const lines = text.split("\n");
-  for (const [i, re] of PR_ROW_ROUTES.entries()) {
-    const n = lines.filter((l) => re.test(l)).length;
-    if (n !== 1) problems.push(`row route ${i}: ${n} matches`);
-  }
-  return problems;
-}
-
-const ROW_GATE_FILE = "src/features/pulls/RemotePrViewParts.tsx";
-
-test(`${ROW_GATE_FILE}: Files rows pick through the settled gate`, () => {
-  assert.deepEqual(auditRowGate(read(ROW_GATE_FILE)), []);
-});
-
-test("mutation control: an ungated row pick fails the pin", () => {
-  const source = read(ROW_GATE_FILE);
-  const ungated = source.replace(
-    "if (filter.rail.settled) onSelectPath(path);",
-    "onSelectPath(path);",
-  );
-  assert.notEqual(ungated, source, "mutation target not found");
-  assert.notDeepEqual(auditRowGate(ungated), []);
-  assert.notDeepEqual(
-    auditChild(ungated, PICK_PROP_CHILDREN[ROW_GATE_FILE]),
-    [],
-  );
-});
-
-test("mutation control: a row click past the gate fails the pin", () => {
-  const source = read(ROW_GATE_FILE);
-  const bypass = source.replace(
-    "onClick={() => pickRow(file.path)}",
-    "onClick={() => onSelectPath(file.path)}",
-  );
-  assert.notEqual(bypass, source, "mutation target not found");
-  assert.notDeepEqual(auditRowGate(bypass), []);
-  assert.notDeepEqual(
-    auditChild(bypass, PICK_PROP_CHILDREN[ROW_GATE_FILE]),
-    [],
-  );
-});
-
-test("mutation control: an arrow route past the gate fails the pin", () => {
-  const source = read(ROW_GATE_FILE);
-  const bypass = source.replace(
-    "onActivate: (file) => pickRow(file.path),",
-    "onActivate: (file) => onSelectPath(file.path),",
-  );
-  assert.notEqual(bypass, source, "mutation target not found");
-  assert.notDeepEqual(auditRowGate(bypass), []);
 });

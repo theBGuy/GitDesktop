@@ -207,3 +207,19 @@ test("the BOM rule: a byte-order mark on line 1 reads as absent, on either input
   const second = `@@ -1,2 +1,2 @@\n a\n-${BOM}b\n+c\n`;
   assert.equal(hunksMatchContent(second, "a\nb\n", "a\nc\n"), false);
 });
+
+test("the EOF rule: a hunk starting past either file's end is refused, one starting at it is not", () => {
+  const T = "a\nb\nc\n";
+  // A zero-count hunk names the line before it, so `-3,0` starts at the end.
+  assert.equal(hunksMatchContent("@@ -3,0 +3,0 @@\n", T, T), true);
+  assert.equal(hunksMatchContent("@@ -3,0 +4 @@\n+d\n", T, `${T}d\n`), true);
+  assert.equal(hunksMatchContent("@@ -4,0 +4,0 @@\n", T, T), false);
+  assert.equal(hunksMatchContent("@@ -3,0 +4,0 @@\n", T, T), false);
+  assert.equal(hunksMatchContent("@@ -4,0 +3,0 @@\n", T, T), false);
+  const started = Date.now();
+  assert.equal(hunksMatchContent("@@ -20000000,0 +20000000,0 @@\n", T, T), false);
+  // A start too large for a finite number reads as Infinity.
+  const huge = "9".repeat(400);
+  assert.equal(hunksMatchContent(`@@ -${huge},0 +${huge},0 @@\n`, T, T), false);
+  assert.ok(Date.now() - started < 1000, "refused without walking to the start");
+});

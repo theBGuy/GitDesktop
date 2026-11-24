@@ -258,7 +258,14 @@ interface PanesState {
   viewing?: PaneKey;
   /** A forge-patch host's last settled reads of this file, drawn while a new
    *  pair's first reads are in flight. */
-  settled?: Record<PaneKey, SideRead>;
+  settled?: Record<PaneKey, SettledSide>;
+}
+
+/** A settled read with the path it was read at: a kept side's type fallback
+ *  reads that path, never the pair now reading. */
+interface SettledSide {
+  read: SideRead;
+  path: string;
 }
 
 /** The same answer: the same FileBytes object, never a compare of its bytes. */
@@ -283,11 +290,14 @@ function sameBytes(a: SideRead, b: SideRead): boolean {
  *  drops its measurement and decode failure, which were the previous image's. */
 function keepSettled(
   prev: PanesState,
-  next: Record<PaneKey, SideRead>,
+  next: Record<PaneKey, SettledSide>,
 ): PanesState {
   const out: PanesState = { ...prev, settled: next };
   for (const key of ["old", "new"] as const) {
-    if (prev.settled === undefined || sameBytes(prev.settled[key], next[key]))
+    if (
+      prev.settled === undefined ||
+      sameBytes(prev.settled[key].read, next[key].read)
+    )
       continue;
     out[key] = undefined;
     if (out.failed?.[key]) out.failed = { ...out.failed, [key]: undefined };
@@ -372,22 +382,30 @@ export function ImagePanes({
   // this file's last settled reads, so panes on screen never blank and swap
   // in one commit; a new read that failed or can't run shows at once.
   const snapshot = keeps && pending ? (current?.settled ?? null) : null;
-  const drawn = (live: SideRead, key: PaneKey): SideRead =>
-    snapshot !== null && !("error" in live) ? snapshot[key] : live;
-  const drawnOld = drawn(oldRead, "old");
-  const drawnNew = drawn(newRead, "new");
+  const drawn = (live: SideRead, path: string, key: PaneKey): SettledSide =>
+    snapshot !== null && !("error" in live)
+      ? snapshot[key]
+      : { read: live, path };
+  const { read: drawnOld, path: drawnOldPath } = drawn(oldRead, oldPath, "old");
+  const { read: drawnNew, path: drawnNewPath } = drawn(
+    newRead,
+    filePath,
+    "new",
+  );
   const drawnHeld = held && snapshot === null;
   if (
     keeps &&
     !held &&
     (current?.settled === undefined ||
-      !sameRead(current.settled.old, oldRead) ||
-      !sameRead(current.settled.new, newRead))
+      !sameRead(current.settled.old.read, oldRead) ||
+      !sameRead(current.settled.new.read, newRead) ||
+      current.settled.old.path !== oldPath ||
+      current.settled.new.path !== filePath)
   )
     setState((prev) =>
       keepSettled(prev.id === id ? prev : { id }, {
-        old: oldRead,
-        new: newRead,
+        old: { read: oldRead, path: oldPath },
+        new: { read: newRead, path: filePath },
       }),
     );
   // Absent only when the read answered so: a failed side might exist.
@@ -441,8 +459,8 @@ export function ImagePanes({
         };
   };
   const panes = [
-    toPane("old", drawnOld, oldPath, newAbsent ? "Deleted" : "Old"),
-    toPane("new", drawnNew, filePath, oldAbsent ? "Added" : "New"),
+    toPane("old", drawnOld, drawnOldPath, newAbsent ? "Deleted" : "Old"),
+    toPane("new", drawnNew, drawnNewPath, oldAbsent ? "Added" : "New"),
   ].filter((pane): pane is Pane => pane !== null);
 
   // A refused side has nothing to show fullscreen, so the viewer indexes only
