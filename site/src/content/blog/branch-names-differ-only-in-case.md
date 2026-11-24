@@ -118,13 +118,14 @@ makes the delete conditional: if Leo pushed to the twin after your
 `ls-remote`, the remote no longer holds `5d95f9c`, and the whole push is
 rejected before the delete can drop his new commit. Spell the lease's branch
 name exactly as the branch you delete: a lease on `feature/offline-maps`
-doesn't guard `Feature/offline-maps`, and Git doesn't warn you. The second
-lease, with nothing after the colon, requires the new name to be free;
-without it, an existing branch by that name would be fast-forwarded to Leo's
-commit. If the push fails, the new name may be taken (pick another), or
-someone may have moved the twin or already removed it. Run `git fetch`, which
-still downloads new commits while it reports the error, then `git ls-remote`,
-and rerun the push with the new hash if the twin is still there.
+doesn't guard `Feature/offline-maps`, and Git doesn't warn you. The
+second lease, with nothing after the colon, requires the new name to
+be free; without it, an existing branch by that name would be fast-forwarded
+to Leo's commit. If the push fails, the new name may be taken (pick
+another), or someone may have moved the twin or already removed it. Run
+`git fetch origin`, which still downloads new commits while it reports the
+error, then `git ls-remote origin`, and rerun the push with the new hash if
+the twin is still there.
 
 Deleting the twin also removed the shared file in your clone, so
 `git fetch --prune` brings `origin/feature/offline-maps` from its hash
@@ -166,9 +167,10 @@ running into it until the remote drops a spelling. And before you migrate:
   and copy out any ignored files you still need (a `.env`, local settings),
   since `git worktree remove` deletes them with the folder. Then remove
   each worktree, and run `git worktree prune` for any folder you deleted
-  by hand. A fresh clone made with `git clone --ref-format=reftable`
-  avoids that, but your local branches, stashes and unpushed commits stay
-  behind in the old one.
+  by hand. Removing one that has submodules checked out takes `--force`,
+  so commit and push any work inside them first. A fresh clone made with
+  `git clone --ref-format=reftable` avoids all of this, but your local
+  branches, stashes and unpushed commits stay behind in the old one.
 - It can't lock out other writers while it runs, so close editors and
   anything else that fetches in the background, and if the repository
   is registered for scheduled maintenance, run `git maintenance unregister`
