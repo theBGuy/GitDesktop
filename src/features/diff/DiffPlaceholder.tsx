@@ -16,7 +16,7 @@ export function DiffPlaceholder({
   action?: ReactNode;
 }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
+    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-2 text-muted-foreground">
       <Icon className="size-8" />
       <p className="text-xs">{message}</p>
       {action}

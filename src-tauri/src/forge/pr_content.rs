@@ -1,6 +1,7 @@
 //! Whole-file reads behind a forge pull request's diff: its merge base, a commit's first
 //! parent, and one file's bytes at a commit, on GitHub, GitLab and Bitbucket. Each
 //! provider arm is a private fn; a command validates, dispatches, and awaits one arm.
+//! Also the local `git diff -w` of two file versions those reads returned.
 
 use base64::Engine;
 use serde_json::Value;
@@ -13,7 +14,7 @@ use crate::forge::http::{self, bb_unreadable, BbCredentials, BbGetFailure, BbOpK
 use crate::forge::model::Provider;
 use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::forge::{detect_non_github, encode_query_value};
-use crate::git::diff::FileBytes;
+use crate::git::diff::{with_ignore_whitespace, FileBytes};
 use crate::git::runner::{run_git_raw, DEFAULT_TIMEOUT};
 use crate::github::runner::{run_gh, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
 use crate::github::{gh_failure_reason, gh_lens_slug, gh_unreadable, lens_remote};
@@ -21,6 +22,13 @@ use crate::image_sniff::{dimensions_within_caps, has_raster_magic, sniff_image};
 
 /// The byte ceiling of one by-sha read, the local preview reader's cap.
 const FORGE_FILE_MAX_BYTES: u64 = 20_000_000;
+
+/// The decoded ceiling of one side of a whitespace diff. The frontend sends at most its
+/// content budget; this keeps the command safe from any caller.
+const WHITESPACE_SIDE_MAX_BYTES: usize = 1_000_000;
+
+/// Never `gd-review-`: the app sweeps that prefix out of the temp dir at startup.
+const WHITESPACE_DIFF_PREFIX: &str = "gd-pr-ws-diff-";
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,7 +116,129 @@ pub async fn forge_file_at_sha(
     }
 }
 
+/// The `-w` diff of two file versions held in memory, hunks only.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhitespaceHunks {
+    /// From the first `@@` line on; empty when the versions differ in whitespace only, or not at all.
+    pub hunks: String,
+    /// git called the pair binary; `hunks` is empty.
+    pub is_binary: bool,
+}
+
+/// `git diff -w` of two file versions the frontend already holds, as base64; None = no
+/// file at that side, diffed as an empty one. A local run over private temp files, with
+/// the user's git config applied, so line endings and blank context lines vary.
+#[tauri::command]
+pub async fn git_diff_bytes_ignoring_whitespace(
+    old_base64: Option<String>,
+    new_base64: Option<String>,
+) -> AppResult<WhitespaceHunks> {
+    let (old, new) = whitespace_sides(old_base64.as_deref(), new_base64.as_deref())?;
+    let args = with_ignore_whitespace(
+        &["diff", "--no-ext-diff", "--no-index", "--no-color"],
+        Some(true),
+    );
+    let stdout = diff_written_pair(WHITESPACE_DIFF_PREFIX, &args, old, new).await?;
+    Ok(whitespace_hunks(&stdout))
+}
+
 // ── Validation and shared pieces ─────────────────────────────────────────────
+
+/// Both sides decoded and size-checked before anything is written; None = empty.
+fn whitespace_sides(old: Option<&str>, new: Option<&str>) -> AppResult<(Vec<u8>, Vec<u8>)> {
+    if old.is_none() && new.is_none() {
+        return Err(AppError::InvalidArgument(
+            "a whitespace diff needs at least one side".into(),
+        ));
+    }
+    Ok((whitespace_side(old, "old")?, whitespace_side(new, "new")?))
+}
+
+fn whitespace_side(side: Option<&str>, name: &str) -> AppResult<Vec<u8>> {
+    let Some(encoded) = side else {
+        return Ok(Vec::new());
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|e| AppError::InvalidArgument(format!("the {name} side is not base64: {e}")))?;
+    if bytes.len() > WHITESPACE_SIDE_MAX_BYTES {
+        return Err(AppError::InvalidArgument(format!(
+            "the {name} side is over {WHITESPACE_SIDE_MAX_BYTES} bytes"
+        )));
+    }
+    Ok(bytes)
+}
+
+/// `--no-index` exits 1 when the files differ; any other code is a failure, the -1 of a
+/// git killed by a signal included (its stdout may be cut short).
+fn no_index_diff_exit_ok(code: i32) -> bool {
+    matches!(code, 0 | 1)
+}
+
+/// Runs `args` then `-- <old> <new>` over the two buffers written into a fresh private
+/// temp dir, which is closed on every path.
+async fn diff_written_pair(
+    prefix: &str,
+    args: &[&str],
+    old: Vec<u8>,
+    new: Vec<u8>,
+) -> AppResult<Vec<u8>> {
+    let prefix = prefix.to_owned();
+    let dir = tokio::task::spawn_blocking(move || crate::agent_sandbox::private_temp_dir(&prefix))
+        .await
+        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
+        .map_err(AppError::Io)?;
+    let old_path = dir.path().join("old");
+    let new_path = dir.path().join("new");
+    let result = async {
+        tokio::fs::write(&old_path, &old)
+            .await
+            .map_err(AppError::Io)?;
+        tokio::fs::write(&new_path, &new)
+            .await
+            .map_err(AppError::Io)?;
+        let old_arg = old_path.to_string_lossy();
+        let new_arg = new_path.to_string_lossy();
+        let mut argv = args.to_vec();
+        argv.extend(["--", &*old_arg, &*new_arg]);
+        let out = run_git_raw(None, &argv, DEFAULT_TIMEOUT).await?;
+        if !no_index_diff_exit_ok(out.code) {
+            return Err(AppError::Git {
+                code: out.code,
+                stderr: out.full_failure_text(),
+            });
+        }
+        Ok(out.stdout)
+    }
+    .await;
+    let _ = tokio::task::spawn_blocking(move || dir.close()).await;
+    result
+}
+
+/// The hunks of one file's `git diff`, from its first `@@ ` line on: the header, which
+/// names the temp paths, never leaves Rust.
+fn whitespace_hunks(stdout: &[u8]) -> WhitespaceHunks {
+    let mut is_binary = false;
+    let mut offset = 0;
+    let mut start = None;
+    for line in stdout.split_inclusive(|&b| b == b'\n') {
+        if line.starts_with(b"@@ ") {
+            start = Some(offset);
+            break;
+        }
+        let text = line.trim_ascii_end();
+        if text.starts_with(b"Binary files ") && text.ends_with(b" differ") {
+            is_binary = true;
+        }
+        offset += line.len();
+    }
+    let hunks = match start {
+        Some(at) if !is_binary => String::from_utf8_lossy(&stdout[at..]).into_owned(),
+        _ => String::new(),
+    };
+    WhitespaceHunks { hunks, is_binary }
+}
 
 fn is_full_sha(sha: &str) -> bool {
     matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit())
@@ -1743,10 +1873,15 @@ mod tests {
         }
     }
 
-    async fn git(repo: &str, args: &[&str]) -> String {
-        let out = run_git_raw(Some(repo), args, TEST_GIT_HANG_GUARD)
+    /// A test git run in `dir` on the hang guard, whatever its exit code.
+    async fn git_run(dir: &str, args: &[&str]) -> crate::git::runner::GitOutput {
+        run_git_raw(Some(dir), args, TEST_GIT_HANG_GUARD)
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    async fn git(repo: &str, args: &[&str]) -> String {
+        let out = git_run(repo, args).await;
         assert_eq!(out.code, 0, "git {args:?}: {}", out.stderr);
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
@@ -2189,5 +2324,206 @@ mod tests {
         .unwrap()
         .unwrap();
         println!("live github #84 head src/style.css = {:?} B", read.size);
+    }
+
+    // ── The local `-w` diff ──────────────────────────────────────────────────────
+
+    fn b64(bytes: &[u8]) -> Option<String> {
+        Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    async fn ws_diff(old: Option<&[u8]>, new: Option<&[u8]>) -> WhitespaceHunks {
+        git_diff_bytes_ignoring_whitespace(old.and_then(b64), new.and_then(b64))
+            .await
+            .unwrap()
+    }
+
+    /// The header git prints (temp paths included) never reaches `hunks`.
+    fn assert_hunks_only(hunks: &str) {
+        assert!(!hunks.contains(WHITESPACE_DIFF_PREFIX), "{hunks}");
+        for line in hunks.lines() {
+            assert!(
+                !line.starts_with("diff --git")
+                    && !line.starts_with("--- ")
+                    && !line.starts_with("+++ ")
+                    && !line.starts_with("Binary files "),
+                "{hunks}"
+            );
+        }
+        if !hunks.is_empty() {
+            assert!(hunks.starts_with("@@ "), "{hunks}");
+        }
+    }
+
+    fn hunk_count(hunks: &str) -> usize {
+        hunks.lines().filter(|l| l.starts_with("@@ ")).count()
+    }
+
+    /// Twenty lines, `c` at index 2 and `d` at index 17: far enough apart that a change
+    /// at each is its own hunk.
+    fn twenty(c: &str, d: &str) -> Vec<u8> {
+        let mut lines: Vec<String> = (0..20).map(|i| format!("line {i}")).collect();
+        lines[2] = c.into();
+        lines[17] = d.into();
+        format!("{}\n", lines.join("\n")).into_bytes()
+    }
+
+    /// A unique temp prefix per test, so "the dir is gone" reads no other run's dirs.
+    fn test_prefix(name: &str) -> String {
+        format!("gd-pr-ws-test-{}-{name}-", std::process::id())
+    }
+
+    fn leftovers(prefix: &str) -> Vec<String> {
+        std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(prefix))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn whitespace_diffs_keep_only_the_hunks_that_change_content() {
+        let indented = ws_diff(
+            Some(b"fn a() {\n  body();\n}\n"),
+            Some(b"fn a() {\n    body();\n}\n"),
+        )
+        .await;
+        assert_eq!(indented.hunks, "");
+        assert!(!indented.is_binary);
+
+        let mixed = ws_diff(
+            Some(&twenty("  keep", "old text")),
+            Some(&twenty("        keep", "new text")),
+        )
+        .await;
+        assert_hunks_only(&mixed.hunks);
+        assert_eq!(hunk_count(&mixed.hunks), 1, "{}", mixed.hunks);
+        assert!(mixed.hunks.contains("\n-old text\n"), "{}", mixed.hunks);
+        assert!(mixed.hunks.contains("\n+new text\n"), "{}", mixed.hunks);
+        assert!(!mixed.hunks.contains("keep"), "{}", mixed.hunks);
+
+        let added = ws_diff(None, Some(b"one\ntwo\n")).await;
+        assert_hunks_only(&added.hunks);
+        assert_eq!(added.hunks, "@@ -0,0 +1,2 @@\n+one\n+two\n");
+
+        let removed = ws_diff(Some(b"one\n"), None).await;
+        assert_eq!(removed.hunks, "@@ -1 +0,0 @@\n-one\n");
+
+        let endings = ws_diff(Some(b"a\r\nb\r\n"), Some(b"a\nb\n")).await;
+        assert_eq!(endings.hunks, "");
+        assert!(!endings.is_binary);
+
+        let same = ws_diff(Some(b"x\n"), Some(b"x\n")).await;
+        assert_eq!(same.hunks, "");
+    }
+
+    #[tokio::test]
+    async fn whitespace_diffs_report_binary_pairs_and_survive_non_utf8_bytes() {
+        let binary = ws_diff(Some(b"a\0b\n"), Some(b"a\0c\n")).await;
+        assert!(binary.is_binary);
+        assert_eq!(binary.hunks, "");
+
+        let latin = ws_diff(Some(b"\xff\xfe a\n"), Some(b"\xff\xfe b\n")).await;
+        assert!(!latin.is_binary);
+        assert_hunks_only(&latin.hunks);
+        assert_eq!(hunk_count(&latin.hunks), 1, "{}", latin.hunks);
+        assert!(latin.hunks.contains(char::REPLACEMENT_CHARACTER));
+    }
+
+    #[tokio::test]
+    async fn whitespace_diffs_refuse_bad_sides_by_kind() {
+        let over = vec![b'x'; WHITESPACE_SIDE_MAX_BYTES + 1];
+        let cases: [(Option<String>, Option<String>); 4] = [
+            (None, None),
+            (Some("not base64!".into()), None),
+            (None, Some("QUJD=x".into())),
+            (b64(&over), Some(String::new())),
+        ];
+        for (old, new) in cases {
+            let label = format!("{:?}", (old.as_deref().map(str::len), new.as_deref()));
+            let refused = git_diff_bytes_ignoring_whitespace(old, new).await;
+            assert!(
+                matches!(refused, Err(AppError::InvalidArgument(_))),
+                "{label}: {refused:?}"
+            );
+        }
+        // The ceiling itself is accepted, and an empty side is an empty file.
+        let at_cap = vec![b'x'; WHITESPACE_SIDE_MAX_BYTES];
+        let (old, new) = whitespace_sides(b64(&at_cap).as_deref(), Some("")).unwrap();
+        assert_eq!((old.len(), new.len()), (WHITESPACE_SIDE_MAX_BYTES, 0));
+    }
+
+    /// Without `-w` the same re-indent pair has hunks: the flag, not the fixture, empties it.
+    #[tokio::test]
+    async fn the_same_pair_without_ignore_whitespace_has_hunks() {
+        let (old, new) = (b"fn a() {\n  body();\n}\n", b"fn a() {\n    body();\n}\n");
+        // The product's `-w` run leaves nothing behind on success.
+        let prefix = test_prefix("plain");
+        let ignoring = with_ignore_whitespace(
+            &["diff", "--no-ext-diff", "--no-index", "--no-color"],
+            Some(true),
+        );
+        let stdout = diff_written_pair(&prefix, &ignoring, old.to_vec(), new.to_vec())
+            .await
+            .unwrap();
+        assert_eq!(whitespace_hunks(&stdout).hunks, "");
+        assert_eq!(leftovers(&prefix), Vec::<String>::new());
+
+        let dir = crate::agent_sandbox::private_temp_dir(&test_prefix("plain-run")).unwrap();
+        std::fs::write(dir.path().join("old"), old).unwrap();
+        std::fs::write(dir.path().join("new"), new).unwrap();
+        let mut args =
+            with_ignore_whitespace(&["diff", "--no-ext-diff", "--no-index", "--no-color"], None);
+        args.extend(["--", "old", "new"]);
+        let out = git_run(&dir.path().to_string_lossy(), &args).await;
+        assert_eq!(out.code, 1, "{}", out.stderr);
+        let plain = whitespace_hunks(&out.stdout);
+        assert_hunks_only(&plain.hunks);
+        assert_eq!(hunk_count(&plain.hunks), 1, "{}", plain.hunks);
+        assert!(plain.hunks.contains("\n-  body();\n+    body();\n"));
+        dir.close().unwrap();
+    }
+
+    #[test]
+    fn a_no_index_diff_passes_only_its_two_exit_codes() {
+        for (code, ok) in [(0, true), (1, true), (2, false), (128, false), (-1, false)] {
+            assert_eq!(no_index_diff_exit_ok(code), ok, "exit {code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_temp_dir_is_gone_after_a_git_failure() {
+        let prefix = test_prefix("failed");
+        let failed = diff_written_pair(
+            &prefix,
+            &["diff", "--no-ext-diff", "--no-index", "--no-such-option"],
+            b"a\n".to_vec(),
+            b"b\n".to_vec(),
+        )
+        .await;
+        assert!(
+            matches!(failed, Err(AppError::Git { code, .. }) if code > 1),
+            "{failed:?}"
+        );
+        assert_eq!(leftovers(&prefix), Vec::<String>::new());
+    }
+
+    #[test]
+    fn whitespace_hunks_cut_the_header_at_the_first_hunk() {
+        let out = b"diff --git a/x b/y\nindex 1..2 100644\n--- a/x\n+++ b/y\n@@ -1 +1 @@\n-a\n+b\n@@ -9 +9 @@\n-c\n+d\n";
+        let parsed = whitespace_hunks(out);
+        assert_eq!(parsed.hunks, "@@ -1 +1 @@\n-a\n+b\n@@ -9 +9 @@\n-c\n+d\n");
+        assert!(!parsed.is_binary);
+        let binary = whitespace_hunks(
+            b"diff --git a/x b/y\nindex 1..2 100644\r\nBinary files a/x and b/y differ\r\n",
+        );
+        assert!(binary.is_binary);
+        assert_eq!(binary.hunks, "");
+        let empty = whitespace_hunks(b"");
+        assert_eq!((empty.hunks.as_str(), empty.is_binary), ("", false));
+        // A content line that merely looks like a binary verdict is not one.
+        let content = whitespace_hunks(b"@@ -1 +1 @@\n-Binary files a and b differ\n+x\n");
+        assert!(!content.is_binary);
     }
 }

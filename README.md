@@ -142,8 +142,9 @@ unstaged changes (in your working copy or an agent session's) opens in its
 default program (a file your system would run instead is refused), or shows
 in Explorer, right from its diff; for a deleted file, Explorer opens the
 nearest folder that still exists.
-Hide whitespace changes in any local diff to read a re-indented file by the
-lines whose content changed.
+Hide whitespace changes in your working-tree, commit, file-history, compare,
+stash and agent-session diffs, and in pull request diffs on GitHub, GitLab and
+Bitbucket, to read a re-indented file by the lines whose content changed.
 Filter the changes list by path or category, and read a file's `+added -deleted`
 line counts without opening it; a binary file that was only renamed or had its
 mode changed says so when Git can confirm its content is unchanged.

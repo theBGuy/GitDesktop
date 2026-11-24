@@ -440,6 +440,7 @@ pub fn run() {
             forge::pr_content::forge_pr_content_revs,
             forge::pr_content::forge_commit_first_parent,
             forge::pr_content::forge_file_at_sha,
+            forge::pr_content::git_diff_bytes_ignoring_whitespace,
             forge::forge_commit_comments,
             forge::forge_commit_comment_create,
             forge::forge_commit_comment_edit,

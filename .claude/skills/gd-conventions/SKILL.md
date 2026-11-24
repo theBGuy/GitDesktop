@@ -694,10 +694,11 @@ reference).
   its scroller ref, the effective mode, the path and the built diff; an expand of
   the same diff (Show full diff) calls the hook's `keepLine` before it flips, so
   the line read before the press is restored after the browser re-lays the rows.
-  Two gaps remain: the staging viewer's Show full diff doesn't keep the line
-  (only a focused press moves focus to the first revealed hunk), and
-  `GitDiffView` hosts without a scroller (agent transcript inline diffs, the
-  conflict view) keep it on neither a switch nor an expand.
+  One gap remains: the staging viewer's Show full diff doesn't keep the line
+  (only a focused press moves focus to the first revealed hunk). The agent
+  session column keeps its place across a switch through `useColumnLayoutAnchor`
+  (`src/features/sessions/use-column-layout-anchor.ts`), which anchors on the
+  open step diffs (`data-transcript-diff`) around the column's top edge.
 - A file rail's filter rides `DetailRail`'s `filter` prop
   (`src/components/detail-rail.tsx`), built only by `useFileListFilter`
   (`src/components/use-file-list-filter.ts`), and renders its field in the
@@ -776,6 +777,12 @@ Main-side panels (children of RepositoryView's `<main>`, a display:block host) r
 with `flex h-full min-h-0 flex-col` — `flex-1` is inert there, and the panel's
 natural height document-scrolls the whole tab, chrome included (#261's
 InsightsBoard was the outlier; every other main-side panel already complies).
+An element or component root that takes its parent's whole height (`h-full`)
+beside in-flow siblings in a flex column carries `min-h-0` (`flex-1 min-h-0` to
+take the rest), or sits alone in a `min-h-0 flex-1` box: without it the item
+can't shrink below its content, so tall content pushes it past the column and
+the app root's `overflow-clip` cuts it off with no scrollbar; the ratchet is
+`scripts/flex-column-rigid-fill.test.mjs`, whose header lists what it can't see.
 Tailwind animation overrides need the `!` important modifier — tw-merge doesn't
 dedupe the animate group, so `animate-none` vs an existing `animate-in` is a
 build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
@@ -1396,7 +1403,13 @@ one grep away on the named symbol. Grows via Conventions-sync.
   new unguarded writer. The probe also counts an open Thread edit
   (`data-thread-editing` on the Thread's root) inside a row a flip may drop
   (`data-whitespace-row`, CommitComments' hidden list), so a new host whose
-  rows a flip replaces marks them the same way.
+  rows a flip replaces marks them the same way. The two forge-patch hosts (a
+  pull request's Files pane and commit drill-in) take the mode through
+  `useForgeWhitespaceDiff` (`src/features/diff/use-forge-whitespace-diff.ts`):
+  a proven `-w` diff of the two file versions, stamped with the same marks,
+  never `readViewDiff`. Their anchor and position math reads the forge section,
+  and the probe counts an in-anchor editor only under
+  `[data-diff-anchor="whitespace"]`.
 - **Queries package boundary** — import the git query layer through the
   `@/lib/git/queries` barrel; `queries/internal.ts` is package-private. Modules
   inside the package may import it but never re-export it, since `export *`
@@ -1767,7 +1780,14 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `lineComposerOpen()` and the upgrade hold; a new one marks its open state with
   `data-diff-editor`. It counts a `data-diff-editor` or `data-thread-editing`
   mark only inside a `[data-diff-anchor]` row; the line composer matches by its
-  own `[data-diff-line-widget]` wrapper.
+  own `[data-diff-line-widget]` wrapper. The pull request diff keys on the
+  head its details name (`prDiffOptions`' last axis), and `usePrDiff` reports
+  `placeholderOf`, so a host tells an older head of the same pull request from
+  another record's diff. `refreshOpenPr` (`queries/prs.ts`) is the one re-read
+  that orders the details before the head-keyed children, which it addresses
+  by the exact key of the head the details then name, never by prefix. A forge
+  write anchored by LINE holds its submit while the painted diff is an older
+  head's (`headPending` on `ReviewComposer`), the editor staying mounted.
 
 ## Rust / Tauri conventions
 

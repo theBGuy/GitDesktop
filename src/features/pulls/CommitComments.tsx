@@ -258,6 +258,8 @@ function subscribeBodyMutations(onChange: () => void): () => void {
       "data-diff-line-widget",
       "data-whitespace-row",
       "data-thread-editing",
+      "data-diff-anchor",
+      "data-diff-editor",
     ],
   });
   return () => observer.disconnect();
@@ -388,6 +390,7 @@ export function CommitComments({
   enabled = true,
   diffReady = true,
   drawnDiff,
+  whitespaceShownDiff,
 }: {
   repoPath: string;
   sha: string;
@@ -427,6 +430,10 @@ export function CommitComments({
    *  exactly `sha` + `selectedPath`, or null while that isn't known. Omitted =
    *  the pane draws `diffSections`' section. */
   drawnDiff?: FileDiff | null;
+  /** The selected file's whitespace-shown diff, on a host that already holds
+   *  it (a forge patch's section): replaces the local read, which fails for a
+   *  commit this clone lacks. Omitted = read it locally. */
+  whitespaceShownDiff?: FileDiff;
 }) {
   const comments = useCommitComments(
     repoPath,
@@ -601,10 +608,10 @@ export function CommitComments({
     repoPath,
     sha,
     selectedPath ?? null,
-    needsPlain,
+    needsPlain && whitespaceShownDiff === undefined,
   );
-  const plainData = plainDiff.data;
-  const plainFailed = plainDiff.isError;
+  const plainData = whitespaceShownDiff ?? plainDiff.data;
+  const plainFailed = whitespaceShownDiff === undefined && plainDiff.isError;
   const shownLines = useMemo(() => linesShownByDefault(plainData), [plainData]);
   // The note on a listed comment of the open file; null = no note yet.
   // A resolved line here is one the drawn diff lacks, so it needs no forge patch.
@@ -830,12 +837,15 @@ export function CommitComments({
   return (
     <div
       ref={paneRef}
-      className="flex max-h-[45%] min-h-0 shrink-0 flex-col border-t"
-      // Capped at the same 45% as `max-h`, live, so a window shrink mid-load
-      // can't let the floor outgrow the pane's cap.
+      // The 16rem arm keeps a line of the list plus the composer inside the
+      // pane on a short window, where 45% is less than the composer alone;
+      // the host's scroll region then reaches it.
+      className="flex max-h-[max(45%,16rem)] min-h-0 shrink-0 flex-col border-t"
+      // Capped like `max-h`, live, so a window shrink mid-load can't let the
+      // floor outgrow the pane's cap.
       style={
         listLoading && loadingFloor !== null
-          ? { minHeight: `min(${loadingFloor}px, 45%)` }
+          ? { minHeight: `min(${loadingFloor}px, max(45%, 16rem))` }
           : undefined
       }
     >
@@ -844,7 +854,7 @@ export function CommitComments({
         tabIndex={-1}
         role="group"
         aria-label="Commit comments"
-        className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3"
+        className="min-h-10 flex-1 space-y-4 overflow-y-auto p-3"
         aria-busy={held || undefined}
       >
         <DegradedListNotice

@@ -44,7 +44,7 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label:
-      "Hide whitespace changes in any local diff, so re-indented code shows only the lines whose content changed",
+      "Hide whitespace changes in working-tree, commit, file-history, compare, stash and pull request diffs, so re-indented code shows only the lines whose content changed",
   },
   {
     group: "Diffs & staging",

@@ -223,3 +223,159 @@ test("the EOF rule: a hunk starting past either file's end is refused, one start
   assert.equal(hunksMatchContent(`@@ -${huge},0 +${huge},0 @@\n`, T, T), false);
   assert.ok(Date.now() - started < 1000, "refused without walking to the start");
 });
+
+// --- ignoreWhitespace: the guard over a `git diff -w` text -----------------
+//
+// Every positive fixture below is real output of
+//   git diff --no-ext-diff --no-index --no-color -w -- old new
+// (git 2.51.1, no global or system config; diff.suppressBlankEmpty only where
+// the case says), from its first "@@" line on. D24's final-newline probe, same
+// run, as JSON strings:
+//   "x\n" vs "x"          -> nothing printed, exit 0
+//   "x \n" vs "x"         -> nothing printed, exit 0
+//   "a\nb\nc\n" vs "A\nb\nc" -> "@@ -1,3 +1,3 @@\n-a\n+A\n b\n c\n\\ No newline at end of file\n"
+//   "a\nb\nc" vs "A\nb\nc\n" -> "@@ -1,3 +1,3 @@\n-a\n+A\n b\n c\n"
+//   "a\nb" vs "a\nB\n"     -> "@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+B\n"
+// So a final newline is whitespace to -w: a context line's marker speaks for
+// the new side only, and last lines outside every hunk may differ in it; a "-"
+// or "+" line's marker still speaks for its own side.
+const WS = { ignoreWhitespace: true };
+const CAPTURED = {
+  reindentEdit: [
+    "@@ -11,7 +11,7 @@ function g() {\n   line 8\n   line 9\n   line 10\n-  line 11\n+  line ELEVEN\n   line 12\n   line 13\n   line 14\n",
+    "function f() {\n  line 1\n  line 2\n  line 3\n  line 4\n  line 5\n  line 6\n}\nfunction g() {\n  line 7\n  line 8\n  line 9\n  line 10\n  line 11\n  line 12\n  line 13\n  line 14\n}\n",
+    "function f() {\n    line 1\n    line 2\n    line 3\n    line 4\n    line 5\n    line 6\n}\nfunction g() {\n  line 7\n  line 8\n  line 9\n  line 10\n  line ELEVEN\n  line 12\n  line 13\n  line 14\n}\n",
+  ],
+  crlfVsLf: [
+    "@@ -1,7 +1,7 @@\n a\r\n b\r\n c\r\n-d\n+D\r\n e\r\n f\r\n g\r\n",
+    "a\nb\nc\nd\ne\nf\ng\nh\n",
+    "a\r\nb\r\nc\r\nD\r\ne\r\nf\r\ng\r\nh\r\n",
+  ],
+  wsInGap: [
+    "@@ -1,6 +1,6 @@\n line 1\n line 2\n-line 3\n+line three\n line 4\n line 5\n line 6\n@@ -24,7 +24,7 @@ line 23\n line 24\n line 25\n line 26\n-line 27\n+line twenty-seven\n line 28\n line 29\n line 30\n",
+    "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\n",
+    "line 1\nline 2\nline three\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\n   line 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline twenty-seven\nline 28\nline 29\nline 30\n",
+  ],
+  // diff.suppressBlankEmpty = true: blank context lines lose their space.
+  blankContext: [
+    "@@ -1,6 +1,6 @@\n a\n\n-b\n+B\n c\n\n d\n",
+    "a\n\nb\nc\n\nd\n",
+    "a\n\nB\nc\n\nd\n",
+  ],
+  eofNewline: [
+    "@@ -1,3 +1,3 @@\n-a\n+A\n b\n c\n\\ No newline at end of file\n",
+    "a\nb\nc\n",
+    "A\nb\nc",
+  ],
+  eofSpaceNewline: [
+    "@@ -1,3 +1,3 @@\n-a\n+A\n b\n c\n\\ No newline at end of file\n",
+    "a\nb\nc \n",
+    "A\nb\nc",
+  ],
+  eofNewlineOutside: [
+    "@@ -1,4 +1,4 @@\n-a\n+A\n b\n c\n d\n",
+    "a\nb\nc\nd\ne\nf\ng\nh\n",
+    "A\nb\nc\nd\ne\nf\ng\nh",
+  ],
+  eofOldNoNewline: [
+    "@@ -1,3 +1,3 @@\n-a\n+A\n b\n c\n",
+    "a\nb\nc",
+    "A\nb\nc\n",
+  ],
+  minusMarker: [
+    "@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+B\n",
+    "a\nb",
+    "a\nB\n",
+  ],
+  // A block duplicated above itself and re-indented: the -w hunk draws
+  // new-side lines no plain hunk holds.
+  duplicateReindent: [
+    "@@ -1,6 +1,8 @@\n start\n+if (z) {\n   if (a) {\n     b();\n     c();\n   }\n+}\n end\n",
+    "start\nif (a) {\n  b();\n  c();\n}\nend\n",
+    "start\nif (z) {\n  if (a) {\n    b();\n    c();\n  }\n}\nend\n",
+  ],
+};
+
+test("ignoreWhitespace: true for real -w texts, which exact mode refuses where -w did anything", () => {
+  for (const [name, [diff, oldText, newText]] of Object.entries(CAPTURED))
+    assert.equal(hunksMatchContent(diff, oldText, newText, WS), true, name);
+  for (const name of [
+    "reindentEdit",
+    "eofNewline",
+    "eofSpaceNewline",
+    "eofNewlineOutside",
+    "eofOldNoNewline",
+    "duplicateReindent",
+  ]) {
+    const [diff, oldText, newText] = CAPTURED[name];
+    assert.equal(
+      hunksMatchContent(diff, oldText, newText),
+      false,
+      "exact: " + name,
+    );
+  }
+});
+
+test("ignoreWhitespace: false for every non-whitespace mismatch", () => {
+  const [gapDiff, gapOld, gapNew] = CAPTURED.wsInGap;
+  const [riDiff, riOld, riNew] = CAPTURED.reindentEdit;
+  const [eofDiff, eofOld] = CAPTURED.eofNewline;
+  const cases = [
+    [
+      "a non-whitespace difference in a gap",
+      gapDiff,
+      gapOld,
+      gapNew.replace("   line 15\n", "line fifteen\n"),
+    ],
+    [
+      "a context line differing in a letter, old side",
+      riDiff,
+      riOld.replace("  line 9\n", "  line 9x\n"),
+      riNew,
+    ],
+    [
+      "a context line differing in a letter, new side",
+      riDiff,
+      riOld,
+      riNew.replace("  line 9\n", "  line 9x\n"),
+    ],
+    [
+      "a hunk offset off by one",
+      riDiff.replace("@@ -11,7 +11,7 @@", "@@ -12,7 +12,7 @@"),
+      riOld,
+      riNew,
+    ],
+    [
+      "unequal line counts outside the hunks",
+      gapDiff,
+      gapOld,
+      gapNew + "line 31\n",
+    ],
+    [
+      "a hunk starting past the file's end",
+      "@@ -40,1 +40,1 @@\n-x\n+y\n",
+      "x\n",
+      "y\n",
+    ],
+    ["a text with no hunk", "", "x\n", "x"],
+    [
+      "a - marker the old file contradicts",
+      CAPTURED.minusMarker[0],
+      "a\nb\n",
+      "a\nB\n",
+    ],
+    ["a context marker the new file contradicts", eofDiff, eofOld, "A\nb\nc\n"],
+  ];
+  for (const [name, diff, oldText, newText] of cases)
+    assert.equal(hunksMatchContent(diff, oldText, newText, WS), false, name);
+});
+
+test("ignoreWhitespace absent or false is exact mode", () => {
+  const [diff, oldText, newText] = CAPTURED.reindentEdit;
+  assert.equal(hunksMatchContent(diff, oldText, newText, {}), false);
+  assert.equal(
+    hunksMatchContent(diff, oldText, newText, { ignoreWhitespace: false }),
+    false,
+  );
+  assert.equal(hunksMatchContent(EDIT, OLD, NEW, WS), true);
+});

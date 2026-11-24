@@ -1053,12 +1053,13 @@ describe("Pull request Files tab drawn by the real diff", () => {
   });
   const expands = () =>
     document.querySelectorAll<HTMLElement>('[title^="Expand"]');
-  /** Every drawing of `text`, and how many sit in an inline diff anchor. */
-  const drawn = (text: string) => {
+  /** Every drawing of `text`, and how many sit in an inline diff anchor
+   *  carrying `mark`. */
+  const drawn = (text: string, mark: "whitespace" | "layout") => {
     const all = screen.queryAllByText(text);
     return {
       count: all.length,
-      inline: all.filter((el) => el.closest('[data-diff-anchor="layout"]'))
+      inline: all.filter((el) => el.closest(`[data-diff-anchor="${mark}"]`))
         .length,
     };
   };
@@ -1100,14 +1101,20 @@ describe("Pull request Files tab drawn by the real diff", () => {
     await waitFor(() => expect(expands().length).toBeGreaterThan(0), {
       timeout: 10_000,
     });
-    expect(drawn("On a gap line").count).toBe(0);
-    expect(drawn("Draft on a gap line").count).toBe(0);
+    expect(drawn("On a gap line", "whitespace").count).toBe(0);
+    expect(drawn("Draft on a gap line", "whitespace").count).toBe(0);
     for (let i = 0; i < 20 && expands().length > 0; i++)
       await user.click(expands()[0]);
     await waitFor(() =>
-      expect(drawn("On a gap line")).toEqual({ count: 1, inline: 1 }),
+      expect(drawn("On a gap line", "whitespace")).toEqual({
+        count: 1,
+        inline: 1,
+      }),
     );
-    expect(drawn("Draft on a gap line")).toEqual({ count: 1, inline: 1 });
+    expect(drawn("Draft on a gap line", "whitespace")).toEqual({
+      count: 1,
+      inline: 1,
+    });
   }, 30_000);
 
   it("AC-T2: a binary-to-link typechange draws its link half, the thread once inline, and the composer there", async () => {
@@ -1129,7 +1136,7 @@ describe("Pull request Files tab drawn by the real diff", () => {
       document.querySelector('span[data-line-new-num="1"]');
     await waitFor(() => expect(linkLine()).not.toBeNull());
     await waitFor(() =>
-      expect(drawn("On the link")).toEqual({ count: 1, inline: 1 }),
+      expect(drawn("On the link", "layout")).toEqual({ count: 1, inline: 1 }),
     );
     const num = linkLine()?.closest(".diff-line-num") as HTMLElement;
     fireEvent.mouseOver(num);

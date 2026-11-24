@@ -4,6 +4,7 @@ import {
   type QueryClient,
   type QueryKey,
   queryOptions,
+  type UseQueryResult,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -30,7 +31,7 @@ import type {
   ReviewThreadOut,
   ReviewThreadsOut,
 } from "../types";
-import { remoteListFilterKey } from "../types";
+import { prHeadSha, remoteListFilterKey } from "../types";
 import {
   invalidateRepoAfterWrite,
   keepPreviousDataForKeyAxes,
@@ -483,9 +484,16 @@ function overlayLandedMerge(
   return lagsLandedMerge(details) ? { ...details, state: "MERGED" } : details;
 }
 
-export const prDiffOptions = (repo: string, number: number, lens: RemoteLens) =>
+/** A pull request's diff, filed under the head its details named. The forge
+ *  serves its current head, so `head` files the answer and never asks for it. */
+export const prDiffOptions = (
+  repo: string,
+  number: number,
+  lens: RemoteLens,
+  head: string | null,
+) =>
   queryOptions({
-    queryKey: ["repo", repo, "pr", lens, number, "diff"] as const,
+    queryKey: ["repo", repo, "pr", lens, number, "diff", head] as const,
     queryFn: () => api.forgePrDiff(repo, number, lens),
     staleTime: 30_000,
   });
@@ -707,18 +715,98 @@ export function usePrBaseDivergence(
   };
 }
 
+/** What `data` is when it is not this key's own answer: this pull request's
+ *  diff read at a head the details no longer name, or another record's. */
+export type PrDiffPlaceholder = "none" | "olderHead" | "otherRecord";
+
+/** The head axis while the details have not answered: no forge sha can equal
+ *  it, and `null` is a head-less merge request's real key. */
+const PR_DIFF_HEAD_UNANSWERED = "(unanswered)";
+
+interface OwnPrDiff {
+  repo: string;
+  lens: RemoteLens;
+  number: number | null;
+  text: string;
+}
+
+const sameOwnPrDiff = (a: OwnPrDiff | null, b: OwnPrDiff) =>
+  a !== null &&
+  a.repo === b.repo &&
+  a.lens === b.lens &&
+  a.number === b.number &&
+  a.text === b.text;
+
+/** `head` undefined: the details have not named one yet, and the read waits. */
 export function usePrDiff(
   repo: string,
   number: number | null,
   lens: RemoteLens,
-) {
-  return useQuery({
-    ...prDiffOptions(repo, number ?? 0, lens),
-    enabled: number !== null,
-    // Lens axis mirrors usePrDetails; the number axis stays placeholder-served so
-    // RemotePrView's diffStale keeps gating the Files tab during a PR switch.
+  head: string | null | undefined,
+): UseQueryResult<string> & { placeholderOf: PrDiffPlaceholder } {
+  const queryClient = useQueryClient();
+  const query = useQuery({
+    ...prDiffOptions(
+      repo,
+      number ?? 0,
+      lens,
+      head === undefined ? PR_DIFF_HEAD_UNANSWERED : head,
+    ),
+    enabled: number !== null && head !== undefined,
+    // Lens axis mirrors usePrDetails; the number AND head axes stay
+    // placeholder-served, and `placeholderOf` tells a head move from a PR switch.
     placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
   });
+  const ownText = query.isPlaceholderData ? undefined : query.data;
+  const current: OwnPrDiff | null =
+    ownText === undefined ? null : { repo, lens, number, text: ownText };
+  // The live query's last own answer, adjusted during render.
+  const [lastOwn, setLastOwn] = useState<OwnPrDiff | null>(null);
+  if (current && !sameOwnPrDiff(lastOwn, current)) setLastOwn(current);
+  const own = current ?? lastOwn;
+  const sameRecord =
+    own !== null &&
+    own.repo === repo &&
+    own.lens === lens &&
+    own.number === number;
+  // A failed first read of a new head keeps this pull request's last own diff,
+  // so a transient failure never swaps the pane for its no-data arm.
+  const retained =
+    query.data === undefined &&
+    query.isError &&
+    !query.isFetching &&
+    sameRecord;
+  let placeholderOf: PrDiffPlaceholder = "none";
+  if (retained) placeholderOf = "olderHead";
+  else if (query.isPlaceholderData)
+    placeholderOf =
+      sameRecord && own.text === query.data ? "olderHead" : "otherRecord";
+  const holdsOwn = current !== null;
+  // Once this head's own answer landed, the pull request's diff entries of other
+  // heads go: dead weight, or another head's text after a repo-wide refetch. A
+  // cold load in flight is spared, since a removal would reject its waiter.
+  useEffect(() => {
+    if (!holdsOwn || number === null || head === undefined) return;
+    queryClient.removeQueries({
+      queryKey: [...prDetailsOptions(repo, number, lens).queryKey, "diff"],
+      predicate: (q) =>
+        q.queryKey[6] !== head &&
+        q.getObserversCount() === 0 &&
+        !(q.state.fetchStatus !== "idle" && q.state.data === undefined),
+    });
+  }, [queryClient, repo, lens, number, head, holdsOwn]);
+  const data = retained ? own?.text : query.data;
+  const isPlaceholderData = retained || query.isPlaceholderData;
+  // A view over the live result, so its tracked-prop reads stay lazy (a spread
+  // would read and track every field, `promise` included).
+  return new Proxy(query, {
+    get: (target, key) => {
+      if (key === "data") return data;
+      if (key === "isPlaceholderData") return isPlaceholderData;
+      if (key === "placeholderOf") return placeholderOf;
+      return Reflect.get(target, key);
+    },
+  }) as UseQueryResult<string> & { placeholderOf: PrDiffPlaceholder };
 }
 
 // File:line-anchored review threads (Copilot/CodeRabbit/human line comments); the
@@ -1199,11 +1287,87 @@ export function usePrefetchPr(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useCallback(
     (number: number) => {
-      queryClient.prefetchQuery(prDetailsOptions(repo, number, lens));
-      queryClient.prefetchQuery(prDiffOptions(repo, number, lens));
+      // The diff waits for the head its details name; best-effort throughout.
+      queryClient
+        .fetchQuery(prDetailsOptions(repo, number, lens))
+        .then((pr) =>
+          queryClient.prefetchQuery(
+            prDiffOptions(repo, number, lens, prHeadSha(pr) ?? null),
+          ),
+        )
+        .catch(() => undefined);
     },
     [queryClient, repo, lens],
   );
+}
+
+/** The children of a pull request's subtree a list Refresh leaves alone. */
+export const OPEN_PR_REFRESH_SKIPS: ReadonlySet<string> = new Set([
+  "commit-diff",
+  "review-drafts",
+  "resolve-worktree",
+]);
+
+/** Its head-keyed children: never re-read by prefix, only by the exact key of
+ *  the head the details name once they have answered. */
+export const OPEN_PR_HEAD_KEYED: ReadonlySet<string> = new Set([
+  "diff",
+  "content-revs",
+]);
+
+/** Re-reads the open pull request by invalidation only: a cancel would reject a
+ *  cold load's waiter (an AI run awaiting the diff). The head-keyed reads wait
+ *  for the details, then address that head's exact keys: the diff observer is
+ *  still on the previous head's key until it re-renders, so a prefix would
+ *  refetch it and file the new head's text under the old head. */
+export async function refreshOpenPr(
+  queryClient: QueryClient,
+  repo: string,
+  lens: RemoteLens,
+  number: number,
+): Promise<void> {
+  const details = prDetailsOptions(repo, number, lens).queryKey;
+  const settled = queryClient
+    .invalidateQueries({ queryKey: details, exact: true })
+    .catch(() => undefined);
+  queryClient
+    .invalidateQueries({
+      queryKey: details,
+      predicate: (q) => {
+        const child = q.queryKey[5];
+        return (
+          q.queryKey.length > 5 &&
+          !(
+            typeof child === "string" &&
+            (OPEN_PR_REFRESH_SKIPS.has(child) || OPEN_PR_HEAD_KEYED.has(child))
+          )
+        );
+      },
+    })
+    .catch(() => undefined);
+  queryClient
+    .invalidateQueries({ queryKey: prBaseDivergencePrefix(repo, number) })
+    .catch(() => undefined);
+  await settled;
+  // Parked offline: no head was named, and the reconnect's refetch names it.
+  if (queryClient.getQueryState(details)?.fetchStatus === "paused") return;
+  const pr = queryClient.getQueryData(details);
+  if (pr === undefined) return;
+  const head = prHeadSha(pr) ?? null;
+  queryClient
+    .invalidateQueries({
+      queryKey: prDiffOptions(repo, number, lens, head).queryKey,
+      exact: true,
+    })
+    .catch(() => undefined);
+  // A head-less record has no revs entry: its read is disabled under "".
+  if (head !== null)
+    queryClient
+      .invalidateQueries({
+        queryKey: prContentRevsOptions(repo, number, lens, head).queryKey,
+        exact: true,
+      })
+      .catch(() => undefined);
 }
 
 /** {@link usePrReactions}'s query options. */
@@ -1466,3 +1630,34 @@ export const forgeFileAtShaOptions = (
   gcTime: FORGE_SHA_READ_GC_MS,
   retry: retryUnlessRefused,
 });
+
+/** The `-w` hunks of one file's two versions, as read for a forge-patch diff
+ *  (`sides`: each version's base64 as read, null where absent). Keyed on the
+ *  reads' identity, never the bytes; outside the `["repo", …]` subtree, since
+ *  a rev pair's diff never changes. A local git run, so it never parks. */
+export const prWhitespaceHunksOptions = (
+  reads: {
+    repo: string;
+    sourceKey: string;
+    oldRev: string | undefined;
+    oldPath: string;
+    newRev: string;
+    path: string;
+  },
+  sides: { old: string | null; new: string | null },
+) =>
+  queryOptions({
+    queryKey: [
+      "pr-whitespace-hunks",
+      reads.repo,
+      reads.sourceKey,
+      reads.oldRev ?? null,
+      reads.oldPath,
+      reads.newRev,
+      reads.path,
+    ] as const,
+    queryFn: () => api.gitDiffBytesIgnoringWhitespace(sides.old, sides.new),
+    staleTime: Infinity,
+    gcTime: FORGE_SHA_READ_GC_MS,
+    networkMode: "always",
+  });

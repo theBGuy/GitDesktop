@@ -124,6 +124,8 @@ const SITES = [
     noun: "diff",
     noticeNoun: "this diff",
     stale: "diff.isPlaceholderData",
+    // The step's kept answer: a whitespace flip's read paints the last one.
+    hasData: "loaded !== null",
     shell: "notice",
     // No arm-swap refocus: several steps' diffs can be open at once, so one
     // landing while focus sits on <body> would take focus it never held.
@@ -504,7 +506,7 @@ function scan(site) {
 /** The one `const shell = (content…) => (…)` helper, as its `(…)` span. */
 function shellSpan(site, masked, body) {
   const re =
-    /\bconst\s+shell\s*=\s*\(\s*content\s*(?::\s*ReactNode\s*)?\)\s*=>\s*\(/g;
+    /\bconst\s+shell\s*=\s*\(\s*content\s*(?::\s*ReactNode\s*)?(?:,\s*note\s*\??\s*(?::\s*ReactNode\s*)?)?\)\s*=>\s*\(/g;
   re.lastIndex = body.open;
   const found = [];
   for (
@@ -1095,6 +1097,27 @@ test("the transcript diff's notice sits above its scroller, which the host wraps
   );
 });
 
+test("shellSpan finds a shell with an optional note, and only a shell", () => {
+  const site = { file: "x.tsx", component: "X" };
+  const span = (code) => shellSpan(site, code, { open: 0, close: code.length });
+  const two =
+    "{ const shell = (content: ReactNode, note?: ReactNode) => (<div>{note}{content}</div>); }";
+  const found = span(two);
+  assert.equal(two.slice(found.from, found.to), "(<div>{note}{content}</div>)");
+  assert.ok(span("{ const shell = (content: ReactNode) => (<div />); }"));
+  assert.throws(
+    () => span("{ const shell = (body: ReactNode) => (<div />); }"),
+    /expected one `const shell = \(content\) => \(`/,
+  );
+  assert.throws(
+    () =>
+      span(
+        "{ const shell = (content: ReactNode, extra: number) => (<div />); }",
+      ),
+    /expected one `const shell = \(content\) => \(`/,
+  );
+});
+
 test("a TODO's untracked fallback opens only on a blame with nothing loaded", () => {
   const file = "src/features/code-todos/CodeTodoDetailView.tsx";
   const { raw, masked } = load(file);
@@ -1157,6 +1180,15 @@ const FILE_AT_REV_GATES = {
         "oldRev === undefined || !(oldQ.isPending && oldQ.errorUpdateCount === 0)",
       newSettled:
         "newRev === undefined || !(newQ.isPending && newQ.errorUpdateCount === 0)",
+    },
+  },
+  "src/features/diff/use-forge-whitespace-diff.ts": {
+    queries: ["oldQ", "newQ"],
+    decls: {
+      oldFirstRead:
+        'oldQ.isPending && oldQ.errorUpdateCount === 0 && oldQ.fetchStatus === "fetching"',
+      newFirstRead:
+        'newQ.isPending && newQ.errorUpdateCount === 0 && newQ.fetchStatus === "fetching"',
     },
   },
   "src/features/diff/ImageDiff.tsx": {

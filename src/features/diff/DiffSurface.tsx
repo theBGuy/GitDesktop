@@ -359,6 +359,7 @@ export function GitDiffView({
   rebuildsOnWhitespace,
   forgePatch,
   dataIsPlaceholder,
+  whitespaceHidden,
   lineKeeper,
 }: {
   filePath: string;
@@ -392,6 +393,9 @@ export function GitDiffView({
   /** `text` is the previous record's diff, painted while this one's loads:
    *  its build stays, whatever record `forgePatch.scope` names. */
   dataIsPlaceholder?: boolean;
+  /** `text` is a `-w` diff (the diff's `whitespaceHidden` mark): under
+   *  `forgePatch`, the hunk-match guard compares lines as `-w` does. */
+  whitespaceHidden?: boolean;
   /** Filled with the call that keeps the top visible line across a layout
    *  change above the rows in `scrollerRef` (see `useModeLineAnchor`). */
   lineKeeper?: { current: (() => void) | null };
@@ -418,6 +422,7 @@ export function GitDiffView({
           rebuildsOnWhitespace={rebuildsOnWhitespace}
           forgePatch={forgePatch}
           dataIsPlaceholder={dataIsPlaceholder}
+          whitespaceHidden={whitespaceHidden}
           lineKeeper={lineKeeper}
         />
       </DiffErrorBoundary>
@@ -605,6 +610,9 @@ export function useFileContent(
   // text), and whether `diffText` is a previous record's placeholder paint.
   scope: string | undefined = forgePatch?.scope,
   placeholder = false,
+  // `diffText` is a `-w` diff (its `whitespaceHidden` mark, deferred with
+  // the text): the guard compares lines as `-w` does.
+  whitespaceHidden = false,
 ): {
   content: { old: string; new: string } | null;
   pending: boolean;
@@ -680,7 +688,10 @@ export function useFileContent(
     covers(oldText, maxOldLine) &&
     // A forge's text isn't built from these files: content mode lays them
     // around its hunks only when the text is exactly their change.
-    (forgePatch === undefined || hunksMatchContent(diffText, oldText, newText));
+    (forgePatch === undefined ||
+      hunksMatchContent(diffText, oldText, newText, {
+        ignoreWhitespace: whitespaceHidden,
+      }));
   // A forge-patch host's build on screen: its record, path and text, and the
   // content it was built with (null: hunk-only), recorded from its first paint.
   const [shown, setShown] = useState<{
@@ -1352,6 +1363,7 @@ function RenderedDiff({
   rebuildsOnWhitespace = false,
   forgePatch,
   dataIsPlaceholder = false,
+  whitespaceHidden = false,
   lineKeeper,
 }: {
   filePath: string;
@@ -1367,6 +1379,7 @@ function RenderedDiff({
   rebuildsOnWhitespace?: boolean;
   forgePatch?: ForgePatch;
   dataIsPlaceholder?: boolean;
+  whitespaceHidden?: boolean;
   lineKeeper?: { current: (() => void) | null };
 }) {
   const settings = useSettings();
@@ -1401,6 +1414,7 @@ function RenderedDiff({
   // render pairs the old text with these values' old state.
   const deferredScope = useDeferredValue(forgePatch?.scope);
   const deferredPlaceholder = useDeferredValue(dataIsPlaceholder);
+  const deferredWhitespaceHidden = useDeferredValue(whitespaceHidden);
 
   // Reset on the DEFERRED path, not the urgent `filePath`: `blocked` derives
   // from `deferredText`, so an urgent reset would re-block the OUTGOING mega
@@ -1453,6 +1467,7 @@ function RenderedDiff({
     editorOpen,
     deferredScope,
     deferredPlaceholder,
+    deferredWhitespaceHidden,
   );
 
   const { shown, hidden, shortened } = useMemo(() => {
@@ -2397,6 +2412,7 @@ export function DiffContent({
   whitespaceControl = false,
   forgePatch,
   typechangeAnchors = false,
+  whitespaceNote,
 }: {
   filePath: string;
   /** Absent only when the source query has nothing to show; never an empty
@@ -2439,8 +2455,8 @@ export function DiffContent({
    *  the commit on Commits). undefined = local surface. See BinaryFileSummary. */
   anchorCommit?: string | null;
   /** Adds the whitespace section to the Diff options sheet and answers the
-   *  whitespace palette action. Only {@link DiffSurface} sets it, so the
-   *  remote PR hosts get neither. */
+   *  whitespace palette action: set by {@link DiffSurface} and by the
+   *  forge-patch hosts whose `data` comes through `useForgeWhitespaceDiff`. */
   whitespaceControl?: boolean;
   /** The diff text came from a forge (a pull request's patch), not from
    *  `contentRevs`: content mode builds only when the hunk-match guard
@@ -2451,6 +2467,9 @@ export function DiffContent({
    *  (hosts that draw no binary pane's comments elsewhere). Omitted = the half
    *  is read-only. */
   typechangeAnchors?: boolean;
+  /** One quiet line above a text diff (a forge-patch file that keeps its
+   *  whitespace changes, and why). Not a live region. */
+  whitespaceNote?: string;
 }) {
   // The pane measures itself: this surface mounts at widths from a full window
   // down to a rail-flanked column, and both the split gate and the toolbar's
@@ -3057,6 +3076,9 @@ export function DiffContent({
           {UNDECODABLE_NOTE_COPY[stagingSide]}
         </InfoNote>
       )}
+      {whitespaceNote !== undefined && (
+        <InfoNote className="shrink-0">{whitespaceNote}</InfoNote>
+      )}
       <div ref={scrollerCaptureRef} className="min-h-0 flex-1 overflow-auto">
         {previewOn && repoPath && previewRevs ? (
           // Passed the raw revs, not the truncation-stripped pair below:
@@ -3100,6 +3122,7 @@ export function DiffContent({
               }
               forgePatch={forgePatch}
               dataIsPlaceholder={dataIsPlaceholder}
+              whitespaceHidden={data.whitespaceHidden === true}
               lineAnchors={lineAnchors}
               lineWidget={lineWidget}
               forceUnified={narrowPane}

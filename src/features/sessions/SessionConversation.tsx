@@ -14,6 +14,7 @@ import { AgentNarration } from "./AgentNarration";
 import { AgentTranscript } from "./AgentTranscript";
 import { SessionComposer, type SessionComposerHandle } from "./SessionComposer";
 import { type AgentSession, type SessionTurn, useSessionsStore } from "./store";
+import { useColumnLayoutAnchor } from "./use-column-layout-anchor";
 
 /**
  * The conversation column of the agent canvas: a document-style log of turns
@@ -49,11 +50,15 @@ export function SessionConversation({
   // intermediate positions (otherwise the button flickers back in mid-scroll).
   const jumping = useRef(false);
   const [atBottom, setAtBottom] = useState(true);
+  // Open step diffs change height on a Unified/Split switch; the column keeps
+  // its place around them, or stays pinned while `stick` holds.
+  useColumnLayoutAnchor(scrollRef, stick);
 
   const last = session.turns[session.turns.length - 1];
   // A cheap signature of everything that grows during streaming, so the
   // auto-scroll effect fires on each delta without deep-watching the array.
-  const streamSig = `${session.turns.length}:${last?.narration.length ?? 0}:${last?.statusText ?? ""}:${last?.status ?? ""}`;
+  // A tool step or note appends a segment and leaves the narration as it was.
+  const streamSig = `${session.turns.length}:${last?.narration.length ?? 0}:${last?.segments?.length ?? 0}:${last?.statusText ?? ""}:${last?.status ?? ""}`;
   const prevLen = useRef(session.turns.length);
 
   const onScroll = () => {

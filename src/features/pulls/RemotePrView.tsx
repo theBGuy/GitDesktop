@@ -302,6 +302,7 @@ import { useRetained } from "@/lib/use-retained";
 import { useToastClearance } from "@/lib/use-toast-clearance";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
+import { headPendingKind } from "./head-pending";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import {
   type DeleteBranchBlock,
@@ -996,7 +997,14 @@ export function RemotePrView({
     section === "conversation" && !!provider,
     lens,
   );
-  const targetDiff = usePrDiff(repoPath, number, lens);
+  const targetDiff = usePrDiff(
+    repoPath,
+    number,
+    lens,
+    targetDetails.data !== undefined && !targetDetails.isPlaceholderData
+      ? (prHeadSha(targetDetails.data) ?? null)
+      : undefined,
+  );
   const targetReactions = usePrReactions(
     repoPath,
     canReact ? number : null,
@@ -1019,7 +1027,12 @@ export function RemotePrView({
         forgeSettled: !forge.isPending,
         reactions: canReact ? targetReactions : null,
         tasks: canTasks ? targetTasks : null,
-        diff: targetDiff,
+        // Details that failed with nothing loaded name no head, so no diff read
+        // will run: that failure answers the Files section.
+        diff:
+          targetDetails.isError && targetDetails.data === undefined
+            ? targetDetails
+            : targetDiff,
       }),
     // The PR on screen may stand in when it is of the same repo and lens (the
     // key's prefix); the reducer adds that it settled. Never the placeholder: a
@@ -1041,7 +1054,15 @@ export function RemotePrView({
   // do nothing. Declared up here beside `details` because the gates that need it
   // (the update-branch derivation among them) run well before the strip does.
   const detailsStale = hold.holding || detailsPlaceholder;
-  const prDiff = usePrDiff(repoPath, shownNumber, lens);
+  // Read under the head the details name, the one usePrContentRevs reads.
+  const prDiff = usePrDiff(
+    repoPath,
+    shownNumber,
+    lens,
+    details.data !== undefined && !detailsPlaceholder
+      ? (prHeadSha(details.data) ?? null)
+      : undefined,
+  );
   // The selected PR's late reads, warmed while the hold keeps the old one on
   // screen so they are cached when it swaps in, rather than filling it in after.
   // Gated as their consumers are, on the selected PR's own state where known.
@@ -3138,11 +3159,14 @@ export function RemotePrView({
     () => splitUnifiedDiff(prDiff.data ?? "", { joinTypechanges: true }),
     [prDiff.data],
   );
-  // The pane keeps rendering the previous PR's diff through a switch, so its lines
-  // can belong to another PR than the `number` a new thread would be created under.
-  // Both reads key on shownNumber but settle independently, and showsLoadingFrame
-  // hides the details placeholder only in the hold's loading phase.
-  const diffStale = detailsPlaceholder || prDiff.isPlaceholderData;
+  // Another record's diff or details: the pane's lines are not this pull request's.
+  const diffStale =
+    detailsPlaceholder || prDiff.placeholderOf === "otherRecord";
+  // This pull request's diff, read at a head the details no longer name.
+  const diffHeadPending = !diffStale && prDiff.placeholderOf === "olderHead";
+  // Either: the revs the details name are not the painted text's.
+  const diffNotOwn = diffStale || diffHeadPending;
+  const headPending = diffHeadPending ? headPendingKind(prDiff) : null;
   // The Files tab's whole-file reads: the rendered pull request's merge base
   // and head. Read only on that tab, and never for a placeholder's head.
   const contentRevs = usePrContentRevs(
@@ -3917,7 +3941,14 @@ export function RemotePrView({
       // so this works for fork PRs / unfetched head branches.
       async (settings) => {
         const [text, exclude] = await Promise.all([
-          queryClient.ensureQueryData(prDiffOptions(repoPath, number, lens)),
+          queryClient.ensureQueryData(
+            prDiffOptions(
+              repoPath,
+              shownNumber,
+              lens,
+              prHeadSha(prForGen) ?? null,
+            ),
+          ),
           aiExcludePatterns(repoPath, settings.aiIgnorePatterns),
         ]);
         // The Files tab's own binary verdict, read from the diff just awaited.
@@ -4024,6 +4055,7 @@ export function RemotePrView({
               canCreateThread={canCreateThread}
               lens={lens}
               onClose={onClose}
+              headPending={headPending}
             />
           ),
         }
@@ -4955,7 +4987,14 @@ export function RemotePrView({
             // re-fetching it — PR diffs are among the slowest loads in the app.
             loadDiff: () =>
               queryClient
-                .ensureQueryData(prDiffOptions(repoPath, shownNumber, lens))
+                .ensureQueryData(
+                  prDiffOptions(
+                    repoPath,
+                    shownNumber,
+                    lens,
+                    prHeadSha(pr) ?? null,
+                  ),
+                )
                 .then((text) => {
                   // The Files tab's own binary verdict, read from this diff.
                   const bins = binaryRowPaths(pr.files, splitUnifiedDiff(text));
@@ -5590,19 +5629,26 @@ export function RemotePrView({
                 isFetching={prDiff.isFetching}
                 onRetry={() => void prDiff.refetch()}
                 dataIsPlaceholder={prDiff.isPlaceholderData}
-                // Revs with no answer, or a diff another record's, read no
-                // files; a failed refetch keeps the answer it had (the read
-                // keys on this pull request and head, with no placeholder).
-                contentRevs={!diffStale ? contentRevs.data : undefined}
+                // Revs with no answer, or a diff that is not this head's own
+                // (another record's, or an older head's: the revs name the new
+                // head), read no files; a failed refetch keeps the answer it had.
+                contentRevs={!diffNotOwn ? contentRevs.data : undefined}
                 // Settled with no answer (a refused read is never retried), or
-                // details that name no head, which leave the read disabled: the
-                // pane drops any image pair it kept for an older head.
+                // details that name no head: the pane drops any image pair it
+                // kept, never under an older head's text, whose pair it is.
                 revsUnavailable={
-                  !diffStale &&
+                  !diffNotOwn &&
                   (!prHeadSha(pr) ||
                     (contentRevs.isError &&
                       !contentRevs.isFetching &&
                       contentRevs.data === undefined))
+                }
+                // A first revs read parked offline: the whitespace view falls
+                // back to its offline note instead of waiting on it.
+                revsPaused={
+                  !diffNotOwn &&
+                  contentRevs.isPaused &&
+                  contentRevs.data === undefined
                 }
                 // The same threads + handlers/gates the Conversation block uses — one
                 // filtered list off the top-level read, not a second fetch, so an
@@ -5640,6 +5686,18 @@ export function RemotePrView({
                     : undefined
                 }
                 pendingWrites={pendingThreadWrites}
+                onEditComment={
+                  canEditOwnThreadComments && !detailsPlaceholder
+                    ? saveThreadCommentEdit
+                    : undefined
+                }
+                onDeleteComment={
+                  canEditOwnThreadComments && !detailsPlaceholder
+                    ? askDeleteThreadComment
+                    : undefined
+                }
+                editHeld={detailsPlaceholder}
+                editHeldReason={archived ? PR_ARCHIVED_READONLY_MESSAGE : null}
                 provider={providerKey}
                 apply={suggestionApply}
                 fileDiffLookup={fileDiffLookup}
