@@ -162,15 +162,15 @@ running into it until the remote drops a spelling. And before you migrate:
 
 - It won't run while the repository has [linked
   worktrees](/blog/work-on-two-branches-at-once/). Git answers
-  `migrating repositories with worktrees is not supported yet`. Commit
-  in each one, or stash with `git stash -u` so untracked files go too,
-  and copy out any ignored files you still need (a `.env`, local settings),
-  since `git worktree remove` deletes them with the folder. Then remove
-  each worktree, and run `git worktree prune` for any folder you deleted
-  by hand. Removing one that has submodules checked out takes `--force`,
-  so commit and push any work inside them first. A fresh clone made with
-  `git clone --ref-format=reftable` avoids all of this, but your local
-  branches, stashes and unpushed commits stay behind in the old one.
+  `migrating repositories with worktrees is not supported yet`. In each
+  one, commit and push any work inside its submodules first, then commit,
+  or stash with `git stash -u` so untracked files go too, and copy out
+  any ignored files you still need (a `.env`, local settings), since
+  `git worktree remove` deletes them with the folder. Then remove each
+  worktree (one with submodules checked out takes `--force`), and run
+  `git worktree prune` for any folder you deleted by hand. A fresh clone
+  made with `git clone --ref-format=reftable` avoids all of this, but your
+  local branches, stashes and unpushed commits stay behind in the old one.
 - It can't lock out other writers while it runs, so close editors and
   anything else that fetches in the background, and if the repository
   is registered for scheduled maintenance, run `git maintenance unregister`
