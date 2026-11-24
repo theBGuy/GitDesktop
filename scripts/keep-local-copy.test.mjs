@@ -1,7 +1,8 @@
 // Pins Keep local's owner-approved copy character for character, and that no
 // string claims to cover "every push" (a terminal push isn't covered unless the
 // pre-push guard is installed). The imports reach straight into src/ under
-// Node's type stripping, so both modules must stay import-free.
+// Node's type stripping, so both modules must stay import-free at runtime; a
+// type-only import is erased.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 

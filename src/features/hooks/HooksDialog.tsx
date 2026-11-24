@@ -43,6 +43,7 @@ import {
   openWithDefault,
 } from "@/lib/git/api";
 import {
+  hookContentKey,
   useDeleteHook,
   useHookContent,
   useHooks,
@@ -395,7 +396,13 @@ export function HooksDialog({
     (input ?? row)?.focus();
   }, [changedOnDisk, readFailed, open]);
 
-  const dirty = draft !== base;
+  // Until the save's re-read lands, the disk holds what that Save wrote, not
+  // the cached text it replaced.
+  const diskText =
+    seedMatches && seed.replaced !== null && base === seed.replaced
+      ? seed.text
+      : base;
+  const dirty = draft !== diskText;
   const isBlank = draft.trim() === "";
   const noShebang = !isBlank && !draft.startsWith("#!");
   // Until the selected hook seeds, the draft may still be the previous hook's,
@@ -477,12 +484,8 @@ export function HooksDialog({
     // replaced never reads as a change on disk. Only over the press's text and
     // selection; after a re-selection or a Reload, the re-read converges.
     const cached =
-      queryClient.getQueryData<string | null>([
-        "repo",
-        firedIn,
-        "hook",
-        name,
-      ]) ?? DEFAULT_HOOK;
+      queryClient.getQueryData<string | null>(hookContentKey(firedIn, name)) ??
+      DEFAULT_HOOK;
     // A cache moved to anything but the press's text is a change on disk, never
     // the text this Save replaced: that falls back to the one cached at the press.
     const replaced =

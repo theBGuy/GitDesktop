@@ -1,6 +1,8 @@
-// Keep local's copy. Import-free: scripts/keep-local-copy.test.mjs loads it under
-// Node's type stripping, which resolves no bundler aliases. The sync bar's reason
-// and the held-item suffix live in sync-controls-state.ts, which builds them.
+// Keep local's copy. Import-free at runtime (a type-only import is erased):
+// scripts/keep-local-copy.test.mjs loads it under Node's type stripping, which
+// resolves no bundler aliases. The sync bar's reason and the held-item suffix
+// live in sync-controls-state.ts, which builds them.
+import type { KeepLocalHookStatus } from "@/lib/git/types";
 
 /** The row and picker chip's visible text. */
 export const KEPT_LOCAL_CHIP_TEXT = "kept local";
@@ -90,11 +92,7 @@ export const KEEP_LOCAL_HOOK_NO_VERIFY = "git push --no-verify skips it.";
 export const KEEP_LOCAL_HOOK_ON_BODY =
   "A pre-push hook in this clone stops git push for branches marked Keep local. It covers this clone only, and git push --no-verify skips it.";
 
-type KeepLocalHookBlock =
-  | "hookManager"
-  | "customHooksPath"
-  | "foreignHook"
-  | "linkedHook";
+type KeepLocalHookBlock = NonNullable<KeepLocalHookStatus["blocked"]>;
 
 /** Why the hook can't be installed; `manager` is set for `hookManager` only. */
 export const KEEP_LOCAL_HOOK_BLOCKED: Record<
@@ -114,7 +112,7 @@ export const KEEP_LOCAL_HOOK_BLOCKED: Record<
 /** The `hookManager` state's note on using the check under a manager, rendered
  *  between its reason and the check's lead; a manager without an entry has none. */
 export const KEEP_LOCAL_HOOK_MANAGER_NOTE: Partial<
-  Record<"husky" | "pre-commit" | "lefthook", string>
+  Record<NonNullable<KeepLocalHookStatus["manager"]>, string>
 > = {
   lefthook:
     "With lefthook, the check sees the pushed refs only when it is the one pre-push command or script that sets use_stdin: true.",

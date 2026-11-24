@@ -4437,8 +4437,10 @@ the small programs Git runs at points like *before commit* or *before push*. Whe
   installed it's listed here like any other pre-push hook, so editing, disabling or
   deleting it here changes the guard too. While it's active, its row reads **Managed by
   GitDesktop**, and **Save**, **Disable** and **Delete** on it ask first.
-- When a hook changes on disk while it's open, an unedited script reloads by itself; an
-  edited one keeps your edit and offers **Reload**. A hook whose script can't be read
+- When a hook changes on disk while it's open, the dialog catches up the next time it
+  reads the script (when you select the hook, after you save, enable or disable one, or
+  when you switch back to the app): an unedited script shows the new text, and an edited
+  one keeps your edit and offers **Reload**. A hook whose script can't be read
   when you select it shows the reason and a **Retry**. **Save**, **Disable** and
   **Enable** stop with a notice when the terminal push guard was added or removed since
   the list loaded, and GitDesktop never writes through a link: **Enable** and **Disable**

@@ -107,8 +107,10 @@ fn absolutize(repo_path: &str, raw: &str) -> PathBuf {
 
 /// Resolves the effective hooks directory as git's own `rev-parse --git-path hooks`
 /// answer: a raw `core.hooksPath` needs git's pathname rules (`~`, the `:(optional)`
-/// prefix), which only git applies. Returns `(absolute_dir, is_custom)`.
-async fn resolve_hooks_dir(repo_path: &str) -> AppResult<(PathBuf, bool)> {
+/// prefix), which only git applies. Returns `(absolute_dir, is_custom, is_empty)`: an
+/// empty value prints the repository root, though git looks up `/<hook>` and runs no
+/// hook from that root.
+async fn resolve_hooks_dir(repo_path: &str) -> AppResult<(PathBuf, bool, bool)> {
     let out = run_git(
         Some(repo_path),
         &["rev-parse", "--git-path", "hooks"],
@@ -123,7 +125,9 @@ async fn resolve_hooks_dir(repo_path: &str) -> AppResult<(PathBuf, bool)> {
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let set = cfg.code == 0 && !cfg.stdout_lossy().trim().is_empty();
+    let value = cfg.stdout_lossy();
+    let set = cfg.code == 0 && !value.trim().is_empty();
+    let empty = cfg.code == 0 && value.trim_end_matches(['\r', '\n']).is_empty();
     // A value git ignores (a missing optional dir) or that names the managed dir
     // redirects nothing; an unresolvable managed dir keeps the value's own answer.
     let custom = set
@@ -131,7 +135,7 @@ async fn resolve_hooks_dir(repo_path: &str) -> AppResult<(PathBuf, bool)> {
             Ok(managed) => !same_hooks_dir(&dir, &managed),
             Err(_) => true,
         };
-    Ok((dir, custom))
+    Ok((dir, custom, empty))
 }
 
 /// Detects a hook manager that owns this repo's hooks (and its config path). husky is a
@@ -277,7 +281,7 @@ fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
 
 #[tauri::command]
 pub async fn git_hooks_list(repo_path: String) -> AppResult<HooksInfo> {
-    let (hooks_dir, custom) = resolve_hooks_dir(&repo_path).await?;
+    let (hooks_dir, custom, _) = resolve_hooks_dir(&repo_path).await?;
     let detected = detect_manager(&repo_path, &hooks_dir);
     let manager = detected.as_ref().map(|(m, _)| m.clone());
     let manager_config = detected
@@ -511,7 +515,7 @@ pub async fn git_run_hook_manager(
 #[tauri::command]
 pub async fn git_hook_read(repo_path: String, name: String) -> AppResult<Option<String>> {
     validate_hook_name(&name)?;
-    let (dir, _) = resolve_hooks_dir(&repo_path).await?;
+    let (dir, _, _) = resolve_hooks_dir(&repo_path).await?;
     for candidate in [
         dir.join(&name),
         dir.join(format!("{name}.disabled")),
@@ -594,7 +598,7 @@ pub async fn git_hook_write(
     expected_managed: Option<bool>,
 ) -> AppResult<HookWriteOutcome> {
     validate_hook_name(&name)?;
-    let (dir, _) = resolve_hooks_dir(&repo_path).await?;
+    let (dir, _, _) = resolve_hooks_dir(&repo_path).await?;
     if let Some(managed) =
         managed_changed(&repo_path, &dir, &name, expected_managed, "saved").await?
     {
@@ -629,7 +633,7 @@ pub async fn git_hook_set_enabled(
     expected_managed: Option<bool>,
 ) -> AppResult<HookWriteOutcome> {
     validate_hook_name(&name)?;
-    let (dir, _) = resolve_hooks_dir(&repo_path).await?;
+    let (dir, _, _) = resolve_hooks_dir(&repo_path).await?;
     let (verb, act) = if enabled {
         ("enabled", "enable it")
     } else {
@@ -701,7 +705,7 @@ async fn hook_delete_core(
     trash: impl Fn(&Path) -> std::io::Result<()> + Send + 'static,
 ) -> AppResult<HookDeleteOutcome> {
     validate_hook_name(name)?;
-    let (dir, _) = resolve_hooks_dir(repo_path).await?;
+    let (dir, _, _) = resolve_hooks_dir(repo_path).await?;
     if let Some(managed) =
         managed_changed(repo_path, &dir, name, expected_managed, "deleted").await?
     {
@@ -1179,7 +1183,8 @@ fn display_hooks_path(path: &Path) -> String {
 /// A custom hooks dir blocks first: git doesn't run `<common>/hooks` then, even if
 /// our file sits there, unless the custom dir's `pre-push` links to a marker-carrying
 /// file, which git runs through the link and so reads `linkedHook` ahead of a manager.
-/// Past it, a marker-carrying managed file is what git runs, so it reads installed
+/// An empty `core.hooksPath` never reads that link: git runs no hook from the root it
+/// prints. Past it, a marker-carrying managed file is what git runs, so it reads installed
 /// before a manager config in the tree can block, and a link to a marker-carrying file
 /// reads `linkedHook` there for the same reason. Config-defined hooks
 /// (`hook.<name>.*`, git 2.54+) aren't detected: they run beside the hooks-folder file,
@@ -1187,7 +1192,7 @@ fn display_hooks_path(path: &Path) -> String {
 async fn keep_local_hook_status_core(repo_path: &str) -> AppResult<KeepLocalHookStatus> {
     use KeepLocalHookBlock::{CustomHooksPath, ForeignHook, HookManager, LinkedHook};
     use KeepLocalHookState::{Absent, Blocked, Installed};
-    let (effective, _) = resolve_hooks_dir(repo_path).await?;
+    let (effective, _, empty) = resolve_hooks_dir(repo_path).await?;
     let managed = managed_hooks_dir(repo_path).await?;
     let manager = detect_manager(repo_path, &effective).map(|(name, _)| name);
     let pre_push = managed.join("pre-push");
@@ -1196,7 +1201,7 @@ async fn keep_local_hook_status_core(repo_path: &str) -> AppResult<KeepLocalHook
     let redirected = hooks_dir_redirected(&managed);
     let linked = matches!(redirected, Ok(true));
     let (state, blocked, managed_hook_present) = if !same_hooks_dir(&effective, &managed) {
-        if links_to_a_guard_elsewhere(&effective, &managed) {
+        if !empty && links_to_a_guard_elsewhere(&effective, &managed) {
             (Blocked, Some(LinkedHook), false)
         } else {
             let reason = if manager.is_some() {
@@ -1277,7 +1282,8 @@ async fn keep_local_hook_install_core(repo_path: &str) -> AppResult<KeepLocalHoo
 
 /// Whether git reads a hooks dir other than `managed` whose `pre-push` links to a
 /// managed guard ([`links_to_a_managed_guard`]). git runs it through the link, so the
-/// status reads `linkedHook` and Remove leaves the managed dir alone.
+/// status reads `linkedHook` and Remove leaves the managed dir alone. Callers skip it
+/// for an empty `core.hooksPath`, whose printed dir git reads no hook from.
 fn links_to_a_guard_elsewhere(effective: &Path, managed: &Path) -> bool {
     !same_hooks_dir(effective, managed)
         && links_to_a_managed_guard(&effective.join("pre-push"), managed)
@@ -1299,15 +1305,16 @@ fn links_to_a_managed_guard(link: &Path, managed: &Path) -> bool {
 /// behind a later custom hooksPath stays removable); only marker-carrying regular
 /// files go, nothing is deleted through a redirected hooks dir, nothing at all while
 /// another hooks dir git reads links its `pre-push` to a marker-carrying file, and
-/// never the file the effective `pre-push` link resolves to.
+/// never the file the effective `pre-push` link resolves to. An empty `core.hooksPath`
+/// names no hooks dir git reads, so its root `pre-push` link protects nothing.
 async fn keep_local_hook_remove_core(repo_path: &str) -> AppResult<KeepLocalHookStatus> {
     let dir = managed_hooks_dir(repo_path).await?;
-    let (effective, _) = resolve_hooks_dir(repo_path).await?;
-    if !links_to_a_guard_elsewhere(&effective, &dir)
+    let (effective, _, empty) = resolve_hooks_dir(repo_path).await?;
+    if (empty || !links_to_a_guard_elsewhere(&effective, &dir))
         && !hooks_dir_redirected(&dir).map_err(AppError::Io)?
     {
         let link = effective.join("pre-push");
-        let linked = is_link(&link);
+        let linked = !empty && is_link(&link);
         for name in ["pre-push", "pre-push.disabled"] {
             let file = dir.join(name);
             if !(linked && resolves_to(&link, &file)) {
@@ -2248,6 +2255,56 @@ mod tests {
         );
     }
 
+    /// A root `pre-push` link to a marker-carrying file reads `linkedHook` under a `.`
+    /// hooksPath, which git runs, but not under an empty one, which runs no hook there:
+    /// that reads the custom-dir answer and Remove deletes the inert managed file, the
+    /// link's own target included.
+    #[tokio::test]
+    async fn keep_local_hook_empty_hooks_path_ignores_a_root_link_to_a_guard() {
+        let (_g, base, repo, _remote) = hook_repo("empty-hooks-path").await;
+        let outside = base.join("guard.sh");
+        std::fs::write(&outside, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        let leftover = managed_file(&repo, "pre-push");
+        let link = Path::new(&repo).join("pre-push");
+        for target in [outside.clone(), leftover.clone()] {
+            let row = format!("{target:?}");
+            std::fs::write(&leftover, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+            let _ = std::fs::remove_file(&link);
+            if try_symlink_file(&target, &link).is_none() {
+                return;
+            }
+            git_ok(&repo, &["config", "core.hooksPath", "."]).await;
+            for st in [
+                status(&repo).await,
+                install(&repo).await,
+                remove(&repo).await,
+            ] {
+                assert_status(&st, Blocked, Some(LinkedHook), None);
+                assert_present(&st, false);
+            }
+            assert!(leftover.is_file(), "{row}: Remove kept it under `.`");
+            git_ok(&repo, &["config", "core.hooksPath", ""]).await;
+            for st in [status(&repo).await, install(&repo).await] {
+                assert_status(&st, Blocked, Some(CustomHooksPath), None);
+                assert_present(&st, true);
+            }
+            assert_eq!(
+                std::fs::read(&leftover).unwrap(),
+                KEEP_LOCAL_HOOK_SCRIPT.as_bytes()
+            );
+            for st in [remove(&repo).await, status(&repo).await] {
+                assert_status(&st, Blocked, Some(CustomHooksPath), None);
+                assert_present(&st, false);
+            }
+            assert!(!leftover.exists(), "{row}: Remove deletes the managed file");
+            assert_link(&link);
+        }
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            KEEP_LOCAL_HOOK_SCRIPT.as_bytes()
+        );
+    }
+
     /// A link to an over-cap marker-carrying file outside the managed dir keeps the
     /// custom-dir answer: the common leftover reads present and Remove deletes only it.
     #[tokio::test]
@@ -2667,7 +2724,8 @@ mod tests {
                 let _ = git(repo, &["config", "--unset", "core.hooksPath"]).await;
             }
         }
-        resolve_hooks_dir(wt).await.unwrap()
+        let (dir, custom, _) = resolve_hooks_dir(wt).await.unwrap();
+        (dir, custom)
     }
 
     /// Whether a commit in `wt` runs a `pre-commit` placed in `dir`. The hook and its

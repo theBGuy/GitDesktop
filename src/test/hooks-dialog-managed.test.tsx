@@ -642,14 +642,18 @@ describe("held controls in the Hooks dialog", () => {
     await waitFor(() =>
       expect(toast.success).toHaveBeenCalledWith("Saved the pre-commit hook"),
     );
-    await waitFor(() => expect(save).not.toHaveAttribute("aria-disabled"));
-    expect(fireEvent.keyDown(save, { key: "Enter", repeat: true })).toBe(false);
-    await act(() => Promise.resolve());
-    expect(gitHookWrite).toHaveBeenCalledTimes(1);
-    await act(async () => reread());
+    // The saved script is the disk's text before its re-read lands, and after.
     await waitFor(() =>
       expect(save).toHaveAccessibleDescription("No changes to save."),
     );
+    await act(async () => reread());
+    expect(save).toHaveAccessibleDescription("No changes to save.");
+    // A held Enter's repeat on the re-enabled Save writes nothing.
+    await user.type(editor, "x");
+    expect(save).not.toHaveAttribute("aria-disabled");
+    expect(fireEvent.keyDown(save, { key: "Enter", repeat: true })).toBe(false);
+    await act(() => Promise.resolve());
+    expect(gitHookWrite).toHaveBeenCalledTimes(1);
   });
 
   it("refuses to close while its own managed prompt is pending", async () => {
@@ -1500,6 +1504,52 @@ describe("a hook that changes on disk while it is open", () => {
     );
     expect(editor()).toHaveValue(`${EDITED}x`);
     expect(line().textContent).toBe(LINE);
+  });
+
+  /** Holds the next write's re-read for good, so the cache keeps the text the
+   *  Save replaced. */
+  const holdSaveReread = () =>
+    vi.mocked(gitHookWrite).mockImplementationOnce(async (_r, name, text) => {
+      disk.set(name, text);
+      vi.mocked(gitHookRead).mockImplementationOnce(
+        () => new Promise<string>(() => undefined),
+      );
+      return WRITTEN;
+    });
+
+  it("Save holds with the no-changes reason right after a save, before the re-read", async () => {
+    holdSaveReread();
+    const { user, client } = await edited();
+    const save = screen.getByRole("button", { name: "Save" });
+    await user.click(save);
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Saved the pre-commit hook"),
+    );
+    expect(client.getQueryData(["repo", REPO, "hook", "pre-commit"])).toBe(
+      SCRIPT,
+    );
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    expect(save).toHaveAccessibleDescription("No changes to save.");
+    await user.type(editor(), "x");
+    expect(save).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("a draft set back to the pre-save text can be saved in that window", async () => {
+    holdSaveReread();
+    const { user, client } = await edited();
+    const save = screen.getByRole("button", { name: "Save" });
+    await user.click(save);
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Saved the pre-commit hook"),
+    );
+    fireEvent.change(editor(), { target: { value: SCRIPT } });
+    expect(client.getQueryData(["repo", REPO, "hook", "pre-commit"])).toBe(
+      SCRIPT,
+    );
+    expect(save).not.toHaveAttribute("aria-disabled");
+    await user.click(save);
+    await waitFor(() => expect(gitHookWrite).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(gitHookWrite).mock.lastCall?.[2]).toBe(SCRIPT);
   });
 
   it("an edited hook deleted on disk shows no line", async () => {

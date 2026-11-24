@@ -22,10 +22,13 @@ export function useHooks(repo: string) {
   });
 }
 
+export const hookContentKey = (repo: string, name: string | null) =>
+  ["repo", repo, "hook", name] as const;
+
 /** A hook's script content, loaded when one is selected for editing. */
 export function useHookContent(repo: string, name: string | null) {
   return useQuery({
-    queryKey: ["repo", repo, "hook", name] as const,
+    queryKey: hookContentKey(repo, name),
     queryFn: () => api.gitHookRead(repo, name ?? ""),
     enabled: name !== null,
     networkMode: "always",
