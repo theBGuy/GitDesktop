@@ -3537,8 +3537,35 @@ pub async fn forge_issue_delete_comment(
     }
 }
 
-/// Close an issue, behind the abstraction. `reason` is GitHub's close reason
-/// (`completed`/`not_planned`); GitLab has no close reason and ignores it.
+/// An issue close reason, in the API's spelling (`completed` / `not_planned`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseReason {
+    Completed,
+    NotPlanned,
+}
+
+impl CloseReason {
+    /// Accepts the two API spellings, with an empty reason meaning `Completed`;
+    /// anything else is refused.
+    pub fn parse(reason: &str) -> AppResult<Self> {
+        match reason {
+            "" | "completed" => Ok(Self::Completed),
+            "not_planned" => Ok(Self::NotPlanned),
+            _ => Err(AppError::InvalidArgument(format!(
+                "unknown close reason: {reason}"
+            ))),
+        }
+    }
+
+    pub fn as_api_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::NotPlanned => "not_planned",
+        }
+    }
+}
+
+/// Close an issue, behind the abstraction.
 #[tauri::command]
 pub async fn forge_issue_close(
     repo_path: String,
@@ -3546,18 +3573,62 @@ pub async fn forge_issue_close(
     reason: String,
     lens: Option<String>,
 ) -> AppResult<()> {
+    forge_issue_close_outcome(repo_path, number, reason, lens)
+        .await
+        .map(|_| ())
+}
+
+/// What an issue close did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueCloseOutcome {
+    /// Closed now, with the reason the close recorded (`None` where the forge has no
+    /// close reason).
+    Closed(Option<CloseReason>),
+    /// Already closed: nothing was written, and its existing reason is untouched.
+    AlreadyClosed,
+}
+
+/// Closes an issue and reports what the close did. The reason parses before the
+/// provider dispatch, so every forge refuses the same input. The GitLab arm never
+/// receives the reason: GitLab has no close reason to record.
+pub async fn forge_issue_close_outcome(
+    repo_path: String,
+    number: u64,
+    reason: String,
+    lens: Option<String>,
+) -> AppResult<IssueCloseOutcome> {
+    let reason = CloseReason::parse(&reason)?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::close_issue(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::close_issue(&repo_path, number, &reason, lens).await,
+        _ => github::close_issue(&repo_path, number, reason, lens).await,
     }
 }
 
 /// Reopen a closed issue, behind the abstraction.
 #[tauri::command]
 pub async fn forge_issue_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
+    forge_issue_reopen_outcome(repo_path, number, lens)
+        .await
+        .map(|_| ())
+}
+
+/// What an issue reopen did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueReopenOutcome {
+    Reopened,
+    /// Already open: nothing was written.
+    AlreadyOpen,
+}
+
+/// Reopens an issue and reports what the reopen did.
+pub async fn forge_issue_reopen_outcome(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<IssueReopenOutcome> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::reopen_issue(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
@@ -5709,6 +5780,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn close_reason_parses_the_api_spellings_and_refuses_the_rest() {
+        for (input, want) in [
+            ("", CloseReason::Completed),
+            ("completed", CloseReason::Completed),
+            ("not_planned", CloseReason::NotPlanned),
+        ] {
+            assert_eq!(CloseReason::parse(input).unwrap(), want, "{input:?}");
+        }
+        for input in [
+            "duplicate",
+            "not planned",
+            "NOT_PLANNED",
+            " completed",
+            "garbage",
+        ] {
+            let refused = CloseReason::parse(input);
+            assert!(
+                matches!(&refused, Err(AppError::InvalidArgument(m))
+                    if *m == format!("unknown close reason: {input}")),
+                "{input:?}: {refused:?}"
+            );
+        }
+        assert_eq!(CloseReason::Completed.as_api_str(), "completed");
+        assert_eq!(CloseReason::NotPlanned.as_api_str(), "not_planned");
+    }
+
+    /// The same unknown reason is refused on both forges, ahead of the dispatch. The
+    /// remotes' owner and the issue number don't exist, so a regressed guard reaches
+    /// no real issue.
+    #[tokio::test]
+    async fn an_unknown_close_reason_is_refused_on_every_forge() {
+        use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
+        for origin in [
+            "https://github.com/gd-test-no-such-owner/none.git",
+            "https://gitlab.com/gd-test-no-such-owner/none.git",
+        ] {
+            let dir = tempfile::Builder::new()
+                .prefix("gd-close-reason-")
+                .tempdir()
+                .expect("create temp dir");
+            let repo = dir.path().to_string_lossy().into_owned();
+            run_git(Some(&repo), &["init", "-q"], TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
+            run_git(
+                Some(&repo),
+                &["remote", "add", "origin", origin],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await
+            .unwrap();
+            let out = forge_issue_close(repo, 2_147_483_647, "garbage".into(), None).await;
+            assert!(
+                matches!(&out, Err(AppError::InvalidArgument(m))
+                    if m == "unknown close reason: garbage"),
+                "{origin}: {out:?}"
+            );
+        }
+    }
+
     /// An unknown lens keeps its own refusal ahead of every attachment check on GitHub.
     #[tokio::test]
     async fn an_unknown_lens_with_attachments_is_refused_before_its_checks() {
@@ -7448,7 +7580,8 @@ mod tests {
     fn saved_reply_unreadable_rides_the_hosts_kind() {
         type Wrap = fn(String) -> AppError;
         let hosts = [
-            ("Bitbucket", AppError::Bitbucket as Wrap, "bitbucket"),
+            ("GitLab", AppError::Glab as Wrap, "glab"),
+            ("Bitbucket", AppError::Bitbucket, "bitbucket"),
             ("Jira", AppError::Jira, "jira"),
         ];
         for (host, wrap, kind) in hosts {
