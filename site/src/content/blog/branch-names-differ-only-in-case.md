@@ -137,7 +137,7 @@ when he's ready.
 
 ## Or keep both names: move the clone to reftable
 
-The other way out is the command the message suggests. Added in Git 2.46,
+The other way out is the command the message suggests.
 `git refs migrate --ref-format=reftable` moves the clone's branch names out
 of files and into reftable, a format that stores them in a table where case
 is part of the name:
@@ -160,10 +160,15 @@ records `Feature/offline-maps` as its own branch and corrects
 That fixes this one clone, though. Every teammate on Windows or macOS keeps
 running into it until the remote drops a spelling. And before you migrate:
 
+- Check your Git version. The command arrived in 2.46, but an everyday clone
+  needs 2.49 or later: 2.46 and 2.47 refuse any repository that has reflogs,
+  and 2.48 doesn't carry the stash list across.
 - It won't run while the repository has [linked
   worktrees](/blog/work-on-two-branches-at-once/). Git answers
-  `migrating repositories with worktrees is not supported yet`. In each
-  one, commit and push any work inside its submodules first, then commit,
+  `migrating repositories with worktrees is not supported yet`. In
+  each one, commit and push any work inside its submodules first, then
+  commit on a branch (if the worktree's HEAD is detached, create one
+  with `git switch -c` first, or the commit is lost with the worktree),
   or stash with `git stash -u` so untracked files go too, and copy out
   any ignored files you still need (a `.env`, local settings), since
   `git worktree remove` deletes them with the folder. Then remove each
