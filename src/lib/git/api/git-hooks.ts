@@ -7,14 +7,39 @@ export const gitHooksList = (repoPath: string) =>
 export const gitHookRead = (repoPath: string, name: string) =>
   invoke<string | null>("git_hook_read", { repoPath, name });
 
-export const gitHookWrite = (repoPath: string, name: string, content: string) =>
-  invoke<void>("git_hook_write", { repoPath, name, content });
+/** What a save or an enable/disable did. With `expectedManaged` given, a hook
+ *  whose managed state no longer matches it is left as it was and its current
+ *  state comes back; on `written`, `managed` is the state the list reads next. */
+export type HookWriteOutcome = {
+  status: "written" | "managedChanged";
+  managed: boolean;
+};
+
+export const gitHookWrite = (
+  repoPath: string,
+  name: string,
+  content: string,
+  expectedManaged?: boolean,
+) =>
+  invoke<HookWriteOutcome>("git_hook_write", {
+    repoPath,
+    name,
+    content,
+    expectedManaged,
+  });
 
 export const gitHookSetEnabled = (
   repoPath: string,
   name: string,
   enabled: boolean,
-) => invoke<void>("git_hook_set_enabled", { repoPath, name, enabled });
+  expectedManaged?: boolean,
+) =>
+  invoke<HookWriteOutcome>("git_hook_set_enabled", {
+    repoPath,
+    name,
+    enabled,
+    expectedManaged,
+  });
 
 /** What a delete did. With `expectedManaged` given, a hook whose managed state
  *  no longer matches it is left in place and its current state comes back. */
