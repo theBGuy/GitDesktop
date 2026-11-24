@@ -49,8 +49,8 @@ struct CommentIssueArgs {
 struct CloseIssueArgs {
     /// The issue number.
     number: u64,
-    /// Close reason: "completed" (default) or "not_planned". Empty defaults to "completed";
-    /// any other value is refused.
+    /// Close reason: "completed" (default; also used when empty) or "not_planned". Any
+    /// other value is refused.
     #[serde(default)]
     reason: String,
 }
@@ -180,17 +180,29 @@ fn merge_messages_from(
     })
 }
 
-/// The close confirmation names the reason the forge recorded, never the argument:
-/// a GitLab close records none, so its `reason` is null.
-fn close_issue_reply(
-    number: u64,
-    recorded: Option<crate::forge::CloseReason>,
-) -> serde_json::Value {
+/// The close confirmation reports what the close did, never the argument: a GitLab
+/// close records no reason, and an issue already closed was not written to.
+fn close_issue_reply(number: u64, outcome: crate::forge::IssueCloseOutcome) -> serde_json::Value {
+    use crate::forge::IssueCloseOutcome;
+    let (status, recorded) = match outcome {
+        IssueCloseOutcome::Closed(recorded) => ("closed", recorded),
+        IssueCloseOutcome::AlreadyClosed => ("already_closed", None),
+    };
     serde_json::json!({
         "issue": number,
-        "status": "closed",
+        "status": status,
         "reason": recorded.map(crate::forge::CloseReason::as_api_str),
     })
+}
+
+/// The reopen confirmation reports what the reopen did: an issue already open was
+/// not written to.
+fn reopen_issue_reply(number: u64, outcome: crate::forge::IssueReopenOutcome) -> serde_json::Value {
+    let status = match outcome {
+        crate::forge::IssueReopenOutcome::Reopened => "open",
+        crate::forge::IssueReopenOutcome::AlreadyOpen => "already_open",
+    };
+    serde_json::json!({ "issue": number, "status": status })
 }
 
 /// The tool's `expected_head_sha` as the merge reads it: a blank value is no head, so
@@ -623,6 +635,17 @@ async fn on_github(repo: &str) -> bool {
     crate::forge::detect_non_github(repo).await.is_none()
 }
 
+/// On GitHub, refuses a pull request's number ahead of an issue write that addresses
+/// the issue by number: GitHub's issue endpoints and `gh issue` act on a pull request
+/// too. Close and reopen refuse inside their own state read.
+async fn ensure_issue_number(repo: &str, number: u64) -> AppResult<()> {
+    if on_github(repo).await {
+        crate::github::issue::gh_refuse_pull_request(repo.to_string(), number).await
+    } else {
+        Ok(())
+    }
+}
+
 /// GitHub needs only the preserved fields; other providers retain their full view.
 async fn pr_title_body_to_preserve(repo: &str, number: u64) -> AppResult<(String, String)> {
     if on_github(repo).await {
@@ -754,8 +777,9 @@ impl GitDesktopMcp {
         description = "Post a comment to an issue (by number) in the bound repository's forge \
                        (GitHub or GitLab, per its remote; Bitbucket issues aren't supported — its \
                        native tracker is deprecated; for a repo with a linked Jira project, use \
-                       comment_jira_issue instead), under the authenticated forge user. \
-                       Requires --allow-remote-write.",
+                       comment_jira_issue instead), under the authenticated forge user. On \
+                       GitHub, a pull request's number is refused. Requires \
+                       --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn comment_issue(
@@ -763,6 +787,9 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<CommentIssueArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
+        ensure_issue_number(&self.repo, args.number)
+            .await
+            .map_err(app_err)?;
         let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
         crate::forge::forge_issue_comment(self.repo.clone(), args.number, body, None, None)
             .await
@@ -775,9 +802,12 @@ impl GitDesktopMcp {
                        GitLab, per its remote; Bitbucket issues aren't supported — its native \
                        tracker is deprecated; for a repo with a linked Jira project, use \
                        transition_jira_issue instead). Reversible via reopen_issue. `reason` is \
-                       \"completed\" (default) or \"not_planned\"; any other value is refused on \
-                       every forge. GitLab has no close reason, so it records none there and the \
-                       reply's `reason` is null. Requires --allow-remote-write.",
+                       \"completed\" (also used when empty) or \"not_planned\"; any other value is \
+                       refused on every forge. GitLab has no close reason, so it records none \
+                       there and the reply's `reason` is null. An issue that is already closed is \
+                       left as it is: the reply's `status` is \"already_closed\" and its `reason` \
+                       null. On GitHub, a pull request's number is refused. Requires \
+                       --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn close_issue(
@@ -785,18 +815,24 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<CloseIssueArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        let recorded =
-            crate::forge::forge_issue_close_recorded(self.repo.clone(), args.number, args.reason, None)
-                .await
-                .map_err(app_err)?;
-        json_result(&close_issue_reply(args.number, recorded))
+        let outcome = crate::forge::forge_issue_close_outcome(
+            self.repo.clone(),
+            args.number,
+            args.reason,
+            None,
+        )
+        .await
+        .map_err(app_err)?;
+        json_result(&close_issue_reply(args.number, outcome))
     }
 
     #[tool(
         description = "Reopen a closed issue (by number) in the bound repository's forge (GitHub or \
                        GitLab, per its remote; Bitbucket issues aren't supported — its native \
                        tracker is deprecated; for a repo with a linked Jira project, use \
-                       transition_jira_issue instead). Requires --allow-remote-write.",
+                       transition_jira_issue instead). An issue that is already open is left as \
+                       it is and the reply's `status` is \"already_open\". On GitHub, a pull \
+                       request's number is refused. Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn reopen_issue(
@@ -804,10 +840,11 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<ReopenIssueArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_issue_reopen(self.repo.clone(), args.number, None)
-            .await
-            .map_err(app_err)?;
-        json_result(&serde_json::json!({ "issue": args.number, "status": "open" }))
+        let outcome =
+            crate::forge::forge_issue_reopen_outcome(self.repo.clone(), args.number, None)
+                .await
+                .map_err(app_err)?;
+        json_result(&reopen_issue_reply(args.number, outcome))
     }
 
     #[tool(
@@ -1189,6 +1226,7 @@ impl GitDesktopMcp {
                        bound repository's forge (GitHub or GitLab, per its remote; Bitbucket labels \
                        aren't supported). `kind` is \"pr\" or \"issue\". Labels are given by name \
                        and must already exist (see list_labels) — an unknown name is an error on \
+                       GitHub. With `kind` \"issue\", a pull request's number is refused on \
                        GitHub. Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
@@ -1207,6 +1245,11 @@ impl GitDesktopMcp {
                 ));
             }
         };
+        if target == "issue" {
+            ensure_issue_number(&self.repo, args.number)
+                .await
+                .map_err(app_err)?;
+        }
         // GitHub labels use node ids; GitLab uses names and ignores the id side.
         // Read the item before repo labels to preserve provider validation order.
         let labelable_id = labelable_node_id(&self.repo, target, args.number)
@@ -1274,7 +1317,8 @@ impl GitDesktopMcp {
                        or GitLab, per its remote; Bitbucket issues aren't supported; for a repo \
                        with a linked Jira project, use assign_jira_issue instead). `assignees` \
                        is the FULL desired set of logins — it REPLACES the current assignees (an \
-                       empty list clears them). See list_assignable_users. Requires \
+                       empty list clears them). See list_assignable_users. On GitHub, a pull \
+                       request's number is refused (use set_pull_request_assignees). Requires \
                        --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
@@ -1283,6 +1327,9 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<SetAssigneesArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
+        ensure_issue_number(&self.repo, args.number)
+            .await
+            .map_err(app_err)?;
         crate::forge::forge_issue_set_assignees(
             self.repo.clone(),
             args.number,
@@ -1667,7 +1714,8 @@ impl GitDesktopMcp {
         description = "Edit an issue's title and/or body (by number) in the bound repository's forge \
                        (GitHub or GitLab, per its remote; Bitbucket issues aren't supported). Omitted \
                        fields keep their current value (the current issue is read first to preserve \
-                       them). Requires --allow-remote-write.",
+                       them). On GitHub, a pull request's number is refused (use \
+                       update_pull_request). Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn update_issue(
@@ -1675,6 +1723,9 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<UpdateIssueArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
+        ensure_issue_number(&self.repo, args.number)
+            .await
+            .map_err(app_err)?;
         // forge_issue_edit replaces BOTH title and body, so fetch the current issue to
         // fill whichever the caller omitted — otherwise an omitted field would be wiped
         // (same fetch-and-preserve as update_pull_request).
@@ -1699,7 +1750,8 @@ impl GitDesktopMcp {
         description = "Set (or clear) an issue's milestone (by number) in the bound repository's \
                        forge (GitHub or GitLab, per its remote; Bitbucket issues aren't supported). \
                        `milestone` is the `number` of the chosen entry from list_milestones; omit \
-                       it to CLEAR the milestone. Requires --allow-remote-write.",
+                       it to CLEAR the milestone. On GitHub, a pull request's number is \
+                       refused. Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn set_issue_milestone(
@@ -1707,6 +1759,9 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<SetIssueMilestoneArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
+        ensure_issue_number(&self.repo, args.number)
+            .await
+            .map_err(app_err)?;
         crate::forge::forge_issue_set_milestone(self.repo.clone(), args.number, args.milestone, None)
             .await
             .map_err(app_err)?;
@@ -2000,24 +2055,187 @@ mod tests {
     }
 
     #[test]
-    fn close_issue_reply_names_only_the_recorded_reason() {
-        use crate::forge::CloseReason;
-        let reply = |reason: serde_json::Value| {
-            serde_json::json!({ "issue": 7, "status": "closed", "reason": reason })
+    fn close_issue_reply_reports_what_the_close_did() {
+        use crate::forge::{CloseReason, IssueCloseOutcome};
+        let reply = |status: &str, reason: serde_json::Value| {
+            serde_json::json!({ "issue": 7, "status": status, "reason": reason })
         };
         assert_eq!(
-            close_issue_reply(7, Some(CloseReason::NotPlanned)),
-            reply("not_planned".into())
+            close_issue_reply(7, IssueCloseOutcome::Closed(Some(CloseReason::NotPlanned))),
+            reply("closed", "not_planned".into())
         );
         assert_eq!(
-            close_issue_reply(7, Some(CloseReason::Completed)),
-            reply("completed".into())
+            close_issue_reply(7, IssueCloseOutcome::Closed(Some(CloseReason::Completed))),
+            reply("closed", "completed".into())
         );
-        assert_eq!(close_issue_reply(7, None), reply(serde_json::Value::Null));
+        assert_eq!(
+            close_issue_reply(7, IssueCloseOutcome::Closed(None)),
+            reply("closed", serde_json::Value::Null)
+        );
+        assert_eq!(
+            close_issue_reply(7, IssueCloseOutcome::AlreadyClosed),
+            reply("already_closed", serde_json::Value::Null)
+        );
+    }
+
+    /// Every issue write tool that addresses an issue by number on GitHub refuses a pull
+    /// request's number before its read or write (close and reopen refuse inside
+    /// their own state read).
+    #[test]
+    fn issue_tools_refuse_a_pull_requests_number_first() {
+        use crate::github::issue::tests::{flat_body, in_order, strip_block_comments};
+        let src = include_str!("write_forge.rs").replace("\r\n", "\n");
+        let src = src.split("\nmod tests {").next().unwrap().to_string();
+        assert!(
+            !src.contains("fn issue_tools_refuse_a_pull"),
+            "tests stripped"
+        );
+        let method = |src: &str, name: &str| -> String {
+            let start = src.find(&format!("async fn {name}(")).unwrap();
+            let body = &src[start..];
+            let body = &body[..body.find("\n    }\n").unwrap()];
+            let code: Vec<_> = body
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect();
+            strip_block_comments(&code.join("\n"))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let guard = "ensure_issue_number(&self.repo, args.number) .await .map_err(app_err)?;";
+        // Each tool's guard precedes every listed read or write; update_issue's also
+        // precedes its title/body branch, so a call passing both fields is guarded.
+        let tools: [(&str, &[&str]); 5] = [
+            ("comment_issue", &["crate::forge::forge_issue_comment("]),
+            (
+                "update_issue",
+                &[
+                    "let (title, body) =",
+                    "issue_title_body_to_preserve(",
+                    "crate::forge::forge_issue_edit(",
+                ],
+            ),
+            (
+                "set_issue_assignees",
+                &["crate::forge::forge_issue_set_assignees("],
+            ),
+            (
+                "set_issue_milestone",
+                &["crate::forge::forge_issue_set_milestone("],
+            ),
+            (
+                "edit_labels",
+                &["labelable_node_id(", "crate::forge::forge_repo_labels("],
+            ),
+        ];
+        let pinned = |src: &str| {
+            tools.iter().all(|(name, uses)| {
+                let body = method(src, name);
+                body.matches("ensure_issue_number(").count() == 1
+                    && uses
+                        .iter()
+                        .all(|used| in_order(&body, &["self.ensure_remote_write()?;", guard, used]))
+            }) && {
+                let labels = method(src, "edit_labels");
+                labels.contains("\"issue\" => \"issue\",")
+                    && labels.contains("if target == \"issue\" { ensure_issue_number(")
+            } && flat_body(src, "ensure_issue_number")
+                == "fn ensure_issue_number(repo: &str, number: u64) -> AppResult<()> { \
+                    if on_github(repo).await { \
+                    crate::github::issue::gh_refuse_pull_request(repo.to_string(), number).await \
+                    } else { Ok(()) }"
+        };
+        assert!(pinned(&src));
+        let mutate = |anchor: &str, edits: &[(&str, &str)]| {
+            let at = src.find(anchor).unwrap();
+            let mut tail = src[at..].to_string();
+            for (from, to) in edits {
+                let next = tail.replacen(from, to, 1);
+                assert_ne!(next, tail, "{from}");
+                tail = next;
+            }
+            format!("{}{}", &src[..at], tail)
+        };
+        let guard_src =
+            "ensure_issue_number(&self.repo, args.number)\n            .await\n            \
+             .map_err(app_err)?;";
+        for (name, _) in &tools {
+            let anchor = format!("async fn {name}(");
+            let mutant = mutate(&anchor, &[("ensure_issue_number(", "drop_check(")]);
+            assert!(!pinned(&mutant), "unguarded {name} passed");
+        }
+        // The whole guard, commented out: only the method's comment stripping kills it.
+        let commented = mutate(
+            "async fn comment_issue(",
+            &[(guard_src, &format!("/* {guard_src} */"))],
+        );
+        assert!(!pinned(&commented), "a commented-out guard passed");
+        let read_first = mutate(
+            "async fn update_issue(",
+            &[(
+                guard_src,
+                &format!(
+                    "let _ = issue_title_body_to_preserve(&self.repo, args.number).await; \
+                     {guard_src}"
+                ),
+            )],
+        );
+        assert!(
+            !pinned(&read_first),
+            "a preserve read before the guard passed"
+        );
+        let relabelled = mutate(
+            "async fn edit_labels(",
+            &[("\"issue\" => \"issue\"", "\"issue\" => \"mr\"")],
+        );
+        assert!(
+            !pinned(&relabelled),
+            "kind \"issue\" mapped to the MR branch passed"
+        );
+        let branch = "let (title, body) = if args.title.is_none() || args.body.is_none() {";
+        let moved = mutate(
+            "async fn update_issue(",
+            &[(guard_src, ""), (branch, &format!("{branch} {guard_src}"))],
+        );
+        assert!(
+            !pinned(&moved),
+            "a guard inside update_issue's preserve branch passed"
+        );
+        let hollow = mutate(
+            "async fn ensure_issue_number(",
+            &[("if on_github(repo).await {", "if false {")],
+        );
+        assert!(!pinned(&hollow), "a hollow ensure_issue_number passed");
+        let skipped = mutate(
+            "async fn ensure_issue_number(",
+            &[(
+                "if on_github(repo).await {",
+                "if on_github(repo).await { return Ok(()); } if on_github(repo).await {",
+            )],
+        );
+        assert!(
+            !pinned(&skipped),
+            "an early return in ensure_issue_number passed"
+        );
+    }
+
+    #[test]
+    fn reopen_issue_reply_reports_what_the_reopen_did() {
+        use crate::forge::IssueReopenOutcome;
+        assert_eq!(
+            reopen_issue_reply(7, IssueReopenOutcome::Reopened),
+            serde_json::json!({ "issue": 7, "status": "open" })
+        );
+        assert_eq!(
+            reopen_issue_reply(7, IssueReopenOutcome::AlreadyOpen),
+            serde_json::json!({ "issue": 7, "status": "already_open" })
+        );
     }
 
     /// The tool refuses an unknown reason on GitLab too, where the close sends none.
-    /// The remote names an owner that doesn't exist, so a regressed guard reaches no issue.
+    /// The remote's owner and the issue number don't exist, so a regressed guard
+    /// reaches no real issue.
     #[tokio::test]
     async fn close_issue_refuses_an_unknown_reason_on_gitlab() {
         use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
@@ -2044,7 +2262,7 @@ mod tests {
         let h = GitDesktopMcp::with_options(repo, false, true, false, false);
         let error = h
             .close_issue(Parameters(CloseIssueArgs {
-                number: 1,
+                number: 2_147_483_647,
                 reason: "garbage".into(),
             }))
             .await

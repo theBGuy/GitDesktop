@@ -3545,7 +3545,8 @@ pub enum CloseReason {
 }
 
 impl CloseReason {
-    /// Empty defaults to `Completed`; any other spelling is refused.
+    /// Accepts the two API spellings, with an empty reason meaning `Completed`;
+    /// anything else is refused.
     pub fn parse(reason: &str) -> AppResult<Self> {
         match reason {
             "" | "completed" => Ok(Self::Completed),
@@ -3572,37 +3573,62 @@ pub async fn forge_issue_close(
     reason: String,
     lens: Option<String>,
 ) -> AppResult<()> {
-    forge_issue_close_recorded(repo_path, number, reason, lens)
+    forge_issue_close_outcome(repo_path, number, reason, lens)
         .await
         .map(|_| ())
 }
 
-/// Closes an issue and returns the reason the forge recorded. The reason parses
-/// before the provider dispatch, so every forge refuses the same input; GitLab has
-/// no close reason, so its close records none.
-pub async fn forge_issue_close_recorded(
+/// What an issue close did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueCloseOutcome {
+    /// Closed now, with the reason the close recorded (`None` where the forge has no
+    /// close reason).
+    Closed(Option<CloseReason>),
+    /// Already closed: nothing was written, and its existing reason is untouched.
+    AlreadyClosed,
+}
+
+/// Closes an issue and reports what the close did. The reason parses before the
+/// provider dispatch, so every forge refuses the same input. The GitLab arm never
+/// receives the reason: GitLab has no close reason to record.
+pub async fn forge_issue_close_outcome(
     repo_path: String,
     number: u64,
     reason: String,
     lens: Option<String>,
-) -> AppResult<Option<CloseReason>> {
+) -> AppResult<IssueCloseOutcome> {
     let reason = CloseReason::parse(&reason)?;
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::close_issue(&repo_path, number)
-            .await
-            .map(|()| None),
+        Some((Provider::GitLab, _)) => gitlab::close_issue(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::close_issue(&repo_path, number, reason, lens)
-            .await
-            .map(|()| Some(reason)),
+        _ => github::close_issue(&repo_path, number, reason, lens).await,
     }
 }
 
 /// Reopen a closed issue, behind the abstraction.
 #[tauri::command]
 pub async fn forge_issue_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
+    forge_issue_reopen_outcome(repo_path, number, lens)
+        .await
+        .map(|_| ())
+}
+
+/// What an issue reopen did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueReopenOutcome {
+    Reopened,
+    /// Already open: nothing was written.
+    AlreadyOpen,
+}
+
+/// Reopens an issue and reports what the reopen did.
+pub async fn forge_issue_reopen_outcome(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<IssueReopenOutcome> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::reopen_issue(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
@@ -5763,7 +5789,13 @@ mod tests {
         ] {
             assert_eq!(CloseReason::parse(input).unwrap(), want, "{input:?}");
         }
-        for input in ["duplicate", "not planned", "NOT_PLANNED", " completed", "garbage"] {
+        for input in [
+            "duplicate",
+            "not planned",
+            "NOT_PLANNED",
+            " completed",
+            "garbage",
+        ] {
             let refused = CloseReason::parse(input);
             assert!(
                 matches!(&refused, Err(AppError::InvalidArgument(m))
@@ -5776,7 +5808,8 @@ mod tests {
     }
 
     /// The same unknown reason is refused on both forges, ahead of the dispatch. The
-    /// remotes name an owner that doesn't exist, so a regressed guard reaches no issue.
+    /// remotes' owner and the issue number don't exist, so a regressed guard reaches
+    /// no real issue.
     #[tokio::test]
     async fn an_unknown_close_reason_is_refused_on_every_forge() {
         use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
@@ -5799,7 +5832,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let out = forge_issue_close(repo, 1, "garbage".into(), None).await;
+            let out = forge_issue_close(repo, 2_147_483_647, "garbage".into(), None).await;
             assert!(
                 matches!(&out, Err(AppError::InvalidArgument(m))
                     if m == "unknown close reason: garbage"),
