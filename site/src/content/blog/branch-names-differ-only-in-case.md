@@ -162,9 +162,9 @@ running into it until the remote drops a spelling. And before you migrate:
 
 - Check your Git version. The command arrived in 2.46, but an everyday
   clone needs 2.51.1 or later: 2.46 and 2.47 refuse any repository that
-  has reflogs, 2.48 doesn't carry the stash list across, and releases
-  before 2.51.1 write the migrated reflog entries with mangled names and
-  all-zero old hashes.
+  has reflogs, 2.48 doesn't carry the stash list across, and releases before
+  2.51.1 write each migrated reflog entry with a garbled committer name and
+  an all-zero old hash.
 - It won't run while the repository has [linked
   worktrees](/blog/work-on-two-branches-at-once/). Git answers
   `migrating repositories with worktrees is not supported yet`. In
@@ -209,17 +209,18 @@ From …/trailmap
  ! 2903282..992e0c0  feature/offline-maps -> origin/feature/offline-maps  (unable to update local ref)
 ```
 
-The first fetch worked. Then `git branch -r` lists a branch the remote
-doesn't have, `origin/Feature/offline-maps`. Priya's update was written
-into the folder Leo's branch had created first, and Git reads that folder's
-spelling back. From there every fetch fails with `cannot lock ref`, the
-one above included, though nothing new had arrived, and `git pull` stops on
-the same error. The fixes carry over. Rename every branch under `Feature/`
-to `feature/` with the same kind of push (here only `Feature/route-export`,
-but `git ls-remote --heads origin` lists them all, and one left behind
-keeps the folder clash alive), then run `git fetch --prune`, which deletes
-the phantom. Moving the clone to reftable works too, followed by the same
-`git fetch --prune`, since the migration keeps the phantom.
+The first fetch worked. Then `git branch -r` lists a branch the
+remote doesn't have, `origin/Feature/offline-maps`. The update to
+`feature/offline-maps` was written into the folder Leo's branch had created
+first, and Git reads that folder's spelling back. From there every fetch
+fails with `cannot lock ref`, the one above included, though nothing new
+had arrived, and `git pull` stops on the same error. The fixes carry over.
+Rename every branch under `Feature/` to `feature/` with the same kind of
+push (here only `Feature/route-export`, but `git ls-remote --heads origin`
+lists them all, and one left behind keeps the folder clash alive), then run
+`git fetch --prune`, which deletes the phantom. Moving the clone to reftable
+works too, followed by the same `git fetch --prune`, since the migration
+keeps the phantom.
 
 ## How the twin got there
 
