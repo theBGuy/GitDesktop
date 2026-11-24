@@ -19,6 +19,8 @@ import { unmockedCommands } from "./setup";
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   forgeCommitComments: vi.fn(),
+  // The commit isn't local here, so the pane asks the forge for its parent.
+  forgeCommitFirstParent: vi.fn(async () => null),
   forgePrCommitDiff: vi.fn(),
   forgeStatus: vi.fn(),
   gitObjectsPresent: vi.fn(),

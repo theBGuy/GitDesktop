@@ -1204,3 +1204,197 @@ test("the submodule pane reaches no whitespace machinery", () => {
     "an import of the mode",
   );
 });
+
+// --- the shared in-diff editor selector ------------------------------------
+
+const MODE_FILE = "src/features/diff/whitespace-mode.ts";
+const EDITOR_ARMS = [
+  "[data-diff-line-widget]",
+  "[data-diff-anchor] [data-thread-editing]",
+  "[data-diff-anchor] [data-diff-editor]",
+];
+
+/** One plain string literal holding exactly the three arms, read by
+ *  `diffEditorOpen`, and the layout probe returning through it. */
+function pinEditorSelector(text) {
+  const decl = text.match(
+    /^export const DIFF_EDITOR_SELECTOR =\s*"([^"\\`$]*)";$/m,
+  );
+  if (!decl)
+    throw new Error("DIFF_EDITOR_SELECTOR must be ONE plain string literal");
+  once(text, "export const DIFF_EDITOR_SELECTOR =");
+  const arms = decl[1].split(",").map((arm) => arm.trim());
+  if (
+    arms.length !== EDITOR_ARMS.length ||
+    EDITOR_ARMS.some((arm) => !arms.includes(arm))
+  )
+    throw new Error(`the selector's arms: ${arms.join(" | ")}`);
+  const open = bodyOf(text, "export function diffEditorOpen(", false);
+  if (
+    !/return root\.querySelector\(DIFF_EDITOR_SELECTOR\) !== null;/.test(open)
+  )
+    throw new Error("diffEditorOpen queries DIFF_EDITOR_SELECTOR on its root");
+  const layout = bodyOf(text, "export function lineComposerOpen(", false);
+  if (
+    layout.replace(/\s+/g, " ").trim() !==
+    "{ return diffEditorOpen(document); }"
+  )
+    throw new Error(
+      "lineComposerOpen returns through diffEditorOpen(document)",
+    );
+}
+
+test("one selector names every in-diff editor, and the layout probe reads it", () => {
+  const text = source(MODE_FILE);
+  pinEditorSelector(text);
+  assert.equal(mode.DIFF_EDITOR_SELECTOR.split(", ").length, 3);
+  const asked = [];
+  const root = {
+    querySelector: (s) => {
+      asked.push(s);
+      return s.includes("[data-diff-editor]") ? {} : null;
+    },
+  };
+  assert.equal(mode.diffEditorOpen(root), true);
+  assert.deepEqual(asked, [mode.DIFF_EDITOR_SELECTOR]);
+  const literal = text.match(/DIFF_EDITOR_SELECTOR =\s*("[^"]*")/)[1];
+  for (const arm of EDITOR_ARMS) {
+    const dropped = literal.replace(`${arm}, `, "").replace(`, ${arm}`, "");
+    red(pinEditorSelector, swap(text, literal, dropped), `arm dropped: ${arm}`);
+  }
+  red(
+    pinEditorSelector,
+    swap(
+      text,
+      literal,
+      `"[data-diff-line-widget], " + "[data-diff-anchor] [data-thread-editing], [data-diff-anchor] [data-diff-editor]"`,
+    ),
+    "the selector concatenated",
+  );
+  red(
+    pinEditorSelector,
+    swap(
+      text,
+      "  return diffEditorOpen(document);\n",
+      '  return document.querySelector("[data-diff-line-widget]") !== null;\n',
+    ),
+    "lineComposerOpen given its own selector again",
+  );
+});
+
+/** The anchor row's wrapper tags itself like the composer wrapper. */
+function pinAnchorMarker(text) {
+  const rows = text.slice(once(text, "const renderExtendLine = extendData"));
+  if (
+    !/^\s*\? \(\{ data \}: \{ data: \{ render: \(\) => ReactNode \} \}\) => \(\s*<div\s+data-diff-anchor=\{rebuildsOnWhitespace \? "whitespace" : "layout"\}\s+className="border-y bg-background/.test(
+      rows.slice("const renderExtendLine = extendData".length),
+    )
+  )
+    throw new Error(
+      "renderExtendLine's wrapper must tag itself whitespace or layout by its host",
+    );
+}
+
+test("the anchor row marks its rebuild kind for the editor probes", () => {
+  const text = source(SURFACE);
+  pinAnchorMarker(text);
+  red(
+    pinAnchorMarker,
+    swap(
+      text,
+      '          data-diff-anchor={rebuildsOnWhitespace ? "whitespace" : "layout"}\n',
+      "",
+    ),
+    "the attribute removed",
+  );
+  red(
+    pinAnchorMarker,
+    swap(
+      text,
+      'data-diff-anchor={rebuildsOnWhitespace ? "whitespace" : "layout"}',
+      'data-diff-anchor="layout"',
+    ),
+    "the value made a constant",
+  );
+});
+
+// --- the editor observer's attribute filter --------------------------------
+
+const SURFACE_FILE = "src/features/diff/DiffSurface.tsx";
+
+/** DiffSurface's observer filter lists exactly the attributes the selector
+ *  reads, once each; anything either side spells another way fails. */
+function pinEditorMarks(surface, modeText) {
+  const decl = modeText.match(
+    /^export const DIFF_EDITOR_SELECTOR =\s*"([^"\\`$]*)";$/m,
+  );
+  if (!decl)
+    throw new Error("DIFF_EDITOR_SELECTOR must be ONE plain string literal");
+  const wanted = new Set();
+  for (const [, inner] of decl[1].matchAll(/\[([^\]]*)\]/g)) {
+    if (!/^[a-z][a-z-]*$/.test(inner))
+      throw new Error(`an attribute selector this pin can't read: [${inner}]`);
+    wanted.add(inner);
+  }
+  if (wanted.size === 0) throw new Error("the selector names no attribute");
+  once(surface, "const DIFF_EDITOR_MARKS = [");
+  const marks = surface.match(
+    /^const DIFF_EDITOR_MARKS = \[\n((?: {2}"[a-z][a-z-]*",\n)+)\];$/m,
+  );
+  if (!marks)
+    throw new Error("DIFF_EDITOR_MARKS must be ONE array of plain literals");
+  const listed = [...marks[1].matchAll(/"([a-z-]+)"/g)].map((m) => m[1]);
+  if (new Set(listed).size !== listed.length)
+    throw new Error("DIFF_EDITOR_MARKS lists a mark twice");
+  const missing = [...wanted].filter((m) => !listed.includes(m));
+  const extra = listed.filter((m) => !wanted.has(m));
+  if (missing.length > 0 || extra.length > 0)
+    throw new Error(`marks vs selector: missing ${missing}; extra ${extra}`);
+}
+
+test("the editor observer watches exactly the selector's attributes", () => {
+  const surface = source(SURFACE_FILE);
+  const modeText = source(MODE_FILE);
+  pinEditorMarks(surface, modeText);
+  const onSurface = (t) => pinEditorMarks(t, modeText);
+  const onMode = (t) => pinEditorMarks(surface, t);
+  red(
+    onSurface,
+    swap(surface, '  "data-diff-editor",\n', ""),
+    "a mark dropped",
+  );
+  red(
+    onSurface,
+    swap(
+      surface,
+      '  "data-diff-editor",\n',
+      '  "data-diff-editor",\n  "data-extra",\n',
+    ),
+    "a mark added",
+  );
+  red(
+    onSurface,
+    swap(
+      surface,
+      '  "data-diff-editor",\n',
+      '  "data-diff-editor",\n  "data-diff-editor",\n',
+    ),
+    "a mark listed twice",
+  );
+  red(
+    onSurface,
+    swap(surface, '  "data-diff-editor",\n', "  EXTRA_MARK,\n"),
+    "a mark that isn't a literal",
+  );
+  const literal = modeText.match(/DIFF_EDITOR_SELECTOR =\s*"([^"]*)"/)[1];
+  red(
+    onMode,
+    swap(modeText, literal, `${literal}, [data-diff-anchor] [data-new-editor]`),
+    "an arm added",
+  );
+  red(
+    onMode,
+    swap(modeText, literal, `${literal}, [data-diff-editor="open"]`),
+    "an attribute selector with a value",
+  );
+});

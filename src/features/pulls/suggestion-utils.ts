@@ -4,11 +4,16 @@
  * from a file's unified-diff section, building the provider-correct
  * ```suggestion fence, and synthesizing a GitHub-shaped `diffHunk` for
  * GitLab/Bitbucket threads (whose APIs return none) so the Apply affordance can
- * light up. The hunk parsing is a deliberate separate copy of ReviewThreads.tsx's
- * private `parseHunk`/`newSideLines` (those are coupled to its own
- * `HunkLine`/`ReviewThreadOut` shapes) — any change to the unified marker/counter
- * rules must be mirrored in BOTH.
+ * light up. The marker and new-side counter rules are a deliberate separate copy
+ * of ReviewThreads.tsx's private `parseHunk`/`newSideLines` (those are coupled to
+ * its own `HunkLine`/`ReviewThreadOut` shapes) — any change to them must be
+ * mirrored in BOTH. The section walk itself is bounded like every other hunk
+ * walk over a file section (`patchLines` in diff-split.ts). Its only import is a
+ * relative .ts one, so scripts/diff-split.test.mjs loads it under Node.
  */
+import { diffLines } from "../../lib/git/diff-split.ts";
+
+const SECTION_HUNK = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
 /** One parsed new-side line of a unified-diff section: its 1-based new-side line
  *  number, null for removed lines (which carry no new-side number). */
@@ -17,7 +22,12 @@ interface SectionLine {
   kind: "add" | "del" | "context";
   /** Raw line including its leading marker (+, -, or space). */
   text: string;
+  /** `\ No newline at end of file` follows: the line has no terminator. */
+  noEol?: boolean;
 }
+
+const NO_EOL_MARKER = "\\ No newline at end of file";
+const BOM = String.fromCharCode(0xfeff);
 
 /**
  * Parse every hunk of a per-file unified-diff section into new-side-numbered
@@ -26,32 +36,48 @@ interface SectionLine {
  * advances on context + added lines and resets at each hunk header's `+c` start;
  * removed lines carry no number. The counter rules mirror ReviewThreads.tsx's
  * private `parseHunk`, so a hunk synthesized here lines up with its Apply gating.
+ * Each hunk ends at its header's counts (an omitted count is 1), so neither the
+ * empty tail a final newline leaves nor a joined section's next file header is
+ * read as a line; an empty line inside a hunk is a blank context line.
  */
 function parseSectionLines(section: string): SectionLine[] {
   const out: SectionLine[] = [];
-  let newNo: number | null = null;
-  for (const raw of section.split("\n")) {
-    const header = raw.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-    if (header) {
-      newNo = Number(header[1]);
-      continue;
-    }
-    // Skip everything before the first hunk header (file header lines).
-    if (newNo === null) continue;
+  let newNo = 0;
+  let oldLeft = 0;
+  let newLeft = 0;
+  for (const raw of diffLines(section)) {
     const marker = raw[0];
     // `\ No newline at end of file` annotates the previous line — not content,
-    // so it gets no number and must not advance the counter.
-    if (marker === "\\") continue;
-    if (marker === "+") {
-      out.push({ number: newNo, kind: "add", text: raw });
-      newNo += 1;
-    } else if (marker === "-") {
-      out.push({ number: null, kind: "del", text: raw });
-    } else {
-      // Context line (leading space) or a stray blank; both advance new-side.
-      out.push({ number: newNo, kind: "context", text: raw });
-      newNo += 1;
+    // so it gets no number and must not advance the counter. It follows a
+    // hunk's last line too, after the counts ran out.
+    if (marker === "\\") {
+      const prev = out.at(-1);
+      if (prev) prev.noEol = true;
+      continue;
     }
+    if (oldLeft <= 0 && newLeft <= 0) {
+      const header = SECTION_HUNK.exec(raw);
+      if (header) {
+        oldLeft = header[1] === undefined ? 1 : Number(header[1]);
+        newNo = Number(header[2]);
+        newLeft = header[3] === undefined ? 1 : Number(header[3]);
+      }
+      continue;
+    }
+    if (marker === "-") {
+      out.push({ number: null, kind: "del", text: raw });
+      oldLeft -= 1;
+      continue;
+    }
+    // A line past its side's count draws no new-side line, as in `patchLines`.
+    const number = newLeft > 0 ? newNo : null;
+    if (marker === "+") out.push({ number, kind: "add", text: raw });
+    else {
+      out.push({ number, kind: "context", text: raw });
+      oldLeft -= 1;
+    }
+    newNo += 1;
+    newLeft -= 1;
   }
   return out;
 }
@@ -77,7 +103,12 @@ export function extractNewSideLines(
   for (let n = from; n <= to; n += 1) {
     const hit = byNumber.get(n);
     if (!hit) return null; // gap — range not fully in the section
-    picked.push(hit.text.slice(1)); // strip the single leading marker
+    // Strip the single leading marker, and any "\r": the composer's textarea
+    // would turn a lone CR into a line break inside the fence. Line 1 sheds a
+    // leading BOM: Apply restores the file's own, so the fence's would double it.
+    let body = hit.text.slice(1).replace(/\r$/, "");
+    if (n === 1 && body.startsWith(BOM)) body = body.slice(1);
+    picked.push(body);
   }
   return picked;
 }
@@ -144,5 +175,15 @@ export function synthesizeThreadHunk(
   const newCount = window.filter((l) => l.kind !== "del").length;
   const oldCount = window.filter((l) => l.kind !== "add").length;
   const header = `@@ -${from},${oldCount} +${from},${newCount} @@`;
-  return [header, ...window.map((l) => l.text)].join("\n");
+  // A blank context line takes its leading space back: ReviewThreads'
+  // `parseHunk` skips an empty first row as an artifact. The no-newline marker
+  // rides along, since Apply keeps an unterminated line's "\r".
+  const rows = window.flatMap((l) => {
+    const row =
+      l.kind === "context" && (l.text === "" || l.text === "\r")
+        ? ` ${l.text}`
+        : l.text;
+    return l.noEol ? [row, NO_EOL_MARKER] : [row];
+  });
+  return [header, ...rows].join("\n");
 }

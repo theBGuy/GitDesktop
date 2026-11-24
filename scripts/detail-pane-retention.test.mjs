@@ -1163,7 +1163,7 @@ const FILE_AT_REV_GATES = {
     queries: ["oldFile", "newFile"],
     decls: {
       pending:
-        "(oldFile.isPending && oldFile.errorUpdateCount === 0) || (newFile.isPending && newFile.errorUpdateCount === 0)",
+        '(oldFile.isPending && oldFile.errorUpdateCount === 0 && oldFile.fetchStatus === "fetching") || (newFile.isPending && newFile.errorUpdateCount === 0 && newFile.fetchStatus === "fetching")',
     },
   },
   "src/features/diff/MarkdownPreview.tsx": {
@@ -1187,25 +1187,30 @@ function srcFiles() {
     .map((d) => relative(root, join(d.parentPath, d.name)).replace(/\\/g, "/"));
 }
 
+// The diff feature reads through `useFileAtSource` (content-source.ts), which
+// is `useFileAtRev`'s query for a local source, so both spell a caller.
 test("file-at-rev reads pend on a first read only", () => {
   const files = srcFiles();
   assert.ok(files.length > 0, "no source files under src/");
   const callers = files
     .filter((file) =>
-      readFileSync(new URL(`../${file}`, import.meta.url), "utf8").includes(
-        "useFileAtRev",
+      /useFileAt(?:Rev|Source)/.test(
+        readFileSync(new URL(`../${file}`, import.meta.url), "utf8"),
       ),
     )
     .filter((file) =>
-      /(?<![\w$])useFileAtRev\s*\(/.test(
-        load(file).masked.replace(/\bfunction\s+useFileAtRev\s*\(/g, ""),
+      /(?<![\w$])useFileAt(?:Rev|Source)\s*\(/.test(
+        load(file).masked.replace(
+          /\bfunction\s+useFileAt(?:Rev|Source)\s*\(/g,
+          "",
+        ),
       ),
     )
     .sort();
   assert.deepEqual(
     callers,
     Object.keys(FILE_AT_REV_GATES).sort(),
-    "the useFileAtRev( callers must match FILE_AT_REV_GATES",
+    "the useFileAtRev( and useFileAtSource( callers must match FILE_AT_REV_GATES",
   );
   for (const [file, { queries, decls }] of Object.entries(FILE_AT_REV_GATES)) {
     const { raw, masked } = load(file);

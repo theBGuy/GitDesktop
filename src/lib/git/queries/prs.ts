@@ -1375,3 +1375,94 @@ function useOptimisticCreateCommentMutation<TData>(
     mutationKey,
   );
 }
+
+// Whole-file reads for pull request diffs (expand context, image previews).
+// None keeps previous data: another head's or pull request's revs never serve.
+
+/** How long an unobserved by-sha forge read stays cached: a sha's bytes never
+ *  change, and the bound keeps up to 20 MB per image out of session memory. */
+export const FORGE_SHA_READ_GC_MS = 30 * 60_000;
+
+/** A refusal (`invalidArgument`) answers the same every time. */
+const retryUnlessRefused = (failureCount: number, error: unknown) =>
+  !(isAppError(error) && error.kind === "invalidArgument") &&
+  shouldRetryQuery(failureCount, error);
+
+/** A pull request's content revs at one head: its merge base and that head.
+ *  In the PR subtree, so it refreshes with the diff. */
+export const prContentRevsOptions = (
+  repo: string,
+  number: number,
+  lens: RemoteLens,
+  headSha: string,
+) =>
+  queryOptions({
+    queryKey: [
+      "repo",
+      repo,
+      "pr",
+      lens,
+      number,
+      "content-revs",
+      headSha,
+    ] as const,
+    queryFn: () => api.forgePrContentRevs(repo, number, lens, headSha),
+    staleTime: 30_000,
+    retry: retryUnlessRefused,
+  });
+
+export function usePrContentRevs(
+  repo: string,
+  number: number,
+  lens: RemoteLens,
+  headSha: string | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    ...prContentRevsOptions(repo, number, lens, headSha ?? ""),
+    enabled: enabled && !!headSha,
+  });
+}
+
+/** A commit's first parent from the forge (null: a root commit). Outside the
+ *  `["repo", …]` subtree: a commit's parents never change, so a repo-wide
+ *  invalidation never re-reads them. */
+export const commitFirstParentOptions = (
+  repo: string,
+  lens: RemoteLens,
+  oid: string,
+) =>
+  queryOptions({
+    queryKey: ["forge-commit-parent", repo, lens, oid] as const,
+    queryFn: () => api.forgeCommitFirstParent(repo, oid, lens),
+    staleTime: Infinity,
+    gcTime: FORGE_SHA_READ_GC_MS,
+    retry: retryUnlessRefused,
+  });
+
+export function useCommitFirstParent(
+  repo: string,
+  lens: RemoteLens,
+  oid: string,
+  enabled: boolean,
+) {
+  return useQuery({ ...commitFirstParentOptions(repo, lens, oid), enabled });
+}
+
+/** One file's bytes at a sha, from the forge (null: absent at that commit).
+ *  `maxBytes` (null: the 20 MB image cap) keys the read, so content mode's
+ *  budgeted read never serves an image's. Outside the `["repo", …]` subtree
+ *  for the same reason as the parent read. */
+export const forgeFileAtShaOptions = (
+  repo: string,
+  lens: RemoteLens,
+  sha: string,
+  file: string,
+  maxBytes: number | null,
+) => ({
+  queryKey: ["forge-file-at-sha", repo, lens, sha, file, maxBytes] as const,
+  queryFn: () => api.forgeFileAtSha(repo, sha, file, lens, maxBytes),
+  staleTime: Infinity,
+  gcTime: FORGE_SHA_READ_GC_MS,
+  retry: retryUnlessRefused,
+});

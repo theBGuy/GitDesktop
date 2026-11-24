@@ -1755,6 +1755,19 @@ one grep away on the named symbol. Grows via Conventions-sync.
   Select does not skip a disabled item on arrow keys). A new picker joins the set
   that `git grep -E "EFFORT_LEVELS|EFFORT_LEVEL_LABELS|REVIEW_EFFORTS" -- src`
   closes.
+- **Forge-patch diff hosts** — a host whose diff text comes from a forge (a
+  pull request's Files pane and commit drill-in) passes `forgePatch` beside
+  its `contentRevs` / `imageRevs`: the hunk-match guard
+  (`src/features/diff/hunk-match.ts`) decides whether content mode builds,
+  and the build upgrades in place. The diff panes' whole-file reads (content
+  mode, image diffs) go through `src/features/diff/content-source.ts`, never
+  `useFileAtRev` directly; Markdown preview stays a local read. An editor that
+  can open inside a diff row is counted by `DIFF_EDITOR_SELECTOR`
+  (`src/features/diff/whitespace-mode.ts`), the one predicate behind
+  `lineComposerOpen()` and the upgrade hold; a new one marks its open state with
+  `data-diff-editor`. It counts a `data-diff-editor` or `data-thread-editing`
+  mark only inside a `[data-diff-anchor]` row; the line composer matches by its
+  own `[data-diff-line-widget]` wrapper.
 
 ## Rust / Tauri conventions
 

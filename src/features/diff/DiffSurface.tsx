@@ -27,6 +27,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -59,8 +60,8 @@ import {
   modeChangeMessage,
   type TypechangeHalves,
   typechangeHalves,
+  withBlankContextSpaces,
 } from "@/lib/git/diff-split";
-import { useFileAtRev } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import type { AppSettings, CustomLanguage } from "@/lib/settings/api";
@@ -105,6 +106,13 @@ import {
 import { HOLD_BOUND_MS } from "./diff-pane-slots";
 import "./code-highlight.css";
 import {
+  contentSourceKey,
+  type DiffContentSource,
+  FORGE_CONTENT_BUDGET_BYTES,
+  type ForgePatch,
+  useFileAtSource,
+} from "./content-source";
+import {
   anchorRow,
   anchorRows,
   anchorScrollTop,
@@ -120,6 +128,7 @@ import {
   changesSince,
   contentBuildGate,
   contentReadsKey,
+  contentUpgradeGate,
   type Painted,
   paintedAfter,
 } from "./file-content-gate";
@@ -134,6 +143,7 @@ import {
   installHljsGapIsolation,
 } from "./hljs-gap-isolation";
 import { installPatchedJsGrammars } from "./hljs-ts-no-jsx";
+import { hunksMatchContent } from "./hunk-match";
 import { ImageDiff, ImagePanes, type ImageRevs, imageMime } from "./ImageDiff";
 import {
   canPreviewMarkdown,
@@ -158,8 +168,10 @@ import {
 } from "./use-hidden-trigger-focus";
 import { useWorkerHighlight, type WorkerAsts } from "./use-worker-highlight";
 import {
+  diffEditorOpen,
   LAYOUT_COMPOSER_HELD,
   lineComposerOpen,
+  SHOW_FULL_COMPOSER_HELD,
   SHOW_WHITESPACE_LABEL,
   WHITESPACE_COMPOSER_HELD,
   WHITESPACE_ONLY_MESSAGE,
@@ -345,6 +357,9 @@ export function GitDiffView({
   revealLanding,
   scrollerRef,
   rebuildsOnWhitespace,
+  forgePatch,
+  dataIsPlaceholder,
+  lineKeeper,
 }: {
   filePath: string;
   /** The path the old side's whole-file read uses (a rename's source).
@@ -372,6 +387,14 @@ export function GitDiffView({
    *  `whitespaceControl`), so an open composer holds that flip as well as a
    *  layout one. Omitted = a fixed patch only a layout flip rebuilds. */
   rebuildsOnWhitespace?: boolean;
+  /** See {@link DiffContent}'s prop of the same name. */
+  forgePatch?: ForgePatch;
+  /** `text` is the previous record's diff, painted while this one's loads:
+   *  its build stays, whatever record `forgePatch.scope` names. */
+  dataIsPlaceholder?: boolean;
+  /** Filled with the call that keeps the top visible line across a layout
+   *  change above the rows in `scrollerRef` (see `useModeLineAnchor`). */
+  lineKeeper?: { current: (() => void) | null };
 }) {
   const sinkRef = useRef<HTMLSpanElement>(null);
   return (
@@ -393,6 +416,9 @@ export function GitDiffView({
           revealLanding={revealLanding ?? sinkRef}
           scrollerRef={scrollerRef}
           rebuildsOnWhitespace={rebuildsOnWhitespace}
+          forgePatch={forgePatch}
+          dataIsPlaceholder={dataIsPlaceholder}
+          lineKeeper={lineKeeper}
         />
       </DiffErrorBoundary>
     </>
@@ -518,7 +544,7 @@ export function createDiffFile(
         fileLang: lang,
         content: content?.new ?? null,
       },
-      hunks: [text],
+      hunks: [withBlankContextSpaces(text)],
     };
     const file = DiffFile.createInstance(data);
     file.initRaw();
@@ -570,29 +596,51 @@ export function useFileContent(
   maxDiffLines: number = DIFF_LINE_CAP,
   // Keep the shown build whatever its reads do (a view held on purpose).
   frozen = false,
+  // The diff text came from a forge: the hunk-match guard gates content mode,
+  // and an upgrade over a hunk-only paint waits for `release`.
+  forgePatch?: ForgePatch,
+  // An editor is open inside this diff (read only with `forgePatch`).
+  editorOpen = false,
+  // The record `diffText` belongs to (`forgePatch.scope`, deferred with the
+  // text), and whether `diffText` is a previous record's placeholder paint.
+  scope: string | undefined = forgePatch?.scope,
+  placeholder = false,
 ): {
   content: { old: string; new: string } | null;
   pending: boolean;
   hold: boolean;
   /** An enabled side read is fetching, a refetch of cached data included. */
   fetching: boolean;
+  /** A forge-patch diff's content build is ready and withheld until
+   *  `release`, which the caller runs once it has kept the reader's line. */
+  pendingUpgrade: boolean;
+  release: () => void;
 } {
   const oldRev = contentRevs?.oldRev;
   const newRev = contentRevs?.newRev;
+  // A forge-patch host whose source isn't known yet reads nothing.
+  const source = forgePatch === undefined ? "local" : forgePatch.source;
   const wantContent =
-    !!repoPath && !!contentRevs && realLineCount(diffText) <= maxDiffLines;
-  const oldQ = useFileAtRev(
-    repoPath ?? "",
-    oldRev ?? null,
-    oldPath,
-    wantContent && oldRev !== undefined,
-  );
-  const newQ = useFileAtRev(
-    repoPath ?? "",
-    newRev ?? null,
-    filePath,
-    wantContent && newRev !== undefined,
-  );
+    !!repoPath &&
+    !!contentRevs &&
+    source !== null &&
+    realLineCount(diffText) <= maxDiffLines;
+  const oldQ = useFileAtSource({
+    repo: repoPath ?? "",
+    source: source ?? "local",
+    rev: oldRev ?? null,
+    path: oldPath,
+    enabled: wantContent && oldRev !== undefined,
+    maxBytes: FORGE_CONTENT_BUDGET_BYTES,
+  });
+  const newQ = useFileAtSource({
+    repo: repoPath ?? "",
+    source: source ?? "local",
+    rev: newRev ?? null,
+    path: filePath,
+    enabled: wantContent && newRev !== undefined,
+    maxBytes: FORGE_CONTENT_BUDGET_BYTES,
+  });
   // An omitted side (undefined rev) has no version there → "" — gated on the
   // rev, not just the data, because a disabled `null` read shares the worktree
   // query key and would otherwise cache-hit the *other* side's content. A null
@@ -621,20 +669,85 @@ export function useFileContent(
   // (see diffMaxLineNumbers) — a stale, shorter read would half-highlight.
   const { old: maxOldLine, new: maxNewLine } = diffMaxLineNumbers(diffText);
   const covers = (s: string, max: number) => max === 0 || countLines(s) >= max;
+  const settled = oldSettled && newSettled;
   const useContent =
     wantContent &&
-    oldSettled &&
-    newSettled &&
+    settled &&
     (oldText !== "" || newText !== "") &&
     fitsBudget(oldText) &&
     fitsBudget(newText) &&
     covers(newText, maxNewLine) &&
-    covers(oldText, maxOldLine);
+    covers(oldText, maxOldLine) &&
+    // A forge's text isn't built from these files: content mode lays them
+    // around its hunks only when the text is exactly their change.
+    (forgePatch === undefined || hunksMatchContent(diffText, oldText, newText));
+  // A forge-patch host's build on screen: its record, path and text, and the
+  // content it was built with (null: hunk-only), recorded from its first paint.
+  const [shown, setShown] = useState<{
+    scope: string | undefined;
+    path: string;
+    text: string;
+    content: { old: string; new: string } | null;
+  } | null>(null);
+  const fresh = useMemo(
+    () => ({ old: oldText, new: newText }),
+    [oldText, newText],
+  );
+  // Any build of this path counts against blanking it; its content counts
+  // only for its own record, since another record's identical text says
+  // nothing about the lines outside its hunks. A placeholder paint is the
+  // previous record's diff, so it keeps that record's build.
+  const pathOnScreen = shown !== null && shown.path === filePath;
+  const textOnScreen =
+    pathOnScreen &&
+    shown.text === diffText &&
+    (placeholder || shown.scope === scope);
+  const shownContent = textOnScreen ? shown.content : null;
+  const upgrade =
+    forgePatch !== undefined
+      ? contentUpgradeGate({
+          forge: source !== null && source !== "local",
+          wanted: wantContent,
+          onScreen: textOnScreen,
+          contentShown: shownContent !== null,
+          pathOnScreen,
+          settled,
+          matched: useContent,
+          same:
+            shownContent !== null &&
+            shownContent.old === oldText &&
+            shownContent.new === newText,
+          editorOpen,
+        })
+      : null;
+  if (upgrade === "hunk-only" && !textOnScreen)
+    setShown({ scope, path: filePath, text: diffText, content: null });
+  if (upgrade === "build")
+    setShown({ scope, path: filePath, text: diffText, content: fresh });
+  const release = useCallback(
+    () => setShown({ scope, path: filePath, text: diffText, content: fresh }),
+    [scope, filePath, diffText, fresh],
+  );
+  const content = ((): { old: string; new: string } | null => {
+    switch (upgrade) {
+      case null:
+        return useContent ? fresh : null;
+      case "build":
+        return fresh;
+      case "keep":
+      case "release":
+        return shownContent;
+      default:
+        return null;
+    }
+  })();
   // Content mode wants to apply but its reads are in flight — the caller holds
   // the paint rather than build a hunk-only diff it will restructure. Only a
   // first read pends: a background refetch of cached data must never re-blank,
   // nor one of a failed read, which react-query resets to pending each time.
-  const pending = wantContent && (!oldSettled || !newSettled);
+  // A forge-patch host pends only as `contentUpgradeGate` says.
+  const pending =
+    upgrade === null ? wantContent && !settled : upgrade === "pending";
 
   // The inputs of the build on screen, and the one whose hold ran its bound.
   const [painted, setPainted] = useState<Painted | null>(null);
@@ -656,6 +769,7 @@ export function useFileContent(
     ...changesSince(painted, now),
     boundExpired: painted !== null && expiredFor === painted,
     frozen,
+    paintsUnsettled: upgrade !== null && upgrade !== "pending",
   });
   const nextPainted = paintedAfter(painted, decision, pending, now, {
     wantContent,
@@ -674,14 +788,10 @@ export function useFileContent(
     return () => window.clearTimeout(bound);
   }, [hold, frozen, painted]);
   const fetching = oldFetching || newFetching;
+  const pendingUpgrade = upgrade === "release";
   return useMemo(
-    () => ({
-      content: useContent ? { old: oldText, new: newText } : null,
-      pending,
-      hold,
-      fetching,
-    }),
-    [useContent, oldText, newText, pending, hold, fetching],
+    () => ({ content, pending, hold, fetching, pendingUpgrade, release }),
+    [content, pending, hold, fetching, pendingUpgrade, release],
   );
 }
 
@@ -692,8 +802,8 @@ export function useFileContent(
  * both {@link createDiffFile} call sites so they apply the same routing rules.
  *
  * Contract: the rebuild that picks a loaded grammar up rides `holdForGrammar`
- * turning false. Callers still list `grammarState` in their
- * {@link createDiffFile} memo's deps for biome and an uncompiled caller; the
+ * turning false. A caller whose {@link createDiffFile} build is a memo still
+ * lists `grammarState` in its deps for biome and an uncompiled caller; the
  * compiler derives a compiled caller's keys from the body and drops it.
  * `workerHighlighter` goes to the view as its `registerHighlighter` prop and
  * must NOT be a build dep: keeping the DiffFile identity stable across the
@@ -1006,6 +1116,9 @@ export function useModeLineAnchor(
   mode: string,
   file: string,
   content: unknown,
+  // Filled with a call that puts the reader's line back after a layout change
+  // above the rows that no scroll or build reports (image panes over the diff).
+  keeper?: { current: (() => void) | null },
 ): () => void {
   const runtime = useRef<LineAnchorRuntime>({
     anchor: null,
@@ -1102,6 +1215,26 @@ export function useModeLineAnchor(
     rt.rows = anchorRows(scroller);
     rt.anchor = captureLineAnchor(scroller, rt.rows);
   }, [content, mode, file, scrollerRef]);
+  // The anchor read before that change is the last one scrolling or a build
+  // took, so it restores exactly as a switch does; a wait already armed owns it.
+  useLayoutEffect(() => {
+    if (keeper === undefined) return;
+    keeper.current = () => {
+      const rt = runtime.current;
+      const scroller = scrollerRef?.current;
+      if (!scroller || rt.anchor === null || rt.armed !== null) return;
+      restoreLineAnchor(
+        rt,
+        scroller,
+        rt.anchor,
+        appliedRef.current,
+        () => appliedRef.current,
+      );
+    };
+    return () => {
+      keeper.current = null;
+    };
+  }, [keeper, scrollerRef]);
   // Called just before an expand of the diff on screen: reads the line the
   // pane shows now, which the expanded build restores.
   return useCallback(() => {
@@ -1118,6 +1251,93 @@ export function useModeLineAnchor(
 /** The per-side line -> render() maps the vendored DiffView consumes. */
 type AnchorExtendData = Record<string, { data: { render: () => ReactNode } }>;
 
+/** What one diff build is made of. */
+interface DiffBuildInputs extends SyntaxPrefs {
+  path: string;
+  text: string;
+  content: { old: string; new: string } | null;
+}
+
+function sameBuildInputs(a: DiffBuildInputs, b: DiffBuildInputs): boolean {
+  return (
+    a.path === b.path &&
+    a.text === b.text &&
+    a.syntaxMap === b.syntaxMap &&
+    a.customLanguages === b.customLanguages &&
+    (a.content === b.content ||
+      (a.content !== null &&
+        b.content !== null &&
+        a.content.old === b.content.old &&
+        a.content.new === b.content.new))
+  );
+}
+
+/**
+ * The diff's DiffFile, built once per set of inputs: a gate that withheld the
+ * build (a refresh's hold, a pending read) and lets the same inputs through
+ * again gets the same instance back. The view keys its rows by the instance,
+ * so a new one remounts them and drops an editor open in them. A grammar loads
+ * before the first build of its language, so no build predates its arrival.
+ */
+function useDiffBuild(
+  inputs: DiffBuildInputs,
+  gated: boolean,
+): DiffFile | null {
+  const [last, setLast] = useState<{
+    inputs: DiffBuildInputs;
+    file: DiffFile | null;
+  } | null>(null);
+  if (gated) return null;
+  if (last !== null && sameBuildInputs(last.inputs, inputs)) return last.file;
+  const file = createDiffFile(
+    inputs.path,
+    inputs.text,
+    inputs,
+    inputs.content ?? undefined,
+  );
+  // Rows prebuilt for both layouts, as the library's own mount effect builds
+  // them: its view remounts on every rebuild (Show full diff among them), and
+  // rows built only in that effect would leave the scroller rowless for a
+  // commit, which clamps it to the top. The layout stays out of the inputs,
+  // since a new build would drop the user's expanded context.
+  file?.buildSplitDiffLines();
+  file?.buildUnifiedDiffLines();
+  setLast({ inputs, file });
+  return file;
+}
+
+/** The marks `DIFF_EDITOR_SELECTOR` reads, as an observer's attribute filter. */
+const DIFF_EDITOR_MARKS = [
+  "data-diff-line-widget",
+  "data-diff-anchor",
+  "data-thread-editing",
+  "data-diff-editor",
+];
+
+/** Whether an editor is open inside the diff under `root`, kept live by an
+ *  observer over it: opening one changes no state this diff renders from. */
+function useDiffEditorOpen(root: HTMLElement | null): boolean {
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      if (root === null) return () => undefined;
+      const observer = new MutationObserver(onChange);
+      observer.observe(root, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: DIFF_EDITOR_MARKS,
+      });
+      return () => observer.disconnect();
+    },
+    [root],
+  );
+  const snapshot = useCallback(
+    () => root !== null && diffEditorOpen(root),
+    [root],
+  );
+  return useSyncExternalStore(subscribe, snapshot);
+}
+
 function RenderedDiff({
   filePath,
   oldPath,
@@ -1130,6 +1350,9 @@ function RenderedDiff({
   revealLanding,
   scrollerRef,
   rebuildsOnWhitespace = false,
+  forgePatch,
+  dataIsPlaceholder = false,
+  lineKeeper,
 }: {
   filePath: string;
   oldPath?: string;
@@ -1142,6 +1365,9 @@ function RenderedDiff({
   revealLanding?: { readonly current: HTMLElement | null };
   scrollerRef?: { readonly current: HTMLElement | null };
   rebuildsOnWhitespace?: boolean;
+  forgePatch?: ForgePatch;
+  dataIsPlaceholder?: boolean;
+  lineKeeper?: { current: (() => void) | null };
 }) {
   const settings = useSettings();
   const isDark = useIsDark();
@@ -1171,6 +1397,10 @@ function RenderedDiff({
   const deferredText = useDeferredValue(text);
   const deferredPath = useDeferredValue(filePath);
   const deferredOldPath = useDeferredValue(oldPath ?? filePath);
+  // The record the deferred text belongs to, deferred with it: an urgent
+  // render pairs the old text with these values' old state.
+  const deferredScope = useDeferredValue(forgePatch?.scope);
+  const deferredPlaceholder = useDeferredValue(dataIsPlaceholder);
 
   // Reset on the DEFERRED path, not the urgent `filePath`: `blocked` derives
   // from `deferredText`, so an urgent reset would re-block the OUTGOING mega
@@ -1197,10 +1427,16 @@ function RenderedDiff({
   // null = capped hunk-only). Hold the whole paint while `contentPending` so the
   // diff is built ONCE in its final layout rather than rebuilt (the "flash"),
   // and keep the previous build up through a refresh's `contentHold`.
+  // This diff's root, observed for an open editor on a host that can hold one
+  // (see `observesRoot`): it holds Show full diff, and a forge patch's upgrade.
+  const [diffRoot, setDiffRoot] = useState<HTMLDivElement | null>(null);
+  const editorOpen = useDiffEditorOpen(diffRoot);
   const {
     content,
     pending: contentPending,
     hold: contentHold,
+    pendingUpgrade,
+    release,
   } = useFileContent(
     repoPath,
     deferredPath,
@@ -1211,6 +1447,12 @@ function RenderedDiff({
     // IPC reads are pure waste when we're going to hunk-only anyway — skip
     // content mode entirely once any line is over the shorten cap.
     longestLine > DIFF_MAX_LINE_CHARS ? undefined : contentRevs,
+    DIFF_LINE_CAP,
+    false,
+    forgePatch,
+    editorOpen,
+    deferredScope,
+    deferredPlaceholder,
   );
 
   const { shown, hidden, shortened } = useMemo(() => {
@@ -1245,7 +1487,7 @@ function RenderedDiff({
   const activeRepo = useUiStore((s) => s.repoPath);
   const { syntaxMap, customLanguages } = useEffectiveSyntax(activeRepo);
 
-  const { holdForGrammar, grammarState, workerHighlighter } = useShikiRouting({
+  const { holdForGrammar, workerHighlighter } = useShikiRouting({
     filePath: deferredPath,
     text: shown,
     content: content ?? null,
@@ -1255,36 +1497,16 @@ function RenderedDiff({
     customLanguages,
   });
 
-  // grammarState: inert once compiled; see useShikiRouting's contract.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState stays listed for the uncompiled path; the rebuild rides holdForGrammar
-  const builtDiffFile = useMemo(() => {
-    if (blocked || contentPending || holdForGrammar || contentHold) return null;
-    const file = createDiffFile(
-      deferredPath,
-      shown,
-      { syntaxMap, customLanguages },
-      content ?? undefined,
-    );
-    // Rows prebuilt for both layouts, as the library's own mount effect builds
-    // them: its view remounts on every rebuild (Show full diff among them), and
-    // rows built only in that effect would leave the scroller rowless for a
-    // commit, which clamps it to the top. The layout stays out of the deps,
-    // since a new build would drop the user's expanded context.
-    file?.buildSplitDiffLines();
-    file?.buildUnifiedDiffLines();
-    return file;
-  }, [
-    shown,
-    deferredPath,
-    syntaxMap,
-    customLanguages,
-    content,
-    blocked,
-    contentPending,
-    holdForGrammar,
-    contentHold,
-    grammarState,
-  ]);
+  const builtDiffFile = useDiffBuild(
+    {
+      path: deferredPath,
+      text: shown,
+      content: content ?? null,
+      syntaxMap,
+      customLanguages,
+    },
+    blocked || contentPending || holdForGrammar || contentHold,
+  );
   // Through a refresh's hold, the build already on screen, with the worker
   // highlighting painted on it (the worker answers nothing while held).
   const diffFile = useRetained(builtDiffFile, !contentHold);
@@ -1485,9 +1707,14 @@ function RenderedDiff({
     viewMode === "split" ? DiffModeEnum.Split : DiffModeEnum.Unified;
   // A card renders inside the diff table; give it a neutral, non-mono container
   // so it doesn't inherit the code cell's font/background.
+  // Valued like the composer wrapper, so the editor probes (whitespace-mode.ts)
+  // count a reply or an edit open in this row by the flips that rebuild it.
   const renderExtendLine = extendData
     ? ({ data }: { data: { render: () => ReactNode } }) => (
-        <div className="border-y bg-background px-3 py-2 font-sans text-xs">
+        <div
+          data-diff-anchor={rebuildsOnWhitespace ? "whitespace" : "layout"}
+          className="border-y bg-background px-3 py-2 font-sans text-xs"
+        >
           {data.render()}
         </div>
       )
@@ -1603,6 +1830,19 @@ function RenderedDiff({
   // the diff and announces it), else on `revealLanding`. The cleanup reads the
   // last committed path, so a file switch's unmount never lands.
   const diffLandingRef = useRef<HTMLDivElement>(null);
+  // An editor lives only in the line widget or an anchor row, so a host with
+  // neither never observes its root and renders as before.
+  const observesRoot =
+    forgePatch !== undefined ||
+    lineWidget !== undefined ||
+    lineAnchors !== undefined;
+  const diffRootRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      diffLandingRef.current = node;
+      if (observesRoot) setDiffRoot(node);
+    },
+    [observesRoot],
+  );
   const footerFocus = useRef<{
     button: HTMLElement;
     hadFocus: boolean;
@@ -1644,7 +1884,37 @@ function RenderedDiff({
     viewMode,
     deferredPath,
     diffFile,
+    lineKeeper,
   );
+  // A forge-patch upgrade lands in a step of its own, declared after the hook
+  // above: the line read here from the hunk-only rows is the one the content
+  // build restores. An editor open in this diff would lose its text with the
+  // rebuild, so it holds the step until it closes.
+  const upgradeHadFocus = useRef(false);
+  useLayoutEffect(() => {
+    const root = diffLandingRef.current;
+    if (!pendingUpgrade || (root !== null && diffEditorOpen(root))) return;
+    const active = document.activeElement;
+    upgradeHadFocus.current =
+      root !== null && active !== root && root.contains(active);
+    keepLine();
+    release();
+  }, [pendingUpgrade, keepLine, release]);
+  // Focus that was inside the rows the upgrade replaced lands on the diff's
+  // own group, never on <body>.
+  useLayoutEffect(() => {
+    const had = upgradeHadFocus.current;
+    upgradeHadFocus.current = false;
+    if (!had || diffFile === null) return;
+    const root = diffLandingRef.current;
+    const active = document.activeElement;
+    if (
+      root !== null &&
+      interactive &&
+      (active === null || active === document.body || !active.isConnected)
+    )
+      root.focus({ preventScroll: true });
+  }, [diffFile, interactive]);
 
   // A generated/minified file (one enormous line) would freeze the renderer:
   // placeholder + one-click opt-in. FIRST, so a blocked mega file never flashes
@@ -1676,7 +1946,7 @@ function RenderedDiff({
     // The Show full landing: a named group, so focus that lands here stays in
     // the diff (scroll keys keep reading it) and announces which diff it is.
     <div
-      ref={diffLandingRef}
+      ref={diffRootRef}
       role="group"
       aria-label={`Diff of ${deferredPath}`}
       tabIndex={-1}
@@ -1735,6 +2005,10 @@ function RenderedDiff({
           keepLine();
           setShowFull(true);
         }}
+        // Show full diff rebuilds the rows, and an editor open in them would
+        // lose its text: held, with its reason, until the editor closes.
+        held={observesRoot ? editorOpen : undefined}
+        heldReason={observesRoot ? SHOW_FULL_COMPOSER_HELD : undefined}
         buttonRef={captureFooter}
       />
     </div>
@@ -2060,6 +2334,7 @@ export function DiffSurface({
   lineAnchors,
   lineWidget,
   stagingSide,
+  forgePatch,
 }: {
   filePath: string;
   diff: UseQueryResult<FileDiff>;
@@ -2072,6 +2347,8 @@ export function DiffSurface({
   lineWidget?: LineWidget;
   /** See {@link DiffContent}'s prop of the same name. */
   stagingSide?: StagingSide;
+  /** See {@link DiffContent}'s prop of the same name. */
+  forgePatch?: ForgePatch;
 }) {
   return (
     <DiffContent
@@ -2090,6 +2367,7 @@ export function DiffSurface({
       lineAnchors={lineAnchors}
       lineWidget={lineWidget}
       stagingSide={stagingSide}
+      forgePatch={forgePatch}
       whitespaceControl
     />
   );
@@ -2108,7 +2386,7 @@ export function DiffContent({
   isFetching = false,
   onRetry,
   repoPath,
-  imageRevs,
+  imageRevs: hostImageRevs,
   contentRevs,
   previewRev,
   dataIsPlaceholder,
@@ -2117,6 +2395,8 @@ export function DiffContent({
   stagingSide,
   anchorCommit,
   whitespaceControl = false,
+  forgePatch,
+  typechangeAnchors = false,
 }: {
   filePath: string;
   /** Absent only when the source query has nothing to show; never an empty
@@ -2162,6 +2442,15 @@ export function DiffContent({
    *  whitespace palette action. Only {@link DiffSurface} sets it, so the
    *  remote PR hosts get neither. */
   whitespaceControl?: boolean;
+  /** The diff text came from a forge (a pull request's patch), not from
+   *  `contentRevs`: content mode builds only when the hunk-match guard
+   *  (hunk-match.ts) passes, a hunk-only paint upgrades in place, and the
+   *  whole-file and image reads come from `forgePatch.source`. */
+  forgePatch?: ForgePatch;
+  /** A joined typechange's text half takes `lineAnchors` and `lineWidget`
+   *  (hosts that draw no binary pane's comments elsewhere). Omitted = the half
+   *  is read-only. */
+  typechangeAnchors?: boolean;
 }) {
   // The pane measures itself: this surface mounts at widths from a full window
   // down to a rail-flanked column, and both the split gate and the toolbar's
@@ -2233,8 +2522,11 @@ export function DiffContent({
   // Preview's rev source: the diff's own pair where there is one, else the
   // new-side-only `previewRev`. Deliberately not merged into `contentRevs` — a
   // previewRev host has no old side and must not light up content mode.
+  // A forge-patch host's pair never feeds it, local or forge-read: its Preview
+  // stays on the host's head-only `previewRev`, as on every other PR view.
+  const localRevs = forgePatch === undefined ? contentRevs : undefined;
   const previewRevs: DiffContentRevs | undefined =
-    contentRevs ??
+    localRevs ??
     (previewRev === undefined ? undefined : { newRev: previewRev });
   const canPreview =
     showsToolbar && canPreviewMarkdown(filePath, repoPath, previewRevs);
@@ -2376,6 +2668,64 @@ export function DiffContent({
   // first row.
   useReportPaneSettled(!(isPending && !isPaused) && !retainedOther);
 
+  // A PR host's image arm draws the host's live pair whenever it has one. Only
+  // while it has none does it keep the last pair it drew for this record and
+  // path, so a wrong pair never outlives the right one's arrival. A
+  // placeholder paint is the previous record's diff, so it keeps that one's.
+  // A pair the host can't read drops the kept one: it isn't this diff's.
+  const scope = forgePatch?.scope;
+  const imageLive: ImageOn | undefined =
+    forgePatch !== undefined &&
+    hostImageRevs !== undefined &&
+    forgePatch.source !== null
+      ? {
+          scope,
+          path: filePath,
+          oldPath: dataIsPlaceholder ? filePath : (data?.oldPath ?? filePath),
+          revs: hostImageRevs,
+          source: forgePatch.source,
+        }
+      : undefined;
+  const [imageKept, setImageKept] = useState<ImageOn | null>(null);
+  const keptValid =
+    imageKept !== null &&
+    forgePatch?.pairUnavailable !== true &&
+    imageKept.path === filePath &&
+    (dataIsPlaceholder === true || imageKept.scope === scope);
+  const imageOn =
+    keptValid && (dataIsPlaceholder || imageLive === undefined)
+      ? imageKept
+      : imageLive;
+  if (
+    imageLive !== undefined &&
+    !dataIsPlaceholder &&
+    data !== undefined &&
+    !retainedOther &&
+    imageMime(filePath) !== null
+  ) {
+    if (!sameImage(imageKept, imageLive)) setImageKept(imageLive);
+  } else if (imageKept !== null && !keptValid && !dataIsPlaceholder)
+    setImageKept(null);
+  const imageRevs = forgePatch === undefined ? hostImageRevs : imageOn?.revs;
+  const imagePatch =
+    forgePatch === undefined ? undefined : { source: imageOn?.source ?? null };
+  // SVG panes above the rows change the layout with no scroll or build, so
+  // they hand the line back through the diff's own anchor.
+  const lineKeeper = useRef<(() => void) | null>(null);
+  const keeper = forgePatch === undefined ? undefined : lineKeeper;
+  // Panes leaving from above rows that stay can't run an effect of their own,
+  // so their presence edge hands the line back here.
+  const svgPanes =
+    showsToolbar &&
+    !previewOn &&
+    Boolean(repoPath) &&
+    imageRevs !== undefined &&
+    filePath.toLowerCase().endsWith(".svg");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: it runs once per presence edge, which `svgPanes` names
+  useLayoutEffect(() => {
+    lineKeeper.current?.();
+  }, [svgPanes]);
+
   // ~200px of unshrinkable text, so it shows only where the pane has the room;
   // the sr-only twin carries it at every width, and `aria-hidden` on the
   // visible copy keeps the two from announcing twice. Hidden in Preview, which
@@ -2505,6 +2855,9 @@ export function DiffContent({
   // never lends its `oldPath`: it is another key's diff (another commit's, for
   // the same path), while the revs already name the new selection.
   const oldSidePath = dataIsPlaceholder ? filePath : (data.oldPath ?? filePath);
+  // A kept pair reads its old side where it was paired, so a renamed image's
+  // old side never re-keys under a placeholder.
+  const imageOldPath = imageOn?.oldPath ?? oldSidePath;
 
   // Error + fetching (a reconnect's resumed read) is unsettled: no notice. A
   // settled error says it failed, with Retry; a park (alone, or over an error)
@@ -2527,23 +2880,36 @@ export function DiffContent({
   // The binary, image, empty and header-only arms draw retained data too, so
   // they carry the same notice as the text diff.
   if (data.isBinary) {
-    if (repoPath && imageRevs && imageMime(filePath)) {
+    const halves = typechangeHalves(data.text, filePath);
+    // A host that anchors the typechange halves draws them on an image path
+    // too: its text half carries that host's comments and composer.
+    if (
+      repoPath &&
+      imageRevs &&
+      imageMime(filePath) &&
+      !(typechangeAnchors && halves !== null)
+    ) {
       return shell(
         <div key="arm-image" className="min-h-0 flex-1">
           <ImageDiff
+            key={imageOn?.scope}
             repoPath={repoPath}
             filePath={filePath}
-            oldPath={oldSidePath}
+            oldPath={imageOldPath}
             revs={imageRevs}
+            forgePatch={imagePatch}
           />
         </div>,
         notice,
       );
     }
     // A file↔symlink typechange with one binary half stacks both halves in
-    // git's order. The text half is read-only: hosts that group a binary
-    // pane's comments outside it would render an inline anchor twice.
-    const halves = typechangeHalves(data.text, filePath);
+    // git's order. The text half is read-only unless the host opts in: hosts
+    // that group a binary pane's comments outside it would render an inline
+    // anchor twice. A joined typechange is binary and no whitespace mode
+    // re-reads it, so its wrappers read "layout".
+    const halfAnchors = typechangeAnchors ? lineAnchors : undefined;
+    const halfWidget = typechangeAnchors ? lineWidget : undefined;
     if (halves !== null) {
       const band = (
         <div
@@ -2577,6 +2943,8 @@ export function DiffContent({
           oldPath={filePath}
           text={halves.text}
           repoPath={repoPath}
+          lineAnchors={halfAnchors}
+          lineWidget={halfWidget}
           forceUnified={narrowPane}
           revealLanding={controlsRef}
           scrollerRef={scrollerRef}
@@ -2708,10 +3076,13 @@ export function DiffContent({
             {svgPreview && repoPath && imageRevs && (
               <div className="border-b">
                 <ImagePanes
+                  key={imageOn?.scope}
                   repoPath={repoPath}
                   filePath={filePath}
-                  oldPath={oldSidePath}
+                  oldPath={imageOldPath}
                   revs={imageRevs}
+                  forgePatch={imagePatch}
+                  lineKeeper={keeper}
                 />
               </div>
             )}
@@ -2727,18 +3098,44 @@ export function DiffContent({
               contentRevs={
                 data.isTruncated || dataIsPlaceholder ? undefined : contentRevs
               }
+              forgePatch={forgePatch}
+              dataIsPlaceholder={dataIsPlaceholder}
               lineAnchors={lineAnchors}
               lineWidget={lineWidget}
               forceUnified={narrowPane}
               revealLanding={controlsRef}
               scrollerRef={scrollerRef}
               rebuildsOnWhitespace={whitespaceControl}
+              lineKeeper={keeper}
             />
           </>
         )}
       </div>
     </Fragment>,
     notice,
+  );
+}
+
+/** The pair a PR host's image arm draws, with the record and path it was
+ *  drawn for. */
+interface ImageOn {
+  scope: string | undefined;
+  path: string;
+  /** The old side's path in that pairing. */
+  oldPath: string;
+  revs: ImageRevs;
+  source: DiffContentSource;
+}
+
+function sameImage(a: ImageOn | null, b: ImageOn): boolean {
+  return (
+    a !== null &&
+    a.scope === b.scope &&
+    a.path === b.path &&
+    a.oldPath === b.oldPath &&
+    a.revs.old === b.revs.old &&
+    a.revs.new === b.revs.new &&
+    contentSourceKey(a.source) === contentSourceKey(b.source)
   );
 }
 

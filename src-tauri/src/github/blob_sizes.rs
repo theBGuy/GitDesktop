@@ -1,33 +1,56 @@
 use crate::error::{AppError, AppResult};
 use crate::git::blob_sizes::{side_id, BlobSizes};
-use crate::github::runner::{gh_output_ok, run_gh, GhOutput, GH_NETWORK_TIMEOUT};
-use crate::github::{gh_lens_slug, gh_unreadable, lens_remote};
+use crate::github::runner::{gh_host_for_url, gh_output_ok, run_gh, GhOutput, GH_NETWORK_TIMEOUT};
+use crate::github::{gh_unreadable, lens_remote, slug_from_remote_url};
+use std::future::Future;
 
 const UNKNOWN: BlobSizes = BlobSizes {
     old_size: None,
     new_size: None,
 };
 
-/// Resolve only local remote metadata. Missing or unparseable remotes, and a lens remote
-/// whose host isn't github.com, stay unknown; failed Git reads remain errors so callers
-/// never cache a transient failure as null.
-async fn sizes_repo_slug(repo: &str, lens: Option<&str>) -> AppResult<Option<String>> {
+/// The lens remote's slug and the host the query pins. Missing or unparseable remotes,
+/// and a non-github.com host gh holds no stored login for, stay unknown; failed Git
+/// reads remain errors so callers never cache a transient failure as null.
+async fn sizes_repo_slug(repo: &str, lens: Option<&str>) -> AppResult<Option<(String, String)>> {
+    sizes_repo_slug_with(repo, lens, |url| async move { gh_host_for_url(&url).await }).await
+}
+
+/// [`sizes_repo_slug`] over a given stored-login lookup, so tests never spawn gh.
+async fn sizes_repo_slug_with<F, Fut>(
+    repo: &str,
+    lens: Option<&str>,
+    stored_login: F,
+) -> AppResult<Option<(String, String)>>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
     let remote = lens_remote(lens)?;
     let url = match crate::git::remote::git_remote_url(repo.to_string(), remote.to_string()).await {
         Ok(url) => url,
         Err(AppError::Git { stderr, .. }) if no_such_remote(&stderr) => return Ok(None),
         Err(error) => return Err(error),
     };
-    // The query pins github.com (run_gh would aim it at origin's login host), so the
-    // selected lens must name that host.
-    if crate::forge::remote_host(&url).as_deref() != Some("github.com") {
-        return Ok(None);
-    }
-    match gh_lens_slug(repo, lens).await {
-        Ok(slug) => Ok(Some(slug)),
-        Err(AppError::Gh(_)) => Ok(None),
-        Err(error) => Err(error),
-    }
+    let slug = match slug_from_remote_url(remote, &url) {
+        Ok(slug) => slug,
+        Err(AppError::Gh(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    // The query pins its own host (run_gh would aim it at origin's login host). Any host
+    // but github.com pins only a spelling gh holds a STORED login for, so a hostile
+    // remote can't aim the user's token at a host it chose.
+    let host = if crate::forge::remote_host(&url).as_deref() == Some("github.com") {
+        "github.com".to_string()
+    } else {
+        match stored_login(url).await {
+            // `gh api --hostname` refuses a port-qualified host before any request
+            // (gh 2.103.3), and dropping the port would query another endpoint.
+            Some(host) if !host.contains(':') => host,
+            _ => return Ok(None),
+        }
+    };
+    Ok(Some((slug, host)))
 }
 
 // Matches the repo's other missing-remote checks: git before 2.30 died with
@@ -65,27 +88,32 @@ pub async fn github_blob_sizes(
     if old.is_none() && new.is_none() {
         return Ok(UNKNOWN);
     }
-    let Some(slug) = sizes_repo_slug(&repo_path, lens.as_deref()).await? else {
+    let Some((slug, host)) = sizes_repo_slug(&repo_path, lens.as_deref()).await? else {
         return Ok(UNKNOWN);
     };
-    // gh_lens_slug validates the owner/name grammar before this split.
+    // slug_from_remote_url validates the owner/name grammar before this split.
     let (owner, name) = slug
         .split_once('/')
         .ok_or_else(|| AppError::InvalidArgument("invalid GitHub repository slug".into()))?;
-    let args = sizes_args(&sizes_query(old.as_deref(), new.as_deref()), owner, name);
+    let args = sizes_args(
+        &sizes_query(old.as_deref(), new.as_deref()),
+        owner,
+        name,
+        &host,
+    );
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await;
     github_sizes_outcome(result, old.as_deref(), new.as_deref())
 }
 
 /// An explicit `--hostname` outranks run_gh's `GH_HOST` pin to origin's login host,
-/// which would send a github.com lens slug to origin's (possibly GHE) host.
-fn sizes_args(query: &str, owner: &str, name: &str) -> Vec<String> {
+/// which would send the lens slug to origin's host when the lens remote's differs.
+fn sizes_args(query: &str, owner: &str, name: &str, host: &str) -> Vec<String> {
     vec![
         "api".into(),
         "graphql".into(),
         "--hostname".into(),
-        "github.com".into(),
+        host.into(),
         "-f".into(),
         format!("query={query}"),
         "-f".into(),
@@ -305,18 +333,47 @@ mod tests {
     }
 
     #[test]
-    fn sizes_args_pin_github_com() {
-        let args = sizes_args("q", "owner", "name");
-        let at = args.iter().position(|arg| arg == "--hostname");
+    fn sizes_args_pin_the_given_host() {
+        // github.com keeps its argv byte for byte.
         assert_eq!(
-            at.and_then(|at| args.get(at + 1)).map(String::as_str),
-            Some("github.com"),
-            "{args:?}"
+            sizes_args("q", "owner", "name", "github.com"),
+            [
+                "api",
+                "graphql",
+                "--hostname",
+                "github.com",
+                "-f",
+                "query=q",
+                "-f",
+                "owner=owner",
+                "-f",
+                "name=name",
+            ]
         );
-        assert_eq!(&args[..2], ["api", "graphql"]);
-        for field in ["query=q", "owner=owner", "name=name"] {
-            let at = args.iter().position(|arg| arg == field).unwrap();
-            assert_eq!(args[at - 1], "-f", "{field}");
+        for host in ["github.com", "ghe.acme.com:8443", "ghe.acme.com"] {
+            let args = sizes_args("q", "owner", "name", host);
+            let at = args.iter().position(|arg| arg == "--hostname");
+            assert_eq!(
+                at.and_then(|at| args.get(at + 1)).map(String::as_str),
+                Some(host),
+                "{args:?}"
+            );
+            assert_eq!(&args[..2], ["api", "graphql"]);
+            for field in ["query=q", "owner=owner", "name=name"] {
+                let at = args.iter().position(|arg| arg == field).unwrap();
+                assert_eq!(args[at - 1], "-f", "{field}");
+            }
+        }
+    }
+
+    /// A stored-login lookup that answers `login` and records each URL it was asked.
+    fn lookup<'a>(
+        login: Option<&'static str>,
+        seen: &'a std::sync::Mutex<Vec<String>>,
+    ) -> impl FnOnce(String) -> std::future::Ready<Option<String>> + 'a {
+        move |url| {
+            seen.lock().unwrap().push(url);
+            std::future::ready(login.map(str::to_string))
         }
     }
 
@@ -393,9 +450,6 @@ mod tests {
     async fn unavailable_remote_identities_return_unknown_without_gh() {
         for remote in [
             None,
-            Some("https://gitlab.com/owner/repo.git"),
-            Some("git@bitbucket.org:owner/repo.git"),
-            Some("https://github.enterprise.example/owner/repo.git"),
             Some("not-a-url"),
             Some("https://github.com/owner/repo/extra"),
         ] {
@@ -410,6 +464,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pair(result), (None, None));
+        // Without a stored login for its host, a non-github.com remote stays unknown.
+        for remote in [
+            "https://gitlab.com/owner/repo.git",
+            "git@bitbucket.org:owner/repo.git",
+            "https://ghe.acme.com:8443/owner/repo.git",
+            "https://github.enterprise.example/owner/repo.git",
+        ] {
+            let (_dir, repo) = remote_repo(Some(remote)).await;
+            let seen = std::sync::Mutex::new(Vec::new());
+            let pinned = sizes_repo_slug_with(&repo, None, lookup(None, &seen)).await;
+            assert_eq!(pinned.unwrap(), None, "{remote}");
+            assert_eq!(*seen.lock().unwrap(), [remote], "{remote}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_port_qualified_login_stays_unknown() {
+        let remote = "https://ghe.acme.com:8443/owner/repo.git";
+        let (_dir, repo) = remote_repo(Some(remote)).await;
+        let seen = std::sync::Mutex::new(Vec::new());
+        let pinned = sizes_repo_slug_with(&repo, None, lookup(Some("ghe.acme.com:8443"), &seen))
+            .await
+            .unwrap();
+        assert_eq!(pinned, None);
+        assert_eq!(*seen.lock().unwrap(), [remote]);
+    }
+
+    #[tokio::test]
+    async fn a_stored_login_pins_its_own_spelling() {
+        for (remote, login) in [
+            ("https://ghe.acme.com/owner/repo.git", "ghe.acme.com"),
+            ("git@ghe.acme.com:owner/repo.git", "ghe.acme.com"),
+        ] {
+            let (_dir, repo) = remote_repo(Some(remote)).await;
+            let seen = std::sync::Mutex::new(Vec::new());
+            let pinned = sizes_repo_slug_with(&repo, None, lookup(Some(login), &seen))
+                .await
+                .unwrap();
+            assert_eq!(pinned, Some(("owner/repo".to_string(), login.to_string())));
+            assert_eq!(*seen.lock().unwrap(), [remote]);
+            let args = sizes_args("q", "owner", "repo", &pinned.unwrap().1);
+            assert_eq!(&args[2..4], ["--hostname", login]);
+        }
     }
 
     #[tokio::test]
@@ -431,34 +528,44 @@ mod tests {
             (Some("upstream"), "parent/base"),
         ] {
             assert_eq!(
-                sizes_repo_slug(&repo, lens).await.unwrap().as_deref(),
-                Some(expected)
+                sizes_repo_slug(&repo, lens).await.unwrap(),
+                Some((expected.to_string(), "github.com".to_string()))
             );
         }
     }
 
+    /// github.com pins itself without a lookup; any other lens host pins only a stored
+    /// login's spelling, so a hostile upstream never inherits a host.
     #[tokio::test]
     async fn only_the_selected_lens_host_may_target_github_com() {
+        let origin = "https://github.com/fork/project.git";
         for upstream in [
             "https://gitlab.com/parent/base.git",
             "git@bitbucket.org:parent/base.git",
             "https://github.enterprise.example/parent/base.git",
             "https://github.com.evil.example/parent/base.git",
         ] {
-            let (_dir, repo) = remote_repo(Some("https://github.com/fork/project.git")).await;
+            let (_dir, repo) = remote_repo(Some(origin)).await;
             git(&repo, &["remote", "add", "upstream", upstream]).await;
+            let seen = std::sync::Mutex::new(Vec::new());
             assert_eq!(
-                sizes_repo_slug(&repo, Some("origin"))
+                sizes_repo_slug_with(&repo, Some("origin"), lookup(Some("evil"), &seen))
                     .await
-                    .unwrap()
-                    .as_deref(),
-                Some("fork/project")
+                    .unwrap(),
+                Some(("fork/project".to_string(), "github.com".to_string()))
             );
-            let result =
-                github_blob_sizes(repo, Some("abcd".into()), None, Some("upstream".into()))
+            assert!(
+                seen.lock().unwrap().is_empty(),
+                "github.com needs no lookup"
+            );
+            assert_eq!(
+                sizes_repo_slug_with(&repo, Some("upstream"), lookup(None, &seen))
                     .await
-                    .unwrap();
-            assert_eq!(pair(result), (None, None), "{upstream}");
+                    .unwrap(),
+                None,
+                "{upstream}"
+            );
+            assert_eq!(*seen.lock().unwrap(), [upstream]);
         }
         let (_dir, repo) = remote_repo(Some("https://gitlab.com/fork/project.git")).await;
         git(
@@ -471,13 +578,16 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(sizes_repo_slug(&repo, None).await.unwrap(), None);
+        let seen = std::sync::Mutex::new(Vec::new());
         assert_eq!(
-            sizes_repo_slug(&repo, Some("upstream"))
+            sizes_repo_slug_with(&repo, None, lookup(None, &seen))
                 .await
-                .unwrap()
-                .as_deref(),
-            Some("parent/base")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            sizes_repo_slug(&repo, Some("upstream")).await.unwrap(),
+            Some(("parent/base".to_string(), "github.com".to_string()))
         );
     }
 }

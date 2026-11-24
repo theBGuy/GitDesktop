@@ -434,9 +434,10 @@ const STDERR_ONLY_ALLOWLIST = [
   },
 ];
 
-// Check E. Both sites route every interpolated segment — base, head, and the
-// cross-repo owner sharing the head's path segment — through
-// `forge::validate_compare_branch`, verified by reading each one.
+// Check E. The two divergence sites route every interpolated segment — base,
+// head, and the cross-repo owner sharing the head's path segment — through
+// `forge::validate_compare_branch`; the pr_content site interpolates only
+// validated full shas. Verified by reading each one.
 const COMPARE_ENDPOINT_ALLOWLIST = [
   {
     file: "forge/github.rs",
@@ -449,6 +450,12 @@ const COMPARE_ENDPOINT_ALLOWLIST = [
     fn: "build_divergence_compare_path",
     rationale:
       "validates base, head and the cross-repository owner with validate_compare_branch at fn entry",
+  },
+  {
+    file: "forge/pr_content.rs",
+    fn: "github_merge_base",
+    rationale:
+      "both ends are 40/64-hex shas validated before the call (`head` by full_sha at the command, `base` by sha_at from the pull request JSON), so no branch name, brace, `#` or `?` reaches the basehead",
   },
 ];
 
@@ -466,6 +473,12 @@ const SHORT_REF_ALLOWLIST = [
 // Check G. Rev positions that take a bare branch-named ident on purpose,
 // verified by reading each one.
 const BARE_REV_ALLOWLIST = [
+  {
+    file: "forge/pr_content.rs",
+    fn: "github_merge_base",
+    rationale:
+      "both ends of the compare range are 40/64-hex shas validated before the call (`head` by full_sha at the command, `base` by sha_at from the pull request JSON), so no branch name or tag can reach the rev position",
+  },
   {
     file: "git/compare.rs",
     fn: "git_branch_ahead",

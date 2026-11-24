@@ -76,6 +76,15 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label:
+      "Expand the lines around a change in pull request diffs — GitHub, GitLab and Bitbucket, GitHub fork pull requests included",
+  },
+  {
+    group: "Diffs & staging",
+    label: "Image previews in pull request files and commits",
+  },
+  {
+    group: "Diffs & staging",
+    label:
       "Binary files show their size change — old and new size, and how much larger or smaller, on GitHub and Bitbucket pull requests too",
   },
   {

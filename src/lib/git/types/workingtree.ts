@@ -41,8 +41,9 @@ export interface FileDiff {
   undecodable?: boolean;
   /** Set only when the shown diff pairs this file with a DIFFERENT source path
    *  (that surface's own rename detection). Old-side whole-file reads use
-   *  `oldPath ?? filePath`; backend diffs omit it for non-renames and hand-built
-   *  diffs (PR patches) omit it entirely. */
+   *  `oldPath ?? filePath`; backend diffs omit it for non-renames, and a
+   *  hand-built diff (a pull request patch) sets it from its section's rename
+   *  or copy source. */
   oldPath?: string;
   /** Set by the query layer, never by the backend: this text came from a `-w`
    *  read, so its hunks are display-only and no patch may be built from it. */

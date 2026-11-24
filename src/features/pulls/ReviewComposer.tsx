@@ -4,12 +4,20 @@ import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
+import { patchLines } from "@/lib/git/diff-split";
 import { useCreateReviewThread } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useAddReviewDraft } from "@/lib/pulls/review-drafts";
 import { toastError } from "@/lib/toast";
 import { buildSuggestionFence, extractNewSideLines } from "./suggestion-utils";
+
+/** Why a composer on lines outside the pull request's patch can't post. */
+export const OFF_PATCH_REVIEW_REASON: Record<"line" | "range", string> = {
+  line: "This line isn't in the pull request's diff for this file.",
+  range:
+    "Some lines in this range aren't in the pull request's diff for this file.",
+};
 
 export interface ReviewComposerProps {
   repoPath: string;
@@ -75,6 +83,22 @@ export function ReviewComposer({
     ? `Lines ${rangeFrom}–${line} · ${path}`
     : `Line ${line} · ${path}`;
 
+  // An expanded gap draws lines the forge's patch lacks, and no forge anchors
+  // a review comment there. GitHub also refuses a range leaving its end line's
+  // hunk. GitLab and Bitbucket accept a range whose start is outside the diff,
+  // so only the end line must be in it (GitLab still receives the start line).
+  // A side's lines in one hunk are consecutive and hunks never touch, so every
+  // line from start to end being a patch line means one hunk.
+  const offPatch = ((): keyof typeof OFF_PATCH_REVIEW_REASON | null => {
+    const drawn = patchLines(fileSection)[side];
+    if (provider !== "github") return drawn.has(line) ? null : "line";
+    for (let n = rangeFrom; n <= line; n++)
+      if (!drawn.has(n)) return isRange ? "range" : "line";
+    return null;
+  })();
+  const offPatchReason =
+    offPatch === null ? null : OFF_PATCH_REVIEW_REASON[offPatch];
+
   // Suggestions replace NEW-side code, so an old-side anchor can't be suggested
   // on. Bitbucket suggestions are single-line only. Otherwise we need the current
   // code for the range to prefill; if it can't be recovered, degrade the action.
@@ -106,7 +130,8 @@ export function ReviewComposer({
   }
 
   async function addSingleComment() {
-    if (!canCreateThread || !body.trim() || pending) return;
+    if (!canCreateThread || !body.trim() || pending || offPatchReason !== null)
+      return;
     setPending(true);
     // Posting is optimistic (the thread lands in the cache immediately), so close
     // right away — the synthetic thread renders under the line without waiting.
@@ -120,7 +145,7 @@ export function ReviewComposer({
   }
 
   async function addToReview() {
-    if (!body.trim() || pending) return;
+    if (!body.trim() || pending || offPatchReason !== null) return;
     setPending(true);
     try {
       await addDraft.mutateAsync({
@@ -156,6 +181,9 @@ export function ReviewComposer({
 
   const addToReviewLabel =
     draftCount === 0 ? "Start a review" : "Add to review";
+  // The off-patch reason outranks the empty body's.
+  const blockedReason =
+    offPatchReason ?? (!body.trim() ? "Write a comment first" : null);
 
   return (
     <div className="space-y-2">
@@ -193,43 +221,27 @@ export function ReviewComposer({
       />
       <div className="flex items-center gap-2">
         {canCreateThread && (
-          <span
-            title={
-              !body.trim()
-                ? "Write a comment first"
-                : draftCount > 0
-                  ? undefined
-                  : SUBMIT_HINT
-            }
-          >
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!body.trim() || pending}
-              onClick={addSingleComment}
-            >
-              Add single comment
-            </Button>
-          </span>
-        )}
-        <span
-          title={
-            !body.trim()
-              ? "Write a comment first"
-              : draftCount > 0
-                ? SUBMIT_HINT
-                : undefined
-          }
-        >
-          <Button
-            variant={canCreateThread ? "secondary" : "outline"}
+          <DisabledReasonButton
+            variant="outline"
             size="sm"
-            disabled={!body.trim() || pending}
-            onClick={addToReview}
+            disabled={blockedReason !== null || pending}
+            reason={blockedReason}
+            title={draftCount > 0 ? undefined : SUBMIT_HINT}
+            onClick={addSingleComment}
           >
-            {addToReviewLabel}
-          </Button>
-        </span>
+            Add single comment
+          </DisabledReasonButton>
+        )}
+        <DisabledReasonButton
+          variant={canCreateThread ? "secondary" : "outline"}
+          size="sm"
+          disabled={blockedReason !== null || pending}
+          reason={blockedReason}
+          title={draftCount > 0 ? SUBMIT_HINT : undefined}
+          onClick={addToReview}
+        >
+          {addToReviewLabel}
+        </DisabledReasonButton>
         <Button variant="ghost" size="sm" disabled={pending} onClick={onClose}>
           Cancel
         </Button>

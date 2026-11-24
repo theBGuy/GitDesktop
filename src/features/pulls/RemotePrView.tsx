@@ -212,6 +212,7 @@ import {
   usePendingThreadWrites,
   usePrApprovals,
   usePrBaseDivergence,
+  usePrContentRevs,
   usePrDetails,
   usePrDiff,
   usePrListPage,
@@ -3134,7 +3135,7 @@ export function RemotePrView({
     if (headDeletionBlocked || headIsDefault) setDeleteBranch(false);
   }, [headDeletionBlocked, headIsDefault]);
   const fileSections = useMemo(
-    () => splitUnifiedDiff(prDiff.data ?? ""),
+    () => splitUnifiedDiff(prDiff.data ?? "", { joinTypechanges: true }),
     [prDiff.data],
   );
   // The pane keeps rendering the previous PR's diff through a switch, so its lines
@@ -3142,6 +3143,15 @@ export function RemotePrView({
   // Both reads key on shownNumber but settle independently, and showsLoadingFrame
   // hides the details placeholder only in the hold's loading phase.
   const diffStale = detailsPlaceholder || prDiff.isPlaceholderData;
+  // The Files tab's whole-file reads: the rendered pull request's merge base
+  // and head. Read only on that tab, and never for a placeholder's head.
+  const contentRevs = usePrContentRevs(
+    repoPath,
+    shownNumber,
+    lens,
+    pr ? (prHeadSha(pr) ?? null) : null,
+    section === "files" && !detailsPlaceholder,
+  );
   // No binary flag from a previous PR's placeholder diff or details.
   const binaryPaths = useMemo(
     () =>
@@ -5580,6 +5590,20 @@ export function RemotePrView({
                 isFetching={prDiff.isFetching}
                 onRetry={() => void prDiff.refetch()}
                 dataIsPlaceholder={prDiff.isPlaceholderData}
+                // Revs with no answer, or a diff another record's, read no
+                // files; a failed refetch keeps the answer it had (the read
+                // keys on this pull request and head, with no placeholder).
+                contentRevs={!diffStale ? contentRevs.data : undefined}
+                // Settled with no answer (a refused read is never retried), or
+                // details that name no head, which leave the read disabled: the
+                // pane drops any image pair it kept for an older head.
+                revsUnavailable={
+                  !diffStale &&
+                  (!prHeadSha(pr) ||
+                    (contentRevs.isError &&
+                      !contentRevs.isFetching &&
+                      contentRevs.data === undefined))
+                }
                 // The same threads + handlers/gates the Conversation block uses — one
                 // filtered list off the top-level read, not a second fetch, so an
                 // unsubmitted GitHub review's drafts stay out of BOTH tabs rather than

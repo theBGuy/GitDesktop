@@ -42,20 +42,36 @@ export const WHITESPACE_ANNOUNCEMENT: { hidden: string; shown: string } = {
 export const WHITESPACE_COMPOSER_HELD =
   "Finish or close the line comment you're writing (here or in another tab), then change the whitespace view.";
 
-/** The layout twin: switching Unified/Split rebuilds the view, and an open line
- *  composer would lose its text with it. */
+/** The layout twin: switching Unified/Split rebuilds the view, and an editor
+ *  open inside a diff (a line composer, or a comment edit, a thread reply or a
+ *  pending draft's edit in an anchor row) would lose its text with it. */
 export const LAYOUT_COMPOSER_HELD =
   "Finish or close the line comment you're writing (here or in another tab), then change the diff display.";
+
+/** Show full diff rebuilds only its own diff, so it holds only on an editor
+ *  open inside that diff (`diffEditorOpen` over the diff's root). */
+export const SHOW_FULL_COMPOSER_HELD =
+  "Finish or close the comment you're writing, then show the full diff.";
 
 // Both diff settings are app-wide and hidden tabs keep their DOM under
 // `<Activity>`, so a flip from any pane rebuilds a hidden tab's composer too.
 // Every writer of either setting checks its probe first
 // (scripts/hide-whitespace.test.mjs pins the roster).
 
-/** The layout probe: a line comment composer is open on any diff, since
- *  Unified/Split rebuilds every one. */
+/** Every editor that can be open inside a rendered diff: the line composer, and inside an anchor row a
+ *  comment edit, a thread Reply box or a pending draft's edit. A rebuild of the diff drops their text. */
+export const DIFF_EDITOR_SELECTOR =
+  "[data-diff-line-widget], [data-diff-anchor] [data-thread-editing], [data-diff-anchor] [data-diff-editor]";
+
+/** `root.querySelector(DIFF_EDITOR_SELECTOR) !== null`. */
+export function diffEditorOpen(root: ParentNode = document): boolean {
+  return root.querySelector(DIFF_EDITOR_SELECTOR) !== null;
+}
+
+/** The layout probe: `diffEditorOpen(document)`. An editor open inside any
+ *  diff counts, since Unified/Split rebuilds every one. */
 export function lineComposerOpen(): boolean {
-  return document.querySelector("[data-diff-line-widget]") !== null;
+  return diffEditorOpen(document);
 }
 
 /** The whitespace probe: a composer is open on a diff a whitespace flip

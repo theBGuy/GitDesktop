@@ -1,5 +1,11 @@
 import { CopyIcon } from "@phosphor-icons/react";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  type ComponentProps,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   DetailRail,
   DetailRailFilterStatus,
@@ -25,6 +31,10 @@ import {
   refreshFailed,
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
+import {
+  type DiffContentSource,
+  useLatchedFor,
+} from "@/features/diff/content-source";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffContent, type LineWidget } from "@/features/diff/DiffSurfaceLazy";
 import {
@@ -39,9 +49,17 @@ import {
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
-import { sectionIsBinary, splitUnifiedDiff } from "@/lib/git/diff-split";
+import {
+  sectionIsBinary,
+  sectionOldPath,
+  splitUnifiedDiff,
+  typechangeHalves,
+} from "@/lib/git/diff-split";
 import {
   useCommitComments,
+  useCommitFirstParent,
+  useCommitParents,
+  useCommitRecordsParent,
   useObjectsPresent,
   usePrCommitDiff,
 } from "@/lib/git/queries";
@@ -58,8 +76,19 @@ import {
   CommitComments,
   CommitLineComposer,
   type DiffSections,
+  newSideLines,
   useCommitLineAnchors,
 } from "./CommitComments";
+
+type DiffProps = ComponentProps<typeof DiffContent>;
+
+/** A commit's whole-file reads: its revs, where they're read from, and the
+ *  image pair (absent for a root commit read from the forge). */
+interface CommitFileContent {
+  revs: NonNullable<DiffProps["contentRevs"]>;
+  images?: NonNullable<DiffProps["imageRevs"]>;
+  source: DiffContentSource;
+}
 
 interface PrCommitDetailProps {
   repoPath: string;
@@ -114,9 +143,70 @@ export function PrCommitDetail({
   // Markdown preview reads the file at this commit, so it's offered only once
   // the commit is a local object (after a Check out PR or a fetch).
   const commitPresent = useObjectsPresent(repoPath, [commit.oid]);
+  // A local commit's parents as this clone resolves them. None is a root, or
+  // a shallow clone's boundary, whose parent the graft hides; the raw header
+  // tells the two apart.
+  const localParents = useCommitParents(
+    repoPath,
+    commitPresent.data === true ? commit.oid : null,
+  );
+  const parentless = localParents.data?.length === 0;
+  const recordsParent = useCommitRecordsParent(
+    repoPath,
+    commit.oid,
+    parentless,
+  );
+  // The local reader takes a missing ancestor for an absent file, so a local
+  // commit whose first parent doesn't resolve here (a shallow boundary, or a
+  // failed parent read) takes its pair from the forge, like one not here.
+  const parentElsewhere =
+    commitPresent.data === true &&
+    (localParents.isError ||
+      (parentless && !recordsParent.isPending && recordsParent.data !== false));
+  const forgeParent = useCommitFirstParent(
+    repoPath,
+    lens,
+    commit.oid,
+    commitPresent.data === false || parentElsewhere,
+  );
+  // The forge's parent can still be a local object (fetched past the graft).
+  const parentPresent = useObjectsPresent(
+    repoPath,
+    parentElsewhere && forgeParent.data ? [forgeParent.data] : [],
+  );
+  // Whole-file reads at the first parent and the commit: this clone's objects
+  // when it holds both (a local root's old side reads as absent), else the
+  // forge. A root commit read from the forge has no old side, so its images
+  // keep the placeholder (null = working tree). The first answer holds for the
+  // commit: forge reads by sha stay valid after a fetch, and a failed refetch
+  // keeps what it had.
+  const answered = ((): CommitFileContent | undefined => {
+    if (commitPresent.data === undefined) return undefined;
+    if (commitPresent.data && !parentElsewhere) {
+      if (localParents.data === undefined) return undefined;
+      if (parentless && recordsParent.data === undefined) return undefined;
+      const parent = `${commit.oid}~1`;
+      return {
+        revs: { oldRev: parent, newRev: commit.oid },
+        images: { old: parent, new: commit.oid },
+        source: "local",
+      };
+    }
+    const parent = forgeParent.data;
+    if (parent === undefined) return undefined;
+    if (parent === null)
+      return { revs: { newRev: commit.oid }, source: { lens } };
+    if (commitPresent.data && parentPresent.isPending) return undefined;
+    return {
+      revs: { oldRev: parent, newRev: commit.oid },
+      images: { old: parent, new: commit.oid },
+      source: parentPresent.data === true ? "local" : { lens },
+    };
+  })();
+  const content = useLatchedFor(`${lens}\0${commit.oid}`, answered);
 
   const sections = useMemo(
-    () => splitUnifiedDiff(diff.data ?? ""),
+    () => splitUnifiedDiff(diff.data ?? "", { joinTypechanges: true }),
     [diff.data],
   );
   const files = useMemo(
@@ -157,6 +247,12 @@ export function PrCommitDetail({
   // The user's pick, else the first match under a filter, else the first file
   // (derived, so there's no empty-selection frame while an effect catches up).
   const effectivePath = filter.openPath;
+  // The pane draws no line anchors for a binary file, except a typechange's
+  // text half, whose comments render inline.
+  const selectedSection = sections.get(effectivePath ?? "") ?? "";
+  const selectedBinary =
+    sectionIsBinary(selectedSection) &&
+    typechangeHalves(selectedSection, effectivePath ?? "") === null;
 
   const onFilesKeyDown = listKeyboardNav({
     items: filter.visible,
@@ -377,6 +473,7 @@ export function PrCommitDetail({
                                   ? commit.oid
                                   : undefined
                               }
+                              content={content}
                               reportRead={diffSlots.reportRead}
                             />
                           ) : (
@@ -395,9 +492,7 @@ export function PrCommitDetail({
                       // still resolves.
                       diffReady={diff.data !== undefined}
                       selectedPath={effectivePath}
-                      selectedBinary={sectionIsBinary(
-                        sections.get(effectivePath ?? "") ?? "",
-                      )}
+                      selectedBinary={selectedBinary}
                       onSelectFile={pickPath}
                       lens={lens}
                     />
@@ -424,6 +519,7 @@ function PrCommitFileDiffSlot({
   provider,
   lens,
   previewRev,
+  content,
   reportRead,
 }: {
   repoPath: string;
@@ -435,6 +531,8 @@ function PrCommitFileDiffSlot({
   provider: "github" | "gitlab" | "bitbucket";
   lens: RemoteLens;
   previewRev: string | undefined;
+  /** The commit's whole-file reads; absent = a hunk-only diff. */
+  content: CommitFileContent | undefined;
   reportRead: (read: SlotRead) => void;
 }) {
   // The patch is in memory: never a placeholder, never pending.
@@ -443,11 +541,19 @@ function PrCommitFileDiffSlot({
   // Line-anchored comments on this file that resolve to a new-side line
   // render inline in the diff; ones that can't resolve fall back to the
   // CommitComments labelled group. Grouping + range chips live in the shared hook.
-  const lineAnchors = useCommitLineAnchors(comments, sections, path, {
+  const commentAnchors = useCommitLineAnchors(comments, sections, path, {
     provider,
     repoPath,
     lens,
   });
+  // A comment on a line the commit's patch doesn't draw stays in the list
+  // below, never also inline in an expanded gap. A manual memo: the diff's
+  // `extendData` keys on this array's identity, which the compiler drops
+  // silently when it bails out of a component.
+  const lineAnchors = useMemo(() => {
+    const drawn = newSideLines(section ?? "");
+    return commentAnchors.filter((a) => drawn.has(a.line));
+  }, [commentAnchors, section]);
   // Line-anchored comment creation: when the viewer can comment, clicking a diff
   // line opens the inline composer below it. Anchored to this file's section
   // (GitHub recovers the diff `position` from it). Absent otherwise, so the diff
@@ -468,6 +574,7 @@ function PrCommitFileDiffSlot({
           fileSection={sections.get(path)}
           onClose={onClose}
           lens={lens}
+          patchOnly
         />
       ),
     };
@@ -484,12 +591,18 @@ function PrCommitFileDiffSlot({
               text: section,
               isBinary: sectionIsBinary(section),
               isTruncated: false,
+              oldPath: sectionOldPath(section),
             }
       }
       isPending={false}
       isError={false}
       repoPath={repoPath}
       previewRev={previewRev}
+      contentRevs={content?.revs}
+      imageRevs={content?.images}
+      // From the first paint, so the diff records it as on screen.
+      forgePatch={{ source: content?.source ?? null, scope: `${lens}\0${sha}` }}
+      typechangeAnchors
       anchorCommit={sha}
       lineAnchors={lineAnchors}
       lineWidget={lineWidget}

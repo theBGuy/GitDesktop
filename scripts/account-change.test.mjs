@@ -81,6 +81,18 @@ test("shouldResetOnAccountChange: each query shape (table)", () => {
     ["explicit online mode", q(["repo", REPO, "pr-list"], "online"), true],
     ["my-work page", q(["forge-my-work", "github", null]), true],
     ["token scopes", q(["gh", "token-scopes", null]), true],
+    // Reads outside the "repo" subtree that the lens's forge answers.
+    [
+      "file at a sha",
+      q(["forge-file-at-sha", REPO, "origin", "abc", "a.txt", 1024]),
+      true,
+    ],
+    ["commit parent", q(["forge-commit-parent", REPO, "origin", "abc"]), true],
+    [
+      "blob sizes",
+      q(["github-blob-sizes", REPO, "origin", "abc", "def"]),
+      true,
+    ],
     // Jira is its own account, never the forge's.
     ["jira issues under repo", q(["repo", REPO, "jira-issues", "x"]), false],
     ["jira issue under repo", q(["repo", REPO, "jira-issue", "x"]), false],
