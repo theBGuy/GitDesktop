@@ -81,7 +81,7 @@
     "zustand": "^5.1.0"
   },
   "devDependencies": {
-    "@babel/core": "^7.29.13",
+    "@babel/core": "^8.0.9",
     "@biomejs/biome": "2.6.8",
     "@rolldown/plugin-babel": "^0.3.1",
     "@tauri-apps/cli": "^2.12.6",
