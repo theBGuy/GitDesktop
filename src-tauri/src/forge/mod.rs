@@ -7580,7 +7580,8 @@ mod tests {
     fn saved_reply_unreadable_rides_the_hosts_kind() {
         type Wrap = fn(String) -> AppError;
         let hosts = [
-            ("Bitbucket", AppError::Bitbucket as Wrap, "bitbucket"),
+            ("GitLab", AppError::Glab as Wrap, "glab"),
+            ("Bitbucket", AppError::Bitbucket, "bitbucket"),
             ("Jira", AppError::Jira, "jira"),
         ];
         for (host, wrap, kind) in hosts {

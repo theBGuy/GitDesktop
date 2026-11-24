@@ -8518,7 +8518,8 @@ pub async fn comment_issue(repo_path: &str, number: u64, body: &str) -> AppResul
 /// project path the caller resolved for its state read, so both name the same issue.
 /// Returns whether GitLab's answer reads the issue as closed: it answers 200 while
 /// keeping the old state when the caller's role may not change it (a locked
-/// discussion blocks reopening). `None` when the answer is unreadable.
+/// discussion blocks reopening). `None` when the answer is unreadable; the caller
+/// then re-reads (`gl_issue_closed_after`).
 async fn set_issue_state(
     repo_path: &str,
     enc: &str,
@@ -8557,18 +8558,6 @@ async fn gl_issue_closed_now(repo_path: &str, enc: &str, number: u64) -> AppResu
     gl_issue_is_closed(&out.stdout_lossy())
 }
 
-/// Closes an issue. GitLab has no close reason, so a close records none.
-pub async fn close_issue(repo_path: &str, number: u64) -> AppResult<IssueCloseOutcome> {
-    let enc = encode_project(&project_path(repo_path).await?);
-    if gl_issue_closed_now(repo_path, &enc, number).await? {
-        return Ok(IssueCloseOutcome::AlreadyClosed);
-    }
-    if set_issue_state(repo_path, &enc, number, "close").await? == Some(false) {
-        return Err(gl_state_kept(number, "open"));
-    }
-    Ok(IssueCloseOutcome::Closed(None))
-}
-
 /// Whether a GitLab issue body reads as closed. A missing or unknown state is an
 /// error, so the write never proceeds on a guess.
 fn gl_issue_is_closed(body: &str) -> AppResult<bool> {
@@ -8589,12 +8578,44 @@ fn gl_issue_is_closed(body: &str) -> AppResult<bool> {
     }
 }
 
+/// Whether the issue is closed after a state PUT: GitLab's answer when it can be
+/// read, else one re-read of the issue. A re-read that fails leaves the change
+/// unconfirmed, reported with the shared may-be-saved sentence that the frontend's
+/// `mayHaveLanded` reads.
+async fn gl_issue_closed_after(
+    repo_path: &str,
+    enc: &str,
+    number: u64,
+    answer: Option<bool>,
+) -> AppResult<bool> {
+    match answer {
+        Some(closed) => Ok(closed),
+        None => gl_issue_closed_now(repo_path, enc, number)
+            .await
+            .map_err(|_| crate::forge::saved_reply_unreadable("GitLab", AppError::Glab)),
+    }
+}
+
+/// Closes an issue. GitLab has no close reason, so a close records none.
+pub async fn close_issue(repo_path: &str, number: u64) -> AppResult<IssueCloseOutcome> {
+    let enc = encode_project(&project_path(repo_path).await?);
+    if gl_issue_closed_now(repo_path, &enc, number).await? {
+        return Ok(IssueCloseOutcome::AlreadyClosed);
+    }
+    let answer = set_issue_state(repo_path, &enc, number, "close").await?;
+    if !gl_issue_closed_after(repo_path, &enc, number, answer).await? {
+        return Err(gl_state_kept(number, "open"));
+    }
+    Ok(IssueCloseOutcome::Closed(None))
+}
+
 pub async fn reopen_issue(repo_path: &str, number: u64) -> AppResult<IssueReopenOutcome> {
     let enc = encode_project(&project_path(repo_path).await?);
     if !gl_issue_closed_now(repo_path, &enc, number).await? {
         return Ok(IssueReopenOutcome::AlreadyOpen);
     }
-    if set_issue_state(repo_path, &enc, number, "reopen").await? == Some(true) {
+    let answer = set_issue_state(repo_path, &enc, number, "reopen").await?;
+    if gl_issue_closed_after(repo_path, &enc, number, answer).await? {
         return Err(gl_state_kept(number, "closed"));
     }
     Ok(IssueReopenOutcome::Reopened)
@@ -14756,11 +14777,13 @@ mod tests {
                     "let enc = encode_project(&project_path(repo_path).await?);",
                     "if gl_issue_closed_now(repo_path, &enc, number).await? { \
                      return Ok(IssueCloseOutcome::AlreadyClosed); }",
-                    "if set_issue_state(repo_path, &enc, number, \"close\").await? \
-                     == Some(false) { return Err(gl_state_kept(number, \"open\")); }",
+                    "let answer = set_issue_state(repo_path, &enc, number, \"close\").await?;",
+                    "if !gl_issue_closed_after(repo_path, &enc, number, answer).await? { \
+                     return Err(gl_state_kept(number, \"open\")); }",
                 ],
             ) && flat.matches("Closed(").count() == 1
                 && flat.matches("return ").count() == 2
+                && flat.matches("let answer").count() == 1
                 && flat.ends_with("Ok(IssueCloseOutcome::Closed(None))")
         };
         assert_mutants_fail(
@@ -14778,7 +14801,16 @@ mod tests {
                 ("return Ok(IssueCloseOutcome::AlreadyClosed);", ""),
                 ("&enc, number).await?", "&enc, 1).await?"),
                 ("\"close\").await?", "\"close\").await.unwrap_or(None)"),
-                ("== Some(false)", "== Some(true)"),
+                ("if !gl_issue_closed_after(", "if gl_issue_closed_after("),
+                ("number, answer)", "number, Some(true))"),
+                (
+                    "if !gl_issue_closed_after(",
+                    "let answer = Some(true); if !gl_issue_closed_after(",
+                ),
+                (
+                    "if !gl_issue_closed_after(",
+                    "let answer = answer.or(Some(true)); if !gl_issue_closed_after(",
+                ),
             ],
             pinned,
         );
@@ -14793,14 +14825,16 @@ mod tests {
         let pinned = |src: &str| {
             let flat = flat_body(src, "reopen_issue");
             flat.matches("return ").count() == 2
+                && flat.matches("let answer").count() == 1
                 && in_order(
                     &flat,
                     &[
                         "let enc = encode_project(&project_path(repo_path).await?);",
                         "if !gl_issue_closed_now(repo_path, &enc, number).await? { \
                          return Ok(IssueReopenOutcome::AlreadyOpen); }",
-                        "if set_issue_state(repo_path, &enc, number, \"reopen\").await? \
-                         == Some(true) { return Err(gl_state_kept(number, \"closed\")); }",
+                        "let answer = set_issue_state(repo_path, &enc, number, \"reopen\").await?;",
+                        "if gl_issue_closed_after(repo_path, &enc, number, answer).await? { \
+                         return Err(gl_state_kept(number, \"closed\")); }",
                         "Ok(IssueReopenOutcome::Reopened)",
                     ],
                 )
@@ -14812,10 +14846,56 @@ mod tests {
                 ("if !gl_issue_closed_now(", "if gl_issue_closed_now("),
                 ("return Ok(IssueReopenOutcome::AlreadyOpen);", ""),
                 ("\"reopen\").await?", "\"reopen\").await.unwrap_or(None)"),
-                ("== Some(true)", "== Some(false)"),
+                ("if gl_issue_closed_after(", "if !gl_issue_closed_after("),
+                ("number, answer)", "number, Some(false))"),
+                (
+                    "if gl_issue_closed_after(",
+                    "let answer = Some(false); if gl_issue_closed_after(",
+                ),
+                (
+                    "if gl_issue_closed_after(",
+                    "let answer = answer.or(Some(false)); if gl_issue_closed_after(",
+                ),
                 (
                     "let enc =",
                     "return Ok(IssueReopenOutcome::Reopened); let enc =",
+                ),
+            ],
+            pinned,
+        );
+    }
+
+    /// An unreadable PUT answer is settled by re-reading the same issue, and a
+    /// failed re-read is the shared may-be-saved error, never a guessed state.
+    #[test]
+    fn an_unreadable_state_answer_is_read_back() {
+        use crate::github::issue::tests::{assert_mutants_fail, flat_body};
+        let src = gitlab_rs_source();
+        let pinned = |src: &str| {
+            flat_body(src, "gl_issue_closed_after")
+                == "fn gl_issue_closed_after( repo_path: &str, enc: &str, number: u64, \
+                    answer: Option<bool>, ) -> AppResult<bool> { match answer { \
+                    Some(closed) => Ok(closed), \
+                    None => gl_issue_closed_now(repo_path, enc, number) .await \
+                    .map_err(|_| crate::forge::saved_reply_unreadable(\"GitLab\", AppError::Glab)), }"
+        };
+        assert_mutants_fail(
+            &src,
+            "async fn gl_issue_closed_after(",
+            &[
+                ("Some(closed) => Ok(closed)", "Some(closed) => Ok(!closed)"),
+                ("enc, number)\n", "enc, 1)\n"),
+                (
+                    ".await\n            .map_err(",
+                    ".await\n            .or(Ok(true))\n            .map_err(",
+                ),
+                (
+                    "None => gl_issue_closed_now",
+                    "None => Ok(true), _ => gl_issue_closed_now",
+                ),
+                (
+                    "crate::forge::saved_reply_unreadable(\"GitLab\", AppError::Glab)",
+                    "AppError::Glab(\"unconfirmed\".into())",
                 ),
             ],
             pinned,

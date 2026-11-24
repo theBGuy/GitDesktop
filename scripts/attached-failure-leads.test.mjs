@@ -398,10 +398,10 @@ function jiraReplyMismatch(forgeSrc, errorSrc, predicate = mayHaveLanded) {
 const SAVED_SENTENCE = (host) =>
   `${host} accepted the request but its reply couldn't be read, so the change may already be saved. Check before trying again.`;
 
-/** Null when `saved_reply_unreadable`'s literal, filled for each host its callers pass
- *  (Bitbucket, Jira) under that host's kind from error.rs, is the ruled one-line
- *  sentence, reads as may-have-landed only under its own kind, and presents whole
- *  under that forge's label without a transport reading. */
+/** Null when `saved_reply_unreadable`'s literal, filled for each host its callers
+ *  pass (GitLab, Bitbucket, Jira) under that host's kind from error.rs, is the ruled
+ *  one-line sentence, reads as may-have-landed only under its own kind, and presents
+ *  whole under that forge's label without a transport reading. */
 function savedReplyMismatch(forgeSrc, errorSrc, predicate = mayHaveLanded) {
   const body = fnBody(forgeSrc, "saved_reply_unreadable");
   if (body === null) return "saved_reply_unreadable not found exactly once";
@@ -417,10 +417,14 @@ function savedReplyMismatch(forgeSrc, errorSrc, predicate = mayHaveLanded) {
     return `read ${consts.length} UNREAD_REPLY_LEAD, want 1`;
   const template = literal.replaceAll("{UNREAD_REPLY_LEAD}", consts[0][1]);
   const kinds = new Map();
-  for (const host of ["Bitbucket", "Jira"]) {
+  for (const [host, variant] of [
+    ["GitLab", "Glab"],
+    ["Bitbucket", "Bitbucket"],
+    ["Jira", "Jira"],
+  ]) {
     const arms = [
       ...errorSrc.matchAll(
-        new RegExp(`AppError::${host}\\(_\\) => "(\\w+)"`, "g"),
+        new RegExp(`AppError::${variant}\\(_\\) => "(\\w+)"`, "g"),
       ),
     ];
     if (arms.length !== 1) return `${host}: ${arms.length} kind arms`;
@@ -957,7 +961,7 @@ test("the Jira pin fails on a mutated literal, variant or predicate", () => {
   );
 });
 
-test("saved_reply_unreadable reads as may-have-landed under bitbucket and jira", () => {
+test("saved_reply_unreadable reads as may-have-landed under glab, bitbucket and jira", () => {
   const forge = read(FORGE);
   const errorSrc = read(ERROR);
   assert.equal(savedReplyMismatch(forge, errorSrc), null);

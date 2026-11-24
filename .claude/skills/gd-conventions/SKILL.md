@@ -1240,7 +1240,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   not whether the caller uses the reply: `bb_post_empty`, `bb_delete`, Jira's
   `send_no_content` and a 200 or 202 merge succeed with the body unread;
   `bb_put_json` and Jira's `put_json` give `saved_reply_unreadable`'s sentence
-  under its forge's own kind, callers that discard the reply included; a create
+  under its forge's own kind, callers that discard the reply included, and so
+  does a GitLab issue close or reopen whose answer can't be read and whose one
+  re-read fails (`gl_issue_closed_after` in forge/gitlab.rs); a create
   gives the may-already-exist sentence, except Bitbucket's pull request create
   (`created_pr_response`: created, number unknown) and repository create
   (`created_repo_response`: reported as created at its URL). A non-2xx and every
