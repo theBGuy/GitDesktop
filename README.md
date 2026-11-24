@@ -76,8 +76,8 @@ instead, see [Development](#development).
   [merge prediction](#branches), lost-stash recovery, a worktree manager
   (pull requests check out into their own), and bulk branch cleanup.
 - **[Rename a branch on its remote too](#branches)**: one dialog renames it
-  here and on the remote, and lists the open pull or merge requests on the
-  old name before you confirm.
+  here and on the remote. Before you confirm, it lists the open pull or merge
+  requests on the old name, and says so when it couldn't check for them.
 - **[Markdown, previewed in the diff](#changes-and-commits)**: a
   Raw / Preview toggle renders markdown and MDX changes anywhere the app
   can read the file locally, with the repository's own images read from
@@ -247,14 +247,17 @@ beside its arrows, and a branch marked Keep local wears a `kept local` chip.
 - **No-checkout and remote-branch ops**: update a branch *without* checking
   it out (from the default branch or its own upstream, e.g. to bring the
   default current after a merged PR), and check out or delete remote-only
-  branches straight from the switcher's Remote section. Updating from the
-  default branch merges its upstream tip when your local copy is behind, and
-  the menu and toast name the commit it merges.
+  branches straight from the switcher's Remote section. Deleting one removes
+  it only at the commit the app had read for it when the confirmation
+  opened, so a branch that changed on the remote since stays there. Updating
+  from the default branch merges its upstream tip when your local copy is
+  behind, and the menu and toast name the commit it merges.
 - **Push or publish without switching**: from the switcher's context menu,
-  push a branch that's ahead of the remote it tracks (to that remote, or to
-  the one Git's `pushRemote` or `pushDefault` setting names, which the item
-  shows) or publish an unpushed one, choosing the remote when there's more
-  than one. Works even when the branch is checked out in another worktree.
+  push a branch that's ahead of the remote it tracks, or one that Git's
+  `pushRemote` or `pushDefault` setting sends to another remote (the item
+  names where it goes, and is there whether or not the branch is ahead), or
+  publish an unpushed one, choosing the remote when there's more than one.
+  Works even when the branch is checked out in another worktree.
   A branch tracking a differently named one offers **Publish as
   _origin/name_**, unless its push settings send it to another remote; one
   still tracking the remote's default branch it started from gets that in

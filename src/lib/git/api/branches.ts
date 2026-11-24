@@ -148,12 +148,20 @@ export const gitDeleteBranch = async (
 };
 
 /** Deletes `name` on `remote` (`git push <remote> --delete`). Idempotent when
- *  the remote ref is already gone. */
+ *  the remote ref is already gone. With `expectedTip` (a full commit id) the
+ *  delete is leased on it: a remote branch that moved since is not deleted. */
 export const gitDeleteRemoteBranch = (
   repoPath: string,
   remote: string,
   name: string,
-) => invoke<void>("git_delete_remote_branch", { repoPath, remote, name });
+  expectedTip?: string,
+) =>
+  invoke<void>("git_delete_remote_branch", {
+    repoPath,
+    remote,
+    name,
+    expectedTip: expectedTip ?? null,
+  });
 
 export const gitDefaultBranch = (repoPath: string) =>
   invoke<string | null>("git_default_branch", { repoPath });

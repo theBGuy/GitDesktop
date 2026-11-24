@@ -389,8 +389,8 @@ export function useDeleteRemoteBranch(repo: string) {
   const prListKeys = headDeletePrListKeys(repo);
   return useRepoMutation(
     repo,
-    (args: { remote: string; name: string }) =>
-      api.gitDeleteRemoteBranch(repo, args.remote, args.name),
+    (args: { remote: string; name: string; expectedTip?: string }) =>
+      api.gitDeleteRemoteBranch(repo, args.remote, args.name, args.expectedTip),
     {
       invalidate: [
         ["repo", repo, "remote-branches"],

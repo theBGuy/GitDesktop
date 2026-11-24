@@ -85,7 +85,8 @@ export type AppError =
    *  `name` is its file name. */
   | { kind: "defaultOpenRefused"; message: string; name: string }
   /** A push naming no remote refused because the configured push remote `value`
-   *  (from the config key `key`) is empty, invalid or not a remote of the repository. */
+   *  (from the config key `key`) is empty, invalid or not a remote of the repository;
+   *  a URL's userinfo arrives replaced by `***`. */
   | {
       kind: "pushRemoteUnusable";
       message: string;

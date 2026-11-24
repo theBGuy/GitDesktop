@@ -464,6 +464,7 @@ for (const route of ROUTES)
       await route.press();
       await settle();
       expect(useConfirm.getState().request).toBeNull();
+      expect(pushSpy).not.toHaveBeenCalled();
       await act(async () => check.resolve(null));
       await waitFor(() => expect(pushSpy).toHaveBeenCalledTimes(1));
       await settle();

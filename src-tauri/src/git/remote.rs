@@ -1674,10 +1674,27 @@ fn configured_push_remote_checked<'c>(
         return Err(AppError::PushRemoteUnusable {
             branch: branch.to_string(),
             key,
-            value: value.to_string(),
+            value: redact_url_userinfo(value),
         });
     }
     Ok(Some(value))
+}
+
+/// A push-remote value with the userinfo of a URL (`scheme://` or scp-style; no remote
+/// name holds a `:`) replaced by `***`, so its credential never reaches a message; the
+/// scheme, host and path stay, and any other value is returned as it is.
+pub(crate) fn redact_url_userinfo(value: &str) -> String {
+    if !value.contains(':') {
+        return value.to_string();
+    }
+    let start = value.find("://").map_or(0, |i| i + 3);
+    let end = value[start..]
+        .find(['/', '\\'])
+        .map_or(value.len(), |i| start + i);
+    match value[start..end].rfind('@') {
+        Some(at) => format!("{}***{}", &value[..start], &value[start + at..]),
+        None => value.to_string(),
+    }
 }
 
 /// Every pre-spawn read of a HEAD push, run early and again at spawn for an argv that
@@ -9268,6 +9285,13 @@ and the repository exists.
             ("remote.pushdefault\nbad:name\0", pd, "bad:name"),
             ("remote.pushdefault\nghost\0", pd, "ghost"),
             ("remote.pushdefault\nfork\0branch.b.pushremote\n\0", own, ""),
+            // A URL's userinfo is redacted; scheme, host and path still name the value.
+            ("branch.b.pushremote\nhttps://user:token@host/o/r\0", own, "https://***@host/o/r"),
+            ("remote.pushdefault\nhttps://token@host/o/r\0", pd, "https://***@host/o/r"),
+            ("branch.b.pushremote\nuser:pass@host:o/r.git\0", own, "***@host:o/r.git"),
+            ("branch.b.pushremote\nssh://git@host:22/o/r\0", own, "ssh://***@host:22/o/r"),
+            ("branch.b.pushremote\nhttps://host/o/r\0", own, "https://host/o/r"),
+            ("remote.pushdefault\nme@work\0", pd, "me@work"),
         ];
         for (listing, key, value) in rows {
             let config = crate::git::status::PushConfig::from_listing(listing);
@@ -10707,6 +10731,44 @@ and the repository exists.
                 matches!(&err, AppError::PushDestinationExists { branch, remote, dest } if branch == "feat" && remote == "origin" && dest == "feat"),
                 "color.transport={color}: {err:?}"
             );
+            assert_eq!(
+                tip_of(&origin, "refs/heads/feat").await.as_deref(),
+                Some(main.as_str())
+            );
+        }
+    }
+
+    /// A followed tag lands beside the branch the create-only lease refuses: the refusal
+    /// still names the destination, and its text says only the branch wasn't pushed.
+    #[tokio::test]
+    async fn a_followed_tag_beside_a_stale_lease_still_names_the_destination() {
+        let (_guard, base, origin, _url) = seeded_origin("followed-tag-lease").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let state = AppState::default();
+        let main = tip_of(&work, "refs/heads/main").await.unwrap();
+        run(&work, &["config", "push.followTags", "true"]).await;
+        run(&work, &["checkout", "-q", "-b", "feat"]).await;
+        plant_unfetched(&work, "origin", &main).await;
+        let rows = [
+            ("false", "v-plain", "refs/tags/v-plain"),
+            ("always", "v-color", "refs/tags/v-color"),
+        ];
+        for (color, tag, tag_ref) in rows {
+            run(&work, &["config", "color.transport", color]).await;
+            run(&work, &["commit", "-qm", tag, "--allow-empty"]).await;
+            run(&work, &["tag", "-a", tag, "-m", "t"]).await;
+            let err = super::git_push_same_name_core(&state, work.clone(), true, None, None)
+                .await
+                .expect_err("an unfetched ancestor");
+            assert!(
+                matches!(&err, AppError::PushDestinationExists { branch, remote, dest } if branch == "feat" && remote == "origin" && dest == "feat"),
+                "color.transport={color}: {err:?}"
+            );
+            assert!(
+                !err.to_string().contains("nothing was pushed"),
+                "color.transport={color}: {err}"
+            );
+            assert!(tip_of(&origin, tag_ref).await.is_some(), "{tag_ref} landed");
             assert_eq!(
                 tip_of(&origin, "refs/heads/feat").await.as_deref(),
                 Some(main.as_str())

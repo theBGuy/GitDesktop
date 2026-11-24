@@ -9,14 +9,16 @@ export type RemoteRenameRefusal =
   | { code: "mirror" }
   | { code: "pushUrlDiffers" }
   | { code: "caseOnly" }
+  /** The remote's fetch refspecs provably map no tracking ref for the new name. */
+  | { code: "newNotFetched" }
   | { code: "unreachable"; detail: string }
   | { code: "remoteDefault" }
   | { code: "remoteGone" }
   | { code: "moved" }
   | { code: "newExists" }
   | { code: "remoteAhead" }
-  /** The branch's configured push remote (`pushRemote`, as configured) isn't
-   *  the remote being renamed on. */
+  /** The branch's configured push remote (`pushRemote`, as configured, a URL's
+   *  userinfo replaced by `***`) isn't the remote being renamed on. */
   | { code: "pushesElsewhere"; pushRemote: string };
 
 export type RemoteRenameRefusalCode = RemoteRenameRefusal["code"];

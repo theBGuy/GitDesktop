@@ -1962,6 +1962,10 @@ struct GlabForkIds {
     id: Option<u64>,
     #[serde(default)]
     forked_from_project: Option<serde_json::Value>,
+    /// Sent only for a fork, which keeps it when the parent embed is withheld from an
+    /// account that can't read the parent. Only its presence is read, so any shape parses.
+    #[serde(default)]
+    mr_default_target_self: Option<serde_json::Value>,
 }
 
 /// An MR row of the parent-scope read, every field tolerant so one odd row is dropped
@@ -1983,13 +1987,23 @@ struct GlabParentMr {
 }
 
 /// A fork's `(own id, parent id, parent full path)`: `Ok(None)` when origin is not a fork, an
-/// `Err` when this project's id or the parent's id or path is missing. Pure.
+/// `Err` when this project's id or the parent's id or path is missing, or when a fork's
+/// parent embed is absent or null (a parent this account can't read). Pure.
 fn gl_fork_parent(project: &GlabForkIds) -> AppResult<Option<(u64, u64, String)>> {
     let Some(parent) = project
         .forked_from_project
         .as_ref()
         .filter(|v| !v.is_null())
     else {
+        if project
+            .mr_default_target_self
+            .as_ref()
+            .is_some_and(|v| !v.is_null())
+        {
+            return Err(AppError::Glab(
+                "Couldn't read which project this fork was forked from.".into(),
+            ));
+        }
         return Ok(None);
     };
     let parent_id = parent.get("id").and_then(serde_json::Value::as_u64);
@@ -2151,6 +2165,35 @@ mod remote_branch_pull_tests {
                 "{body}"
             );
         }
+    }
+
+    /// GitLab withholds the parent embed from an account that can't read the parent but
+    /// still sends the fork-only `mr_default_target_self`, so that shape is unknown, never
+    /// "not a fork"; with neither key the project is not a fork.
+    #[test]
+    fn a_fork_with_an_unreadable_parent_is_unknown() {
+        for body in [
+            json!({"id": 7, "mr_default_target_self": false}),
+            json!({"id": 7, "mr_default_target_self": true, "forked_from_project": null}),
+            json!({"id": 7, "mr_default_target_self": "false"}),
+            json!({"id": 7, "mr_default_target_self": 0}),
+        ] {
+            assert!(
+                matches!(parent_of(body.clone()), Err(AppError::Glab(_))),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            parent_of(json!({"id": 7, "mr_default_target_self": false,
+                "forked_from_project": {"id": 3, "path_with_namespace": "up/proj"}}))
+            .unwrap(),
+            Some((7, 3, "up/proj".to_string()))
+        );
+        assert_eq!(parent_of(json!({"id": 7})).unwrap(), None);
+        assert_eq!(
+            parent_of(json!({"id": 7, "mr_default_target_self": null})).unwrap(),
+            None
+        );
     }
 
     /// The parent scope keeps only this fork's rows on the branch; another fork's

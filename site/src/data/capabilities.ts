@@ -146,7 +146,7 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "Rename a branch on its remote too — open pull or merge requests on the old name are listed before you confirm",
+      "Rename a branch on its remote too — open pull or merge requests on the old name are listed before you confirm, and the dialog says so when it couldn't check for them",
   },
   {
     group: "Branches & history",

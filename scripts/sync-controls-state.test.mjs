@@ -1304,6 +1304,71 @@ test("rowPushItem: offered when tracked and ahead, never into a different-name d
     assert.equal(rowPushItem(rowFacts(over), REMOTES), want, what);
 });
 
+test("rowPushItem: a routed row's upstream counts never hide its item; diverged holds it", () => {
+  const fork = { namedPushRemote: "fork", namedPushBranch: "feat" };
+  // Tracks up/main, pushes to origin/main: a fork-sync branch.
+  const forkSync = {
+    upstream: "up/main",
+    upstreamRemote: "up",
+    upstreamBranch: "main",
+    namedPushRemote: "origin",
+    namedPushBranch: "main",
+  };
+  const rows = [
+    ["routed elsewhere, level", fork, "live"],
+    ["routed elsewhere, behind only", { ...fork, upstreamBehind: 2 }, "live"],
+    [
+      "routed elsewhere, ahead and behind",
+      { ...fork, upstreamAhead: 1, upstreamBehind: 1 },
+      "held",
+    ],
+    ["fork sync, level", forkSync, "live"],
+    ["fork sync, behind only", { ...forkSync, upstreamBehind: 3 }, "live"],
+    [
+      "fork sync, ahead and behind",
+      { ...forkSync, upstreamAhead: 1, upstreamBehind: 1 },
+      "held",
+    ],
+    ["routed but refused, level", { ...fork, namedPushRefused: true }, "none"],
+    ["routed, upstream gone", { ...fork, upstreamGone: true }, "none"],
+    [
+      "routed, untracked",
+      { ...fork, upstream: null, upstreamRemote: null, upstreamBranch: null },
+      "none",
+    ],
+    [
+      "routed, removed remote",
+      { ...fork, upstream: "old/main", upstreamRemote: "old" },
+      "none",
+    ],
+    [
+      "ordinary same-name tracked, level",
+      { upstream: "origin/feat", upstreamBranch: "feat" },
+      "none",
+    ],
+  ];
+  for (const [what, over, want] of rows)
+    assert.equal(rowPushItem(rowFacts(over), REMOTES), want, what);
+});
+
+test("rowPushItem: a route on the upstream's own remote keeps the ahead-only rule", () => {
+  // A pull request checkout: its upstream is no branch, its route origin/feat.
+  const pr = {
+    upstream: "origin/pull/7/head",
+    upstreamBranch: null,
+    namedPushRemote: "origin",
+    namedPushBranch: "feat",
+  };
+  const rows = [
+    ["level", pr, "none"],
+    ["ahead", { ...pr, upstreamAhead: 1 }, "live"],
+    ["behind only", { ...pr, upstreamBehind: 2 }, "none"],
+    ["diverged", { ...pr, upstreamAhead: 1, upstreamBehind: 1 }, "held"],
+  ];
+  for (const [what, over, want] of rows)
+    assert.equal(rowPushItem(rowFacts(over), REMOTES), want, what);
+});
+
 const START =
   "Not published. Tracks origin/main, where it started. Right-click to publish.";
 

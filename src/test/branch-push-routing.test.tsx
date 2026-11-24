@@ -164,6 +164,16 @@ const routedRow = (name: string, overrides: Partial<Branch> = {}) =>
     ...overrides,
   });
 
+/** `feat` checked out from a pull request: its upstream is origin's
+ *  `refs/pull/7/head`, no branch, and its named push goes to origin/feat. */
+const prCheckoutRow = (overrides: Partial<Branch> = {}) =>
+  trackingRow("feat", "origin", "pull/7/head", {
+    upstreamRemoteRef: "refs/pull/7/head",
+    namedPushRemote: "origin",
+    namedPushBranch: "feat",
+    ...overrides,
+  });
+
 /** A local row with no upstream. */
 const untrackedRow = (name: string): Branch => ({
   ...trackingRow(name, "origin", name),
@@ -362,6 +372,95 @@ describe("a row whose push routes to another remote", () => {
       ).getAttribute("aria-disabled"),
     ).toBe("true");
   });
+
+  // Counts against the upstream say nothing about the routed destination.
+  for (const [what, over] of [
+    ["level with its upstream", { upstreamAhead: 0 }],
+    ["only behind its upstream", { upstreamAhead: 0, upstreamBehind: 2 }],
+  ] as const) {
+    it(`offers its live Push item when ${what}`, async () => {
+      reads.branches.push(routedRow("feat", over));
+      reads.remoteBranches = [
+        { name: "feat", remote: "fork", lastCommitDate: "2026-11-01" },
+      ];
+      const { user } = renderSwitcher();
+      await openList(user);
+      const menu = await openRowMenu(user, "feat");
+      const item = menuItem(menu, "Push to fork/feat");
+      expect(item.getAttribute("aria-disabled")).not.toBe("true");
+      await user.click(item);
+      await waitFor(() =>
+        expect(pushSpy).toHaveBeenCalledWith(
+          REPO,
+          false,
+          false,
+          "feat",
+          "fork",
+          "feat",
+          pins(false),
+        ),
+      );
+      expect(useConfirm.getState().request).toBeNull();
+    });
+  }
+
+  it("level with its upstream, still asks before creating it there", async () => {
+    reads.branches.push(routedRow("feat", { upstreamAhead: 0 }));
+    const { user } = renderSwitcher();
+    await openList(user);
+    const menu = await openRowMenu(user, "feat");
+    await user.click(menuItem(menu, "Push to fork/feat"));
+    await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
+    expect(pushSpy).not.toHaveBeenCalled();
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() =>
+      expect(pushSpy).toHaveBeenCalledWith(
+        REPO,
+        false,
+        false,
+        "feat",
+        "fork",
+        "feat",
+        pins(true),
+      ),
+    );
+  });
+
+  it("an ordinary tracked row level with its upstream still offers no Push", async () => {
+    reads.branches.push(trackingRow("dev", "origin", "dev"));
+    const { user } = renderSwitcher();
+    await openList(user);
+    const menu = await openRowMenu(user, "dev");
+    expect(within(menu).queryByRole("menuitem", { name: /^Push/ })).toBeNull();
+  });
+
+  // A route on the upstream's own remote keeps the ahead-only rule.
+  for (const [what, over, item] of [
+    ["level", {}, null],
+    ["ahead", { upstreamAhead: 1 }, ["Push to origin/feat", false]],
+    ["behind only", { upstreamBehind: 2 }, null],
+    [
+      "diverged",
+      { upstreamAhead: 1, upstreamBehind: 1 },
+      ["Push to origin/feat (diverged from origin/pull/7/head)", true],
+    ],
+  ] as const) {
+    it(`a pull request checkout routed to its own name on origin, ${what}`, async () => {
+      reads.branches.push(prCheckoutRow(over));
+      const { user } = renderSwitcher();
+      await openList(user);
+      const menu = await openRowMenu(user, "feat");
+      if (item === null) {
+        expect(
+          within(menu).queryByRole("menuitem", { name: /^Push/ }),
+        ).toBeNull();
+        return;
+      }
+      expect(
+        menuItem(menu, item[0]).getAttribute("aria-disabled") === "true",
+      ).toBe(item[1]);
+    });
+  }
 
   // Sending the upstream's remote here would push to origin.
   it("pushes unasked to the destination it already has, naming it in the toast", async () => {
@@ -580,8 +679,25 @@ describe("the push-to-origin hotkey on a branch routed elsewhere", () => {
     expect(pushSpy).not.toHaveBeenCalled();
   });
 
-  it("from the list, with nothing to push, names only where it goes", async () => {
-    reads.branches.push(routedRow("feat", { upstreamAhead: 0 }));
+  for (const [what, over] of [
+    ["level with its upstream", { upstreamAhead: 0 }],
+    ["only behind its upstream", { upstreamAhead: 0, upstreamBehind: 2 }],
+  ] as const) {
+    it(`from the list, ${what}, points to its context menu`, async () => {
+      reads.branches.push(routedRow("feat", over));
+      const { user } = renderSwitcher();
+      await openList(user);
+      await hotkeyOnRow("feat");
+      await waitFor(() => expect(info).toHaveBeenCalled());
+      expect(info).toHaveBeenCalledWith(
+        "feat pushes to fork/feat, not origin — push it from its context menu",
+      );
+      expect(pushSpy).not.toHaveBeenCalled();
+    });
+  }
+
+  it("from the list, diverged, names only where it goes", async () => {
+    reads.branches.push(routedRow("feat", { upstreamBehind: 1 }));
     const { user } = renderSwitcher();
     await openList(user);
     await hotkeyOnRow("feat");
@@ -700,6 +816,70 @@ describe("the push-to-origin hotkey on a branch routed elsewhere", () => {
     );
     await settle();
     expect(pushSpy).not.toHaveBeenCalled();
+  });
+
+  for (const [what, over] of [
+    ["level with its upstream", { upstreamAhead: 0 }],
+    ["only behind its upstream", { upstreamAhead: 0, upstreamBehind: 2 }],
+  ] as const) {
+    it(`from the list, the same branch ${what} takes its routed push`, async () => {
+      reads.remotes = ["origin", "upstream"];
+      reads.branches.push(toOriginRow(over));
+      reads.remoteBranches = [
+        { name: "topic", remote: "origin", lastCommitDate: "2026-11-01" },
+      ];
+      const { user } = renderSwitcher();
+      await openList(user);
+      await hotkeyOnRow("topic");
+      await waitFor(() => expect(pushSpy).toHaveBeenCalledTimes(1));
+      expect(pushSpy.mock.calls[0].slice(3, 6)).toEqual([
+        "topic",
+        "origin",
+        "topic",
+      ]);
+      expect(JSON.stringify(info.mock.calls)).not.toContain("tracks upstream");
+    });
+  }
+
+  for (const [what, over, toast] of [
+    ["level", {}, "feat has nothing to push"],
+    [
+      "behind only",
+      { upstreamBehind: 2 },
+      "feat is behind origin/pull/7/head — pull first",
+    ],
+    [
+      "diverged",
+      { upstreamAhead: 1, upstreamBehind: 1 },
+      "feat has diverged — update it from its upstream first",
+    ],
+  ] as const) {
+    it(`from the list, a pull request checkout routed on origin, ${what}, pushes nothing`, async () => {
+      reads.branches.push(prCheckoutRow(over));
+      const { user } = renderSwitcher();
+      await openList(user);
+      await hotkeyOnRow("feat");
+      await waitFor(() => expect(info).toHaveBeenCalledWith(toast));
+      await settle();
+      expect(pushSpy).not.toHaveBeenCalled();
+      expect(useConfirm.getState().request).toBeNull();
+    });
+  }
+
+  it("from the list, a pull request checkout routed on origin, ahead, takes its routed push", async () => {
+    reads.branches.push(prCheckoutRow({ upstreamAhead: 1 }));
+    reads.remoteBranches = [
+      { name: "feat", remote: "origin", lastCommitDate: "2026-11-01" },
+    ];
+    const { user } = renderSwitcher();
+    await openList(user);
+    await hotkeyOnRow("feat");
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledTimes(1));
+    expect(pushSpy.mock.calls[0].slice(3, 6)).toEqual([
+      "feat",
+      "origin",
+      "feat",
+    ]);
   });
 
   it("on the current branch, a fresh list read that routes it elsewhere refuses", async () => {

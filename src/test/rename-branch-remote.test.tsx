@@ -35,6 +35,7 @@ import type {
   RemoteRenameOutcome,
   RemoteRenameRefusal,
 } from "@/lib/git/types";
+import { OFFLINE_WRITE_REASON } from "@/lib/offline-writes";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { commitDraftKey, useUiStore } from "@/lib/stores/ui";
@@ -73,11 +74,27 @@ vi.mock(
     }),
   }),
 );
+// A second worktree of the dialog's repository.
+const SIBLING = vi.hoisted(() => "C:/repos/ren-wt");
+const identityOf = vi.hoisted(
+  () => (path: string) => `${path === SIBLING ? "C:/repos/ren" : path}/.git`,
+);
 vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
-  peekRepoIdentity: (path: string) => `${path}/.git`,
-  repoIdentityStrict: (path: string) => Promise.resolve(`${path}/.git`),
+  peekRepoIdentity: identityOf,
+  repoIdentityStrict: (path: string) => Promise.resolve(identityOf(path)),
 }));
+// The real promotion check unless a test flags a promote.
+const promote = vi.hoisted(() => ({ on: false }));
+vi.mock("@/lib/stores/worktree-removal", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/stores/worktree-removal")>();
+  return {
+    ...actual,
+    promotionBlocksCheckout: (repoPath: string) =>
+      promote.on || actual.promotionBlocksCheckout(repoPath),
+  };
+});
 
 const REPO = "C:/repos/ren";
 const OTHER = "C:/repos/elsewhere";
@@ -146,6 +163,7 @@ beforeEach(() => {
   useUiStore.setState({ repoPath: REPO });
 });
 afterEach(() => {
+  promote.on = false;
   onlineManager.setOnline(true);
   for (const s of Object.values(spies)) s.mockRestore();
 });
@@ -1009,6 +1027,312 @@ describe("the check and the lookup", () => {
     });
   });
 
+  /** Started from outside the modal: another worktree's push of `feat`. */
+  let startSiblingPush: (() => void) | null = null;
+  function SiblingPusher() {
+    const siblingPush = usePush(SIBLING);
+    startSiblingPush = () =>
+      void siblingPush.mutateAsync({ setUpstream: false, branch: "feat" });
+    return null;
+  }
+
+  const openOne: RemoteBranchPulls = {
+    status: "checked",
+    provider: "github",
+    items: [
+      {
+        number: 7,
+        title: "Opened meanwhile",
+        url: "u",
+        isDraft: false,
+        scope: "repository",
+        repo: "a/b",
+      },
+    ],
+    unchecked: [],
+  };
+
+  it("re-reads the lookup at a plain Rename and asks for Rename anyway when a request appeared", async () => {
+    const { user } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    expect(submit()).toHaveTextContent(/^Rename$/);
+    const fresh = deferred<RemoteBranchPulls>();
+    vi.mocked(forgePrsOnRemoteBranch).mockReturnValue(fresh.promise);
+    await user.click(submit());
+    // Held through the re-read as through the act.
+    expect(status()).toHaveTextContent("Renaming feat to feat2 on origin…");
+    expectHeld();
+    await act(async () => fresh.resolve(openOne));
+    await waitFor(() => expect(submit()).toHaveTextContent("Rename anyway"));
+    expect(status()).toHaveTextContent("Opened meanwhile");
+    expect(submit()).toHaveAttribute("aria-disabled", "false");
+    expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+    // The pressing dialog shows the answer itself.
+    expect(spies.info).not.toHaveBeenCalled();
+    // An Enter still held from the press never presses the confirm.
+    const repeat = new KeyboardEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      repeat: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      submit().dispatchEvent(repeat);
+    });
+    expect(repeat.defaultPrevented).toBe(true);
+  });
+
+  it("renames once when a plain Rename's re-read finds no request", async () => {
+    const { user } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    const lookups = vi.mocked(forgePrsOnRemoteBranch).mock.calls.length;
+    await user.click(submit());
+    await waitFor(() => expect(gitRenameBranchRemote).toHaveBeenCalledTimes(1));
+    expect(gitRenameBranchRemote).toHaveBeenCalledWith(
+      REPO,
+      "feat",
+      "feat2",
+      "origin",
+      TIP,
+    );
+    const lookupOrder = vi.mocked(forgePrsOnRemoteBranch).mock
+      .invocationCallOrder;
+    expect(lookupOrder.length).toBe(lookups + 1);
+    expect(lookupOrder[lookups]).toBeLessThan(
+      vi.mocked(gitRenameBranchRemote).mock.invocationCallOrder[0],
+    );
+  });
+
+  it("never renames when a plain Rename's re-read fails, and offers Retry", async () => {
+    const { user } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    vi.mocked(forgePrsOnRemoteBranch)
+      .mockRejectedValueOnce({ kind: "git", message: "fatal: boom" })
+      .mockReturnValue(deferred<RemoteBranchPulls>().promise);
+    await user.click(submit());
+    await within(status()).findByText(/^Couldn't check origin: /, undefined, {
+      timeout: 2000,
+    });
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expectHeld();
+    expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+    expect(spies.info).not.toHaveBeenCalled();
+  });
+
+  it.each<
+    [
+      string,
+      (d: ReturnType<typeof deferred<RemoteBranchPulls>>) => void,
+      string,
+    ]
+  >([
+    [
+      "needs the confirm",
+      (d) => d.resolve(openOne),
+      "Didn't rename feat: the open-request check on origin now needs your confirmation. Open Rename again to see it.",
+    ],
+    [
+      "fails",
+      (d) => d.reject({ kind: "git", message: "fatal: boom" }),
+      "Didn't rename feat: couldn't check origin for open requests. Open Rename again to retry.",
+    ],
+  ])(
+    "toasts a plain Rename whose dialog was closed during a re-read that %s",
+    async (_n, settle, text) => {
+      const { user, rerenderWith } = renderDialog();
+      await rename(user);
+      await tickClear(user);
+      const fresh = deferred<RemoteBranchPulls>();
+      vi.mocked(forgePrsOnRemoteBranch).mockReturnValue(fresh.promise);
+      await user.click(submit());
+      expect(status()).toHaveTextContent("Renaming feat to feat2 on origin…");
+      rerenderWith({ target: null });
+      await act(async () => settle(fresh));
+      await waitFor(() => expect(spies.info).toHaveBeenCalledWith(text));
+      expect(spies.info).toHaveBeenCalledTimes(1);
+      expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+    },
+  );
+
+  it("toasts a plain Rename whose dialog was reopened on another branch during the re-read, and leaves that dialog alone", async () => {
+    const { user, onClose, rerenderWith } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    const fresh = deferred<RemoteBranchPulls>();
+    vi.mocked(forgePrsOnRemoteBranch).mockReturnValue(fresh.promise);
+    await user.click(submit());
+    rerenderWith({ target: null });
+    rerenderWith({ target: "topic" });
+    await waitFor(() => expect(nameField()).toHaveValue("topic"));
+    const closes = onClose.mock.calls.length;
+    await act(async () => fresh.resolve(openOne));
+    await waitFor(() =>
+      expect(spies.info).toHaveBeenCalledWith(
+        "Didn't rename feat: the open-request check on origin now needs your confirmation. Open Rename again to see it.",
+      ),
+    );
+    expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(closes);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(nameField()).toHaveValue("topic");
+    expect(nameField()).not.toHaveAttribute("readonly");
+    expect(box()).not.toBeChecked();
+  });
+
+  it.each<
+    [
+      string,
+      (d: ReturnType<typeof deferred<RemoteBranchPulls>>) => void,
+      () => Promise<unknown>,
+    ]
+  >([
+    [
+      "needs the confirm",
+      (d) => d.resolve(openOne),
+      () => waitFor(() => expect(submit()).toHaveTextContent("Rename anyway")),
+    ],
+    [
+      "fails",
+      (d) => d.reject({ kind: "git", message: "fatal: boom" }),
+      () =>
+        within(status()).findByText(/^Couldn't check origin: /, undefined, {
+          timeout: 2000,
+        }),
+    ],
+  ])(
+    "shows the running rename in a dialog reopened on the same branch during a re-read that %s, then gives it the answer",
+    async (_n, settle, answered) => {
+      const { user, onClose, rerenderWith } = renderDialog();
+      await rename(user);
+      await tickClear(user);
+      const fresh = deferred<RemoteBranchPulls>();
+      vi.mocked(forgePrsOnRemoteBranch).mockReturnValue(fresh.promise);
+      await user.click(submit());
+      rerenderWith({ target: null });
+      rerenderWith({ target: "feat" });
+      await waitFor(() => expect(nameField()).toHaveValue("feat2"));
+      expect(status()).toHaveTextContent("Renaming feat to feat2 on origin…");
+      expect(box()).toBeChecked();
+      expect(nameField()).toHaveAttribute("readonly");
+      expectHeld();
+      const closes = onClose.mock.calls.length;
+      await act(async () => settle(fresh));
+      await answered();
+      expect(box()).toBeChecked();
+      expect(nameField()).toHaveValue("feat2");
+      expect(nameField()).not.toHaveAttribute("readonly");
+      expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalledTimes(closes);
+      expect(spies.info).not.toHaveBeenCalled();
+    },
+  );
+
+  it("holds a dialog reopened on another branch during the re-read, then renames the pressed branch", async () => {
+    const { user, onClose, rerenderWith } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    const fresh = deferred<RemoteBranchPulls>();
+    vi.mocked(forgePrsOnRemoteBranch).mockReturnValue(fresh.promise);
+    await user.click(submit());
+    rerenderWith({ target: null });
+    rerenderWith({ target: "topic" });
+    await waitFor(() => expect(nameField()).toHaveValue("topic"));
+    expect(box()).not.toBeChecked();
+    expect(box()).toHaveAttribute("aria-readonly", "true");
+    expectBoxReason("Another branch is being renamed on its remote");
+    const closes = onClose.mock.calls.length;
+    await act(async () => fresh.resolve(none));
+    await waitFor(() => expect(gitRenameBranchRemote).toHaveBeenCalledTimes(1));
+    expect(gitRenameBranchRemote).toHaveBeenCalledWith(
+      REPO,
+      "feat",
+      "feat2",
+      "origin",
+      TIP,
+    );
+    expect(onClose).toHaveBeenCalledTimes(closes);
+    expect(nameField()).toHaveValue("topic");
+  });
+
+  it.each<[string, () => void, string]>([
+    [
+      "the connection dropped",
+      () => onlineManager.setOnline(false),
+      OFFLINE_WRITE_REASON,
+    ],
+    [
+      "another worktree started a push of the branch",
+      () => startSiblingPush?.(),
+      "Another worktree is pushing this branch. Wait for that push to finish.",
+    ],
+    [
+      "a promote started",
+      () => {
+        promote.on = true;
+      },
+      "A worktree is being promoted to your main workspace. Try again once it finishes.",
+    ],
+  ])(
+    "never renames when %s during a plain Rename's re-read",
+    async (_n, during, message) => {
+      const { user } = renderDialog({}, () => <SiblingPusher />);
+      await rename(user);
+      await tickClear(user);
+      const fresh = deferred<RemoteBranchPulls>();
+      vi.mocked(forgePrsOnRemoteBranch).mockReturnValue(fresh.promise);
+      await user.click(submit());
+      await act(async () => during());
+      await act(async () => fresh.resolve(none));
+      await waitFor(() => expect(spies.info).toHaveBeenCalledWith(message));
+      expect(spies.info).toHaveBeenCalledTimes(1);
+      expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+      expect(
+        screen.queryByText("Renaming feat to feat2 on origin…"),
+      ).toBeNull();
+    },
+  );
+
+  it("never renames once the repository was switched away and back during a plain Rename's re-read", async () => {
+    const { user, rerenderWith, switchRepo } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    const fresh = deferred<RemoteBranchPulls>();
+    vi.mocked(forgePrsOnRemoteBranch).mockReturnValue(fresh.promise);
+    await user.click(submit());
+    // The switch closes the dialog, as the branch menu does.
+    await switchRepo(OTHER);
+    rerenderWith({ target: null });
+    await switchRepo(REPO);
+    await act(async () => fresh.resolve(none));
+    await waitFor(() =>
+      expect(spies.info).toHaveBeenCalledWith(
+        "You switched repositories before the rename started — nothing was renamed.",
+      ),
+    );
+    expect(spies.info).toHaveBeenCalledTimes(1);
+    expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+  });
+
+  it("never renames in the repository switched to during a plain Rename's re-read", async () => {
+    const { user, switchRepo } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    const fresh = deferred<RemoteBranchPulls>();
+    vi.mocked(forgePrsOnRemoteBranch).mockReturnValue(fresh.promise);
+    await user.click(submit());
+    await switchRepo(OTHER);
+    await act(async () => fresh.resolve(none));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(
+      "You switched repositories before the rename started — nothing was renamed in ren.",
+    );
+  });
+
   it("never checks the previous session's name right after a reseed", async () => {
     const { user, rerenderWith } = renderDialog();
     await rename(user);
@@ -1114,6 +1438,11 @@ describe("the check and the lookup", () => {
       "caseOnly",
       { code: "caseOnly" },
       "A rename that changes only letter case can't be done on origin, because this computer's file system ignores letter case in branch names. Untick to rename only here.",
+    ],
+    [
+      "newNotFetched",
+      { code: "newNotFetched" },
+      "This clone fetches only certain branches from origin, and feat2 isn't one of them. Untick to rename only here.",
     ],
     [
       "remoteDefault",
@@ -1551,14 +1880,14 @@ describe("the outcome", () => {
       { status: "oldKept", warning: null, cause: { reason: "notInPush" } },
       "warning",
       "Renamed to feat2, but origin/feat is still there",
-      /^feat2 changed while the rename ran/,
+      "feat2 changed while the rename ran, so the pushed copy doesn't include everything on origin/feat. Fetch and compare the two before deleting feat on origin.",
     ],
     [
       "moved",
       { status: "oldKept", warning: null, cause: { reason: "moved" } },
       "warning",
       "Renamed to feat2, but origin/feat is still there",
-      /^origin\/feat changed while the rename ran, so it wasn't deleted\./,
+      "origin/feat changed while the rename ran, so it wasn't deleted. Fetch and check what changed before deleting it from the branch menu's Remote group.",
     ],
     [
       "rejected",
@@ -1740,7 +2069,7 @@ describe("the outcome", () => {
       { status: "oldKept", warning: null, cause: { reason: "unverified" } },
       "warning",
       "Renamed to feat2, but origin/feat is still there",
-      /^Couldn't confirm that origin\/feat2 includes everything on origin\/feat, so feat wasn't deleted there\. Compare the two before deleting feat on origin\.$/,
+      "Couldn't confirm that origin/feat2 includes everything on origin/feat, so feat wasn't deleted there. Fetch and compare the two before deleting feat on origin.",
     ],
     [
       "failed",
@@ -1751,7 +2080,7 @@ describe("the outcome", () => {
       },
       "warning",
       "Renamed to feat2, but origin/feat may still be there",
-      /Delete feat on origin from the branch menu's Remote group\.$/,
+      `${closed(presentError(err).summary)} Fetch to see whether feat is still on origin; if it is, check it before deleting it from the branch menu's Remote group.`,
     ],
   ])(
     "%s raises its own toast and closes the dialog",

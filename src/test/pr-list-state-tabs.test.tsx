@@ -419,7 +419,7 @@ describe("PullRequestsPanel (real panel)", () => {
       renderPanel();
       const title = await screen.findByText("Numbered row");
       const numberLine = title.closest("p")?.nextElementSibling;
-      expect(numberLine?.textContent?.startsWith(ref)).toBe(true);
+      expect(numberLine?.textContent?.split(" · ")[0]).toBe(ref);
     },
   );
 

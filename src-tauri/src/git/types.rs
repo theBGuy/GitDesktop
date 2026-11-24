@@ -126,8 +126,10 @@ pub struct Branch {
     /// "no upstream" for pushed-ness decisions.
     pub upstream_gone: bool,
     /// The remote of the branch's upstream (`%(upstream:remotename)`), e.g.
-    /// `origin` — null when untracked. Authoritative source for which remote a
-    /// push targets; the UI must never re-derive it from the upstream string.
+    /// `origin` — null when untracked. The tracking remote, which a push follows only as
+    /// its third choice: a named remote, else a configured push remote, else this one
+    /// while the upstream is live, else `origin`. The destination comes from
+    /// `named_push_remote` / `named_push_branch`.
     pub upstream_remote: Option<String>,
     /// The upstream's ref on its remote (`%(upstream:remoteref)`, e.g.
     /// `refs/heads/main`); None when untracked. Cross-name decisions read this,
@@ -164,6 +166,8 @@ pub struct RemoteBranch {
     pub remote: String,
     /// ISO-8601 committer date of the branch tip (for recency sorting).
     pub last_commit_date: String,
+    /// The tracking ref's commit id as of the last fetch.
+    pub tip: String,
 }
 
 /// How far a local branch sits from a base branch (the default branch), for

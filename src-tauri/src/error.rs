@@ -129,8 +129,9 @@ pub enum AppError {
         value: String,
     },
     /// A push carrying the create-only lease refused because `remote` already holds
-    /// `dest` at another commit; the same commit is not refused.
-    #[error("{remote} already has a branch named {dest}, and it points at a different commit, so nothing was pushed.")]
+    /// `dest` at another commit; the same commit is not refused. Only `branch` is named as
+    /// not pushed: a tag the same push follows can still land.
+    #[error("{remote} already has a branch named {dest}, and it points at a different commit, so {branch} wasn't pushed.")]
     PushDestinationExists {
         branch: String,
         remote: String,
@@ -681,7 +682,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&err).unwrap(),
-            r#"{"kind":"pushDestinationExists","message":"fork already has a branch named feat, and it points at a different commit, so nothing was pushed.","branch":"feat","remote":"fork","dest":"feat"}"#
+            r#"{"kind":"pushDestinationExists","message":"fork already has a branch named feat, and it points at a different commit, so feat wasn't pushed.","branch":"feat","remote":"fork","dest":"feat"}"#
         );
     }
 

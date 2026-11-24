@@ -827,11 +827,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     useState<UserWorktree | null>(null);
   // The remote-only branch pending a server-side delete confirm. Every confirm
   // below records the repo it opened in (`repo`, or the `…In` value itself): a
-  // confirm answered after a switch away from it refuses.
+  // confirm answered after a switch away from it refuses. `tip` is the row's tip
+  // when the confirm opened: the delete is leased on what the user was shown.
   const [remoteDeleteTarget, setRemoteDeleteTarget] = useState<{
     remote: string;
     name: string;
     repo: string;
+    tip: string | undefined;
   } | null>(null);
   const shownRemoteDeleteTarget = useRetained(remoteDeleteTarget);
   const [discardAllIn, setDiscardAllIn] = useState<string | null>(null);
@@ -1290,7 +1292,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // its rows) so the effect below re-snapshots the new list. The filter stays: it
   // is the user's visible input, and the switch can land mid-keystroke. A delete
   // confirm closes too: back in its repo the tips read re-mints, and its pin would
-  // no longer be the commit read when it opened.
+  // no longer be the commit read when it opened. So do the Rename and Create
+  // dialogs, whose typed name would otherwise act in the new repo.
   const [orderRepo, setOrderRepo] = useState(repoPath);
   if (orderRepo !== repoPath) {
     setOrderRepo(repoPath);
@@ -1300,6 +1303,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     setRewriteProbe(null);
     setDeleteTarget(null);
     setDeleteSessionRepo(null);
+    setRenameTarget(null);
+    setCreateOpen(false);
   }
   const snapshotOrder = () =>
     setFrozenOrder(
@@ -2217,6 +2222,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         await deleteRemoteBranch.mutateAsync({
           remote: target.remote,
           name: target.name,
+          expectedTip: target.tip,
         });
         toast.success(
           `Deleted ${target.name} on ${target.remote}${landedIn(target.repo).away}`,
@@ -4528,14 +4534,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       if (inWorktree) return rowCopy.blocked;
       return null;
     })();
-    // Outbound sync gating. `pushable` = tracked on a KNOWN remote and ahead →
-    // offer a plain push, labelled with where the backend routes it (`target`),
-    // held when also behind; ahead and behind stay measured against the
-    // upstream. `publishable` = untracked or gone AND at least one remote exists
-    // → offer Publish (one item per remote on a multi-remote repo). Hidden (not
-    // disabled) when in-sync, or tracked on a remote that no longer exists.
+    // Outbound sync gating. `pushable` = `rowPushItem` offers the plain push (its
+    // doc has the rule: tracked on a KNOWN remote and ahead, or routed to another
+    // remote at any count), labelled with where the backend routes it when that
+    // is known (`target`), held when diverged; ahead and behind stay measured
+    // against the upstream. `publishable` = untracked or gone AND at least one
+    // remote exists → offer Publish (one item per remote on a multi-remote
+    // repo). With neither, and no mismatch menu below, the row has no outbound
+    // item (hidden, not disabled).
     const target = rowPushTarget(rowUpstreamFacts(branch));
-    // A push routed off the upstream's remote copies the branch there, so the
+    // A push whose destination is not the upstream (another remote, or a row
+    // whose upstream is not a live branch) copies the branch there, so the
     // different-name pair and the start-point suppression don't apply to it.
     const pushesElsewhere = target.kind === "to" && !target.toUpstream;
     // A different-name upstream follows the sync bar's mismatch menu: no push
@@ -4562,8 +4571,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           ) === true,
         keptLocal: branch.keepLocal,
       });
-    const pushable =
-      rowPushItem(rowUpstreamFacts(branch), remoteNames) !== "none";
+    const pushItem = rowPushItem(rowUpstreamFacts(branch), remoteNames);
+    const pushable = pushItem !== "none";
     const publishable =
       (!branch.upstream || branch.upstreamGone) && remoteNames.length > 0;
     // Publish destinations: origin first, then the rest alphabetical.
@@ -4712,7 +4721,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             {pushable && (
               <ContextMenuItem
                 className={MENU_HELD_ROW_CLASS}
-                disabled={pushItemDisabled || branch.upstreamBehind > 0}
+                disabled={pushItemDisabled || pushItem === "held"}
                 onClick={() => {
                   // The list stays open under the closing menu.
                   fallThroughGuardUntil.current = Date.now() + 300;
@@ -4735,9 +4744,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   switch (true) {
                     case branch.keepLocal:
                       return `${pushTo}${KEPT_LOCAL_SUFFIX}`;
-                    case branch.upstreamBehind > 0 && pushesElsewhere:
+                    case pushItem === "held" && pushesElsewhere:
                       return `${pushTo} (diverged from ${branch.upstream})`;
-                    case branch.upstreamBehind > 0:
+                    case pushItem === "held":
                       return `${pushTo} (diverged)`;
                     default:
                       return `${pushTo}${pushItemSuffix}`;
@@ -5054,6 +5063,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               remote: branch.remote,
               name: branch.name,
               repo: repoPath,
+              tip: branch.tip || undefined,
             });
           }}
         >

@@ -62,8 +62,9 @@ export interface Branch {
   /** The remote of the branch's upstream (git's `%(upstream:remotename)`), e.g.
    *  `origin` — null when untracked. A named push goes to it only when no push
    *  remote is configured (the rule: explicit remote, else `pushRemote`, else
-   *  `pushDefault`, else this, else origin), so the destination comes from
-   *  {@link Branch.namedPushRemote}; never re-derive it from the upstream string. */
+   *  `pushDefault`, else this while the upstream is live, else origin), so the
+   *  destination comes from {@link Branch.namedPushRemote}; never re-derive it
+   *  from the upstream string. */
   upstreamRemote: string | null;
   /** The upstream's ref on its remote (`%(upstream:remoteref)`, e.g.
    *  `refs/heads/main`); null when untracked. Cross-name decisions read this,
@@ -98,6 +99,9 @@ export interface RemoteBranch {
   remote: string;
   /** ISO-8601 committer date of the branch tip (for recency sorting). */
   lastCommitDate: string;
+  /** The tracking ref's commit id as this list read it; a Delete leases on it.
+   *  Absent or empty sends no lease. */
+  tip?: string;
 }
 
 /**

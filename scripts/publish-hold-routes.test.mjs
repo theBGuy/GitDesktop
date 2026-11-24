@@ -231,6 +231,19 @@ const HANDLERS = [
     ],
   },
   {
+    file: `${R}RenameBranchDialog.tsx`,
+    member: "onSubmit",
+    // The press-time refusals again after the lookup's re-read, in order.
+    refusals: 0,
+    order: [
+      "if (refuseWhilePublishing(queryClient, repoPath)) return;",
+      "refuseWhileOffline() ||",
+      "toast.info(PROMOTION_BLOCKS_CHECKOUT);\n          return release();",
+      "refuseWhilePushRuns(queryClient, repoPath) ||",
+      "renameOnRemote.mutateAsync(",
+    ],
+  },
+  {
     file: "features/pulls/CreatePrDialog.tsx",
     member: "onSubmit",
     refusals: 1,
@@ -739,11 +752,15 @@ export function checkPublishHoldRoutes(sources) {
       if (!flat.includes(need))
         problems.push(`${label(h)}: missing \`${need}\``);
     if (h.order) {
-      const [first, then] = h.order;
-      const a = body.indexOf(first);
-      const b = body.indexOf(then);
-      if (a < 0 || b < 0 || a > b)
-        problems.push(`${label(h)}: \`${first}\` must precede \`${then}\``);
+      const at = h.order.map((entry) => body.indexOf(entry));
+      h.order.forEach((entry, i) => {
+        if (at[i] < 0) problems.push(`${label(h)}: missing \`${entry}\``);
+      });
+      for (let i = 1; i < h.order.length; i++)
+        if (at[i - 1] >= 0 && at[i] >= 0 && at[i - 1] > at[i])
+          problems.push(
+            `${label(h)}: \`${h.order[i - 1]}\` must precede \`${h.order[i]}\``,
+          );
     }
   }
 
@@ -859,6 +876,30 @@ test("disarming any one handler's refusals fails the check", () => {
     });
     failsWith(mutant, `${label(h)}: 0 ${REFUSE} call(s)`);
   }
+});
+
+test("the rename dialog's whole order is pinned, its remote write included", () => {
+  const file = `${R}RenameBranchDialog.tsx`;
+  const h = HANDLERS.find((x) => x.file === file && x.member === "onSubmit");
+  const withBody = (edit) =>
+    mutate(realSources(), file, (text) => {
+      const body = handlerBody(text, h);
+      assert.ok(body.includes("\n"), body);
+      return text.replace(body, edit(body));
+    });
+  failsWith(
+    withBody((body) => body.replace("renameOnRemote.mutateAsync(", "(")),
+    `${label(h)}: missing \`renameOnRemote.mutateAsync(\``,
+  );
+  failsWith(
+    withBody((body) =>
+      body
+        .replace("renameBranch.mutateAsync(", "LOCAL_SLOT")
+        .replace("renameOnRemote.mutateAsync(", "renameBranch.mutateAsync(")
+        .replace("LOCAL_SLOT", "renameOnRemote.mutateAsync("),
+    ),
+    `${label(h)}: \`if (refuseWhilePublishing(queryClient, repoPath)) return;\` must precede \`renameOnRemote.mutateAsync(\``,
+  );
 });
 
 test("dropping PublishDialog's identity-loading return fails the check", () => {

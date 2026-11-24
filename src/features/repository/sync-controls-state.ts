@@ -319,9 +319,10 @@ export function rowNameMismatch(
 
 /** The row's plain Push item: offered when it tracks a configured remote and is
  *  ahead, except into a different-name upstream that is the remote's default
- *  (the mismatch menu omits that push); held while behind. The row's menu and
- *  the push-to-origin hotkey both read it here, so the routed-push toast names
- *  the Push item only when the row has one. */
+ *  (the mismatch menu omits that push); held while behind. A row routed to
+ *  another remote than its upstream's has it at any count, held only when ahead
+ *  and behind. The row's menu and the push-to-origin hotkey both read it here,
+ *  so the routed-push toast names the Push item only when the row has one. */
 export function rowPushItem(
   row: RowUpstreamFacts,
   remoteNames: readonly string[],
@@ -331,9 +332,15 @@ export function rowPushItem(
     !row.upstreamGone &&
     row.upstreamRemote !== null &&
     remoteNames.includes(row.upstreamRemote);
-  if (!tracked || row.upstreamAhead <= 0) return "none";
+  if (!tracked) return "none";
   const target = rowPushTarget(row);
   const pushesElsewhere = target.kind === "to" && !target.toUpstream;
+  // Counts against the upstream say nothing about another remote's branch, so a
+  // row routed to another remote keeps its item at any count; only both sides
+  // moving holds it.
+  if (pushesElsewhere && target.remote !== row.upstreamRemote)
+    return row.upstreamAhead > 0 && row.upstreamBehind > 0 ? "held" : "live";
+  if (row.upstreamAhead <= 0) return "none";
   const mismatch = pushesElsewhere ? null : rowNameMismatch(row, remoteNames);
   const menu =
     mismatch &&

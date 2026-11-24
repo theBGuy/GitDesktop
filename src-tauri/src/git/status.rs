@@ -430,12 +430,13 @@ fn triangular_simple_destination(
 
 /// Where a bare push lands once the push config is read, from the atoms' destination:
 /// `push.default=matching` resolves `%(push)` like `current` but only updates branches
-/// both ends already have, so it never creates one; triangular `simple` lands where the
-/// atoms resolve nothing. The remote must be a configured one (a pushRemote can name a
-/// URL) and no mirror (every app push to one is refused, [`refuse_mirror_push`]); a
-/// failed listing claims nothing. The shapes still out of reach are the push-destination
-/// contract's six classes (`resolve_push_target`, git/remote.rs); this read claims
-/// nothing for any of them.
+/// both ends already have, so it never creates one and claims nothing; triangular `simple`
+/// lands where the atoms resolve nothing. The checks are that the remote is a
+/// configured one (a pushRemote can name a URL) and no mirror (every app push to one is
+/// refused, [`refuse_mirror_push`]); a failed listing claims nothing. It does not detect
+/// several push URLs, a single push URL that names another repository, the remote's own
+/// push refspecs on the atoms arm (the triangular arm claims nothing under them), or a
+/// remapped fetch refspec, so a named destination may still be one of those shapes.
 fn configured_destination(
     config: Option<&[ConfigEntry]>,
     name: &str,

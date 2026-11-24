@@ -217,7 +217,7 @@ const REFSPEC_ALLOWLIST = [
     file: "git/branches.rs",
     fn: "git_delete_remote_branch_core",
     rationale:
-      "validates remote and name with validate_ref_name at fn entry; the full ref is the push --delete destination",
+      "validates remote and name via refuse_remote_branch_delete at fn entry; the full ref is the push --delete destination",
   },
   {
     file: "git/commit.rs",

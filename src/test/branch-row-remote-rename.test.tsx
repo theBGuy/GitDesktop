@@ -62,6 +62,9 @@ import { unmockedCommands } from "./setup";
 // lets no file but its one hook import it by name.
 const renameRemoteSpy = vi.hoisted(() => vi.fn());
 const pushSpy = vi.hoisted(() => vi.fn());
+const deleteRemoteSpy = vi.hoisted(() => vi.fn());
+const localRenameSpy = vi.hoisted(() => vi.fn());
+const createSpy = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
   loadSettings: vi.fn(),
@@ -88,6 +91,11 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitRenameBranchRemote: renameRemoteSpy,
   // Another worktree's push, held open.
   gitPush: pushSpy,
+  // The Remote group's Delete, and a local-only rename.
+  gitDeleteRemoteBranch: deleteRemoteSpy,
+  gitRenameBranch: localRenameSpy,
+  // The New branch dialog's create.
+  gitCreateBranch: createSpy,
 }));
 vi.mock("@/lib/git/worktree", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/worktree")>()),
@@ -253,6 +261,8 @@ beforeEach(() => {
       }),
   );
   pushSpy.mockImplementation(() => new Promise(() => undefined));
+  deleteRemoteSpy.mockResolvedValue(undefined);
+  localRenameSpy.mockResolvedValue(undefined);
   info = vi.spyOn(toast, "info");
   useUiStore.setState({ repoPath: REPO });
 });
@@ -326,12 +336,20 @@ function renderSwitcher(opts: { from?: string; oldName?: string } = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  render(
+  const tree = (path: string) => (
     <QueryClientProvider client={queryClient}>
-      <BranchSwitcher repoPath={REPO} />
+      <BranchSwitcher repoPath={path} />
       <RenameHarness path={from} oldName={opts.oldName ?? "old"} />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const view = render(tree(REPO));
+  /** Switches the open repository under the mounted switcher. */
+  const switchRepo = (path: string) =>
+    act(async () => {
+      useUiStore.setState({ repoPath: path });
+      view.rerender(tree(path));
+      await new Promise((r) => setTimeout(r, 20));
+    });
   /** Starts the rename. Not user-event: an open list or prompt hides the page
    *  behind it. */
   const startRename = async () => {
@@ -368,7 +386,7 @@ function renderSwitcher(opts: { from?: string; oldName?: string } = {}) {
       void queryClient.invalidateQueries({ queryKey: ["repo", REPO] });
       await new Promise((r) => setTimeout(r, 20));
     });
-  return { user, queryClient, startRename, settleRename, relist };
+  return { user, queryClient, startRename, settleRename, relist, switchRepo };
 }
 
 type User = ReturnType<typeof userEvent.setup>;
@@ -580,4 +598,146 @@ describe("another worktree holding the current branch", () => {
       });
     },
   );
+});
+
+// Another repository whose list reads the same rows, so it has a same-named
+// branch for a carried-over dialog to rename.
+const OTHER = "C:/repos/ren-other";
+
+describe("a repository switch under an open Rename dialog", () => {
+  async function openRename(user: User) {
+    await openList(user);
+    const menu = await openRowMenu(user, "old");
+    await user.click(menuItem(menu, "Rename branch…"));
+    const field = await screen.findByLabelText("New name");
+    await user.clear(field);
+    await user.type(field, "new");
+    return field;
+  }
+
+  it("closes the dialog, so its name renames nothing in the new repository", async () => {
+    const { user, switchRepo } = renderSwitcher();
+    await openRename(user);
+    await switchRepo(OTHER);
+    await waitFor(() => expect(screen.queryByLabelText("New name")).toBeNull());
+    expect(localRenameSpy).not.toHaveBeenCalled();
+    expect(renameRemoteSpy).not.toHaveBeenCalled();
+  });
+
+  it("with a remote rename running for the old repository: closes, and the rename's settle still toasts", async () => {
+    const success = vi.spyOn(toast, "success");
+    const { user, switchRepo } = renderSwitcher();
+    await openRename(user);
+    await user.click(
+      screen.getByRole("checkbox", { name: "Also rename on origin" }),
+    );
+    await screen.findByText(
+      /^Pushes new to origin, then deletes origin\//,
+      undefined,
+      { timeout: 2000 },
+    );
+    await user.click(screen.getByRole("button", { name: /Rename$/ }));
+    await waitFor(() => expect(landRename).not.toBeNull());
+    await switchRepo(OTHER);
+    await waitFor(() => expect(screen.queryByLabelText("New name")).toBeNull());
+    await act(async () => {
+      landRename?.({ status: "renamed", warning: null });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(success).toHaveBeenCalledWith(
+      "Renamed to new in ren-row and on origin",
+      expect.anything(),
+    );
+    expect(renameRemoteSpy).toHaveBeenCalledTimes(1);
+    expect(localRenameSpy).not.toHaveBeenCalled();
+    success.mockRestore();
+  });
+
+  it("closes an open New branch dialog too", async () => {
+    const { user, switchRepo } = renderSwitcher();
+    await openList(user);
+    await user.click(await screen.findByText("New branch…"));
+    const field = await screen.findByLabelText("Branch name");
+    await user.clear(field);
+    await user.type(field, "fresh");
+    await switchRepo(OTHER);
+    await waitFor(() =>
+      expect(screen.queryByLabelText("Branch name")).toBeNull(),
+    );
+  });
+});
+
+describe("the Remote group's Delete", () => {
+  const MOVED = "b".repeat(40);
+  const remoteOnly = (tip?: string): RemoteBranch => ({
+    ...remoteBranch("gone"),
+    ...(tip === undefined ? {} : { tip }),
+  });
+
+  /** Opens the confirm on the remote-only row; returns its Delete button. */
+  async function openDelete(user: User) {
+    await openList(user);
+    const menu = await openRowMenu(user, "gone");
+    await user.click(menuItem(menu, "Delete on origin…"));
+    return screen.findByRole("button", { name: "Delete" });
+  }
+
+  it("leases on the tip the confirm opened on, even after the row's tip moves", async () => {
+    reads.remoteBranches = [remoteBranch("main"), remoteOnly(TIP)];
+    const { user, queryClient } = renderSwitcher();
+    const confirm = await openDelete(user);
+    let moved = 0;
+    act(() => {
+      queryClient.setQueriesData<RemoteBranch[]>(
+        { queryKey: ["repo", REPO, "remote-branches"] },
+        (rows) => {
+          if (rows === undefined) return rows;
+          moved++;
+          return rows.map((b) =>
+            b.name === "gone" ? { ...b, tip: MOVED } : b,
+          );
+        },
+      );
+    });
+    expect(moved).toBeGreaterThan(0);
+    await user.click(confirm);
+    await waitFor(() => expect(deleteRemoteSpy).toHaveBeenCalledTimes(1));
+    expect(deleteRemoteSpy).toHaveBeenCalledWith(REPO, "origin", "gone", TIP);
+  });
+
+  for (const [what, tip] of [
+    ["no known tip", undefined],
+    ["an empty tip", ""],
+  ] as const) {
+    it(`a row with ${what} sends no lease`, async () => {
+      reads.remoteBranches = [remoteBranch("main"), remoteOnly(tip)];
+      const { user } = renderSwitcher();
+      await user.click(await openDelete(user));
+      await waitFor(() => expect(deleteRemoteSpy).toHaveBeenCalledTimes(1));
+      expect(deleteRemoteSpy).toHaveBeenCalledWith(
+        REPO,
+        "origin",
+        "gone",
+        undefined,
+      );
+    });
+  }
+
+  it("a refused lease's sentence reaches the error toast, and nothing reads as deleted", async () => {
+    // The backend's refusal sentence, as fixture data.
+    const refusal =
+      "origin/gone isn't at the commit this delete was confirmed for, so it wasn't deleted. Fetch, then check it before you delete it.";
+    deleteRemoteSpy.mockRejectedValue({ kind: "command", message: refusal });
+    const error = vi.spyOn(toast, "error");
+    const success = vi.spyOn(toast, "success");
+    reads.remoteBranches = [remoteBranch("main"), remoteOnly(TIP)];
+    const { user } = renderSwitcher();
+    await user.click(await openDelete(user));
+    await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    expect(String(error.mock.calls[0][0])).toContain(refusal);
+    expect(success).not.toHaveBeenCalled();
+    expect(deleteRemoteSpy).toHaveBeenCalledWith(REPO, "origin", "gone", TIP);
+    error.mockRestore();
+    success.mockRestore();
+  });
 });

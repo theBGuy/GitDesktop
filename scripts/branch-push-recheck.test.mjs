@@ -33,7 +33,9 @@ const PINS = [
     anchor: "onSubmit: async ({ value }) =>",
     // The remote step's offline and push refusals are conditional; the publish
     // refusal holds a local rename of the checked-out branch, and every remote
-    // step, each right before its own write.
+    // step, each right before its own write. The remote step re-runs its
+    // refusals after the press-time lookup read: offline first, then the rest
+    // in the press's order.
     seq: [
       "if (!target) return;",
       "refuseWhileBranchPushes(queryClient, repoPath, target, currentName)",
@@ -44,6 +46,11 @@ const PINS = [
       "held && refuseWhilePublishing(queryClient, repoPath)",
       "await renameBranch.mutateAsync",
       "if (refuseWhilePublishing(queryClient, repoPath)) return;",
+      "refuseWhileOffline() ||",
+      "refuseWhileBranchPushes(queryClient, repoPath, target, currentName)\n",
+      "if (promotionBlocksCheckout(repoPath)) {\n          toast.info(PROMOTION_BLOCKS_CHECKOUT);\n          return release();",
+      "refuseWhilePushRuns(queryClient, repoPath) ||",
+      "refuseWhilePublishing(queryClient, repoPath)\n",
       "await renameOnRemote.mutateAsync",
     ],
     mutate: [
@@ -52,6 +59,9 @@ const PINS = [
       "remoteStep && refuseWhilePushRuns(queryClient, repoPath)",
       "held && refuseWhilePublishing(queryClient, repoPath)",
       "if (refuseWhilePublishing(queryClient, repoPath)) return;",
+      "refuseWhileOffline() ||",
+      "refuseWhilePushRuns(queryClient, repoPath) ||",
+      "refuseWhilePublishing(queryClient, repoPath)\n",
     ],
   },
   {
@@ -1568,9 +1578,9 @@ test("mutants with a check removed fail", () => {
   }
   // doDelete's and both doResetToUpstream's second boundaries, doDelete's and
   // Clean up's repeated promotion checks, Clean up's per-row check, the
-  // stash-reapply helper's branchless arm, and the late boundaries of undo,
-  // Edit dates and Edit history.
-  assert.equal(doubled, 10, "doubled needles");
+  // stash-reapply helper's branchless arm, the late boundaries of undo,
+  // Edit dates and Edit history, and the rename submit's post-read boundary.
+  assert.equal(doubled, 11, "doubled needles");
 });
 
 test("an amend pin that drops its amend gate or its pin expression fails", () => {

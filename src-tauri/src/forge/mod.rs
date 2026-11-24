@@ -8295,19 +8295,17 @@ mod tests {
                 })
                 .collect()
         };
-        {
-            let (provider, page) = ("gitlab", gitlab::SOURCE_BRANCH_PAGE);
-            let read = repository_scope_read(fork_rows(page), "feat", "o/r", page);
-            assert!(read.rows.is_empty(), "{provider}");
-            let want = format!("GitDesktop read only the first {page} matches.");
-            assert!(
-                matches!(&read.incomplete, Some(AppError::Command(m)) if *m == want),
-                "{provider}: {:?}",
-                read.incomplete
-            );
-            let short = repository_scope_read(fork_rows(page - 1), "feat", "o/r", page);
-            assert!(short.incomplete.is_none(), "{provider}");
-        }
+        let page = gitlab::SOURCE_BRANCH_PAGE;
+        let read = repository_scope_read(fork_rows(page), "feat", "o/r", page);
+        assert!(read.rows.is_empty(), "gitlab");
+        let want = format!("GitDesktop read only the first {page} matches.");
+        assert!(
+            matches!(&read.incomplete, Some(AppError::Command(m)) if *m == want),
+            "gitlab: {:?}",
+            read.incomplete
+        );
+        let short = repository_scope_read(fork_rows(page - 1), "feat", "o/r", page);
+        assert!(short.incomplete.is_none(), "gitlab");
     }
 
     /// The second scope of a failed read carries the same kind and message.

@@ -997,13 +997,16 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   request is closed; a Bitbucket pull request stays open and loses its source branch).
   When there are any, or one of those repositories couldn't be checked for them, the
   button reads **Rename anyway** and {{key:enter}} in the name field doesn't rename; a
-  lookup that fails outright holds **Rename** with the reason instead. The rename pushes
-  the new name, then deletes the old one only if it hasn't moved since the check; a result
-  that stops partway says what is where, and how to finish when the old name is left on
-  the remote. You can close the dialog while it runs, and the notice still reports the
-  result. Until then the branch's row in the branch menu shows **Renaming on _remote_**
-  and holds what a push of the branch would hold; **Rename branch…** stays available and
-  reopens the dialog on the running rename.
+  lookup that fails outright holds **Rename** with the reason instead. Pressing **Rename**
+  looks for open requests once more and starts the rename only when the answer is still
+  clear: if it now calls for **Rename anyway**, or that look fails, nothing is renamed and
+  the dialog says why (if the dialog is closed by then, a notice says the branch wasn't
+  renamed). The rename pushes the new name, then deletes the old one only if it hasn't
+  moved since the check; a result that stops partway says what is where, and how to finish
+  when the old name is left on the remote. You can close the dialog while it runs, and the
+  notice still reports the result. Until then the branch's row in the branch menu shows
+  **Renaming on _remote_** and holds what a push of the branch would hold;
+  **Rename branch…** stays available and reopens the dialog on the running rename.
   Names under \`gd/session/\` are reserved for agent sessions.
   Deleting asks first and removes the branch only at the commit it had when the
   confirmation opened; a branch that changed since is kept. The notice that follows names
@@ -1151,9 +1154,11 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   branch tracking a fork's _upstream_ is pushed there, not to origin. When Git's
   \`branch.<name>.pushRemote\` or \`remote.pushDefault\` names another remote, the item
   pushes there instead and names it (**Push to _fork/…_**); a setting that names no usable
-  remote leaves a plain **Push**, which says why when pressed. An unpushed or
-  upstream-deleted branch offers **Publish**; on a repo with several remotes you pick the
-  destination (one **Publish to _…_** item per remote). A branch tracking a differently
+  remote leaves a plain **Push**, which says why when pressed. A branch whose push goes
+  to another remote this way has the item whether or not it's ahead of what it tracks,
+  held as diverged when it's both ahead and behind. An unpushed or upstream-deleted
+  branch offers **Publish**; on a repo with several remotes you pick the destination
+  (one **Publish to _…_** item per remote). A branch tracking a differently
   named branch also offers **Publish as _origin/…_** (**Push to _origin/…_ and track it**
   when the remote already has its name), which pushes it under its own name and tracks
   that; one whose push settings send it to another remote doesn't offer it. When the
@@ -1168,8 +1173,8 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   **Cancel** focused, and the list closes for it if it was open. A branch the remote
   already has (as of the last fetch) just pushes and starts tracking it; when the remote
   has a branch of that name this clone hasn't fetched, at another commit, the publish
-  stops and says so, and nothing is pushed. Otherwise the list stays open while the push
-  runs, so you can keep switching and browsing, and the branch's row shows a spinner
+  stops, says so, and leaves that branch alone. Otherwise the list stays open while the
+  push runs, so you can keep switching and browsing, and the branch's row shows a spinner
   naming where the push is going: **Preparing to push to _…_** while GitDesktop checks
   whether the push creates the branch there, **Publishing to _…_** when it does, and
   **Pushing to _…_** otherwise; a push that your push settings route away from the
@@ -1184,10 +1189,12 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   **current** one, and pushes or publishes it to origin. A branch that tracks a different
   remote, has diverged, or has nothing to push says so in a short message, and so does one
   whose push settings send it to another remote, naming where it goes; for those, use
-  the branch's context menu. One that tracks a branch with a different name says so too:
-  push the current branch with **Push** in the sync bar, or a highlighted one from its
-  context menu. If a branch or what it tracks just changed outside the app, the shortcut
-  may ask you to press it again while the branch list catches up.
+  the branch's context menu. The exception is a branch that tracks another remote while
+  its push settings send it to origin: it is pushed to origin, unless it has diverged. One
+  that tracks a branch with a different name says so too: push the current branch with
+  **Push** in the sync bar, or a highlighted one from its context menu. If a branch or
+  what it tracks just changed outside the app, the shortcut may ask you to press it again
+  while the branch list catches up.
 - **While a push runs, its branch is held.** The pushing branch can't be renamed, deleted,
   archived, reset or updated until the push finishes, and **Clean up branches…**, which
   could remove it, waits too; while it's the current branch it can't be rebased or given a
@@ -1212,7 +1219,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or {{secondaryclick}} to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for
-  everyone (protected names are blocked, and it can't be undone from the app).
+  everyone (protected names are blocked; it removes the branch only at the commit the app
+  had read for it when the confirmation opened, so a branch that changed on the remote
+  since is kept; and it can't be undone from the app).
 - The **Merge** dialog previews the result before you commit to it — *fast-forward*, *already
   up to date*, *clean merge*, or *which files will conflict* — worked out in memory without
   touching your files.
@@ -1457,8 +1466,8 @@ right on the **Push** and **Pull** buttons.
   where it's going: **Cancel** has the focus, so {{key:enter}} backs out, and **Publish**
   sends it. A branch the remote already has (as of the last fetch) just pushes, without
   asking; one this clone hasn't fetched, at another commit, stops the publish with the
-  reason, and nothing is pushed. Afterwards the message says "Published" only when that
-  fetch showed the branch was new to the remote, and "Pushed" otherwise.
+  reason, leaving that branch alone. Afterwards the message says "Published" only when
+  that fetch showed the branch was new to the remote, and "Pushed" otherwise.
   When the branch tracks a remote branch with a different name (after renaming a pushed
   branch, say) and Git would refuse a plain push, **Push** opens a small menu: push to
   the branch it tracks, or publish under its own name and track that, which asks the
