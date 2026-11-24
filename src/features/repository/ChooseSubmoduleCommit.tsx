@@ -220,7 +220,7 @@ const BLOCK_NOTE: Record<SubmodulePickBlock, (c: BlockContext) => Note> = {
     c.shallow === true
       ? {
           lead: `Can't confirm that the commits ${c.p} has checked out are saved on a branch, because its history is shallow.`,
-          rest: "Use Fetch full history under the list, then try again.",
+          rest: `Create a branch for them inside ${c.p}, or use Fetch full history under the list, then try again.`,
           emphasis: "full",
           blocks: true,
         }

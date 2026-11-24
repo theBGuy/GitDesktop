@@ -466,7 +466,7 @@ pub(crate) async fn git_submodule_update_core(
     // one, so their nested legs are skipped too ([`nested_leg_skips`]). git activates a
     // named path, so the targeted arm reports a folder gone since before it reads that.
     let entries = gitmodules_entries(&repo_path).await?;
-    let matches = active_spec_matches(&repo_path).await?;
+    let mut specs = ActiveSpecs::default();
     match path.as_deref() {
         Some(path) if update_is_none(&repo_path, &entries, path).await? => {}
         Some(path) => {
@@ -481,7 +481,7 @@ pub(crate) async fn git_submodule_update_core(
                             unusable_why(checkout, reason.as_deref())
                         ))
                     })?;
-            if submodule_is_active(&repo_path, &entries, &matches, path).await? {
+            if submodule_is_active(&repo_path, &entries, &mut specs, path).await? {
                 child
                     .run(
                         &["submodule", "update", "--init", "--recursive"],
@@ -497,7 +497,7 @@ pub(crate) async fn git_submodule_update_core(
         // `validate_submodule_path`), which would abort the whole walk.
         None => {
             for sub_path in gitlink_paths(&repo_path).await? {
-                if nested_leg_skips(&repo_path, &entries, &matches, &sub_path).await? {
+                if nested_leg_skips(&repo_path, &entries, &mut specs, &sub_path).await? {
                     continue;
                 }
                 let worktree = Path::new(&repo_path).join(&sub_path);
@@ -535,21 +535,21 @@ pub(crate) async fn git_submodule_update_core(
 async fn nested_leg_skips(
     repo_path: &str,
     entries: &HashMap<String, ModuleEntry>,
-    matches: &Option<Vec<Vec<u8>>>,
+    specs: &mut ActiveSpecs,
     path: &str,
 ) -> AppResult<bool> {
     Ok(update_is_none(repo_path, entries, path).await?
-        || !submodule_is_active(repo_path, entries, matches, path).await?)
+        || !submodule_is_active(repo_path, entries, specs, path).await?)
 }
 
 /// git's `is_tree_submodule_active` (submodule.c v2.51.1) over the parent's config: no
 /// `.gitmodules` mapping, inactive; else `submodule.<name>.active` when set; else whether
-/// `submodule.active`'s pathspecs match the path (`matches`, [`active_spec_matches`]);
-/// else whether `submodule.<name>.url` is set.
+/// `submodule.active`'s pathspecs match the path ([`ActiveSpecs`]); else whether
+/// `submodule.<name>.url` is set.
 async fn submodule_is_active(
     repo_path: &str,
     entries: &HashMap<String, ModuleEntry>,
-    matches: &Option<Vec<Vec<u8>>>,
+    specs: &mut ActiveSpecs,
     path: &str,
 ) -> AppResult<bool> {
     let Some(entry) = entries.get(path) else {
@@ -562,7 +562,7 @@ async fn submodule_is_active(
     if let Some(own) = config_value(own).ok_or_else(|| unread(&key))? {
         return Ok(own == "true");
     }
-    if let Some(matches) = matches {
+    if let Some(matches) = specs.get(repo_path).await? {
         return Ok(matches.iter().any(|listed| listed == path.as_bytes()));
     }
     let key = format!("submodule.{}.url", entry.name);
@@ -570,6 +570,22 @@ async fn submodule_is_active(
         .await
         .ok_or_else(|| unread(&key))?;
     Ok(url.is_some())
+}
+
+/// `submodule.active`'s matches for one update, read on first use and kept: git reads
+/// the pathspecs only for a submodule without its own `submodule.<name>.active`, so a
+/// value it can't parse fails only an update that consults it.
+#[derive(Default)]
+struct ActiveSpecs(Option<Option<Vec<Vec<u8>>>>);
+
+impl ActiveSpecs {
+    async fn get(&mut self, repo_path: &str) -> AppResult<Option<&[Vec<u8>]>> {
+        let matches = match self.0.take() {
+            Some(matches) => matches,
+            None => active_spec_matches(repo_path).await?,
+        };
+        Ok(self.0.insert(matches).as_deref())
+    }
 }
 
 /// The index paths `submodule.active`'s pathspecs match, git doing the matching with
@@ -3432,8 +3448,6 @@ struct PickFacts {
     target: Option<PickTarget>,
     shallow: Option<Option<bool>>,
     orphan: Option<OrphanFact>,
-    /// HEAD is one of the submodule's shallow roots.
-    shallow_root: Option<bool>,
     overwrite: Option<OverwriteFact>,
     /// The plan read predicts the checkout's refusals; the setter's real checkout
     /// decides them instead.
@@ -3450,7 +3464,6 @@ impl PickFacts {
             target: None,
             shallow: None,
             orphan: None,
-            shallow_root: None,
             overwrite: None,
             with_overwrite,
         }
@@ -3471,7 +3484,6 @@ enum PickNeed {
     ChildMidOp,
     Target,
     Orphan,
-    ShallowRoot,
     Overwrite,
 }
 
@@ -3542,19 +3554,13 @@ fn plan_pick(facts: &PickFacts) -> PickStep {
     }
     // A detached HEAD is always probed: moving it can leave commits no ref names, as
     // git's own "leaving N commits behind" warns, and no parent gitlink keeps one (the
-    // child's gc never reads the parent). A probe shallow history leaves inconclusive
-    // passes only a HEAD listed among the submodule's shallow roots: only a fetch lists
-    // one, so the remote served that commit, while one made on top is never listed.
+    // child's gc never reads the parent). Only positive reachability proceeds: a shallow
+    // entry is no gc root, and the app's own pruning fetch can withdraw the only ref.
     if facts.gate.detached {
         match &facts.orphan {
             None => return PickStep::Need(PickNeed::Orphan),
             Some(OrphanFact::Named) => {}
             Some(OrphanFact::Orphan) => return block(B::DetachedOrphan, None),
-            Some(OrphanFact::Unverified(None)) => match facts.shallow_root {
-                None => return PickStep::Need(PickNeed::ShallowRoot),
-                Some(true) => {}
-                Some(false) => return block(B::DetachedUnverified, None),
-            },
             Some(OrphanFact::Unverified(reason)) => {
                 return block(B::DetachedUnverified, reason.as_deref())
             }
@@ -3579,9 +3585,9 @@ fn plan_pick(facts: &PickFacts) -> PickStep {
     })
 }
 
-/// Reads the facts [`plan_pick`] asks for until it decides. A failed pointer or HEAD
-/// tree read and a failed resolution are Errs; a failed parent mid-operation probe and
-/// a failed probe inside the submodule are data, read as a `checkFailed` plan.
+/// Reads the facts [`plan_pick`] asks for until it decides. A failed pointer read and a
+/// failed resolution are Errs; a failed parent mid-operation probe and a failed probe
+/// inside the submodule are data, read as a `checkFailed` plan.
 async fn settle_pick(
     repo_path: &str,
     path: &str,
@@ -3620,10 +3626,6 @@ async fn settle_pick(
                 let sha = facts.target_sha().unwrap_or_default().to_string();
                 let orphan = orphan_probe(resolved(child)?, path, &head_sha, &sha, shallow).await;
                 facts.orphan = Some(orphan);
-            }
-            PickNeed::ShallowRoot => {
-                let head = facts.gate.head.clone().unwrap_or_default();
-                facts.shallow_root = Some(is_shallow_root(resolved(child)?, &head).await);
             }
             PickNeed::Overwrite => {
                 let sha = facts.target_sha().unwrap_or_default().to_string();
@@ -3885,26 +3887,6 @@ async fn orphan_probe(
         },
         Err(reason) => OrphanFact::Unverified(Some(reason)),
     }
-}
-
-/// Whether `head` is listed in the submodule's `shallow` file, the roots its fetches
-/// cut history at (measured, git 2.51.1: a commit made on top is never listed, and a
-/// deeper fetch drops a root once its parents arrive). An absent file or a failed read
-/// lists nothing.
-async fn is_shallow_root(child: &ChildRepo, head: &str) -> bool {
-    let args = [
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-path",
-        "shallow",
-    ];
-    let Ok(file) = read_answer(child.read(&args).await) else {
-        return false;
-    };
-    let Ok(roots) = std::fs::read_to_string(single_value(&file)) else {
-        return false;
-    };
-    is_full_oid(head) && roots.lines().any(|root| root == head)
 }
 
 /// A one-value answer (`rev-parse`, `config --get`) less its one trailing newline: git
@@ -4574,8 +4556,8 @@ pub(crate) async fn git_submodule_set_commit_core(
 /// which reads as "couldn't check". A prune that lands after the orphan check, from the
 /// parent's own fetch (which recurses into changed submodules) or from outside the app,
 /// can leave the moved-off commit only in the reflog, exactly as the same prune right
-/// after Apply would. A HEAD the orphan check can't place moves only from a shallow
-/// root, which a fetch listed, so the remote served it; it may since have dropped it.
+/// after Apply would. A HEAD the orphan check can't place never moves: a shallow entry
+/// is no gc root and the app's own pruning fetch can withdraw the only ref.
 async fn set_submodule_commit_within(
     state: &AppState,
     repo_path: &str,
@@ -6558,8 +6540,9 @@ mod tests {
         assert_eq!(rows, [("libs/ok", "ok")]);
     }
 
-    /// git's own reason for one path's failed `submodule status`: its first line without
-    /// the `fatal: ` lead, so a test asserts the row whatever words git's version uses.
+    /// git's own reason for one path's failed `submodule status`, spelled independently of
+    /// the production helpers (a shared call would pass whatever they print) in their
+    /// order: the first non-empty line, capped, then the `fatal: ` lead dropped.
     async fn status_reason_of(host: &str, path: &str) -> String {
         let spec = crate::git::pathspec::literal(path);
         let args = ["submodule", "status", "--", spec.as_str()];
@@ -6569,14 +6552,19 @@ mod tests {
         assert_ne!(out.code, 0, "{path} must not read");
         let line = out.stderr.lines().map(str::trim).find(|l| !l.is_empty());
         let line = line.unwrap_or_default();
-        let reason = line.strip_prefix("fatal: ").unwrap_or(line);
+        let line: String = line.chars().take(SUBMODULE_REASON_CAP).collect();
+        let reason = match line.strip_prefix("fatal: ") {
+            Some(rest) if !rest.trim().is_empty() => rest.to_string(),
+            _ => line.clone(),
+        };
         assert!(!reason.is_empty() && reason != NOT_UTF8_PATH, "{reason}");
-        reason.chars().take(SUBMODULE_REASON_CAP).collect()
+        reason
     }
 
-    /// Two submodules whose gitfiles name one missing git dir fail with one line, which is
-    /// still each one's own failure: both list as unreadable, and each refuses an
-    /// unforced Remove as unreadable.
+    /// Two submodules whose gitfiles name one missing git dir: both list as unreadable,
+    /// each row with its own path's reason, and each refuses an unforced Remove as
+    /// unreadable. Where git prints one line for both (2.47.3 and 2.51.1; 2.56.1 names
+    /// each gitfile), the rows also show equal lines never merge into one fault.
     #[tokio::test]
     async fn submodules_sharing_a_missing_git_dir_each_list_as_unreadable() {
         let (dir, host, _dep) = host_with_submodule("unreadable-shared").await;
@@ -6595,7 +6583,6 @@ mod tests {
             status_reason_of(&host, "libs/dep").await,
             status_reason_of(&host, "libs/other").await,
         ];
-        assert_eq!(reasons[0], reasons[1], "premise: one line for both");
 
         let subs = list_submodules(&host).await.unwrap();
         let rows: Vec<(&str, &str, Option<&str>)> = subs
@@ -6605,12 +6592,11 @@ mod tests {
                 (sub.path.as_str(), sub.status.as_str(), why)
             })
             .collect();
-        let why = Some(reasons[0].as_str());
         assert_eq!(
             rows,
             [
-                ("libs/dep", "unreadable", why),
-                ("libs/other", "unreadable", why)
+                ("libs/dep", "unreadable", Some(reasons[0].as_str())),
+                ("libs/other", "unreadable", Some(reasons[1].as_str()))
             ]
         );
         for path in ["libs/dep", "libs/other"] {
@@ -10380,16 +10366,27 @@ mod tests {
         assert_eq!(head_of(&f.sub).await, f.c1, "the hook ran after the move");
         assert_eq!(pointer_row(&f.host).await, row_at(&f.c0), "nothing staged");
 
-        // Detached at a commit no ref names, listed as a shallow root (a hand-written
-        // marker): the probe can't decide, the shallow root passes it, and the checkout
-        // warns about leaving it behind.
+        // Detached at a commit only `keep` names, so the pick moves. The checkout's own
+        // index write runs post-index-change with "1", which drops `keep` before git's
+        // orphan check, so git still warns about leaving the commit behind (measured,
+        // git 2.47.3, 2.51.1, 2.56.1).
         std::fs::write(
             &hook,
             "#!/bin/sh\necho 'hook: build step failed' >&2\nexit 1\n",
         )
         .unwrap();
+        let drop_keep = hooks.join("post-index-change");
+        let script =
+            "#!/bin/sh\n[ \"$1\" = 1 ] || exit 0\nexec git update-ref -d refs/heads/keep\n";
+        std::fs::write(&drop_keep, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(&drop_keep, mode).unwrap();
+        }
         let orphan = commit_in(&f.sub, "x.txt", "orphan").await;
-        std::fs::write(git_path(&f.sub, "shallow").await, format!("{orphan}\n")).unwrap();
+        git(&f.sub, &["branch", "keep", orphan.as_str()]).await;
         stage_gitlink(&f.host, &orphan).await;
         let outcome = pick(&f.host, &f.c1, &orphan).await.unwrap();
         assert_eq!(
@@ -10399,7 +10396,9 @@ mod tests {
             },
             "the reason is the hook's line, past git's orphan warning"
         );
-        assert_eq!(head_of(&f.sub).await, f.c1, "the orphan arm moved");
+        let keep = git(&f.sub, &["branch", "--list", "keep"]).await;
+        assert_eq!(keep.trim(), "", "premise: the checkout dropped keep");
+        assert_eq!(head_of(&f.sub).await, f.c1, "the named HEAD moved");
         assert_eq!(
             pointer_row(&f.host).await,
             row_at(&orphan),
@@ -11264,9 +11263,10 @@ mod tests {
     }
 
     /// A detached HEAD a by-sha shallow fetch listed as a shallow root, named by no
-    /// ref: the probe can't place it, and the shallow root lets the pick move.
+    /// ref: the probe can't place it, so the pick stays put, as for any HEAD the probe
+    /// can't place. A target that descends from it, or a branch at it, lets it move.
     #[tokio::test]
-    async fn pick_moves_off_a_shallow_root_no_ref_names() {
+    async fn pick_blocks_a_shallow_root_no_ref_names() {
         let (_dir, host, dep) = host_with_submodule("pick-shallow-root").await;
         let sub = sub_dir(&host);
         let base = head_of(&sub).await;
@@ -11275,13 +11275,44 @@ mod tests {
         git(&sub, &["fetch", "-q", "--depth", "1", "origin", &older]).await;
         git(&sub, &["fetch", "-q", "--depth", "1", "origin"]).await;
         git(&sub, &["checkout", "-q", "--detach", &older]).await;
+        let roots = std::fs::read_to_string(git_path(&sub, "shallow").await).unwrap();
+        assert!(roots.lines().any(|root| root == older), "premise: listed");
         let child = child_at(&sub).await;
-        assert!(is_shallow_root(&child, &older).await, "premise: listed");
         let probe = orphan_probe(&child, "libs/dep", &older, &tip, Some(true)).await;
         assert_eq!(probe, OrphanFact::Unverified(None), "premise: unnamed");
 
         let read = pick_read(&host, &tip).await;
         assert_eq!(read.shallow, Some(true));
+        let unverified = SubmodulePickBlock::DetachedUnverified;
+        assert_eq!(read.plan, plan_blocked(unverified, None, &[]));
+        assert_eq!(
+            pick(&host, &tip, &base).await.unwrap(),
+            outcome_blocked(unverified, None, &[])
+        );
+        assert_eq!(head_of(&sub).await, older);
+        assert_eq!(pointer_row(&host).await, row_at(&base));
+
+        // A target that descends from HEAD reaches it inside the local history.
+        let tree = format!("{older}^{{tree}}");
+        let above = [
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit-tree",
+            tree.as_str(),
+            "-p",
+            older.as_str(),
+            "-m",
+            "above",
+        ];
+        let above = git(&sub, &above).await.trim().to_string();
+        let read = pick_read(&host, &above).await;
+        assert_eq!(read.plan, ready(SubmodulePickMove::CheckOut));
+
+        // A branch at that HEAD names it, the history still shallow.
+        git(&sub, &["branch", "keep", older.as_str()]).await;
+        let read = pick_read(&host, &tip).await;
         assert_eq!(read.plan, ready(SubmodulePickMove::CheckOut));
         assert_eq!(
             pick(&host, &tip, &base).await.unwrap(),
@@ -11289,6 +11320,91 @@ mod tests {
         );
         assert_eq!(head_of(&sub).await, tip);
         assert_eq!(pointer_row(&host).await, row_at(&tip));
+        let shallow = git(&sub, &["rev-parse", "--is-shallow-repository"]).await;
+        assert_eq!(shallow.trim(), "true", "never unshallowed");
+    }
+
+    /// A depth-1 submodule detached at a branch tip its tracking ref names moves; once
+    /// the remote deletes the branch and the app's own Fetch prunes the tracking ref, the
+    /// same HEAD, still listed as a shallow root, stays put.
+    #[tokio::test]
+    async fn pick_blocks_a_shallow_head_once_a_pruning_fetch_drops_its_ref() {
+        let (_dir, host, dep) = host_with_submodule("pick-shallow-pruned").await;
+        let sub = sub_dir(&host);
+        let base = head_of(&sub).await;
+        git(&dep, &["checkout", "-q", "-b", "feature"]).await;
+        commit_in(&dep, "f.txt", "f1").await;
+        let feature = commit_in(&dep, "f.txt", "f2").await;
+        git(&dep, &["checkout", "-q", "-"]).await;
+        let tip = commit_in(&dep, "dep.txt", "m1").await;
+        git(&sub, &["fetch", "-q", "--depth", "1", "origin"]).await;
+        git(&sub, &["checkout", "-q", "--detach", "origin/feature"]).await;
+        assert_eq!(head_of(&sub).await, feature, "premise: at the branch tip");
+        let read = pick_read(&host, &tip).await;
+        assert_eq!(read.shallow, Some(true));
+        assert_eq!(read.plan, ready(SubmodulePickMove::CheckOut));
+
+        git(&dep, &["branch", "-q", "-D", "feature"]).await;
+        git_submodule_fetch_core(&AppState::default(), &host, "libs/dep", false)
+            .await
+            .unwrap();
+        let refs = git(&sub, &["for-each-ref", "refs/remotes/origin/feature"]).await;
+        assert_eq!(refs.trim(), "", "premise: pruned");
+        let roots = std::fs::read_to_string(git_path(&sub, "shallow").await).unwrap();
+        assert!(roots.lines().any(|root| root == feature), "premise: listed");
+        let read = pick_read(&host, &tip).await;
+        assert_eq!(read.shallow, Some(true));
+        let unverified = SubmodulePickBlock::DetachedUnverified;
+        assert_eq!(read.plan, plan_blocked(unverified, None, &[]));
+        assert_eq!(
+            pick(&host, &tip, &base).await.unwrap(),
+            outcome_blocked(unverified, None, &[])
+        );
+        assert_eq!(head_of(&sub).await, feature);
+        assert_eq!(pointer_row(&host).await, row_at(&base));
+    }
+
+    /// A submodule `update --depth 1` cloned (one branch, the pin fetched by sha) and
+    /// Fetch full history completed: a pin on the fetched branch is named and moves; one
+    /// off it is complete history no ref names, an orphan. The URL is `file://` because
+    /// a local-path clone ignores `--depth`.
+    #[tokio::test]
+    async fn pick_after_full_history_reads_a_pin_off_the_fetched_branch_as_an_orphan() {
+        let (_dir, host, dep) = host_with_submodule("pick-depth-unshallowed").await;
+        let older = commit_in(&dep, "dep.txt", "a1").await;
+        git(&dep, &["checkout", "-q", "-b", "rel"]).await;
+        let rel = commit_in(&dep, "r.txt", "r1").await;
+        git(&dep, &["checkout", "-q", "-"]).await;
+        let tip = commit_in(&dep, "dep.txt", "a2").await;
+        let url = dep.replace('\\', "/");
+        let url = format!("file:///{}", url.trim_start_matches('/'));
+        let modules = Path::new(&host).join(".git").join("modules").join("libs");
+        let cases = [
+            ("on the branch", &older, ready(SubmodulePickMove::CheckOut)),
+            (
+                "off the branch",
+                &rel,
+                plan_blocked(SubmodulePickBlock::DetachedOrphan, None, &[]),
+            ),
+        ];
+        for (case, pin, want) in cases {
+            git(&host, &["submodule", "deinit", "-q", "-f", "libs/dep"]).await;
+            std::fs::rename(modules.join("dep"), modules.join(format!("dep-{case}"))).unwrap();
+            stage_gitlink(&host, pin).await;
+            git(&host, &["submodule", "init", "--", "libs/dep"]).await;
+            git(&host, &["config", "submodule.libs/dep.url", url.as_str()]).await;
+            let update = ["submodule", "update", "--depth", "1", "--", "libs/dep"];
+            git(&host, &update).await;
+            let sub = sub_dir(&host);
+            let shallow = || git(&sub, &["rev-parse", "--is-shallow-repository"]);
+            assert_eq!(shallow().await.trim(), "true", "{case}: premise: depth 1");
+            assert_eq!(&head_of(&sub).await, pin, "{case}: premise: at the pin");
+            git_submodule_fetch_core(&AppState::default(), &host, "libs/dep", true)
+                .await
+                .unwrap();
+            assert_eq!(shallow().await.trim(), "false", "{case}: unshallowed");
+            assert_eq!(pick_read(&host, &tip).await.plan, want, "{case}");
+        }
     }
 
     #[tokio::test]
@@ -12182,7 +12298,6 @@ mod tests {
             }),
             shallow: Some(Some(false)),
             orphan: Some(OrphanFact::Named),
-            shallow_root: Some(false),
             overwrite: Some(OverwriteFact::Clear),
             with_overwrite: true,
         };
@@ -12337,41 +12452,18 @@ mod tests {
                 blocked(B::DetachedOrphan, None),
             ),
             (
-                "an inconclusive probe reads the shallow roots next",
-                edit(|f| {
-                    f.orphan = Some(OrphanFact::Unverified(None));
-                    f.shallow_root = None;
-                }),
-                need(PickNeed::ShallowRoot),
-            ),
-            (
-                "an inconclusive probe passes a shallow root",
-                edit(|f| {
-                    f.orphan = Some(OrphanFact::Unverified(None));
-                    f.shallow_root = Some(true);
-                }),
-                check_out.clone(),
-            ),
-            (
-                "an inconclusive probe blocks any other HEAD",
+                "an inconclusive probe blocks",
                 edit(|f| f.orphan = Some(OrphanFact::Unverified(None))),
                 blocked(B::DetachedUnverified, None),
             ),
             (
-                "a failed probe blocks a shallow root too",
+                "an inconclusive probe blocks before the dry run",
                 edit(|f| {
-                    f.orphan = Some(OrphanFact::Unverified(Some("u".into())));
-                    f.shallow_root = Some(true);
+                    f.orphan = Some(OrphanFact::Unverified(None));
+                    f.shallow = Some(Some(true));
+                    f.overwrite = None;
                 }),
-                blocked(B::DetachedUnverified, Some("u")),
-            ),
-            (
-                "a failed probe reads no shallow roots",
-                edit(|f| {
-                    f.orphan = Some(OrphanFact::Unverified(Some("u".into())));
-                    f.shallow_root = None;
-                }),
-                blocked(B::DetachedUnverified, Some("u")),
+                blocked(B::DetachedUnverified, None),
             ),
             (
                 "the orphan probe runs next",
@@ -12393,7 +12485,6 @@ mod tests {
                 edit(|f| {
                     f.gate.detached = false;
                     f.orphan = None;
-                    f.shallow_root = None;
                 }),
                 check_out.clone(),
             ),
@@ -14894,6 +14985,58 @@ mod tests {
             );
             assert_eq!(exists(&f.sub, "deep/leaf/.git"), dep_settles, "{case}: dep");
             assert_eq!(exists(&a, "deep/leaf/.git"), path.is_none(), "{case}: a");
+        }
+    }
+
+    /// git reads `submodule.active` only for a submodule without its own
+    /// `submodule.<name>.active`, and refuses an empty value as a pathspec (measured, git
+    /// 2.51.1): with every flag set the update settles; with one unset, an update naming
+    /// a flagged submodule still settles, and one over every submodule fails with git's
+    /// own error, as git's own update does.
+    #[tokio::test]
+    async fn remote_update_reads_submodule_active_only_where_git_does() {
+        let f = nested_fixture("update-active-empty").await;
+        let state = AppState::default();
+        let a = Some("libs/a".to_string());
+        git_submodule_add_core(&state, f.host.clone(), "../mid".into(), a, None)
+            .await
+            .unwrap();
+        git(&f.host, &["commit", "-qm", "add a"]).await;
+        let a = Path::new(&f.host)
+            .join("libs/a")
+            .to_string_lossy()
+            .into_owned();
+        git(&f.sub, &["submodule", "deinit", "-q", "-f", "deep/leaf"]).await;
+        for name in ["libs/dep", "libs/a"] {
+            let key = format!("submodule.{name}.active");
+            git(&f.host, &["config", key.as_str(), "true"]).await;
+        }
+        git(&f.host, &["config", "submodule.active", ""]).await;
+        let dep = Some("libs/dep".to_string());
+        for path in [None, dep.clone()] {
+            git_submodule_update_core(&state, f.host.clone(), path.clone(), true)
+                .await
+                .unwrap_or_else(|e| panic!("every flag set, {path:?}: {e}"));
+        }
+        assert!(exists(&f.sub, "deep/leaf/.git"), "dep's nested leg ran");
+        assert!(exists(&a, "deep/leaf/.git"), "a's nested leg ran");
+
+        git(&f.host, &["config", "--unset", "submodule.libs/a.active"]).await;
+        git_submodule_update_core(&state, f.host.clone(), dep, true)
+            .await
+            .unwrap_or_else(|e| panic!("a unset, dep named: {e}"));
+        let own = ["submodule", "update", "--init", "--remote"];
+        let own = run_git_raw(Some(&f.host), &own, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
+        assert_ne!(own.code, 0, "git's own update refuses the value");
+        let first = |text: &str| {
+            let line = text.lines().map(str::trim).find(|l| !l.is_empty());
+            line.map(str::to_string)
+        };
+        match git_submodule_update_core(&state, f.host.clone(), None, true).await {
+            Err(AppError::Git { stderr, .. }) => assert_eq!(first(&stderr), first(&own.stderr)),
+            other => panic!("a unset, every submodule: {other:?}"),
         }
     }
 

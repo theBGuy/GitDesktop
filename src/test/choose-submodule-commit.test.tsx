@@ -1614,7 +1614,9 @@ describe("the note and the gate", () => {
       [
         blocked("detachedUnverified", "probe failed"),
         `Can't confirm that the commits ${SUB} has checked out are saved on a branch, because its history is shallow.`,
-        ["Use Fetch full history under the list, then try again."],
+        [
+          `Create a branch for them inside ${SUB}, or use Fetch full history under the list, then try again.`,
+        ],
         { shallow: true },
       ],
       [

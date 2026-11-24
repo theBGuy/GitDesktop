@@ -1,3 +1,2 @@
-- **Update all to latest** leaves a submodule outside your `submodule.active`
-  selection untouched, along with the submodules nested inside it, as Git's own
-  update does.
+- **Update all to latest** leaves alone the submodules Git treats as inactive,
+  along with the submodules nested inside them, as Git's own update does.
