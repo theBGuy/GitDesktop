@@ -222,7 +222,7 @@ pub(crate) async fn list_submodules(repo_path: &str) -> AppResult<Vec<Submodule>
             .map(|(flag, sha, describe)| Ok((flag, sha.to_string(), describe.to_string())))
             .collect()
     } else {
-        status_rows_by_path(repo_path, &gitlinks, out).await?
+        status_rows_by_path(repo_path, &gitlinks).await?
     };
     let mut subs = Vec::new();
     for (row, (path, index_sha)) in rows.into_iter().zip(gitlinks) {
@@ -263,15 +263,15 @@ fn status_mismatch() -> AppError {
 }
 
 /// One status row per gitlink once the whole-repo `submodule status` failed: git stops
-/// at the first submodule it can't read (`fatal: not a git repository: ...`, exit
-/// 128), while a run for one path still answers for a readable one (measured, git
-/// 2.51.1). A failed path's row is its reason, git's first line without its `fatal: `
-/// lead. A failure that isn't about one path (every path of several failing with one
-/// line) fails the read with the whole run's error.
+/// at the first submodule it can't read (exit 128), while a run for one path still
+/// answers for a readable one (measured, git 2.51.1). A failed path's row is its
+/// reason, git's first line without its `fatal: ` lead, even when several paths fail
+/// with one line: children can share one missing git dir, and the one parent-side fault
+/// found past the reads before this (a bad `diff.renameLimit`) fails only runs that
+/// visit a child, so no parent-only run can tell the two apart (measured, git 2.51.1).
 async fn status_rows_by_path(
     repo_path: &str,
     gitlinks: &[(String, String)],
-    whole: GitOutput,
 ) -> AppResult<Vec<Result<(char, String, String), String>>> {
     let mut rows = Vec::with_capacity(gitlinks.len());
     for (path, _) in gitlinks {
@@ -287,11 +287,6 @@ async fn status_rows_by_path(
             .filter(|(.., rest)| rest.is_empty())
             .ok_or_else(status_mismatch)?;
         rows.push(Ok((flag, sha.to_string(), describe.to_string())));
-    }
-    let failed: Vec<&String> = rows.iter().filter_map(|row| row.as_ref().err()).collect();
-    let one_failure = failed.len() == rows.len() && failed.windows(2).all(|w| w[0] == w[1]);
-    if rows.len() > 1 && one_failure {
-        whole.exit_verdict()?;
     }
     Ok(rows)
 }
@@ -467,9 +462,11 @@ pub(crate) async fn git_submodule_update_core(
     // HEAD; the parent's own `--recursive` would re-walk the other siblings. Every leg
     // runs pinned to the folder's own repository: from a folder emptied or re-pointed
     // outside the app, git would answer for the parent and settle every sibling.
-    // git skips an `update = none` submodule whole, nested ones included, so its nested
-    // leg is skipped too.
+    // git skips an `update = none` submodule whole, nested ones included, and an inactive
+    // one, so their nested legs are skipped too ([`nested_leg_skips`]). git activates a
+    // named path, so the targeted arm reports a folder gone since before it reads that.
     let entries = gitmodules_entries(&repo_path).await?;
+    let matches = active_spec_matches(&repo_path).await?;
     match path.as_deref() {
         Some(path) if update_is_none(&repo_path, &entries, path).await? => {}
         Some(path) => {
@@ -484,13 +481,15 @@ pub(crate) async fn git_submodule_update_core(
                             unusable_why(checkout, reason.as_deref())
                         ))
                     })?;
-            child
-                .run(
-                    &["submodule", "update", "--init", "--recursive"],
-                    NETWORK_TIMEOUT,
-                )
-                .await?
-                .exit_verdict()?;
+            if submodule_is_active(&repo_path, &entries, &matches, path).await? {
+                child
+                    .run(
+                        &["submodule", "update", "--init", "--recursive"],
+                        NETWORK_TIMEOUT,
+                    )
+                    .await?
+                    .exit_verdict()?;
+            }
         }
         // What `submodule foreach` walks: the parent's gitlinks in index order, folders
         // that aren't checked out skipped, stopping at the first failure. Read from the
@@ -498,7 +497,7 @@ pub(crate) async fn git_submodule_update_core(
         // `validate_submodule_path`), which would abort the whole walk.
         None => {
             for sub_path in gitlink_paths(&repo_path).await? {
-                if update_is_none(&repo_path, &entries, &sub_path).await? {
+                if nested_leg_skips(&repo_path, &entries, &matches, &sub_path).await? {
                     continue;
                 }
                 let worktree = Path::new(&repo_path).join(&sub_path);
@@ -524,6 +523,77 @@ pub(crate) async fn git_submodule_update_core(
         }
     }
     Ok(())
+}
+
+/// Whether the nested leg skips the submodule at `path`: git's update skipped it whole,
+/// for an `update = none` mode or for being inactive, read from the parent's config as
+/// the update left it. `update --init` activates what it initializes (helper.c v2.51.1,
+/// 461-465: `if (!is_submodule_active(the_repository, path)) { ... repo_config_set_gently(
+/// the_repository, sb.buf, "true");`) and leaves an inactive one out only with no path
+/// while `submodule.active` is set (551-555: `if (!argc && !repo_config_get(
+/// the_repository, "submodule.active")) module_list_active(&list);`).
+async fn nested_leg_skips(
+    repo_path: &str,
+    entries: &HashMap<String, ModuleEntry>,
+    matches: &Option<Vec<Vec<u8>>>,
+    path: &str,
+) -> AppResult<bool> {
+    Ok(update_is_none(repo_path, entries, path).await?
+        || !submodule_is_active(repo_path, entries, matches, path).await?)
+}
+
+/// git's `is_tree_submodule_active` (submodule.c v2.51.1) over the parent's config: no
+/// `.gitmodules` mapping, inactive; else `submodule.<name>.active` when set; else whether
+/// `submodule.active`'s pathspecs match the path (`matches`, [`active_spec_matches`]);
+/// else whether `submodule.<name>.url` is set.
+async fn submodule_is_active(
+    repo_path: &str,
+    entries: &HashMap<String, ModuleEntry>,
+    matches: &Option<Vec<Vec<u8>>>,
+    path: &str,
+) -> AppResult<bool> {
+    let Some(entry) = entries.get(path) else {
+        return Ok(false);
+    };
+    let unread = |key: &str| AppError::Command(format!("Couldn't read {key}."));
+    let key = format!("submodule.{}.active", entry.name);
+    let args = ["config", "--type=bool", "--get", key.as_str()];
+    let own = run_git_raw(Some(repo_path), &args, DEFAULT_TIMEOUT).await;
+    if let Some(own) = config_value(own).ok_or_else(|| unread(&key))? {
+        return Ok(own == "true");
+    }
+    if let Some(matches) = matches {
+        return Ok(matches.iter().any(|listed| listed == path.as_bytes()));
+    }
+    let key = format!("submodule.{}.url", entry.name);
+    let url = config_get(repo_path, &key)
+        .await
+        .ok_or_else(|| unread(&key))?;
+    Ok(url.is_some())
+}
+
+/// The index paths `submodule.active`'s pathspecs match, git doing the matching with
+/// every value as written; None when it is unset.
+async fn active_spec_matches(repo_path: &str) -> AppResult<Option<Vec<Vec<u8>>>> {
+    let args = ["config", "-z", "--get-all", "submodule.active"];
+    let Some(values) = config_answer(run_git_raw(Some(repo_path), &args, DEFAULT_TIMEOUT).await?)?
+    else {
+        return Ok(None);
+    };
+    let values = String::from_utf8(values.stdout)
+        .map_err(|_| AppError::Command("Couldn't read submodule.active.".into()))?;
+    let mut args = vec!["ls-files", "-z", "--"];
+    args.extend(values.strip_suffix('\0').unwrap_or(&values).split('\0'));
+    let listed = run_git_raw(Some(repo_path), &args, DEFAULT_TIMEOUT)
+        .await?
+        .exit_verdict()?
+        .stdout;
+    Ok(Some(
+        listed
+            .split(|byte| *byte == 0)
+            .map(<[u8]>::to_vec)
+            .collect(),
+    ))
 }
 
 /// Whether git skips the submodule at `path` on an update given no strategy: its
@@ -3360,9 +3430,10 @@ struct PickFacts {
     parent_mid_op: Option<MidOpFact>,
     child_mid_op: Option<MidOpFact>,
     target: Option<PickTarget>,
-    head_tree_pointer: Option<Option<String>>,
     shallow: Option<Option<bool>>,
     orphan: Option<OrphanFact>,
+    /// HEAD is one of the submodule's shallow roots.
+    shallow_root: Option<bool>,
     overwrite: Option<OverwriteFact>,
     /// The plan read predicts the checkout's refusals; the setter's real checkout
     /// decides them instead.
@@ -3377,9 +3448,9 @@ impl PickFacts {
             parent_mid_op: None,
             child_mid_op: None,
             target: None,
-            head_tree_pointer: None,
             shallow: None,
             orphan: None,
+            shallow_root: None,
             overwrite: None,
             with_overwrite,
         }
@@ -3399,8 +3470,8 @@ enum PickNeed {
     ParentMidOp,
     ChildMidOp,
     Target,
-    HeadTreePointer,
     Orphan,
+    ShallowRoot,
     Overwrite,
 }
 
@@ -3471,19 +3542,19 @@ fn plan_pick(facts: &PickFacts) -> PickStep {
     }
     // A detached HEAD is always probed: moving it can leave commits no ref names, as
     // git's own "leaving N commits behind" warns, and no parent gitlink keeps one (the
-    // child's gc never reads the parent). The parent's HEAD tree recording HEAD passes
-    // only an unverifiable probe: a recorded commit shallow or sha-fetched history can't
-    // place came from the remote and can be fetched again.
+    // child's gc never reads the parent). A probe shallow history leaves inconclusive
+    // passes only a HEAD listed among the submodule's shallow roots: only a fetch lists
+    // one, so the remote served that commit, while one made on top is never listed.
     if facts.gate.detached {
-        let recorded = match &facts.head_tree_pointer {
-            None => return PickStep::Need(PickNeed::HeadTreePointer),
-            Some(tree) => tree.is_some() && tree.as_deref() == head,
-        };
         match &facts.orphan {
             None => return PickStep::Need(PickNeed::Orphan),
             Some(OrphanFact::Named) => {}
             Some(OrphanFact::Orphan) => return block(B::DetachedOrphan, None),
-            Some(OrphanFact::Unverified(_)) if recorded => {}
+            Some(OrphanFact::Unverified(None)) => match facts.shallow_root {
+                None => return PickStep::Need(PickNeed::ShallowRoot),
+                Some(true) => {}
+                Some(false) => return block(B::DetachedUnverified, None),
+            },
             Some(OrphanFact::Unverified(reason)) => {
                 return block(B::DetachedUnverified, reason.as_deref())
             }
@@ -3539,9 +3610,6 @@ async fn settle_pick(
                 let pointer_len = facts.pointer.clone().flatten().map_or(0, |p| p.len());
                 facts.target = Some(resolve_pick(resolved(child)?, id, pointer_len).await?);
             }
-            PickNeed::HeadTreePointer => {
-                facts.head_tree_pointer = Some(head_gitlink(repo_path, path, &spec).await?);
-            }
             PickNeed::Orphan => {
                 let shallow = match facts.shallow {
                     Some(shallow) => shallow,
@@ -3552,6 +3620,10 @@ async fn settle_pick(
                 let sha = facts.target_sha().unwrap_or_default().to_string();
                 let orphan = orphan_probe(resolved(child)?, path, &head_sha, &sha, shallow).await;
                 facts.orphan = Some(orphan);
+            }
+            PickNeed::ShallowRoot => {
+                let head = facts.gate.head.clone().unwrap_or_default();
+                facts.shallow_root = Some(is_shallow_root(resolved(child)?, &head).await);
             }
             PickNeed::Overwrite => {
                 let sha = facts.target_sha().unwrap_or_default().to_string();
@@ -3813,6 +3885,26 @@ async fn orphan_probe(
         },
         Err(reason) => OrphanFact::Unverified(Some(reason)),
     }
+}
+
+/// Whether `head` is listed in the submodule's `shallow` file, the roots its fetches
+/// cut history at (measured, git 2.51.1: a commit made on top is never listed, and a
+/// deeper fetch drops a root once its parents arrive). An absent file or a failed read
+/// lists nothing.
+async fn is_shallow_root(child: &ChildRepo, head: &str) -> bool {
+    let args = [
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "shallow",
+    ];
+    let Ok(file) = read_answer(child.read(&args).await) else {
+        return false;
+    };
+    let Ok(roots) = std::fs::read_to_string(single_value(&file)) else {
+        return false;
+    };
+    is_full_oid(head) && roots.lines().any(|root| root == head)
 }
 
 /// A one-value answer (`rev-parse`, `config --get`) less its one trailing newline: git
@@ -4482,7 +4574,8 @@ pub(crate) async fn git_submodule_set_commit_core(
 /// which reads as "couldn't check". A prune that lands after the orphan check, from the
 /// parent's own fetch (which recurses into changed submodules) or from outside the app,
 /// can leave the moved-off commit only in the reflog, exactly as the same prune right
-/// after Apply would.
+/// after Apply would. A HEAD the orphan check can't place moves only from a shallow
+/// root, which a fetch listed, so the remote served it; it may since have dropped it.
 async fn set_submodule_commit_within(
     state: &AppState,
     repo_path: &str,
@@ -5137,20 +5230,12 @@ async fn followed_remote(
                 names.push(name);
             }
         }
-        for name in names {
-            let out = child
-                .read(&["remote", "get-url", "--all", name])
-                .await
-                .ok()?;
-            if out
-                .exit_verdict()
-                .ok()?
-                .stdout_lossy()
-                .lines()
-                .any(|line| line == url)
-            {
-                return Some(name.to_string());
-            }
+        let read = |args: Vec<String>| async move {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            child.read(&args).await
+        };
+        if let Some(name) = remote_with_url(&names, &url, read).await? {
+            return Some(name);
         }
     }
     if let Some(branch_name) = branch.filter(|name| !name.contains(LOSSY)) {
@@ -5163,6 +5248,53 @@ async fn followed_remote(
         [sole] => sole.clone(),
         _ => "origin".to_string(),
     })
+}
+
+/// The first of `names` (git's registration order) that `repo_remote_from_url` would
+/// return for `url`: one whose URL list, insteadOf applied, holds it exactly
+/// (`remote_has_url`, remote.c v2.51.1). Some(None) when none does; None when a read
+/// failed. `read` runs git in the submodule.
+async fn remote_with_url<F, Fut>(names: &[&str], url: &str, read: F) -> Option<Option<String>>
+where
+    F: Fn(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = AppResult<GitOutput>>,
+{
+    let argv = |args: &[&str]| -> Vec<String> { args.iter().map(|a| a.to_string()).collect() };
+    for &name in names {
+        let listed = read(argv(&["remote", "get-url", "--all", name]))
+            .await
+            .ok()?;
+        // `remote get-url` exits 2 exactly for a remote with no key in this repository's
+        // own config (`remote_is_configured(remote, 1)`), which git's walk still
+        // registers; `ls-remote --get-url` reads it, but prints only its first URL.
+        let outside = listed.code == 2;
+        let urls: Vec<String> = if outside {
+            let first = read(argv(&["ls-remote", "--get-url", name])).await.ok()?;
+            vec![single_value(&first.exit_verdict().ok()?.stdout_lossy()).to_string()]
+        } else {
+            let listed = listed.exit_verdict().ok()?.stdout_lossy();
+            listed.lines().map(str::to_string).collect()
+        };
+        let matched = urls.iter().any(|listed| listed == url);
+        if !matched && !outside {
+            continue;
+        }
+        // Both print a URL-less remote's own name, a URL git's walk never compares.
+        let key = format!("remote.{name}.url");
+        let raw = read(argv(&["config", "-z", "--get-all", &key]))
+            .await
+            .ok()?;
+        let count = config_answer(raw)
+            .ok()?
+            .map_or(0, |out| out.stdout.iter().filter(|&&b| b == 0).count());
+        match (matched, count) {
+            (_, 0) | (false, 1) => continue,
+            (true, _) => return Some(Some(name.to_string())),
+            // A URL past the first one `ls-remote` prints can't be compared.
+            (false, _) => return None,
+        }
+    }
+    Some(None)
 }
 
 /// The URL `resolve_relative_url` (helper.c v2.51.1) resolves a relative `.gitmodules`
@@ -6375,9 +6507,8 @@ mod tests {
             ("libs/dep", "../dep")
         );
         assert_eq!(dep.branch.as_deref(), Some("main"));
-        let reason = dep.unreadable_reason.as_deref().unwrap_or_default();
-        assert!(reason.starts_with("not a git repository: "), "{reason}");
-        assert!(reason.contains("libs/dep"), "{reason}");
+        let reason = status_reason_of(&host, "libs/dep").await;
+        assert_eq!(dep.unreadable_reason.as_deref(), Some(reason.as_str()));
         assert_eq!(ok.unreadable_reason, None);
         assert_eq!(ok.describe, "heads/main");
 
@@ -6425,6 +6556,70 @@ mod tests {
             .map(|sub| (sub.path.as_str(), sub.status.as_str()))
             .collect();
         assert_eq!(rows, [("libs/ok", "ok")]);
+    }
+
+    /// git's own reason for one path's failed `submodule status`: its first line without
+    /// the `fatal: ` lead, so a test asserts the row whatever words git's version uses.
+    async fn status_reason_of(host: &str, path: &str) -> String {
+        let spec = crate::git::pathspec::literal(path);
+        let args = ["submodule", "status", "--", spec.as_str()];
+        let out = run_git_raw(Some(host), &args, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
+        assert_ne!(out.code, 0, "{path} must not read");
+        let line = out.stderr.lines().map(str::trim).find(|l| !l.is_empty());
+        let line = line.unwrap_or_default();
+        let reason = line.strip_prefix("fatal: ").unwrap_or(line);
+        assert!(!reason.is_empty() && reason != NOT_UTF8_PATH, "{reason}");
+        reason.chars().take(SUBMODULE_REASON_CAP).collect()
+    }
+
+    /// Two submodules whose gitfiles name one missing git dir fail with one line, which is
+    /// still each one's own failure: both list as unreadable, and each refuses an
+    /// unforced Remove as unreadable.
+    #[tokio::test]
+    async fn submodules_sharing_a_missing_git_dir_each_list_as_unreadable() {
+        let (dir, host, _dep) = host_with_submodule("unreadable-shared").await;
+        let state = AppState::default();
+        let other = Some("libs/other".to_string());
+        git_submodule_add_core(&state, host.clone(), "../dep".into(), other, None)
+            .await
+            .expect("submodule add");
+        git(&host, &["commit", "-qm", "add other"]).await;
+        let missing = dir.path().join("gone").join("modules").join("x");
+        let missing = missing.to_string_lossy().replace('\\', "/");
+        for path in ["libs/dep", "libs/other"] {
+            point_gitfile(&Path::new(&host).join(path).to_string_lossy(), &missing);
+        }
+        let reasons = [
+            status_reason_of(&host, "libs/dep").await,
+            status_reason_of(&host, "libs/other").await,
+        ];
+        assert_eq!(reasons[0], reasons[1], "premise: one line for both");
+
+        let subs = list_submodules(&host).await.unwrap();
+        let rows: Vec<(&str, &str, Option<&str>)> = subs
+            .iter()
+            .map(|sub| {
+                let why = sub.unreadable_reason.as_deref();
+                (sub.path.as_str(), sub.status.as_str(), why)
+            })
+            .collect();
+        let why = Some(reasons[0].as_str());
+        assert_eq!(
+            rows,
+            [
+                ("libs/dep", "unreadable", why),
+                ("libs/other", "unreadable", why)
+            ]
+        );
+        for path in ["libs/dep", "libs/other"] {
+            let outcome =
+                git_submodule_remove_core(&state, host.clone(), path.into(), false, false)
+                    .await
+                    .unwrap();
+            assert!(outcome.refused_unreadable.is_some(), "{path}: {outcome:?}");
+        }
     }
 
     /// host → mid → leaf: the leaf only materializes when the update recurses.
@@ -7897,11 +8092,7 @@ mod tests {
             std::fs::write(&pinned, format!("gitdir: {host_git}\n")).unwrap();
             let read = child.read(&["rev-parse", "--git-dir"]).await.unwrap();
             assert_eq!(read.code, 128, "{folder}: {}", read.stdout_lossy());
-            assert!(
-                read.stderr.contains("not a git repository"),
-                "{}",
-                read.stderr
-            );
+            assert!(read.stdout.is_empty(), "{folder}: {}", read.stderr);
             let mut args = fetch_args(false, Some(false)).unwrap();
             args.push("origin");
             let out = child.fetch(&[], &args, NETWORK_TIMEOUT).await.unwrap();
@@ -10189,18 +10380,17 @@ mod tests {
         assert_eq!(head_of(&f.sub).await, f.c1, "the hook ran after the move");
         assert_eq!(pointer_row(&f.host).await, row_at(&f.c0), "nothing staged");
 
-        // Detached at a commit no ref names, which the parent's HEAD records, in a
-        // shallow store (the marker sits on the root commit): the probe can't decide, the
-        // recorded HEAD passes it, and the checkout warns about leaving it behind.
+        // Detached at a commit no ref names, listed as a shallow root (a hand-written
+        // marker): the probe can't decide, the shallow root passes it, and the checkout
+        // warns about leaving it behind.
         std::fs::write(
             &hook,
             "#!/bin/sh\necho 'hook: build step failed' >&2\nexit 1\n",
         )
         .unwrap();
-        std::fs::write(git_path(&f.sub, "shallow").await, format!("{}\n", f.c0)).unwrap();
         let orphan = commit_in(&f.sub, "x.txt", "orphan").await;
+        std::fs::write(git_path(&f.sub, "shallow").await, format!("{orphan}\n")).unwrap();
         stage_gitlink(&f.host, &orphan).await;
-        git(&f.host, &["commit", "-qm", "record orphan"]).await;
         let outcome = pick(&f.host, &f.c1, &orphan).await.unwrap();
         assert_eq!(
             outcome,
@@ -10966,6 +11156,20 @@ mod tests {
         assert_eq!(pick(&f.host, &f.c1, &f.c2).await.unwrap(), landed(&f.c1));
         assert_eq!(head_of(&f.sub).await, f.c1);
         assert_eq!(pointer_row(&f.host).await, row_at(&f.c1));
+
+        // The parent's HEAD records a descendant of HEAD, and no ref reaches either.
+        let d = commit_in(&f.sub, "d.txt", "d").await;
+        let e = commit_in(&f.sub, "e.txt", "e").await;
+        stage_gitlink(&f.host, &e).await;
+        git(&f.host, &["commit", "-qm", "record e"]).await;
+        git(&f.sub, &["checkout", "-q", "--detach", &d]).await;
+        assert_eq!(
+            pick_read(&f.host, &f.c2).await.plan,
+            plan_blocked(SubmodulePickBlock::DetachedOrphan, None, &[])
+        );
+        assert_eq!(pick(&f.host, &f.c2, &e).await.unwrap(), orphaned());
+        assert_eq!(head_of(&f.sub).await, d);
+        assert_eq!(pointer_row(&f.host).await, row_at(&e));
     }
 
     #[tokio::test]
@@ -11026,14 +11230,61 @@ mod tests {
         assert_eq!(head_of(&sub).await, stray);
         assert_eq!(pointer_row(&host).await, row_at(&base));
 
-        // Once the parent's HEAD tree records that HEAD, the inconclusive probe passes.
+        // The parent's HEAD tree recording that HEAD keeps nothing: still blocked.
         stage_gitlink(&host, &stray).await;
         git(&host, &["commit", "-qm", "record stray"]).await;
         let read = pick_read(&host, &tip).await;
         assert_eq!(read.shallow, Some(true));
+        assert_eq!(
+            read.plan,
+            plan_blocked(SubmodulePickBlock::DetachedUnverified, None, &[])
+        );
+        assert_eq!(
+            pick(&host, &tip, &stray).await.unwrap(),
+            outcome_blocked(SubmodulePickBlock::DetachedUnverified, None, &[])
+        );
+        assert_eq!(head_of(&sub).await, stray);
+        assert_eq!(pointer_row(&host).await, row_at(&stray));
+
+        // A branch at that HEAD names it, the history still shallow.
+        git(&sub, &["branch", "keep-stray", &stray]).await;
+        let child = child_at(&sub).await;
+        let probe = orphan_probe(&child, "libs/dep", &stray, &tip, Some(true)).await;
+        assert_eq!(probe, OrphanFact::Named);
+        let read = pick_read(&host, &tip).await;
         assert_eq!(read.plan, ready(SubmodulePickMove::CheckOut));
         assert_eq!(
             pick(&host, &tip, &stray).await.unwrap(),
+            set_at(&tip, SubmodulePickMove::CheckOut)
+        );
+        assert_eq!(head_of(&sub).await, tip);
+        assert_eq!(pointer_row(&host).await, row_at(&tip));
+        let shallow = git(&sub, &["rev-parse", "--is-shallow-repository"]).await;
+        assert_eq!(shallow.trim(), "true", "never unshallowed");
+    }
+
+    /// A detached HEAD a by-sha shallow fetch listed as a shallow root, named by no
+    /// ref: the probe can't place it, and the shallow root lets the pick move.
+    #[tokio::test]
+    async fn pick_moves_off_a_shallow_root_no_ref_names() {
+        let (_dir, host, dep) = host_with_submodule("pick-shallow-root").await;
+        let sub = sub_dir(&host);
+        let base = head_of(&sub).await;
+        let older = commit_in(&dep, "dep.txt", "one").await;
+        let tip = commit_in(&dep, "dep.txt", "two").await;
+        git(&sub, &["fetch", "-q", "--depth", "1", "origin", &older]).await;
+        git(&sub, &["fetch", "-q", "--depth", "1", "origin"]).await;
+        git(&sub, &["checkout", "-q", "--detach", &older]).await;
+        let child = child_at(&sub).await;
+        assert!(is_shallow_root(&child, &older).await, "premise: listed");
+        let probe = orphan_probe(&child, "libs/dep", &older, &tip, Some(true)).await;
+        assert_eq!(probe, OrphanFact::Unverified(None), "premise: unnamed");
+
+        let read = pick_read(&host, &tip).await;
+        assert_eq!(read.shallow, Some(true));
+        assert_eq!(read.plan, ready(SubmodulePickMove::CheckOut));
+        assert_eq!(
+            pick(&host, &tip, &base).await.unwrap(),
             set_at(&tip, SubmodulePickMove::CheckOut)
         );
         assert_eq!(head_of(&sub).await, tip);
@@ -11929,9 +12180,9 @@ mod tests {
                 sha: sha.clone(),
                 row: None,
             }),
-            head_tree_pointer: Some(None),
             shallow: Some(Some(false)),
             orphan: Some(OrphanFact::Named),
+            shallow_root: Some(false),
             overwrite: Some(OverwriteFact::Clear),
             with_overwrite: true,
         };
@@ -12070,15 +12321,6 @@ mod tests {
                 PickStep::Plan(ready(SubmodulePickMove::AlreadyThere)),
             ),
             (
-                "a detached HEAD only the index records still reads the HEAD tree",
-                edit(|f| {
-                    f.gate.head = Some(pointer.clone());
-                    f.head_tree_pointer = None;
-                    f.orphan = None;
-                }),
-                need(PickNeed::HeadTreePointer),
-            ),
-            (
                 "a detached HEAD only the index records is probed",
                 edit(|f| {
                     f.gate.head = Some(pointer.clone());
@@ -12095,42 +12337,39 @@ mod tests {
                 blocked(B::DetachedOrphan, None),
             ),
             (
-                "the parent's HEAD tree is read next",
+                "an inconclusive probe reads the shallow roots next",
                 edit(|f| {
-                    f.head_tree_pointer = None;
-                    f.orphan = None;
+                    f.orphan = Some(OrphanFact::Unverified(None));
+                    f.shallow_root = None;
                 }),
-                need(PickNeed::HeadTreePointer),
+                need(PickNeed::ShallowRoot),
             ),
             (
-                "a detached HEAD the HEAD tree records is still probed",
+                "an inconclusive probe passes a shallow root",
                 edit(|f| {
-                    f.head_tree_pointer = Some(Some(elsewhere.clone()));
-                    f.orphan = None;
-                }),
-                need(PickNeed::Orphan),
-            ),
-            (
-                "a detached HEAD the HEAD tree records can be an orphan",
-                edit(|f| {
-                    f.head_tree_pointer = Some(Some(elsewhere.clone()));
-                    f.orphan = Some(OrphanFact::Orphan);
-                }),
-                blocked(B::DetachedOrphan, None),
-            ),
-            (
-                "an unverifiable HEAD the HEAD tree records moves",
-                edit(|f| {
-                    f.head_tree_pointer = Some(Some(elsewhere.clone()));
-                    f.orphan = Some(OrphanFact::Unverified(Some("u".into())));
+                    f.orphan = Some(OrphanFact::Unverified(None));
+                    f.shallow_root = Some(true);
                 }),
                 check_out.clone(),
             ),
             (
-                "an unverifiable HEAD the HEAD tree records elsewhere keeps its reason",
+                "an inconclusive probe blocks any other HEAD",
+                edit(|f| f.orphan = Some(OrphanFact::Unverified(None))),
+                blocked(B::DetachedUnverified, None),
+            ),
+            (
+                "a failed probe blocks a shallow root too",
                 edit(|f| {
-                    f.head_tree_pointer = Some(Some(pointer.clone()));
                     f.orphan = Some(OrphanFact::Unverified(Some("u".into())));
+                    f.shallow_root = Some(true);
+                }),
+                blocked(B::DetachedUnverified, Some("u")),
+            ),
+            (
+                "a failed probe reads no shallow roots",
+                edit(|f| {
+                    f.orphan = Some(OrphanFact::Unverified(Some("u".into())));
+                    f.shallow_root = None;
                 }),
                 blocked(B::DetachedUnverified, Some("u")),
             ),
@@ -12153,8 +12392,8 @@ mod tests {
                 "a HEAD on a branch skips the probe",
                 edit(|f| {
                     f.gate.detached = false;
-                    f.head_tree_pointer = None;
                     f.orphan = None;
+                    f.shallow_root = None;
                 }),
                 check_out.clone(),
             ),
@@ -14570,6 +14809,94 @@ mod tests {
         }
     }
 
+    /// The nested leg follows the children git's update left active: `submodule.active`
+    /// picking one child while the other is turned off leaves the other's nested module
+    /// uninitialized, as git leaves the child; turned off alone, or named, git activates
+    /// it again and its nested module settles.
+    #[tokio::test]
+    async fn remote_update_settles_nested_modules_only_in_active_children() {
+        let f = nested_fixture("update-inactive").await;
+        let state = AppState::default();
+        let a = Some("libs/a".to_string());
+        git_submodule_add_core(&state, f.host.clone(), "../mid".into(), a, None)
+            .await
+            .unwrap();
+        git(&f.host, &["commit", "-qm", "add a"]).await;
+        let a = Path::new(&f.host)
+            .join("libs/a")
+            .to_string_lossy()
+            .into_owned();
+        let dep_active = ["config", "--get", "submodule.libs/dep.active"];
+        // (case, parent config writes, the targeted path, whether dep's nested leg runs)
+        type Case<'a> = (&'a str, &'a [&'a [&'a str]], Option<&'a str>, bool);
+        let cases: [Case; 4] = [
+            (
+                "submodule.active picks a, dep turned off",
+                &[
+                    &["submodule.active", "libs/a"],
+                    &["submodule.libs/dep.active", "false"],
+                ],
+                None,
+                false,
+            ),
+            (
+                "a pathspec picks a",
+                &[
+                    &["--unset-all", "submodule.libs/dep.active"],
+                    &["--replace-all", "submodule.active", ":(glob)**/a"],
+                ],
+                None,
+                false,
+            ),
+            (
+                "dep turned off alone",
+                &[
+                    &["--unset-all", "submodule.active"],
+                    &["submodule.libs/dep.active", "false"],
+                ],
+                None,
+                true,
+            ),
+            (
+                "dep turned off and named",
+                &[&["submodule.libs/dep.active", "false"]],
+                Some("libs/dep"),
+                true,
+            ),
+        ];
+        for (case, setup, path, dep_settles) in cases {
+            for sub in [&f.sub, &a] {
+                let deinit = ["submodule", "deinit", "-q", "-f", "deep/leaf"];
+                run_git_raw(Some(sub), &deinit, TEST_GIT_HANG_GUARD)
+                    .await
+                    .unwrap();
+            }
+            for args in setup {
+                let mut argv = vec!["config"];
+                argv.extend_from_slice(args);
+                let out = run_git_raw(Some(&f.host), &argv, TEST_GIT_HANG_GUARD)
+                    .await
+                    .unwrap();
+                assert_eq!(out.code, 0, "{case}: {argv:?}: {}", out.stderr);
+            }
+            let path = path.map(str::to_string);
+            git_submodule_update_core(&state, f.host.clone(), path.clone(), true)
+                .await
+                .unwrap_or_else(|e| panic!("{case}: {e}"));
+            let left = run_git_raw(Some(&f.host), &dep_active, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap()
+                .stdout_lossy();
+            assert_eq!(
+                left.trim() == "true",
+                dep_settles,
+                "{case}: git left {left}"
+            );
+            assert_eq!(exists(&f.sub, "deep/leaf/.git"), dep_settles, "{case}: dep");
+            assert_eq!(exists(&a, "deep/leaf/.git"), path.is_none(), "{case}: a");
+        }
+    }
+
     /// `.gitmodules` is read where git reads it: the worktree file, else the index's
     /// copy, else HEAD's; nowhere (an unborn HEAD included) is no entries.
     #[tokio::test]
@@ -14692,6 +15019,87 @@ mod tests {
             default_rev_of(&host).await,
             at("origin"),
             "control: url keys in origin-first order"
+        );
+    }
+
+    /// [`remote_with_url`] with `pairs` passed as `-c` config, which git scopes outside
+    /// the repository the way a global config is (test builds can't reach a global one).
+    async fn url_walk(
+        sub: &str,
+        pairs: &[&str],
+        names: &[&str],
+        url: &str,
+    ) -> Option<Option<String>> {
+        let read = |args: Vec<String>| {
+            let mut argv: Vec<String> = pairs
+                .iter()
+                .flat_map(|pair| ["-c".to_string(), pair.to_string()])
+                .collect();
+            argv.extend(args);
+            async move {
+                let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+                run_git_raw(Some(sub), &argv, TEST_GIT_HANG_GUARD).await
+            }
+        };
+        remote_with_url(names, url, read).await
+    }
+
+    /// A remote registered only outside the repository's config, which `remote get-url`
+    /// refuses, stays in git's walk: compared by its first URL, insteadOf applied, and
+    /// never by the name git prints for a remote that has no URL.
+    #[tokio::test]
+    async fn submodule_url_match_reads_remotes_configured_outside_the_repository() {
+        let (_dir, host, _dep) = host_with_submodule("url-outside").await;
+        let sub = sub_dir(&host);
+        let url = git(&sub, &["config", "remote.origin.url"]).await;
+        let url = url.trim_end_matches('\n');
+        let names = ["review", "origin"];
+        let prune = ["remote.review.prune=true"];
+        let premise = ["-c", prune[0], "remote", "get-url", "--all", "review"];
+        let premise = run_git_raw(Some(&sub), &premise, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
+        assert_eq!(premise.code, 2, "premise: {}", premise.stderr);
+        let origin = Some(Some("origin".to_string()));
+        let review = Some(Some("review".to_string()));
+        assert_eq!(
+            url_walk(&sub, &prune, &names, url).await,
+            origin,
+            "a URL-less remote registered first"
+        );
+        let own = format!("remote.review.url={url}");
+        assert_eq!(
+            url_walk(&sub, &[&own], &names, url).await,
+            review,
+            "its own URL matches"
+        );
+        let short = [
+            "remote.review.url=short:x",
+            "url.https://h/.insteadOf=short:",
+        ];
+        assert_eq!(
+            url_walk(&sub, &short, &["review"], "https://h/x").await,
+            review,
+            "insteadOf applied"
+        );
+        assert_eq!(
+            url_walk(&sub, &prune, &["review"], "review").await,
+            Some(None),
+            "a URL-less remote's name is no URL"
+        );
+        let first = [own.as_str(), "remote.review.url=https://h/y"];
+        assert_eq!(url_walk(&sub, &first, &names, url).await, review);
+        let second = ["remote.review.url=https://h/y", own.as_str()];
+        assert_eq!(
+            url_walk(&sub, &second, &names, url).await,
+            None,
+            "a second URL ls-remote doesn't print is unknown"
+        );
+        git(&sub, &["config", "remote.here.prune", "true"]).await;
+        assert_eq!(
+            url_walk(&sub, &[], &["here", "origin"], "here").await,
+            Some(None),
+            "nor in the repository's own config"
         );
     }
 
