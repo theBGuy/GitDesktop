@@ -85,6 +85,7 @@ import { cn } from "@/lib/utils";
 const PICKING_REASON = "Checking out and staging…";
 const LOADING_REASON = "Loading commits…";
 const CHECKING_REASON = "Checking this commit…";
+const LOOKUP_FAILED_REASON = "Couldn't look up that commit id.";
 const FETCHING_REASON = "Fetching…";
 
 /** ARIA_DISABLED_CLASS's dim without its `pointer-events-none`: the held ref
@@ -98,7 +99,9 @@ const PLAN_DEBOUNCE_MS = 150;
 const SEARCH_DEBOUNCE_MS = 200;
 
 /** Paths a would-overwrite note lists before it summarizes the rest; the
- *  backend lists at most PATHS_CAP, so a full list can't give a count. */
+ *  backend lists at most PATHS_CAP (its `PICK_PATHS_CAP` in
+ *  src-tauri/src/git/submodule.rs; change both together), so a full list can't
+ *  give a count. */
 const PATHS_SHOWN = 5;
 const PATHS_CAP = 20;
 
@@ -594,29 +597,44 @@ export function ChooseSubmoduleCommit({
   // An answer cached before this mount may paint data (rows, refs, the state
   // line) but never a verdict: a not-usable refs or commits answer, or any plan
   // or lookup answer. A masked verdict reads as loading until a re-read lands
-  // (every pick read re-reads on observe), or as that read's failure. Answers
-  // are told apart by stamp, never a clock: a fresh one can share the mount's
-  // millisecond. A refetch over data keeps status "error", hence isFetching.
-  const [openStamps] = useState(
+  // (every pick read re-reads on observe), or as that read's failure. An answer
+  // is read here when its own query, the one cached at open or a newer one
+  // under its key, took data since: never a stamp, which two keys can share. A
+  // refetch over data keeps status "error", hence isFetching.
+  const [openCounts] = useState(
     () =>
-      new Set(
+      new Map(
         queryClient
           .getQueryCache()
           .findAll({ queryKey: submodulePickKeys.all(repoPath, path) })
-          .map((q) => q.state.dataUpdatedAt)
-          .filter((t) => t > 0),
+          .map((q) => [
+            q.queryHash,
+            { query: q, count: q.state.dataUpdateCount },
+          ]),
       ),
   );
-  const readHere = (r: {
-    data: unknown;
-    dataUpdatedAt: number;
-    isPlaceholderData: boolean;
-  }) =>
+  const freshInCache = (queryKey: readonly unknown[], data?: unknown) => {
+    const q = queryClient.getQueryCache().find({ queryKey, exact: true });
+    if (q === undefined || q.state.data === undefined) return false;
+    if (data !== undefined && q.state.data !== data) return false;
+    const open = openCounts.get(q.queryHash);
+    return (
+      open === undefined ||
+      open.query !== q ||
+      q.state.dataUpdateCount > open.count
+    );
+  };
+  const readHere = (
+    r: { data: unknown; isPlaceholderData: boolean },
+    queryKey: readonly unknown[],
+  ) =>
     r.data !== undefined &&
     !r.isPlaceholderData &&
-    !openStamps.has(r.dataUpdatedAt);
+    freshInCache(queryKey, r.data);
   const refsData =
-    refs.data !== undefined && refs.data.checkout !== "ok" && !readHere(refs)
+    refs.data !== undefined &&
+    refs.data.checkout !== "ok" &&
+    !readHere(refs, submodulePickKeys.refs(repoPath, path))
       ? undefined
       : refs.data;
   const refsLoading =
@@ -660,12 +678,15 @@ export function ChooseSubmoduleCommit({
     revEntry !== undefined && (nameKinds.get(revEntry.ref.name)?.size ?? 0) > 1;
 
   const commits = useSubmoduleCommits(repoPath, path, rev, search);
-  // A placeholder is never read here: it carries the new key's stamp. Any
+  // A placeholder is never read here: it is another key's answer. Any
   // cached not-usable page is a verdict, a Load more page included.
   const commitsData =
     commits.data !== undefined &&
     commits.data.pages.some((p) => p.checkout !== "ok") &&
-    !readHere(commits)
+    !readHere(
+      commits,
+      submodulePickKeys.commits(repoPath, path, rev ?? "", search),
+    )
       ? undefined
       : commits.data;
   const pages = commitsData?.pages ?? [];
@@ -693,7 +714,10 @@ export function ChooseSubmoduleCommit({
 
   // The pasted id's lookup pins its commit above the page rows.
   const lookupRead =
-    shaText !== null && readHere(lookup) ? lookup.data : undefined;
+    shaText !== null &&
+    readHere(lookup, submodulePickKeys.plan(repoPath, path, shaText))
+      ? lookup.data
+      : undefined;
   const pin: PickRow | null = (() => {
     if (!lookupRead || lookupRead.sha === null) return null;
     if (lookupRead.commit !== null)
@@ -727,6 +751,13 @@ export function ChooseSubmoduleCommit({
   const lookupLoading =
     shaText !== null &&
     (lookup.isFetching || (lookupRead === undefined && !lookup.isError));
+  // A failed lookup still holds Apply: the user typed an exact id, so a row the
+  // message search listed must never be applied in its place.
+  const lookupFailed =
+    shaText !== null &&
+    lookupRead === undefined &&
+    lookup.isError &&
+    !lookup.isFetching;
   const seen = new Set<string>(pin ? [pin.sha] : []);
   const pageRows: PickRow[] = [];
   for (const page of pages)
@@ -767,7 +798,11 @@ export function ChooseSubmoduleCommit({
   const planSha = useDebouncedValue(highlighted, PLAN_DEBOUNCE_MS);
   const plan = useSubmodulePickPlan(repoPath, path, planSha);
   const planForThis = highlighted !== null && planSha === highlighted;
-  const planRead = planForThis && readHere(plan) ? plan.data : undefined;
+  const planRead =
+    planForThis &&
+    readHere(plan, submodulePickKeys.plan(repoPath, path, planSha ?? ""))
+      ? plan.data
+      : undefined;
   const rechecking =
     planForThis &&
     recheckHold !== null &&
@@ -869,6 +904,8 @@ export function ChooseSubmoduleCommit({
         lookupLoading ||
         !searchCaughtUp(query):
         return LOADING_REASON;
+      case lookupFailed:
+        return LOOKUP_FAILED_REASON;
       case unborn:
         return `${path} has no commits yet.`;
       case lookupBlock !== null:
@@ -908,7 +945,9 @@ export function ChooseSubmoduleCommit({
       if (
         live?.fetchStatus === "fetching" ||
         live?.dataUpdatedAt !== lookup.dataUpdatedAt ||
-        live.errorUpdatedAt !== lookup.errorUpdatedAt
+        live.errorUpdatedAt !== lookup.errorUpdatedAt ||
+        (live.status === "error" &&
+          !freshInCache(submodulePickKeys.plan(repoPath, path, shaText)))
       )
         return;
     }
@@ -1176,6 +1215,7 @@ export function ChooseSubmoduleCommit({
   });
 
   const refsRescue = useRetryFocusRescue(refsFailed);
+  const unusableRescue = useRetryFocusRescue(unusableText !== null);
   const commitsRescue = useRetryFocusRescue(commitsFailed);
   // Placeholder rows carry no `hasNextPage` of their own (react-query derives it
   // from the new key's data), so their last page decides; the button is held.
@@ -1257,6 +1297,7 @@ export function ChooseSubmoduleCommit({
       <div
         ref={(node) => {
           refsRescue.hostRef(node);
+          unusableRescue.hostRef(node);
           listRescue.hostRef(node);
           bodyRef.current = node;
         }}
@@ -1269,6 +1310,22 @@ export function ChooseSubmoduleCommit({
             {unusableKind === "unreadable" && unusableReason && (
               <p className="mt-1 text-muted-foreground">{unusableReason}</p>
             )}
+            {/* An outside fix can change any verdict: re-read its source. */}
+            <Button
+              ref={unusableRescue.retryRef}
+              variant="outline"
+              size="xs"
+              className="mt-2"
+              onClick={() =>
+                void (
+                  refsData !== undefined && refsData.checkout !== "ok"
+                    ? refs
+                    : commits
+                ).refetch()
+              }
+            >
+              Retry
+            </Button>
           </div>
         )}
         {unusableText === null && refsFailed && (
@@ -1456,19 +1513,23 @@ export function ChooseSubmoduleCommit({
                 className="border-b px-3 py-1.5"
               />
               {/* Outside the listbox, which holds options only. */}
+              <DegradedListNotice
+                noun="commit id lookup"
+                degraded={lookupFailed}
+                message={
+                  lookupFailed
+                    ? `${LOOKUP_FAILED_REASON} ${presentError(lookup.error).summary}`
+                    : undefined
+                }
+                retryLabel="Retry looking up that commit id"
+                onRetry={() => void lookup.refetch()}
+                className="border-b px-3 py-1.5"
+              />
               <ShaLookupLine
                 path={path}
                 shaText={shaText}
                 lookup={lookupRead}
                 blockLead={lookupBlock}
-                lookupError={
-                  shaText !== null &&
-                  lookupRead === undefined &&
-                  lookup.isError &&
-                  !lookup.isFetching
-                    ? lookup.error
-                    : null
-                }
               />
               <div
                 className="max-h-96 overflow-y-auto"
@@ -1661,22 +1722,14 @@ function ShaLookupLine({
   shaText,
   lookup,
   blockLead,
-  lookupError,
 }: {
   path: string;
   shaText: string | null;
   lookup: SubmodulePickRead | undefined;
   /** A block that stopped the lookup before it resolved the id. */
   blockLead: string | null;
-  lookupError: unknown;
 }) {
   if (shaText === null) return null;
-  if (lookupError !== null)
-    return (
-      <p className={LOOKUP_LINE}>
-        Couldn't look up that commit id. {presentError(lookupError).summary}
-      </p>
-    );
   if (blockLead !== null) return <p className={LOOKUP_LINE}>{blockLead}</p>;
   if (lookup === undefined || lookup.plan.kind !== "blocked") return null;
   if (lookup.plan.why === "ambiguous")

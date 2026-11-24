@@ -62,7 +62,7 @@ import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
-import { ChooseSubmoduleCommit } from "./ChooseSubmoduleCommitDialog";
+import { ChooseSubmoduleCommit } from "./ChooseSubmoduleCommit";
 import { useOpenSubmoduleAsRepo } from "./useOpenSubmoduleAsRepo";
 
 /** "Modified" carries the warning tokens so it can't be mistaken for the
@@ -517,7 +517,11 @@ function SubmoduleList({
         force: false,
         deleteModuleData: first.checked,
       });
-      if (outcome.refusedDirty) {
+      // Nothing was mutated by either refusal — escalate rather than report a
+      // failure. An unreadable submodule is checked first: it is no evidence of
+      // local changes, so its copy never claims any.
+      const unreadable = outcome.refusedUnreadable;
+      if (unreadable !== null || outcome.refusedDirty) {
         if (
           refuseIfSwitched(
             removeIn,
@@ -526,15 +530,23 @@ function SubmoduleList({
           )
         )
           return;
-        // Nothing was mutated — escalate rather than report a failure. The
-        // refusal is one bool covering both a dirty worktree and a checkout
-        // that has moved off the recorded commit, so the copy names both.
-        const forced = await useConfirm.getState().ask({
-          title: `Remove ${s.path}?`,
-          body: `${s.path} has local changes or is at a different commit than this repository records. Discard that state and remove?`,
-          confirmLabel: "Discard and remove",
-          confirmVariant: "destructive",
-        });
+        // The dirty refusal is one bool covering both a dirty worktree and a
+        // checkout that has moved off the recorded commit, so its copy names both.
+        const forced = await useConfirm.getState().ask(
+          unreadable !== null
+            ? {
+                title: `Remove ${s.path}?`,
+                body: `Git couldn't read ${s.path}: ${unreadable.replace(/\.$/, "")}. Its local changes can't be checked, and removing it deletes everything in its folder.`,
+                confirmLabel: "Remove anyway",
+                confirmVariant: "destructive",
+              }
+            : {
+                title: `Remove ${s.path}?`,
+                body: `${s.path} has local changes or is at a different commit than this repository records. Discard that state and remove?`,
+                confirmLabel: "Discard and remove",
+                confirmVariant: "destructive",
+              },
+        );
         if (!forced || switchedAway()) return;
         outcome = await remove.mutateAsync({
           path: s.path,

@@ -271,6 +271,10 @@ export function useSubmodules(repo: string) {
 /** Rows per page of the commit picker; the backend clamps at 200. */
 export const SUBMODULE_COMMITS_PAGE = 50;
 
+/** A commits page's offset, and the first page's tip it walks (null on the
+ *  first page, which reads the ref itself). */
+type SubmoduleCommitsParam = { skip: number; tip: string | null };
+
 /** The commit picker's reads, children of `["repo", repo]` so the parent's
  *  settles cover them. `commits` keeps the path at index 3 and the rev at 5,
  *  which its placeholder axes name. Every pick read keeps staleTime 0: the
@@ -297,7 +301,9 @@ export function useSubmoduleRefs(repo: string, path: string) {
 }
 
 /** One ref's history inside the submodule, paged. Rows survive a new `search`
- *  only: another ref's rows under a new ref's label would mislead. */
+ *  only: another ref's rows under a new ref's label would mislead. Pages after
+ *  the first walk the first page's `tip`, never the ref name again; a refetch
+ *  starts over from the first page, which reads the ref afresh. */
 export function useSubmoduleCommits(
   repo: string,
   path: string,
@@ -310,18 +316,24 @@ export function useSubmoduleCommits(
       api.gitSubmoduleCommits(
         repo,
         path,
-        rev ?? "",
-        pageParam,
+        pageParam.tip ?? rev ?? "",
+        pageParam.skip,
         SUBMODULE_COMMITS_PAGE,
         search,
       ),
     enabled: rev !== null,
     // A local read: react-query's default "online" mode would park it offline.
     networkMode: "always",
-    initialPageParam: 0,
-    getNextPageParam: (lastPage, allPages) =>
+    initialPageParam: { skip: 0, tip: null } as SubmoduleCommitsParam,
+    getNextPageParam: (
+      lastPage,
+      allPages,
+    ): SubmoduleCommitsParam | undefined =>
       lastPage.hasMore
-        ? allPages.reduce((n, p) => n + p.commits.length, 0)
+        ? {
+            skip: allPages.reduce((n, p) => n + p.commits.length, 0),
+            tip: allPages[0]?.tip ?? null,
+          }
         : undefined,
     placeholderData: keepPreviousDataForKeyAxes(repo, [
       [3, path],
@@ -559,9 +571,9 @@ export function useSubmoduleChanges(
   });
 }
 
-/** Init + update submodules per each one's `update` setting (by default, a
- *  checkout of the recorded commit); omit `path` for all, set `remote` to move
- *  them to the tip of the branch they track instead. */
+/** Init + update submodules: each follows its `update` setting (by default, a
+ *  checkout) against the commit the parent records; omit `path` for all, set
+ *  `remote` to do the same against the tip of the branch each tracks. */
 export function useUpdateSubmodule(repo: string) {
   return useRepoMutation(repo, (args: { path?: string; remote?: boolean }) =>
     api.gitSubmoduleUpdate(repo, args.path, args.remote ?? false),
@@ -577,7 +589,7 @@ export function useAddSubmodule(repo: string) {
 }
 
 /** Resolves to the removal's outcome — callers must read it: a `refusedDirty`
- *  result mutated nothing and is not an error. */
+ *  or `refusedUnreadable` result mutated nothing and is not an error. */
 export function useRemoveSubmodule(repo: string) {
   return useRepoMutation(
     repo,

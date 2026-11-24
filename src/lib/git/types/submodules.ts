@@ -19,6 +19,10 @@ export interface Submodule {
 export interface SubmoduleRemoveOutcome {
   /** The submodule has local changes and nothing was mutated — retry with force. */
   refusedDirty: boolean;
+  /** Git couldn't read the submodule or its status and nothing was mutated —
+   *  its local changes can't be checked, so a retry with force is confirmed
+   *  first. The clause completes "Git couldn't read <path>: <clause>". */
+  refusedUnreadable: string | null;
   moduleDataDeleted: boolean;
   /** Deleting the cached `.git/modules` data failed; the removal itself is still
    *  staged, so this is a disclosure rather than an error. */
@@ -153,6 +157,9 @@ export interface SubmoduleCommitPage {
   commits: SubmoduleRefCommit[];
   hasMore: boolean;
   shallow: boolean | null;
+  /** The commit id `rev` resolved to for this page; later pages pass it as
+   *  their `rev`, so a ref that moves between pages never skips commits. */
+  tip: string | null;
 }
 
 /** `rev` is the full ref name the commit list reads; `name` is what rows show. */

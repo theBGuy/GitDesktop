@@ -22,6 +22,7 @@ import {
   gitSubmoduleFetch,
   gitSubmodulePickPlan,
   gitSubmoduleRefs,
+  gitSubmoduleRemove,
   gitSubmoduleSetCommit,
   gitSubmodules,
 } from "@/lib/git/api";
@@ -35,8 +36,10 @@ import type {
   SubmodulePickRead,
   SubmoduleRefCommit,
   SubmoduleRefs,
+  SubmoduleRemoveOutcome,
 } from "@/lib/git/types";
 import { OFFLINE_WRITE_REASON } from "@/lib/offline-writes";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
@@ -55,6 +58,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitSubmodulePickPlan: vi.fn(),
   gitSubmoduleSetCommit: vi.fn(),
   gitSubmoduleFetch: vi.fn(),
+  gitSubmoduleRemove: vi.fn(),
 }));
 vi.mock("@/lib/toast", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/toast")>()),
@@ -141,6 +145,7 @@ const page = (
   commits,
   hasMore: false,
   shallow: false,
+  tip: null,
   ...over,
 });
 
@@ -1078,7 +1083,7 @@ describe("the commit list", () => {
     ] as const) {
       await paste(text);
       expect(
-        await screen.findByText((t) => t.startsWith(line)),
+        await screen.findByText((t) => t.startsWith(line), { selector: "p" }),
         text,
       ).toBeInTheDocument();
       expect(row(D)).toBeNull();
@@ -1162,6 +1167,85 @@ describe("the commit list", () => {
     expect(screen.getByText("bad object HEAD")).toBeInTheDocument();
     await waitApplyReason(text);
     expect(row(P)).toBeNull();
+  });
+
+  it("T94 the not-usable panel's Retry reads its verdict's source again, and a usable answer brings the list back", async () => {
+    let broken = true;
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, skip) => {
+        if (skip === 0) return page(DEFAULT_ROWS, { hasMore: true });
+        return broken
+          ? page([], { checkout: "unreadable", reason: "bad object HEAD" })
+          : page([commit(D, "Older still")]);
+      },
+    );
+    const { user } = await pickerWithRows();
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    const text = `${SUB} couldn't be read.`;
+    await screen.findByText(text, { selector: "p" });
+    await waitApplyReason(text);
+    broken = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(row(D)).not.toBeNull());
+    expect(row(P)).not.toBeNull();
+    expect(screen.queryByText(text)).toBe(null);
+    expect(document.activeElement).not.toBe(document.body);
+    await waitApplyReady();
+    cleanup();
+
+    // A refs verdict re-reads the refs.
+    const notInitialized = refsOf({
+      checkout: "notInitialized",
+      branches: [],
+      remoteBranches: [],
+    });
+    const copy = `${SUB} isn't initialized. Initialize it from the list first.`;
+    vi.mocked(gitSubmoduleRefs).mockResolvedValue(notInitialized);
+    vi.mocked(gitSubmoduleCommits).mockResolvedValue(page(DEFAULT_ROWS));
+    renderHarness("list");
+    const again = await openPicker();
+    await screen.findByText(copy, { selector: "p" });
+    vi.mocked(gitSubmoduleRefs).mockResolvedValue(refsOf());
+    await again.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(row(P)).not.toBeNull());
+    expect(screen.queryByText(copy)).toBe(null);
+    await waitApplyReady();
+  });
+
+  it("T96 Load more walks the first page's tip though the ref moved, and a refetch reads the ref again from the first page", async () => {
+    const MAIN = "refs/remotes/origin/main";
+    let mainTip = A;
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, rev, skip) => {
+        if (skip === 0)
+          return page(DEFAULT_ROWS, { hasMore: true, tip: mainTip });
+        // The ref now names another history; the first page's tip still
+        // names the one it listed.
+        return rev === MAIN
+          ? page([commit(E, "Moved ref's commit")], { tip: E })
+          : page([commit(D, `Older under ${rev.slice(0, 1)}`)], { tip: rev });
+      },
+    );
+    const { client, user } = await pickerWithRows();
+    mainTip = C;
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await waitFor(() => expect(row(D)).not.toBeNull());
+    expect(row(E)).toBeNull();
+    expect(gitSubmoduleCommits).toHaveBeenLastCalledWith(
+      REPO,
+      SUB,
+      A,
+      3,
+      50,
+      null,
+    );
+    vi.mocked(gitSubmoduleCommits).mockClear();
+    await act(() => client.invalidateQueries());
+    await waitFor(() => expect(gitSubmoduleCommits).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(gitSubmoduleCommits).mock.calls).toEqual([
+      [REPO, SUB, MAIN, 0, 50, null],
+      [REPO, SUB, C, 3, 50, null],
+    ]);
   });
 
   it("T71 a new search typed over one that matched nothing holds Apply as loading", async () => {
@@ -1298,7 +1382,9 @@ describe("the note and the gate", () => {
       string,
       string[],
       Partial<SubmodulePickRead>?,
+      RegExp[]?,
     ][] = [
+      // The fifth member lists what the live note must NOT say.
       // The plan read names only the first path git would overwrite (or the
       // ignored ones), so its list never reads as complete.
       [
@@ -1328,6 +1414,8 @@ describe("the note and the gate", () => {
         blocked("wouldOverwrite", null, paths(20)),
         `${SUB} has local changes this commit would overwrite.`,
         ["and more"],
+        undefined,
+        [/and \d+ more/],
       ],
       [
         blocked("untrackedInTheWay", "error: untracked files", paths(2)),
@@ -1419,13 +1507,13 @@ describe("the note and the gate", () => {
         ["git died"],
       ],
     ];
-    for (const [plan, lead, extra, over] of cases) {
+    for (const [plan, lead, extra, over, absent = []] of cases) {
       await replan(client, (sha) => readOf(sha, plan, over));
       await waitApplyReason(lead);
       expect(liveNote()).toContain(lead);
       for (const x of extra) expect(liveNote(), x).toContain(x);
+      for (const x of absent) expect(liveNote(), String(x)).not.toMatch(x);
     }
-    expect(liveNote()).not.toContain("and 13 more");
   }, 20_000);
 
   it("T44 an unusable submodule with no reason shows the sentence alone", async () => {
@@ -2002,6 +2090,62 @@ describe("applying", () => {
     await act(async () => undefined);
     expect(gitSubmoduleSetCommit).not.toHaveBeenCalled();
     await act(async () => lookup.resolve(readOf(E)));
+    await waitFor(() =>
+      expect(row(E)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitApplyReady();
+    await user.click(applyButton());
+    await waitFor(() =>
+      expect(gitSubmoduleSetCommit).toHaveBeenCalledExactlyOnceWith(
+        REPO,
+        SUB,
+        E,
+        P,
+      ),
+    );
+  });
+
+  it("T93 a pasted id whose lookup failed holds Apply over a message-search row naming it, and its Retry applies the pasted id", async () => {
+    const { user } = await pickerWithRows();
+    await waitApplyReady();
+    // A revert whose message names the pasted id lists, and its own plan lands,
+    // while the lookup of the id itself fails.
+    vi.mocked(gitSubmoduleCommits).mockImplementation(
+      async (_r, _p, _rev, _skip, _limit, q) =>
+        q === E
+          ? page([commit(D, `Revert "x" This reverts commit ${E}.`)])
+          : page(DEFAULT_ROWS),
+    );
+    let lookupFails = true;
+    planFor = (sha) => {
+      if (sha === E && lookupFails)
+        throw { kind: "io", message: "lookup broke" };
+      return readOf(sha, READY, { relation: { kind: "rewind", behind: 2 } });
+    };
+    act(() => {
+      fireEvent.change(search(), { target: { value: E } });
+    });
+    await waitFor(() =>
+      expect(row(D)).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitFor(() => expect(liveNote()).toContain("back 2 commits"));
+    await waitApplyReason("Couldn't look up that commit id.");
+    expect(
+      screen.getByText(
+        (t) => t.startsWith("Couldn't look up that commit id."),
+        {
+          selector: '[role="status"]',
+        },
+      ),
+    ).toHaveTextContent("lookup broke");
+    fireEvent.click(applyButton());
+    fireEvent.keyDown(row(D) as HTMLElement, { key: "Enter" });
+    await act(async () => undefined);
+    expect(gitSubmoduleSetCommit).not.toHaveBeenCalled();
+    lookupFails = false;
+    await user.click(
+      screen.getByRole("button", { name: "Retry looking up that commit id" }),
+    );
     await waitFor(() =>
       expect(row(E)).toHaveAttribute("aria-selected", "true"),
     );
@@ -2756,7 +2900,7 @@ function holdEntryFrame() {
   const spy = vi
     .spyOn(window, "requestAnimationFrame")
     .mockImplementation((cb) => {
-      if (!new Error().stack?.includes("ChooseSubmoduleCommitDialog"))
+      if (!new Error().stack?.includes("ChooseSubmoduleCommit.tsx"))
         return raf(cb);
       held.push(cb);
       return 0;
@@ -3019,9 +3163,10 @@ function agePickCache() {
 
 /** Reopens the closed dialog's picker from the kebab with the refs re-read
  *  held, recording every node added, and every text changed in place, from
- *  then on that holds `needle`, so a one-commit flash counts too. */
-async function reopen(needle = notInitLead) {
-  agePickCache();
+ *  then on that holds `needle`, so a one-commit flash counts too. `age`
+ *  false keeps the cached stamps where they are. */
+async function reopen(needle = notInitLead, age = true) {
+  if (age) agePickCache();
   const reread = held<SubmoduleRefs>();
   vi.mocked(gitSubmoduleRefs).mockReturnValue(reread.promise);
   let copyAdded = false;
@@ -3111,6 +3256,37 @@ describe("a reopen over a cached unusable answer", () => {
       null,
     );
     await waitFor(() => expect(document.activeElement).toBe(bodyHost()));
+    await waitApplyReason(notInitCopy);
+  });
+
+  it("T95 a fresh answer stamped in the same millisecond as another key's cached answer is read here", async () => {
+    vi.mocked(gitSubmoduleRefs).mockResolvedValue(notInit);
+    const client = renderHarness("list");
+    const first = await openPicker();
+    await screen.findByText(notInitCopy, { selector: "p" });
+    await closeDialog(first);
+    // The refs answer's own stamp moves away; another key's cached answer
+    // holds the stamp the fresh refs answer will carry.
+    agePickCache();
+    const stamp = Date.now();
+    client.setQueryData(
+      ["repo", REPO, "submodule-pick", SUB, "plan", A],
+      readOf(A),
+      { updatedAt: stamp },
+    );
+    const { reread, watch } = await reopen(notInitLead, false);
+    watch.disconnect();
+    const now = vi.spyOn(Date, "now").mockReturnValue(stamp);
+    try {
+      await act(async () => reread.resolve(notInit));
+    } finally {
+      now.mockRestore();
+    }
+    expect(
+      client.getQueryState(["repo", REPO, "submodule-pick", SUB, "refs"])
+        ?.dataUpdatedAt,
+    ).toBe(stamp);
+    await screen.findByText(notInitCopy, { selector: "p" });
     await waitApplyReason(notInitCopy);
   });
 
@@ -3732,5 +3908,82 @@ describe("the list re-reads on every open", () => {
     expect(
       screen.getByRole("button", { name: "Update all" }),
     ).toHaveAccessibleDescription("Submodules couldn't be read");
+  });
+});
+
+describe("removing", () => {
+  const removed = (
+    over: Partial<SubmoduleRemoveOutcome> = {},
+  ): SubmoduleRemoveOutcome => ({
+    refusedDirty: false,
+    refusedUnreadable: null,
+    moduleDataDeleted: false,
+    moduleDataError: null,
+    ...over,
+  });
+
+  /** Opens Remove from the row's kebab, confirms the first prompt, and waits
+   *  for the escalation prompt the refusal raises. */
+  async function refusedAsUnreadable() {
+    useConfirm.setState({ request: null, requestHold: null });
+    // A once-answer an earlier test left unread would answer this one first.
+    vi.mocked(gitSubmoduleRemove)
+      .mockReset()
+      .mockResolvedValueOnce(
+        removed({
+          refusedUnreadable:
+            "its .git names this repository's own git directory.",
+        }),
+      )
+      .mockResolvedValueOnce(removed());
+    renderHarness();
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: `Actions for ${SUB}` }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name: "Remove…" }));
+    await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
+    act(() => useConfirm.getState().answer(true, false));
+    await waitFor(() =>
+      expect(useConfirm.getState().request?.confirmLabel).toBe("Remove anyway"),
+    );
+    expect(gitSubmoduleRemove).toHaveBeenCalledTimes(1);
+    expect(gitSubmoduleRemove).toHaveBeenLastCalledWith(
+      REPO,
+      SUB,
+      false,
+      false,
+    );
+  }
+
+  it("R1 a submodule git can't read asks to remove it anyway, naming why", async () => {
+    await refusedAsUnreadable();
+    const request = useConfirm.getState().request;
+    expect(request?.title).toBe(`Remove ${SUB}?`);
+    expect(request?.body).toBe(
+      `Git couldn't read ${SUB}: its .git names this repository's own git directory. Its local changes can't be checked, and removing it deletes everything in its folder.`,
+    );
+    expect(request?.confirmVariant).toBe("destructive");
+  });
+
+  it("R2 cancelling the unreadable prompt sends nothing more", async () => {
+    await refusedAsUnreadable();
+    act(() => useConfirm.getState().answer(false));
+    await waitFor(() => expect(useConfirm.getState().request).toBeNull());
+    await act(() => Promise.resolve());
+    expect(gitSubmoduleRemove).toHaveBeenCalledTimes(1);
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("R3 Remove anyway retries with force", async () => {
+    await refusedAsUnreadable();
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() => expect(gitSubmoduleRemove).toHaveBeenCalledTimes(2));
+    expect(gitSubmoduleRemove).toHaveBeenLastCalledWith(REPO, SUB, true, false);
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "Submodule removed — staged for you to commit.",
+      ),
+    );
   });
 });
