@@ -12,7 +12,14 @@ import {
   WrenchIcon,
 } from "@phosphor-icons/react";
 import type { UseQueryResult } from "@tanstack/react-query";
-import { type ComponentType, type ReactNode, useState } from "react";
+import {
+  type ComponentType,
+  type ReactNode,
+  useCallback,
+  useDeferredValue,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { Markdown } from "@/components/markdown/markdown";
 import { PathText } from "@/components/path-text";
@@ -27,10 +34,12 @@ import {
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
 import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
+import { drawnLayout } from "@/features/diff/drawn-layout";
 import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import {
   SHOW_WHITESPACE_LABEL,
   WHITESPACE_COMPOSER_HELD,
+  WHITESPACE_HIDDEN_NOTE,
   WHITESPACE_ONLY_MESSAGE,
   whitespaceComposerOpen,
 } from "@/features/diff/whitespace-mode";
@@ -44,9 +53,11 @@ import {
 import { useSessionFileDiff } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
 import { useSetHideWhitespace } from "@/lib/settings/hide-whitespace";
+import { useSettings } from "@/lib/settings/queries";
 import { useContainerWidth } from "@/lib/use-container-width";
 import { cn } from "@/lib/utils";
 import { AgentNarration } from "./AgentNarration";
+import { ColumnLayoutMark, type StepLayout } from "./use-column-layout-anchor";
 
 type GlyphIcon = ComponentType<{ className?: string }>;
 
@@ -211,23 +222,67 @@ function CommandStep({
 function InlineDiff({
   filePath,
   repoPath,
+  base,
   diff,
 }: {
   filePath: string;
   repoPath?: string;
+  /** The session base the diff is read against. */
+  base: string;
   diff: UseQueryResult<FileDiff>;
 }) {
   // A transcript step's diff sits inside the conversation column, which is
   // narrower than a diff pane at any window size — measure it so split never
   // renders below two legible columns.
-  const [paneRef, paneWidth] = useContainerWidth<HTMLDivElement>();
+  const [measureRef, paneWidth] = useContainerWidth<HTMLDivElement>();
+  const forceUnified = paneWidth !== null && paneWidth < SPLIT_MIN_CONTAINER_PX;
+  // What the box draws, for the session column's anchor; an unmeasured box
+  // reports "pending", so its first measurement is never a switch.
+  const mode = useSettings().data?.diffViewMode;
+  const layout: StepLayout =
+    paneWidth === null ? "pending" : drawnLayout(forceUnified, mode);
+  // The measured box is also the line anchor's scroller. One identity-stable
+  // ref serves both, so a re-render never detaches the width observer, and a
+  // detached scroller is never readable.
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const paneRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      scrollerRef.current = node;
+      measureRef(node);
+      return () => {
+        measureRef(null);
+        scrollerRef.current = null;
+      };
+    },
+    [measureRef],
+  );
+  // A whitespace flip re-keys the read: until the other mode's answer lands,
+  // the step keeps the diff it last loaded, never a loading line. Stamped with
+  // the step, so a row reused for another file never paints this one's diff.
+  const step = `${repoPath ?? ""}\0${filePath}\0${base}`;
+  const [kept, setKept] = useState<{ step: string; data: FileDiff } | null>(
+    null,
+  );
+  if (
+    diff.data !== undefined &&
+    (kept === null || kept.data !== diff.data || kept.step !== step)
+  )
+    setKept({ step, data: diff.data });
+  const loaded =
+    kept?.step === step && (diff.data !== undefined || diff.isPending)
+      ? kept
+      : null;
+  // The rows defer their text, so every arm and the hidden note read the
+  // answer deferred the same way: rows and note change in one commit.
+  const deferred = useDeferredValue(loaded);
+  const data = (deferred?.step === step ? deferred : loaded)?.data;
   // A failed refresh keeps the loaded diff under a notice; only a read with
   // nothing loaded replaces it. An errored read stops the live poll, so the
   // notice and its Retry hold steady until a refetch resumes it.
   const pane = resolveDetailPane({
     pending: diff.isPending,
     error: diff.isError,
-    hasData: diff.data !== undefined,
+    hasData: loaded !== null,
     paused: diff.isPaused,
     fetching: diff.isFetching,
   });
@@ -238,15 +293,33 @@ function InlineDiff({
     pane === "error" && diff.isError,
   );
   const setHideWhitespace = useSetHideWhitespace();
+  // Both Show whitespace buttons: the flip reloads the diff and unmounts the
+  // button, so the host every arm keeps takes focus first.
+  const showWhitespace = (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (whitespaceComposerOpen()) {
+      toast.info(WHITESPACE_COMPOSER_HELD);
+      return;
+    }
+    const host = e.currentTarget.closest<HTMLElement>("[tabindex='-1']");
+    host?.focus({ preventScroll: true });
+    setHideWhitespace(false);
+  };
   // No arm-swap refocus here: several steps' diffs can be open at once, and one
   // landing while focus sits on <body> would take focus it never held. The two
   // Retry rescues cover the only focus targets an arm swap removes; the
-  // whitespace note's button hands focus to the host itself.
+  // whitespace notes' buttons hand focus to the host themselves.
   // The host wraps the scroller rather than being it: a tabIndex on the
   // scroller would take the keyboard tab stop Chromium gives a scroller with no
-  // focusable content. The notice sits above it, so it never scrolls away.
-  const shell = (content: ReactNode) => (
-    <div ref={hostRef} tabIndex={-1} className="outline-none">
+  // focusable content. The notices sit above it, so they never scroll away.
+  // `data-transcript-diff` marks a step box the session column's anchor keeps
+  // its place around.
+  const shell = (content: ReactNode, note?: ReactNode) => (
+    <div
+      ref={hostRef}
+      tabIndex={-1}
+      data-transcript-diff=""
+      className="outline-none"
+    >
       <DegradedListNotice
         noun="this diff"
         degraded={pane === "content-degraded"}
@@ -258,6 +331,9 @@ function InlineDiff({
         onRetry={failed ? () => void diff.refetch() : undefined}
         className="border-t border-border/60 px-2 py-1"
       />
+      {note !== undefined && (
+        <div className="border-t border-border/60">{note}</div>
+      )}
       {/* ph-no-capture: the diff is user code/paths — keep it out of session replay. */}
       <div
         ref={paneRef}
@@ -272,7 +348,7 @@ function InlineDiff({
   if (pane === "skeleton" || pane === "offline") {
     return shell(<InlineNote>Loading diff…</InlineNote>);
   }
-  if (pane === "error" || !diff.data) {
+  if (pane === "error" || !data) {
     return shell(
       <InlineNote>
         Couldn't load the diff for this file.
@@ -293,13 +369,13 @@ function InlineDiff({
       </InlineNote>,
     );
   }
-  if (diff.data.isBinary) {
+  if (data.isBinary) {
     return shell(<InlineNote>Binary file — no text diff.</InlineNote>);
   }
   // Ahead of the empty and header-only arms, which under `-w` would say nothing
   // changed.
-  if (diff.data.whitespaceOnly) {
-    const headerOnly = classifyHeaderOnlyDiff(diff.data.text);
+  if (data.whitespaceOnly) {
+    const headerOnly = classifyHeaderOnlyDiff(data.text);
     const modeLine =
       headerOnly?.kind === "mode" ? modeChangeMessage(headerOnly) : null;
     return shell(
@@ -307,18 +383,7 @@ function InlineDiff({
         {WHITESPACE_ONLY_MESSAGE}. {modeLine !== null && <>{modeLine}. </>}
         <button
           type="button"
-          onClick={(e) => {
-            if (whitespaceComposerOpen()) {
-              toast.info(WHITESPACE_COMPOSER_HELD);
-              return;
-            }
-            // It unmounts with the reload, so the host every arm keeps takes
-            // focus first.
-            const host =
-              e.currentTarget.closest<HTMLElement>("[tabindex='-1']");
-            host?.focus({ preventScroll: true });
-            setHideWhitespace(false);
-          }}
+          onClick={showWhitespace}
           className={DEGRADED_ACTION_CLASS}
         >
           {SHOW_WHITESPACE_LABEL}
@@ -326,21 +391,43 @@ function InlineDiff({
       </InlineNote>,
     );
   }
-  if (!diff.data.text.trim()) {
+  if (!data.text.trim()) {
     return shell(<InlineNote>No changes to show.</InlineNote>);
   }
   // A diff that changed no content says what did, never a blank diff view.
-  const headerOnly = classifyHeaderOnlyDiff(diff.data.text);
+  const headerOnly = classifyHeaderOnlyDiff(data.text);
   if (headerOnly !== null) {
     return shell(<InlineNote>{headerOnlyMessage(headerOnly)}.</InlineNote>);
   }
+  // Only a read that hid whitespace says so; a shown read adds nothing.
+  const note =
+    data.whitespaceHidden === true ? (
+      <InlineNote>
+        {WHITESPACE_HIDDEN_NOTE}{" "}
+        <button
+          type="button"
+          onClick={showWhitespace}
+          className={DEGRADED_ACTION_CLASS}
+        >
+          {SHOW_WHITESPACE_LABEL}
+        </button>
+      </InlineNote>
+    ) : undefined;
+  // Only the rows change height on a switch, so only this arm reports a
+  // layout; the mark sits beside the diff's lazy boundary, so a suspended
+  // chunk never hides it.
   return shell(
-    <GitDiffView
-      filePath={filePath}
-      text={diff.data.text}
-      repoPath={repoPath}
-      forceUnified={paneWidth !== null && paneWidth < SPLIT_MIN_CONTAINER_PX}
-    />,
+    <>
+      <ColumnLayoutMark layout={layout} />
+      <GitDiffView
+        filePath={filePath}
+        text={data.text}
+        repoPath={repoPath}
+        forceUnified={forceUnified}
+        scrollerRef={scrollerRef}
+      />
+    </>,
+    note,
   );
 }
 
@@ -398,7 +485,14 @@ function EditDiffStep({
           className="flex-1 font-mono text-foreground/75"
         />
       </button>
-      {open && <InlineDiff filePath={relPath} repoPath={baseDir} diff={diff} />}
+      {open && (
+        <InlineDiff
+          filePath={relPath}
+          repoPath={baseDir}
+          base={base}
+          diff={diff}
+        />
+      )}
     </div>
   );
 }

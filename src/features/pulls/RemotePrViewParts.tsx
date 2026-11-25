@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { FileListFilter } from "@/components/use-file-list-filter";
+import { refreshFailed } from "@/features/conversations/remote-section-state";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import {
   type DiffContentSource,
@@ -32,6 +33,10 @@ import {
   useSlotRetained,
   useSlotWidget,
 } from "@/features/diff/file-slot";
+import {
+  type ForgeWhitespaceRevs,
+  useForgeWhitespaceDiff,
+} from "@/features/diff/use-forge-whitespace-diff";
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { TimeTrackingControls } from "@/features/issues/RemoteIssueViewParts";
 import type { PrContentRevs } from "@/lib/git/api";
@@ -68,6 +73,19 @@ interface DiffThreadWiring {
   onQuote?: (body: string) => void;
   onReply?: (threadId: string, body: string) => Promise<void>;
   onResolve?: (threadId: string, resolved: boolean) => Promise<void>;
+  /** Present when the viewer may edit their own thread comments; saves the new
+   *  body. Wired to a Thread's edit control only for a comment the viewer wrote. */
+  onEditComment?: (commentId: string, body: string) => void;
+  /** Present when the viewer may delete their own thread comments; opens the
+   *  delete confirmation. Wired only for a comment the viewer wrote. */
+  onDeleteComment?: (commentId: string) => void;
+  /** Holds an ALREADY-OPEN comment editor's Save — withholding `onEditComment`
+   *  only drops the menu entry, so a caller whose threads went stale sets this
+   *  too. Threaded straight through to every card's Thread. */
+  editHeld?: boolean;
+  /** Why the viewer's own comments can't be edited (null = they can): holds the
+   *  Edit row and an open editor's Save with this reason. */
+  editHeldReason?: string | null;
   /** Replies and resolves in flight per thread, from the mutation cache. */
   pendingWrites?: PendingThreadWrites;
   /** The forge the threads came from — disambiguates bare-fence Apply scope for
@@ -96,6 +114,10 @@ function DiffThreadAnchor({
   onQuote,
   onReply,
   onResolve,
+  onEditComment,
+  onDeleteComment,
+  editHeld,
+  editHeldReason,
   pendingWrites,
   provider,
   apply,
@@ -121,6 +143,10 @@ function DiffThreadAnchor({
           onQuote={onQuote}
           onReply={onReply}
           onResolve={onResolve}
+          onEditComment={onEditComment}
+          onDeleteComment={onDeleteComment}
+          editHeld={editHeld}
+          editHeldReason={editHeldReason}
           pendingWrites={pendingWrites}
           provider={provider}
           apply={apply}
@@ -149,6 +175,7 @@ export function PrFilesPane({
   dataIsPlaceholder,
   contentRevs,
   revsUnavailable = false,
+  revsPaused = false,
   threads,
   drafts,
   repoPath,
@@ -158,6 +185,10 @@ export function PrFilesPane({
   onQuote,
   onReply,
   onResolve,
+  onEditComment,
+  onDeleteComment,
+  editHeld,
+  editHeldReason,
   pendingWrites,
   provider,
   apply,
@@ -184,6 +215,9 @@ export function PrFilesPane({
   /** The revs read for the shown head settled in error with no answer, or the
    *  settled details name no head to read. */
   revsUnavailable?: boolean;
+  /** The revs read is parked offline with no answer of its own; a parked
+   *  refetch over a kept answer is not this. */
+  revsPaused?: boolean;
   /** All PR review threads; the pane anchors those on the selected file. */
   threads?: ReviewThreadOut[];
   /** Pending-review drafts; those on the selected file render as anchored cards
@@ -325,6 +359,7 @@ export function PrFilesPane({
                 dataIsPlaceholder={dataIsPlaceholder}
                 content={content}
                 pairUnavailable={pairUnavailable}
+                pairPaused={revsPaused}
                 threads={threads}
                 drafts={drafts}
                 repoPath={repoPath}
@@ -336,6 +371,10 @@ export function PrFilesPane({
                 onQuote={onQuote}
                 onReply={onReply}
                 onResolve={onResolve}
+                onEditComment={onEditComment}
+                onDeleteComment={onDeleteComment}
+                editHeld={editHeld}
+                editHeldReason={editHeldReason}
                 pendingWrites={pendingWrites}
                 provider={provider}
                 apply={apply}
@@ -368,6 +407,7 @@ function PrFileDiffSlot({
   dataIsPlaceholder,
   content,
   pairUnavailable,
+  pairPaused,
   threads,
   drafts,
   repoPath,
@@ -379,6 +419,10 @@ function PrFileDiffSlot({
   onQuote,
   onReply,
   onResolve,
+  onEditComment,
+  onDeleteComment,
+  editHeld,
+  editHeldReason,
   pendingWrites,
   provider,
   apply,
@@ -401,6 +445,8 @@ function PrFileDiffSlot({
   content?: PrFileContent;
   /** No whole-file reads will come for the current pair (a settled failure). */
   pairUnavailable: boolean;
+  /** The read naming the current pair is parked offline with no answer. */
+  pairPaused: boolean;
   threads?: ReviewThreadOut[];
   drafts?: ReviewDraft[];
   repoPath?: string;
@@ -413,11 +459,6 @@ function PrFileDiffSlot({
   lineWidget?: LineWidget;
   reportRead: (read: SlotRead) => void;
 } & DiffThreadWiring) {
-  useSlotRead(reportRead, {
-    isPlaceholderData: dataIsPlaceholder ?? false,
-    isPending,
-    isPaused,
-  });
   // The parent builds the diff of its selected file; a held slot's file is
   // another section of the same in-memory patch, or failing a lookup, the diff
   // it showed for this file of this pull request. A slot with no diff of its
@@ -451,6 +492,43 @@ function PrFileDiffSlot({
     resolved === undefined || oldPath === undefined
       ? resolved
       : { ...resolved, oldPath };
+  // Under Hide whitespace the slot draws a proven `-w` view of this file, or
+  // the forge section under a note; anchors and composers keep the section.
+  const [diffRoot, setDiffRoot] = useState<HTMLElement | null>(null);
+  const revs = ((): ForgeWhitespaceRevs => {
+    if (content)
+      return {
+        state: "ready",
+        oldRev: content.revs.oldSha,
+        newRev: content.revs.newSha,
+        source: content.source,
+      };
+    if (pairUnavailable) return { state: "none" };
+    if (pairPaused) return { state: "paused" };
+    return { state: "pending" };
+  })();
+  const view = useForgeWhitespaceDiff({
+    plain: data,
+    placeholder: dataIsPlaceholder ?? false,
+    repo: repoPath,
+    entity,
+    path,
+    revs,
+    root: diffRoot,
+  });
+  // A placeholder patch without this file (one only a newer head carries)
+  // leaves it waiting on the read, offline while that is parked, until the
+  // read fails: never an empty diff.
+  const awaiting =
+    data === undefined &&
+    (dataIsPlaceholder ?? false) &&
+    !refreshFailed({ isError, isPaused: isPaused ?? false, isFetching });
+  const pending = isPending || awaiting || view.pending;
+  useSlotRead(reportRead, {
+    isPlaceholderData: dataIsPlaceholder ?? false,
+    isPending: pending,
+    isPaused,
+  });
 
   // Anchors for THIS slot's file only: threads (with a known line, not outdated)
   // AND pending-review drafts on this path. Multiple items on the same side+line
@@ -496,6 +574,10 @@ function PrFileDiffSlot({
                 onQuote={onQuote}
                 onReply={onReply}
                 onResolve={onResolve}
+                onEditComment={onEditComment}
+                onDeleteComment={onDeleteComment}
+                editHeld={editHeld}
+                editHeldReason={editHeldReason}
                 pendingWrites={pendingWrites}
                 provider={provider}
                 apply={apply}
@@ -529,6 +611,10 @@ function PrFileDiffSlot({
     onQuote,
     onReply,
     onResolve,
+    onEditComment,
+    onDeleteComment,
+    editHeld,
+    editHeldReason,
     pendingWrites,
     provider,
     apply,
@@ -538,38 +624,42 @@ function PrFileDiffSlot({
 
   const widget = useSlotWidget(lineWidget);
   return (
-    <DiffContent
-      filePath={path}
-      data={data}
-      isPending={isPending}
-      isError={isError}
-      isPaused={isPaused}
-      isFetching={isFetching}
-      onRetry={onRetry}
-      dataIsPlaceholder={dataIsPlaceholder}
-      repoPath={repoPath}
-      previewRev={previewRev}
-      contentRevs={
-        content
-          ? { oldRev: content.revs.oldSha, newRev: content.revs.newSha }
-          : undefined
-      }
-      imageRevs={
-        content
-          ? { old: content.revs.oldSha, new: content.revs.newSha }
-          : undefined
-      }
-      // From the first paint, so the diff records it as on screen.
-      forgePatch={{
-        source: content?.source ?? null,
-        scope: entity,
-        ...(pairUnavailable && { pairUnavailable }),
-      }}
-      typechangeAnchors
-      anchorCommit={anchorCommit}
-      lineAnchors={lineAnchors}
-      lineWidget={widget}
-    />
+    <div ref={setDiffRoot} className="contents">
+      <DiffContent
+        filePath={path}
+        data={view.data}
+        isPending={pending}
+        isError={isError}
+        isPaused={isPaused}
+        isFetching={isFetching}
+        onRetry={onRetry}
+        dataIsPlaceholder={dataIsPlaceholder}
+        repoPath={repoPath}
+        previewRev={previewRev}
+        contentRevs={
+          content
+            ? { oldRev: content.revs.oldSha, newRev: content.revs.newSha }
+            : undefined
+        }
+        imageRevs={
+          content
+            ? { old: content.revs.oldSha, new: content.revs.newSha }
+            : undefined
+        }
+        // From the first paint, so the diff records it as on screen.
+        forgePatch={{
+          source: content?.source ?? null,
+          scope: entity,
+          ...(pairUnavailable && { pairUnavailable }),
+        }}
+        whitespaceControl
+        whitespaceNote={view.note}
+        typechangeAnchors
+        anchorCommit={anchorCommit}
+        lineAnchors={lineAnchors}
+        lineWidget={widget}
+      />
+    </div>
   );
 }
 

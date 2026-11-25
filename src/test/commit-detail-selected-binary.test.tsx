@@ -63,15 +63,29 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
   const { useReportPaneSettled } = await import(
     "@/features/diff/diff-pane-hold"
   );
+  const { useStandInReport } = await import("./painted-stand-in");
   function DiffSurface({
+    filePath,
     diff,
     lineAnchors,
     contentRevs,
+    paintsOtherCommit,
   }: {
+    filePath: string;
     diff: { data?: FileDiff; isPlaceholderData: boolean };
     lineAnchors?: DiffLineAnchor[];
     contentRevs?: { newRev?: string };
+    paintsOtherCommit?: boolean;
   }) {
+    // A text file's rows mount every anchor; the binary arm mounts none.
+    const text = diff.data?.isBinary === false;
+    useStandInReport(
+      filePath,
+      diff.data,
+      false,
+      text ? (lineAnchors ?? []) : [],
+      paintsOtherCommit,
+    );
     paneReads.push({
       data: diff.data,
       isPlaceholderData: diff.isPlaceholderData,
@@ -309,13 +323,16 @@ describe("CommitDetailView keeps a binary file's comments grouped", () => {
     await expectGroupedAsShown("x.bin");
     await settle();
     fireEvent.click(railRow("y.txt"));
-    await settle();
-    // y is shown (x's comment now jumps) while its own diff is still pending.
-    expect(jumpTo("x.bin")).toBeTruthy();
-    expect(grouped("note on y.txt")).toBeNull();
+    // y is shown once the hold's bound promotes it (x's comment now jumps),
+    // its own diff still pending: nothing of y is mounted, so its comment is
+    // listed with no note.
+    await waitFor(() => expect(jumpTo("x.bin")).toBeTruthy());
+    expect(grouped("note on y.txt")).toBeTruthy();
+    expect(screen.queryByText(/couldn't place/)).toBeNull();
     await act(async () => resolveY?.(textDiff("y.txt")));
-    await settle();
-    expect(grouped("note on y.txt")).toBeNull();
+    // Its row mounts once the diff lands: inline, out of the list.
+    await waitFor(() => expect(grouped("note on y.txt")).toBeNull());
+    expect(screen.getAllByText("note on y.txt")).toHaveLength(1);
     expect(jumpTo("x.bin")).toBeTruthy();
   });
 
@@ -458,6 +475,46 @@ describe("CommitDetailView keeps a binary file's comments grouped", () => {
     });
   });
 
+  it("judges no comment against the next commit's diff while the header lags", async () => {
+    // B's change sits far from line 1: judged against it, A's line-1 comment
+    // would read "couldn't place".
+    const farB: FileDiff = {
+      ...textDiff("p.txt"),
+      text: "diff --git a/p.txt b/p.txt\nindex 1111aaa..2222bbb 100644\n--- a/p.txt\n+++ b/p.txt\n@@ -50 +50 @@\n-old\n+far\n",
+    };
+    vi.mocked(gitCommitDetails).mockImplementation((_r, hash) =>
+      hash === A ? Promise.resolve(details(A)) : pending(),
+    );
+    vi.mocked(gitCommitFiles).mockResolvedValue([text("p.txt")]);
+    vi.mocked(gitCommitFileDiff).mockImplementation(async (_r, hash) =>
+      hash === A ? textDiff("p.txt") : farB,
+    );
+    vi.mocked(forgeCommitComments).mockImplementation(async (_r, sha) =>
+      sha === A ? [comment("p", "p.txt"), WHOLE] : [WHOLE],
+    );
+    const { switchTo } = renderView(A);
+    await waitFor(() =>
+      expect(screen.getByTestId("inline-anchors").textContent).toContain(
+        "note on p.txt",
+      ),
+    );
+    await settle();
+    switchTo(B);
+    // B's own diff paints while A's header and comments stay.
+    await waitFor(() =>
+      expect(
+        paneReads.some(
+          (r) => !r.isPlaceholderData && r.data?.text === farB.text,
+        ),
+      ).toBe(true),
+    );
+    await settle();
+    expect(screen.getByText("subject abcd")).toBeTruthy();
+    await waitFor(() => expect(grouped("note on p.txt")).toBeTruthy());
+    expect(screen.getAllByText("note on p.txt")).toHaveLength(1);
+    expect(screen.queryByText(/couldn't place/)).toBeNull();
+  });
+
   // Negative controls: dropping the content term from the slot's gate (the
   // comment renders twice) or from the parent's (it renders nowhere) fails this.
   it("lists a text file's comment over a settled read that never rendered", async () => {
@@ -556,9 +613,9 @@ describe("CommitDetailView keeps a binary file's comments grouped", () => {
 
   // A switch's selection reset retargets through the previous path (y.bin) and
   // replaces the held x.txt slot; a click back on x.txt first reuses it in place
-  // under B. Negative control: gating the slots' anchors on `anchorsMatchDiff`
-  // alone fails this test (x.txt's comment renders inline and in the list).
-  it("never anchors inline while the list keeps every file's comments", async () => {
+  // under B. The list reads what the pane mounts, so x.txt's comment is never
+  // both inline and listed.
+  it("places a comment once while a switch retargets the held slot", async () => {
     sizesPending.add("y.bin");
     // The hold's bound would promote y.bin's slot unsettled; pinning it open
     // makes the switch land while that slot is still preparing.
@@ -625,13 +682,12 @@ describe("CommitDetailView keeps a binary file's comments grouped", () => {
         ),
       ).toBe(true);
       expect(screen.getByText("subject abcd")).toBeTruthy();
-      await waitFor(() => {
-        expect(screen.getAllByText("note on x.txt")).toHaveLength(1);
-        expect(grouped("note on x.txt")).toBeTruthy();
-      });
-      expect(
-        screen.queryByTestId("inline-anchors")?.textContent ?? "",
-      ).not.toContain("note on x.txt");
+      // Placed once: inline on the rendered commit's held rows, or listed.
+      await waitFor(() =>
+        expect(screen.getAllByText("note on x.txt")).toHaveLength(1),
+      );
+      await settle();
+      expect(screen.getAllByText("note on x.txt")).toHaveLength(1);
     } finally {
       pinBound.mockRestore();
     }

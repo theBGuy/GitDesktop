@@ -8,8 +8,13 @@ import { patchLines } from "@/lib/git/diff-split";
 import { useCreateReviewThread } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { PR_NOUN } from "@/lib/pulls/pr-state";
 import { useAddReviewDraft } from "@/lib/pulls/review-drafts";
 import { toastError } from "@/lib/toast";
+import {
+  HEAD_PENDING_REVIEW_REASON,
+  type HeadPendingKind,
+} from "./head-pending";
 import { buildSuggestionFence, extractNewSideLines } from "./suggestion-utils";
 
 /** Why a composer on lines outside the pull request's patch can't post. */
@@ -37,6 +42,11 @@ export interface ReviewComposerProps {
   /** The origin|upstream lens the parent PR view resolved (scopes the thread). */
   lens: RemoteLens;
   onClose: () => void;
+  /** Set while the painted diff is an older head's: both submit paths hold with its reason. */
+  headPending?: HeadPendingKind | null;
+  /** The diff's rows on screen are not yet the live text's (`LineWidget`'s
+   *  `rowsBehind`): held as a loading head, since `fileSection` already is. */
+  rowsBehind?: boolean;
 }
 
 /**
@@ -60,6 +70,8 @@ export function ReviewComposer({
   canCreateThread,
   lens,
   onClose,
+  headPending = null,
+  rowsBehind = false,
 }: ReviewComposerProps) {
   const [body, setBody] = useState("");
   const [pending, setPending] = useState(false);
@@ -98,6 +110,9 @@ export function ReviewComposer({
   })();
   const offPatchReason =
     offPatch === null ? null : OFF_PATCH_REVIEW_REASON[offPatch];
+  const held = headPending ?? (rowsBehind ? "loading" : null);
+  const heldReason =
+    held === null ? null : HEAD_PENDING_REVIEW_REASON[held](PR_NOUN[provider]);
 
   // Suggestions replace NEW-side code, so an old-side anchor can't be suggested
   // on. Bitbucket suggestions are single-line only. Otherwise we need the current
@@ -130,7 +145,13 @@ export function ReviewComposer({
   }
 
   async function addSingleComment() {
-    if (!canCreateThread || !body.trim() || pending || offPatchReason !== null)
+    if (
+      !canCreateThread ||
+      !body.trim() ||
+      pending ||
+      heldReason !== null ||
+      offPatchReason !== null
+    )
       return;
     setPending(true);
     // Posting is optimistic (the thread lands in the cache immediately), so close
@@ -145,7 +166,13 @@ export function ReviewComposer({
   }
 
   async function addToReview() {
-    if (!body.trim() || pending || offPatchReason !== null) return;
+    if (
+      !body.trim() ||
+      pending ||
+      heldReason !== null ||
+      offPatchReason !== null
+    )
+      return;
     setPending(true);
     try {
       await addDraft.mutateAsync({
@@ -181,9 +208,12 @@ export function ReviewComposer({
 
   const addToReviewLabel =
     draftCount === 0 ? "Start a review" : "Add to review";
-  // The off-patch reason outranks the empty body's.
+  // A head-pending verdict outranks the off-patch one (a verdict about the
+  // older head's text), which outranks the empty body's.
   const blockedReason =
-    offPatchReason ?? (!body.trim() ? "Write a comment first" : null);
+    heldReason ??
+    offPatchReason ??
+    (!body.trim() ? "Write a comment first" : null);
 
   return (
     <div className="space-y-2">

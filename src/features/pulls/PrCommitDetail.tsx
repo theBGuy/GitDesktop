@@ -1,6 +1,7 @@
 import { CopyIcon } from "@phosphor-icons/react";
 import {
   type ComponentProps,
+  useDeferredValue,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -43,9 +44,14 @@ import {
   placeholderPaneView,
   type SlotRead,
   useFileSlots,
+  usePaintedView,
   useSlotRead,
   useSlotWidget,
 } from "@/features/diff/file-slot";
+import {
+  type ForgeWhitespaceRevs,
+  useForgeWhitespaceDiff,
+} from "@/features/diff/use-forge-whitespace-diff";
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
@@ -53,7 +59,6 @@ import {
   sectionIsBinary,
   sectionOldPath,
   splitUnifiedDiff,
-  typechangeHalves,
 } from "@/lib/git/diff-split";
 import {
   useCommitComments,
@@ -65,10 +70,12 @@ import {
 } from "@/lib/git/queries";
 import type {
   CommitCommentOut,
+  FileDiff,
   PrCommitOut,
   RemoteLens,
 } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useHideWhitespace } from "@/lib/settings/hide-whitespace";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -76,7 +83,7 @@ import {
   CommitComments,
   CommitLineComposer,
   type DiffSections,
-  newSideLines,
+  useCommentPins,
   useCommitLineAnchors,
 } from "./CommitComments";
 
@@ -163,11 +170,12 @@ export function PrCommitDetail({
     commitPresent.data === true &&
     (localParents.isError ||
       (parentless && !recordsParent.isPending && recordsParent.data !== false));
+  const takesForgeParent = commitPresent.data === false || parentElsewhere;
   const forgeParent = useCommitFirstParent(
     repoPath,
     lens,
     commit.oid,
-    commitPresent.data === false || parentElsewhere,
+    takesForgeParent,
   );
   // The forge's parent can still be a local object (fetched past the graft).
   const parentPresent = useObjectsPresent(
@@ -204,6 +212,23 @@ export function PrCommitDetail({
     };
   })();
   const content = useLatchedFor(`${lens}\0${commit.oid}`, answered);
+  // No pair will come until something re-reads the read the latch waits on:
+  // it settled in error with no answer. The forge's parent is the one forge
+  // read among them, so only it parks offline.
+  const settledEmpty = (q: {
+    isError: boolean;
+    isFetching: boolean;
+    data: unknown;
+  }) => q.isError && !q.isFetching && q.data === undefined;
+  const contentUnavailable =
+    content === undefined &&
+    (settledEmpty(commitPresent) ||
+      (takesForgeParent && settledEmpty(forgeParent)));
+  const contentPaused =
+    content === undefined &&
+    takesForgeParent &&
+    forgeParent.isPaused &&
+    forgeParent.data === undefined;
 
   const sections = useMemo(
     () => splitUnifiedDiff(diff.data ?? "", { joinTypechanges: true }),
@@ -247,12 +272,32 @@ export function PrCommitDetail({
   // The user's pick, else the first match under a filter, else the first file
   // (derived, so there's no empty-selection frame while an effect catches up).
   const effectivePath = filter.openPath;
-  // The pane draws no line anchors for a binary file, except a typechange's
-  // text half, whose comments render inline.
-  const selectedSection = sections.get(effectivePath ?? "") ?? "";
-  const selectedBinary =
-    sectionIsBinary(selectedSection) &&
-    typechangeHalves(selectedSection, effectivePath ?? "") === null;
+  // The file's diff swaps through the pane's two-slot hold, within this
+  // commit; another one re-targets the shown slot in place.
+  const diffTarget = effectivePath
+    ? keyedPaneView(repoPath, commit.oid, effectivePath, effectivePath)
+    : placeholderPaneView(commit.oid);
+  const diffSlots = useFileSlots(diffTarget);
+  // What the visible slot has mounted. The comment list judges by it, not by
+  // the pick: while the next file prepares behind a held one, the held file
+  // is the one on screen.
+  const painted = usePaintedView(diffSlots);
+  const listPath = painted?.path ?? null;
+  // Open list edits: kept out of the pane's anchors and in the list.
+  const pins = useCommentPins();
+  // The painted file's forge section is the whitespace-shown diff: the
+  // comment list reads it instead of a local read a non-local commit fails.
+  const selectedPlain = useMemo<FileDiff | undefined>(() => {
+    const section = listPath === null ? undefined : sections.get(listPath);
+    return listPath === null || section === undefined
+      ? undefined
+      : {
+          filePath: listPath,
+          text: section,
+          isBinary: sectionIsBinary(section),
+          isTruncated: false,
+        };
+  }, [listPath, sections]);
 
   const onFilesKeyDown = listKeyboardNav({
     items: filter.visible,
@@ -261,13 +306,6 @@ export function PrCommitDetail({
     rowKey: (f) => f.path,
     rowAttr: "data-path",
   });
-
-  // The file's diff swaps through the pane's two-slot hold, within this
-  // commit; another one re-targets the shown slot in place.
-  const diffTarget = effectivePath
-    ? keyedPaneView(repoPath, commit.oid, effectivePath, effectivePath)
-    : placeholderPaneView(commit.oid);
-  const diffSlots = useFileSlots(diffTarget);
 
   // A failed or parked refresh keeps the loaded commit under a notice; only a
   // read with nothing loaded replaces the rail and pane.
@@ -307,7 +345,7 @@ export function PrCommitDetail({
         focusHost.current = node;
       }}
       tabIndex={-1}
-      className="flex h-full flex-col outline-none"
+      className="flex min-h-0 flex-1 flex-col outline-none"
     >
       <DetailRailFilterStatus filter={filter.rail} blank={pane === "error"} />
       <header className="space-y-1 border-b px-4 py-3">
@@ -320,7 +358,15 @@ export function PrCommitDetail({
         >
           ‹ Commits
         </Button>
-        <h2 className="text-sm font-medium">{commit.headline}</h2>
+        {/* Two lines at most, scrolling past that like the message body below,
+            so a long subject never squeezes out the diff; a tab stop, so a
+            keyboard can scroll it too. */}
+        <h2
+          tabIndex={0}
+          className="max-h-10 overflow-y-auto text-sm font-medium break-words outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
+        >
+          {commit.headline}
+        </h2>
         {commit.messageBody && (
           <pre className="max-h-24 overflow-y-auto font-mono text-xs whitespace-pre-wrap text-muted-foreground">
             {commit.messageBody}
@@ -450,8 +496,12 @@ export function PrCommitDetail({
                       </FileRowActions>
                     </ScrollArea>
                   </DetailRail>
-                  <main className="flex min-w-0 flex-1 flex-col">
-                    <div className="min-h-0 flex-1">
+                  {/* Scrolls only when the window is too short for the diff's
+                      floor plus the comments: the comments' composer never
+                      shrinks, so without it the composer spills under the
+                      PR footer and the diff collapses to a sliver. */}
+                  <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+                    <div className="min-h-40 flex-1">
                       <FileSlots
                         slots={diffSlots}
                         target={diffTarget}
@@ -474,6 +524,9 @@ export function PrCommitDetail({
                                   : undefined
                               }
                               content={content}
+                              contentUnavailable={contentUnavailable}
+                              contentPaused={contentPaused}
+                              pinned={pins.pinned}
                               reportRead={diffSlots.reportRead}
                             />
                           ) : (
@@ -491,10 +544,12 @@ export function PrCommitDetail({
                       // A failed refresh keeps this commit's own patch, which
                       // still resolves.
                       diffReady={diff.data !== undefined}
-                      selectedPath={effectivePath}
-                      selectedBinary={selectedBinary}
+                      painted={painted}
+                      pins={pins}
                       onSelectFile={pickPath}
                       lens={lens}
+                      whitespaceShownDiff={selectedPlain}
+                      hostScrolls
                     />
                   </main>
                 </DetailRailRow>
@@ -520,6 +575,9 @@ function PrCommitFileDiffSlot({
   lens,
   previewRev,
   content,
+  contentUnavailable,
+  contentPaused,
+  pinned,
   reportRead,
 }: {
   repoPath: string;
@@ -533,27 +591,85 @@ function PrCommitFileDiffSlot({
   previewRev: string | undefined;
   /** The commit's whole-file reads; absent = a hunk-only diff. */
   content: CommitFileContent | undefined;
+  /** No whole-file reads will come for this commit (a settled failure). */
+  contentUnavailable: boolean;
+  /** The forge read naming the pair is parked offline with no answer. */
+  contentPaused: boolean;
+  /** The host's open list edits, which draw no anchor here. */
+  pinned: ReadonlySet<string>;
   reportRead: (read: SlotRead) => void;
 }) {
-  // The patch is in memory: never a placeholder, never pending.
-  useSlotRead(reportRead, { isPlaceholderData: false, isPending: false });
   const section = sections.get(path);
-  // Line-anchored comments on this file that resolve to a new-side line
-  // render inline in the diff; ones that can't resolve fall back to the
-  // CommitComments labelled group. Grouping + range chips live in the shared hook.
-  const commentAnchors = useCommitLineAnchors(comments, sections, path, {
-    provider,
-    repoPath,
-    lens,
+  const plain =
+    section === undefined
+      ? undefined
+      : {
+          filePath: path,
+          text: section,
+          isBinary: sectionIsBinary(section),
+          isTruncated: false,
+          oldPath: sectionOldPath(section),
+        };
+  // Under Hide whitespace the slot draws a proven `-w` view of this file, or
+  // the section under a note; anchors and the composer keep the section.
+  const [diffRoot, setDiffRoot] = useState<HTMLElement | null>(null);
+  const revs = ((): ForgeWhitespaceRevs => {
+    // This host's revs are shas (a root commit has no old one), never the
+    // working tree a null rev names.
+    const newRev = content?.revs.newRev;
+    if (content && typeof newRev === "string")
+      return {
+        state: "ready",
+        oldRev: content.revs.oldRev ?? undefined,
+        newRev,
+        source: content.source,
+      };
+    if (contentUnavailable) return { state: "none" };
+    if (contentPaused) return { state: "paused" };
+    return { state: "pending" };
+  })();
+  const view = useForgeWhitespaceDiff({
+    plain,
+    placeholder: false,
+    repo: repoPath,
+    entity: `${lens}\0${sha}`,
+    path,
+    revs,
+    root: diffRoot,
   });
-  // A comment on a line the commit's patch doesn't draw stays in the list
-  // below, never also inline in an expanded gap. A manual memo: the diff's
-  // `extendData` keys on this array's identity, which the compiler drops
-  // silently when it bails out of a component.
-  const lineAnchors = useMemo(() => {
-    const drawn = newSideLines(section ?? "");
-    return commentAnchors.filter((a) => drawn.has(a.line));
-  }, [commentAnchors, section]);
+  // The diff builds its rows off a deferred copy of its text, so the slot
+  // paints one deferred copy of the view.
+  // The content and image revs, anchorCommit and the line widget stay live:
+  // a mounted drill-in never changes commit (each pick remounts it).
+  const deferredData = useDeferredValue(view.data);
+  const deferredPending = useDeferredValue(view.pending);
+  const deferredNote = useDeferredValue(view.note);
+  const deferredSha = useDeferredValue(sha);
+  // While the deferred copy still holds a whitespace-only view with the mode
+  // off, the slot takes the live view whole, so a flip off leaves that arm in
+  // the same commit (an open editor's held view is live too, and stays).
+  const hide = useHideWhitespace();
+  const modeStale = !hide && deferredData?.whitespaceOnly === true;
+  const shownData = modeStale ? view.data : deferredData;
+  const shownPending = modeStale ? view.pending : deferredPending;
+  const shownNote = modeStale ? view.note : deferredNote;
+  const shownSha = modeStale ? sha : deferredSha;
+  // The patch is in memory, never a placeholder: only the view can pend.
+  useSlotRead(reportRead, {
+    isPlaceholderData: false,
+    isPending: shownPending,
+  });
+  // Line-anchored comments on this file that resolve to a new-side line
+  // render inline wherever their row mounts (an expanded gap's included); the
+  // list below takes the rest from the pane's painted report. Grouping +
+  // range chips live in the shared hook.
+  const lineAnchors = useCommitLineAnchors(
+    comments,
+    sections,
+    path,
+    { provider, repoPath, lens },
+    pinned,
+  );
   // Line-anchored comment creation: when the viewer can comment, clicking a diff
   // line opens the inline composer below it. Anchored to this file's section
   // (GitHub recovers the diff `position` from it). Absent otherwise, so the diff
@@ -581,31 +697,28 @@ function PrCommitFileDiffSlot({
   }, [canComment, path, repoPath, sha, provider, sections, lens]);
   const lineWidget = useSlotWidget(widget);
   return (
-    <DiffContent
-      filePath={path}
-      data={
-        section === undefined
-          ? undefined
-          : {
-              filePath: path,
-              text: section,
-              isBinary: sectionIsBinary(section),
-              isTruncated: false,
-              oldPath: sectionOldPath(section),
-            }
-      }
-      isPending={false}
-      isError={false}
-      repoPath={repoPath}
-      previewRev={previewRev}
-      contentRevs={content?.revs}
-      imageRevs={content?.images}
-      // From the first paint, so the diff records it as on screen.
-      forgePatch={{ source: content?.source ?? null, scope: `${lens}\0${sha}` }}
-      typechangeAnchors
-      anchorCommit={sha}
-      lineAnchors={lineAnchors}
-      lineWidget={lineWidget}
-    />
+    <div ref={setDiffRoot} className="contents">
+      <DiffContent
+        filePath={path}
+        data={shownData}
+        isPending={shownPending}
+        isError={false}
+        repoPath={repoPath}
+        previewRev={previewRev}
+        contentRevs={content?.revs}
+        imageRevs={content?.images}
+        // From the first paint, so the diff records it as on screen.
+        forgePatch={{
+          source: content?.source ?? null,
+          scope: `${lens}\0${shownSha}`,
+        }}
+        whitespaceControl
+        whitespaceNote={shownNote}
+        typechangeAnchors
+        anchorCommit={sha}
+        lineAnchors={lineAnchors}
+        lineWidget={lineWidget}
+      />
+    </div>
   );
 }

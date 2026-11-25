@@ -12,7 +12,12 @@ import { relative } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { installSrcHooks } from "./lib/src-import-hooks.mjs";
-import { maskNonCode, matchBrace, sourceFiles } from "./lib/ts-mask.mjs";
+import {
+  literalStrings,
+  maskNonCode,
+  matchBrace,
+  sourceFiles,
+} from "./lib/ts-mask.mjs";
 
 const hooks = installSrcHooks();
 after(() => hooks.deregister());
@@ -909,8 +914,8 @@ test("every diff-settings writer checks its composer probe first", () => {
       TRANSCRIPT_FILE,
       swap(
         files.get(TRANSCRIPT_FILE),
-        "            if (whitespaceComposerOpen()) {\n",
-        "            if (false) {\n",
+        "    if (whitespaceComposerOpen()) {\n      toast.info(WHITESPACE_COMPOSER_HELD);\n",
+        "    if (false) {\n      toast.info(WHITESPACE_COMPOSER_HELD);\n",
       ),
     ),
     "the transcript's probe removed",
@@ -1151,22 +1156,44 @@ test("every fetch site: the mode goes first and the flag reaches the api", () =>
 });
 
 const TRANSCRIPT = "src/features/sessions/AgentTranscript.tsx";
-const WS_ARM = "if (diff.data.whitespaceOnly) {";
-const EMPTY_ARM = "if (!diff.data.text.trim()) {";
+const WS_ARM = "if (data.whitespaceOnly) {";
+const EMPTY_ARM = "if (!data.text.trim()) {";
+const SHOW_HANDLER = "const showWhitespace = (";
+const PASSES_HANDLER = "onClick={showWhitespace}";
 
+/** Both Show whitespace buttons (the whitespace-only arm's and the hidden
+ *  note's on the diff arm) share one handler, which focuses the host before
+ *  the flip; nothing else in InlineDiff flips the setting. */
 function pinInlineDiffArm(text) {
   const body = bodyOf(text, "function InlineDiff(");
+  const masked = maskNonCode(body, true);
   const arm = once(body, WS_ARM);
   if (arm > once(body, EMPTY_ARM))
     throw new Error(
       "InlineDiff: the whitespace-only arm must precede the empty arm",
     );
-  const close = matchBrace(maskNonCode(body, true), arm + WS_ARM.length - 1);
-  const armText = body.slice(arm, close);
-  const focus = armText.indexOf("host?.focus(");
-  const flip = armText.indexOf("setHideWhitespace(false)");
+  const at = once(body, SHOW_HANDLER);
+  const params = matchBrace(masked, at + SHOW_HANDLER.length - 1);
+  const open = masked.indexOf("{", params);
+  // Searches read the masked body (offsets kept), so a commented-out call
+  // never counts as one.
+  const handler = masked.slice(open, matchBrace(masked, open));
+  const focus = handler.indexOf("host?.focus(");
+  const flip = handler.indexOf("setHideWhitespace(false)");
   if (focus < 0 || flip < 0 || focus > flip)
     throw new Error("InlineDiff: the button focuses its host before the flip");
+  if (masked.split("setHideWhitespace(").length !== 2)
+    throw new Error("InlineDiff: only the shared handler flips the setting");
+  const close = matchBrace(masked, arm + WS_ARM.length - 1);
+  if (!masked.slice(arm, close).includes(PASSES_HANDLER))
+    throw new Error(
+      "InlineDiff: the whitespace-only arm's button must use the shared handler",
+    );
+  const last = masked.slice(once(body, "const note =\n"));
+  if (!last.includes("<GitDiffView") || !last.includes(PASSES_HANDLER))
+    throw new Error(
+      "InlineDiff: the diff arm's hidden note must use the shared handler",
+    );
 }
 
 test("the transcript's whitespace-only arm: ahead of the empty arm, focus first", () => {
@@ -1183,9 +1210,44 @@ test("the transcript's whitespace-only arm: ahead of the empty arm, focus first"
   assert.throws(
     () =>
       pinInlineDiffArm(
-        swap(text, "            host?.focus({ preventScroll: true });\n", ""),
+        swap(text, "    host?.focus({ preventScroll: true });\n", ""),
       ),
     /focuses its host before the flip/,
+  );
+  // A commented-out call is no call: every search reads the masked body.
+  for (const line of [
+    "    host?.focus({ preventScroll: true });\n",
+    "    setHideWhitespace(false);\n  };\n",
+  ]) {
+    assert.throws(
+      () => pinInlineDiffArm(swap(text, line, `    // ${line.trimStart()}`)),
+      /focuses its host before the flip/,
+    );
+  }
+  const wsPass = text.indexOf(PASSES_HANDLER, wsStart);
+  assert.ok(wsPass > wsStart && wsPass < emptyAt, "the arm passes the handler");
+  const unpass = (i, kept = "") =>
+    `${text.slice(0, i)}onClick={() => {}}${kept}${text.slice(i + PASSES_HANDLER.length)}`;
+  for (const kept of ["", ` /* ${PASSES_HANDLER} */`]) {
+    assert.throws(
+      () => pinInlineDiffArm(unpass(wsPass, kept)),
+      /whitespace-only arm's button must use the shared handler/,
+    );
+    assert.throws(
+      () => pinInlineDiffArm(unpass(text.lastIndexOf(PASSES_HANDLER), kept)),
+      /hidden note must use the shared handler/,
+    );
+  }
+  assert.throws(
+    () =>
+      pinInlineDiffArm(
+        swap(
+          text,
+          '{WHITESPACE_HIDDEN_NOTE}{" "}\n',
+          '{WHITESPACE_HIDDEN_NOTE}{" "}\n        <button onClick={() => setHideWhitespace(false)} />\n',
+        ),
+      ),
+    /only the shared handler flips the setting/,
   );
 });
 
@@ -1396,5 +1458,497 @@ test("the editor observer watches exactly the selector's attributes", () => {
     onMode,
     swap(modeText, literal, `${literal}, [data-diff-editor="open"]`),
     "an attribute selector with a value",
+  );
+});
+
+// --- the whitespace probe's one literal ------------------------------------
+
+const PROBE_ARMS = [
+  '[data-diff-line-widget="whitespace"]',
+  '[data-diff-anchor="whitespace"] [data-thread-editing]',
+  '[data-diff-anchor="whitespace"] [data-diff-editor]',
+];
+
+/** `whitespaceComposerOpen` queries ONE single-quoted literal in its own body,
+ *  holding exactly the three arms: no concatenation, template or helper. */
+function pinProbeLiteral(text) {
+  const body = bodyOf(text, "export function whitespaceComposerOpen(", false);
+  const m = body.match(
+    /^\{\s*return \(\s*document\.querySelector\(\s*'([^'\\`$]*)',?\s*\) !== null\s*\);\s*\}$/,
+  );
+  if (!m)
+    throw new Error(
+      "whitespaceComposerOpen must query ONE plain string literal in its body",
+    );
+  const arms = m[1].split(",").map((arm) => arm.trim());
+  if (
+    arms.length !== PROBE_ARMS.length ||
+    PROBE_ARMS.some((arm) => !arms.includes(arm))
+  )
+    throw new Error(`the probe's arms: ${arms.join(" | ")}`);
+}
+
+test("the whitespace probe reads one literal naming its three arms", () => {
+  const text = source(MODE_FILE);
+  pinProbeLiteral(text);
+  const literal = text.match(/document\.querySelector\(\s*('[^']*')/)[1];
+  for (const arm of PROBE_ARMS) {
+    const dropped = literal.replace(`${arm}, `, "").replace(`, ${arm}`, "");
+    red(pinProbeLiteral, swap(text, literal, dropped), `arm dropped: ${arm}`);
+  }
+  const inner = literal.slice(1, -1);
+  const cut = inner.indexOf(", ");
+  red(
+    pinProbeLiteral,
+    swap(
+      text,
+      literal,
+      `'${inner.slice(0, cut)}, ' + '${inner.slice(cut + 2)}'`,
+    ),
+    "the literal concatenated",
+  );
+  red(
+    pinProbeLiteral,
+    swap(text, literal, `\`${inner}\``),
+    "the literal made a template",
+  );
+  red(
+    pinProbeLiteral,
+    swap(text, literal, "probeSelector()"),
+    "the literal built by a helper",
+  );
+});
+
+// --- the forge whitespace hook's editor observer ---------------------------
+
+const FORGE_WS_HOOK = "src/features/diff/use-forge-whitespace-diff.ts";
+
+/** The hook's observer filter lists exactly the attributes
+ *  DIFF_EDITOR_SELECTOR reads, once each, as plain literals. */
+function pinHookMarks(hook, modeText) {
+  const decl = modeText.match(
+    /^export const DIFF_EDITOR_SELECTOR =\s*"([^"\\`$]*)";$/m,
+  );
+  if (!decl)
+    throw new Error("DIFF_EDITOR_SELECTOR must be ONE plain string literal");
+  const wanted = new Set(
+    [...decl[1].matchAll(/\[([a-z][a-z-]*)\]/g)].map((m) => m[1]),
+  );
+  if (wanted.size === 0) throw new Error("the selector names no attribute");
+  once(hook, "const EDITOR_MARKS = [");
+  const marks = hook.match(
+    /^const EDITOR_MARKS = \[\n((?: {2}"[a-z][a-z-]*",\n)+)\];$/m,
+  );
+  if (!marks)
+    throw new Error("EDITOR_MARKS must be ONE array of plain literals");
+  const listed = [...marks[1].matchAll(/"([a-z-]+)"/g)].map((m) => m[1]);
+  if (new Set(listed).size !== listed.length)
+    throw new Error("EDITOR_MARKS lists a mark twice");
+  const missing = [...wanted].filter((m) => !listed.includes(m));
+  const extra = listed.filter((m) => !wanted.has(m));
+  if (missing.length > 0 || extra.length > 0)
+    throw new Error(`marks vs selector: missing ${missing}; extra ${extra}`);
+  once(hook, "attributeFilter: EDITOR_MARKS,");
+}
+
+test("the forge whitespace hook observes exactly the selector's attributes", () => {
+  const hook = source(FORGE_WS_HOOK);
+  const modeText = source(MODE_FILE);
+  pinHookMarks(hook, modeText);
+  const on = (t) => pinHookMarks(t, modeText);
+  red(on, swap(hook, '  "data-diff-editor",\n', ""), "a mark dropped");
+  red(
+    on,
+    swap(
+      hook,
+      '  "data-diff-editor",\n',
+      '  "data-diff-editor",\n  "data-extra",\n',
+    ),
+    "a mark added",
+  );
+  red(
+    on,
+    swap(hook, "attributeFilter: EDITOR_MARKS,", "attributeFilter: [],"),
+    "the observer given another filter",
+  );
+});
+
+// --- R1: the setting is a request, never a description ----------------------
+
+// TRIPWIRE: only the view producers and the toggle controls read Hide
+// whitespace. What describes or gates what is on screen (the commit comment
+// list and its notes) reads the pane's painted report (painted-view.ts).
+const SETTING_READERS = [
+  SURFACE,
+  VIEWER,
+  FORGE_WS_HOOK,
+  "src/features/pulls/PrCommitDetail.tsx",
+  "src/features/sessions/WorktreeChangesView.tsx",
+  "src/lib/git/queries/compare.ts",
+  "src/lib/git/queries/history.ts",
+  "src/lib/git/queries/stashes.ts",
+  "src/lib/git/queries/workingtree.ts",
+];
+// The hook's own module names both. The settings shape, its heal and the
+// Settings form (which keeps it out of the draft) name the FIELD only: a
+// hook name there still makes the file a reader.
+const SETTING_HOOK_HOME = "src/lib/settings/hide-whitespace.ts";
+const FIELD_PLUMBING = [
+  "src/lib/settings/api.ts",
+  "src/lib/settings/heal.ts",
+  "src/features/settings/settings-form.ts",
+];
+const NAMES_HOOK = /(?<![\w$])useHideWhitespace(?![\w$])/;
+const NAMES_FIELD = /(?<![\w$])diffHideWhitespace(?![\w$])/;
+// The field is also named by a whole string literal of its exact text (a
+// bracket read, a quoted key, an `in` check, a literal type); comments never
+// count. Out of sight: a computed key (`s[k]`) and an escaped spelling of the
+// name (literals are compared as written); spell the field plainly.
+function settingNames(rel, text) {
+  const masked = maskNonCode(text, rel.endsWith(".tsx"));
+  return {
+    hook: NAMES_HOOK.test(masked),
+    field:
+      NAMES_FIELD.test(masked) ||
+      literalStrings(text, masked).includes("diffHideWhitespace"),
+  };
+}
+
+/** The files naming `useHideWhitespace` or the `diffHideWhitespace` field in
+ *  code (an import, a call, a member or bracket read) are exactly the roster:
+ *  the hook's module is exempt, and the field plumbing for the field only. A
+ *  plumbing row that no longer names what it is exempt for is stale. */
+function pinSettingReaders(files) {
+  const home = settingNames(
+    SETTING_HOOK_HOME,
+    files.get(SETTING_HOOK_HOME) ?? "",
+  );
+  if (!home.hook && !home.field)
+    throw new Error(`${SETTING_HOOK_HOME}: a stale settings plumbing row`);
+  for (const rel of FIELD_PLUMBING)
+    if (!settingNames(rel, files.get(rel) ?? "").field)
+      throw new Error(`${rel}: a stale settings plumbing row`);
+  const readers = [];
+  for (const [rel, text] of files) {
+    if (rel === SETTING_HOOK_HOME) continue;
+    const { hook, field } = settingNames(rel, text);
+    if (hook || (field && !FIELD_PLUMBING.includes(rel))) readers.push(rel);
+  }
+  assert.deepEqual(
+    readers.sort(),
+    [...SETTING_READERS].sort(),
+    "files reading the Hide whitespace setting",
+  );
+}
+
+test("only view producers and controls read the Hide whitespace setting", () => {
+  const files = srcFiles();
+  pinSettingReaders(files);
+  const comments = "src/features/pulls/CommitComments.tsx";
+  const reading = new Map(files);
+  reading.set(
+    comments,
+    `${files.get(comments)}\nconst hidden = () => useHideWhitespace();\n`,
+  );
+  red(pinSettingReaders, reading, "the comment list reads the setting");
+  const member = new Map(files);
+  member.set(
+    comments,
+    `${files.get(comments)}\nconst hidden = (s: AppSettings) => s.diffHideWhitespace;\n`,
+  );
+  red(pinSettingReaders, member, "the comment list reads the setting's field");
+  for (const q of [`"`, `'`, "`"]) {
+    const bracket = new Map(files);
+    bracket.set(
+      comments,
+      `${files.get(comments)}\nconst h = (s: AppSettings) => s[${q}diffHideWhitespace${q}];\n`,
+    );
+    red(pinSettingReaders, bracket, `a bracket read with ${q} quotes`);
+  }
+  for (const [text, what] of [
+    [
+      `const pick = (s: AppSettings) => { const { "diffHideWhitespace": h } = s; return h; };`,
+      "a quoted destructuring key",
+    ],
+    [`const has = (s: object) => "diffHideWhitespace" in s;`, "an in check"],
+  ]) {
+    const literal = new Map(files);
+    literal.set(comments, `${files.get(comments)}\n${text}\n`);
+    red(pinSettingReaders, literal, what);
+  }
+  for (const text of [
+    `// const h = (s: AppSettings) => s["diffHideWhitespace"];`,
+    `const note = "x diffHideWhitespace y";`,
+  ]) {
+    const inert = new Map(files);
+    inert.set(comments, `${files.get(comments)}\n${text}\n`);
+    pinSettingReaders(inert);
+  }
+  const plumbingHook = new Map(files);
+  const form = "src/features/settings/settings-form.ts";
+  plumbingHook.set(
+    form,
+    `${files.get(form)}\nimport { useHideWhitespace } from "@/lib/settings/hide-whitespace";\nconst hidden = () => useHideWhitespace();\n`,
+  );
+  red(pinSettingReaders, plumbingHook, "the Settings form calls the hook");
+  const dropped = new Map(files);
+  const history = "src/lib/git/queries/history.ts";
+  dropped.set(
+    history,
+    files.get(history).replaceAll("useHideWhitespace", "useOtherSetting"),
+  );
+  red(pinSettingReaders, dropped, "a roster file that no longer reads it");
+  const stale = new Map(files);
+  stale.set(
+    form,
+    files.get(form).replaceAll("diffHideWhitespace", "diffOther"),
+  );
+  red(pinSettingReaders, stale, "a plumbing row that no longer names it");
+});
+
+// An open list edit pins its row (painted-view.ts `placeComments`), so no
+// control, probe or view holds on one: the listed-row hold's mark is gone.
+function pinNoListedHold(files) {
+  for (const [rel, text] of files)
+    if (text.includes("data-whitespace-row"))
+      throw new Error(`${rel} names the listed-row hold's mark`);
+}
+
+test("no control, probe or view holds on a listed comment's edit", () => {
+  const files = srcFiles();
+  pinNoListedHold(files);
+  const back = new Map(files);
+  back.set(
+    FORGE_WS_HOOK,
+    `${files.get(FORGE_WS_HOOK)}\nconst LISTED = "[data-whitespace-row] [data-thread-editing]";\n`,
+  );
+  red(pinNoListedHold, back, "a listed-row hold selector re-added");
+});
+
+// --- the forge whitespace read: one caller each ----------------------------
+
+/** `callee(` is called (not defined) exactly once in src, in `file`. */
+function pinOneCaller(files, callee, file) {
+  const call = new RegExp(String.raw`(?<![\w$])${callee}\(`, "g");
+  const def = new RegExp(
+    String.raw`(?:function\s+${callee}\(|const\s+${callee}\s*=\s*\()`,
+    "g",
+  );
+  const sites = [];
+  for (const [rel, text] of files) {
+    const masked = maskNonCode(text, rel.endsWith(".tsx"));
+    const defs = new Set(
+      [...masked.matchAll(def)].map((m) => m.index + m[0].length),
+    );
+    for (const m of masked.matchAll(call))
+      if (!defs.has(m.index + m[0].length)) sites.push(rel);
+  }
+  if (sites.length !== 1 || sites[0] !== file)
+    throw new Error(`${callee}( callers: ${sites.join(", ") || "none"}`);
+}
+
+test("the -w command and its key each have one caller", () => {
+  const files = srcFiles();
+  const pins = [
+    ["gitDiffBytesIgnoringWhitespace", "src/lib/git/queries/prs.ts"],
+    ["prWhitespaceHunksOptions", FORGE_WS_HOOK],
+  ];
+  for (const [callee, file] of pins) {
+    pinOneCaller(files, callee, file);
+    const extra = new Map(files);
+    extra.set("src/extra.ts", `export const x = () => ${callee}(a, b);\n`);
+    red(
+      (f) => pinOneCaller(f, callee, file),
+      extra,
+      `a second ${callee}( caller`,
+    );
+    const none = new Map(files);
+    none.set(file, files.get(file).replaceAll(`${callee}(`, `${callee}Gone(`));
+    red((f) => pinOneCaller(f, callee, file), none, `no ${callee}( caller`);
+  }
+});
+
+// --- the PR hosts: the whitespace control and one view hook per slot --------
+
+const PR_HOSTS = [
+  ["src/features/pulls/RemotePrViewParts.tsx", "PrFileDiffSlot"],
+  ["src/features/pulls/PrCommitDetail.tsx", "PrCommitFileDiffSlot"],
+];
+
+/** Top-level `fn` in `text`, up to the next top-level declaration. */
+function fnBody(text, fn) {
+  const at = text.indexOf(`\nfunction ${fn}(`);
+  if (at < 0) throw new Error(`${fn} not found`);
+  const next = /\n(?:export |function |const |\/\*\*)/g;
+  next.lastIndex = at + 1;
+  const end = next.exec(text)?.index ?? text.length;
+  return text.slice(at, end);
+}
+
+/** The slot's `<DiffContent` element passes a bare `whitespaceControl`. */
+function pinHostControl(text, fn) {
+  const body = fnBody(text, fn);
+  const tag = body.indexOf("<DiffContent");
+  if (tag < 0) throw new Error(`${fn}: no <DiffContent`);
+  const element = body.slice(tag, body.indexOf("/>", tag));
+  if (!/\n\s*whitespaceControl\s*\n/.test(element))
+    throw new Error(`${fn}: <DiffContent> without whitespaceControl`);
+}
+
+test("both PR hosts pass whitespaceControl from their slot", () => {
+  for (const [file, fn] of PR_HOSTS) {
+    const text = source(file);
+    pinHostControl(text, fn);
+    red(
+      (t) => pinHostControl(t, fn),
+      text.replace(/\n\s*whitespaceControl\s*\n/, "\n"),
+      `${fn} without whitespaceControl`,
+    );
+  }
+});
+
+/** `useForgeWhitespaceDiff(` is called once in each slot and nowhere else. */
+function pinViewCallers(files) {
+  const call = /(?<![\w$])useForgeWhitespaceDiff\(/g;
+  const sites = [];
+  for (const [rel, text] of files) {
+    if (rel.endsWith("use-forge-whitespace-diff.ts")) continue;
+    const masked = maskNonCode(text, rel.endsWith(".tsx"));
+    for (const m of masked.matchAll(call)) sites.push([rel, m.index]);
+  }
+  const wanted = PR_HOSTS.map(([file]) => file);
+  if (
+    sites.length !== 2 ||
+    !wanted.every((file) => sites.some(([rel]) => rel === file))
+  )
+    throw new Error(`useForgeWhitespaceDiff( sites: ${sites.map(([r]) => r)}`);
+  for (const [file, fn] of PR_HOSTS) {
+    const text = files.get(file);
+    const body = fnBody(maskNonCode(text, true), fn);
+    if (!body.includes("useForgeWhitespaceDiff("))
+      throw new Error(`${fn} does not call useForgeWhitespaceDiff`);
+  }
+}
+
+test("the whitespace view hook is called in the two PR slots only", () => {
+  const files = srcFiles();
+  pinViewCallers(files);
+  const host = "src/features/pulls/PrCommitDetail.tsx";
+  const second = new Map(files);
+  second.set(
+    host,
+    files
+      .get(host)
+      .replace(
+        "const content = useLatchedFor(",
+        "const twin = useForgeWhitespaceDiff(args);\n  const content = useLatchedFor(",
+      ),
+  );
+  red(pinViewCallers, second, "a second hook call in the commit view host");
+  const gone = new Map(files);
+  gone.set(
+    host,
+    files.get(host).replace("useForgeWhitespaceDiff({", "useOtherView({"),
+  );
+  red(pinViewCallers, gone, "the commit slot without the hook");
+});
+
+// --- CommitComments' probe observer ----------------------------------------
+
+const COMMIT_COMMENTS = "src/features/pulls/CommitComments.tsx";
+
+/** CommitComments re-reads `whitespaceComposerOpen` on a change of any
+ *  attribute its selector reads, so the observer's filter lists exactly those
+ *  names (a valued selector's name is what precedes `=`), once each, as plain
+ *  literals. Both sides are read from source. */
+function pinProbeObserver(comments, modeText) {
+  const probe = bodyOf(
+    modeText,
+    "export function whitespaceComposerOpen(",
+    false,
+  );
+  const queries = [...maskNonCode(probe, false).matchAll(/querySelector\(/g)];
+  if (queries.length !== 1)
+    throw new Error(`the probe makes ${queries.length} querySelector calls`);
+  const args = callArgs(
+    probe,
+    queries[0].index + "querySelector".length,
+    false,
+  );
+  const literal = args.length === 1 && args[0].match(/^'([^'\\`$]*)'$/);
+  if (!literal)
+    throw new Error("the probe must query ONE plain string literal");
+  const wanted = new Set();
+  for (const [, inner] of literal[1].matchAll(/\[([^\]]*)\]/g)) {
+    const name = inner.split("=")[0];
+    if (!/^[a-z][a-z-]*$/.test(name))
+      throw new Error(`an attribute selector this pin can't read: [${inner}]`);
+    wanted.add(name);
+  }
+  if (wanted.size === 0) throw new Error("the selector names no attribute");
+  const observer = bodyOf(comments, "function subscribeBodyMutations(");
+  const filters = [...observer.matchAll(/attributeFilter: \[/g)];
+  if (filters.length !== 1)
+    throw new Error(`the observer has ${filters.length} attribute filters`);
+  const open = filters[0].index + "attributeFilter: ".length;
+  const close = matchBrace(maskNonCode(observer, true), open);
+  if (close < 0) throw new Error("the attribute filter never closes");
+  const listed = observer
+    .slice(open + 1, close)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "")
+    .map((entry) => {
+      const name = entry.match(/^"([a-z][a-z-]*)"$/);
+      if (!name)
+        throw new Error(`a filter entry that isn't a plain literal: ${entry}`);
+      return name[1];
+    });
+  if (new Set(listed).size !== listed.length)
+    throw new Error("the attribute filter lists a name twice");
+  const missing = [...wanted].filter((m) => !listed.includes(m));
+  const extra = listed.filter((m) => !wanted.has(m));
+  if (missing.length > 0 || extra.length > 0)
+    throw new Error(`filter vs probe: missing ${missing}; extra ${extra}`);
+}
+
+test("CommitComments' observer watches exactly the probe's attributes", () => {
+  const comments = source(COMMIT_COMMENTS);
+  const modeText = source(MODE_FILE);
+  pinProbeObserver(comments, modeText);
+  const onComments = (t) => pinProbeObserver(t, modeText);
+  const onMode = (t) => pinProbeObserver(comments, t);
+  const last = '      "data-diff-editor",\n';
+  red(onComments, swap(comments, last, ""), "a name dropped from the filter");
+  red(
+    onComments,
+    swap(comments, last, `${last}      "data-extra",\n`),
+    "a name added to the filter",
+  );
+  red(
+    onComments,
+    swap(comments, last, `${last}${last}`),
+    "a name listed twice",
+  );
+  red(
+    onComments,
+    swap(comments, last, "      EXTRA_MARK,\n"),
+    "a filter entry that isn't a literal",
+  );
+  const literal = modeText.match(/document\.querySelector\(\s*'([^']*)'/)[1];
+  red(
+    onMode,
+    swap(modeText, literal, `${literal}, [data-diff-anchor] [data-new-editor]`),
+    "an arm added to the selector alone",
+  );
+  const cut = literal.indexOf(", ");
+  red(
+    onMode,
+    swap(
+      modeText,
+      `'${literal}'`,
+      `'${literal.slice(0, cut)}, ' + '${literal.slice(cut + 2)}'`,
+    ),
+    "the selector literal split into a concatenation",
   );
 });

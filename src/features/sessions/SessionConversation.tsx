@@ -14,6 +14,11 @@ import { AgentNarration } from "./AgentNarration";
 import { AgentTranscript } from "./AgentTranscript";
 import { SessionComposer, type SessionComposerHandle } from "./SessionComposer";
 import { type AgentSession, type SessionTurn, useSessionsStore } from "./store";
+import {
+  atColumnBottom,
+  ColumnLayoutAnchorContext,
+  useColumnLayoutAnchor,
+} from "./use-column-layout-anchor";
 
 /**
  * The conversation column of the agent canvas: a document-style log of turns
@@ -49,17 +54,22 @@ export function SessionConversation({
   // intermediate positions (otherwise the button flickers back in mid-scroll).
   const jumping = useRef(false);
   const [atBottom, setAtBottom] = useState(true);
+  // Open step diffs change height on a Unified/Split switch; the column keeps
+  // its place around them, or its bottom while it sits there or `jumping`
+  // animates it there (read from the column at the switch, never `stick`).
+  const column = useColumnLayoutAnchor(scrollRef, jumping);
 
   const last = session.turns[session.turns.length - 1];
   // A cheap signature of everything that grows during streaming, so the
   // auto-scroll effect fires on each delta without deep-watching the array.
-  const streamSig = `${session.turns.length}:${last?.narration.length ?? 0}:${last?.statusText ?? ""}:${last?.status ?? ""}`;
+  // A tool step or note appends a segment and leaves the narration as it was.
+  const streamSig = `${session.turns.length}:${last?.narration.length ?? 0}:${last?.segments?.length ?? 0}:${last?.statusText ?? ""}:${last?.status ?? ""}`;
   const prevLen = useRef(session.turns.length);
 
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el || jumping.current) return;
-    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    const bottom = atColumnBottom(el);
     stick.current = bottom;
     setAtBottom(bottom);
   };
@@ -95,6 +105,8 @@ export function SessionConversation({
     // turn streams, only keep pinned if they're already at the bottom.
     const grew = session.turns.length > prevLen.current;
     prevLen.current = session.turns.length;
+    // The jump to a new turn outranks a hold on the place the reader had.
+    if (grew) column.release();
     if (stick.current || grew) el.scrollTop = el.scrollHeight;
   }, [streamSig]);
 
@@ -106,22 +118,28 @@ export function SessionConversation({
           onScroll={onScroll}
           className="h-full overflow-y-auto"
         >
-          <div className="mx-auto flex max-w-3xl flex-col gap-6 p-4">
-            {session.turns.map((turn, i) => (
-              <TurnView
-                key={`${i}:${turn.prompt.slice(0, 32)}`}
-                turn={turn}
-                baseDir={session.kept ? session.repoPath : session.worktreePath}
-                // Inline edit-step diffs need the live worktree (freed once kept)
-                // and the base to diff against; omitted for kept sessions. While the
-                // session runs, the worktree keeps changing, so an open diff polls.
-                editDiffBase={session.kept ? undefined : session.base}
-                editDiffLive={session.running}
-                resendable={!session.kept}
-                onEditResend={() => composerRef.current?.setPrompt(turn.prompt)}
-              />
-            ))}
-          </div>
+          <ColumnLayoutAnchorContext value={column}>
+            <div className="mx-auto flex max-w-3xl flex-col gap-6 p-4">
+              {session.turns.map((turn, i) => (
+                <TurnView
+                  key={`${i}:${turn.prompt.slice(0, 32)}`}
+                  turn={turn}
+                  baseDir={
+                    session.kept ? session.repoPath : session.worktreePath
+                  }
+                  // Inline edit-step diffs need the live worktree (freed once kept)
+                  // and the base to diff against; omitted for kept sessions. While the
+                  // session runs, the worktree keeps changing, so an open diff polls.
+                  editDiffBase={session.kept ? undefined : session.base}
+                  editDiffLive={session.running}
+                  resendable={!session.kept}
+                  onEditResend={() =>
+                    composerRef.current?.setPrompt(turn.prompt)
+                  }
+                />
+              ))}
+            </div>
+          </ColumnLayoutAnchorContext>
         </div>
         <AnimatePresence>
           {!atBottom && (

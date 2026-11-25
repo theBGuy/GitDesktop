@@ -208,6 +208,26 @@ export const forgeFileAtSha = (
     maxBytes,
   });
 
+/** The `-w` diff of two file versions, hunks only (from the first `@@` line). */
+export interface WhitespaceHunks {
+  /** Empty when the versions differ in whitespace only, or not at all. */
+  hunks: string;
+  /** git called the pair binary; `hunks` is empty. */
+  isBinary: boolean;
+}
+
+/** `git diff -w` of two file versions already read, as base64 (null = no file at that
+ *  side). A local run over temp files: no network, no clone objects. The user's git
+ *  config applies, so compare its lines modulo whitespace. */
+export const gitDiffBytesIgnoringWhitespace = (
+  oldBase64: string | null,
+  newBase64: string | null,
+) =>
+  invoke<WhitespaceHunks>("git_diff_bytes_ignoring_whitespace", {
+    oldBase64,
+    newBase64,
+  });
+
 /** Whether a commit exists on any remote (the History-tab comment surface gates on
  *  it — you can only comment on a commit the forge already has). */
 export const commitOnRemote = (repoPath: string, sha: string) =>

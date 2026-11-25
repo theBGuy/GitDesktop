@@ -44,7 +44,7 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label:
-      "Hide whitespace changes in any local diff, so re-indented code shows only the lines whose content changed",
+      "Hide whitespace changes in working-tree, commit, file-history, compare, stash and pull request diffs, so re-indented code shows only the lines whose content changed",
   },
   {
     group: "Diffs & staging",
@@ -379,7 +379,7 @@ export const capabilities: Capability[] = [
   {
     group: "Pull requests & review",
     label:
-      "Refresh the PR list on demand — one press re-reads the list, its checks, conflict chips & review grouping",
+      "Refresh the PR list on demand — one press re-reads the list, its checks, conflict chips, review grouping & the pull request you have open",
   },
 
   // — Forges & trackers —

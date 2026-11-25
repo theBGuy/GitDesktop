@@ -14,12 +14,14 @@ import {
 import { FileIcon, GearSixIcon } from "@phosphor-icons/react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import {
+  createContext,
   Fragment,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type Ref,
   useCallback,
+  useContext,
   useDeferredValue,
   useEffect,
   useId,
@@ -52,7 +54,7 @@ import {
   offlinePendingMessage,
   refreshFailed,
 } from "@/features/conversations/remote-section-state";
-import { decodeBase64Utf8 } from "@/lib/git/api";
+import { decodeBase64Utf8, type FileBytes } from "@/lib/git/api";
 import {
   classifyHeaderOnlyDiff,
   type HeaderOnlyDiff,
@@ -79,6 +81,7 @@ import {
   useDisabledReason,
 } from "@/lib/use-disabled-reason";
 import { useIsDark } from "@/lib/use-is-dark";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { BinaryFileSummary } from "./BinaryFileSummary";
@@ -104,6 +107,16 @@ import {
   useReportPaneSettled,
 } from "./diff-pane-hold";
 import { HOLD_BOUND_MS } from "./diff-pane-slots";
+import { usePaintedPublish } from "./file-slot";
+import { base64Bytes } from "./forge-whitespace";
+import {
+  type AnchorRegistry,
+  anchorKey,
+  createAnchorRegistry,
+  type PaintedCut,
+  type PaneReport,
+  samePaneReport,
+} from "./painted-view";
 import "./code-highlight.css";
 import {
   contentSourceKey,
@@ -124,6 +137,7 @@ import {
   RESTORE_BOUND_MS,
   restoreDecision,
 } from "./diff-rows";
+import { drawnLayout } from "./drawn-layout";
 import {
   changesSince,
   contentBuildGate,
@@ -203,7 +217,10 @@ export interface DiffLineAnchor {
  * component also backs history/working-tree diffs.
  *
  * `render` receives the anchored `line` (a range's END), `fromLine` (its start,
- * equal to `line` for a single line), the resolved `side`, and an `onClose`.
+ * equal to `line` for a single line), the resolved `side`, an `onClose`, and
+ * `rowsBehind`: the rows on screen are not yet built from the live `text`
+ * (a deferred or held paint), so a line counted in that text isn't the one
+ * drawn under the widget.
  */
 export interface LineWidget {
   enabled: boolean;
@@ -212,7 +229,73 @@ export interface LineWidget {
     line: number;
     fromLine?: number;
     onClose: () => void;
+    /** Always passed here; optional so a test stand-in may omit it. */
+    rowsBehind?: boolean;
   }) => ReactNode;
+}
+
+/** `rowsBehind` for the open widget, through context rather than the widget
+ *  renderer's deps: the library memoizes its table on that renderer, so a flip
+ *  re-renders the widget alone. */
+const PaintedRowsBehindContext = createContext(false);
+
+/** What a diff pane's rows draw NOW: `text` is the patch the rows on screen
+ *  were built from (an arm that draws no rows names its own data's), `cut`
+ *  what holds part of it back when something does, with the path and `-w`
+ *  mark they were built with and the anchor rows mounted now (keys from
+ *  `anchorKey`). The pane's painted report, as painted-view.ts names it. */
+interface RowsReport {
+  path: string;
+  text: string;
+  cut: PaintedCut | null;
+  whitespaceHidden: boolean;
+  anchors: readonly string[];
+}
+
+/** How a pane report's rows came in: the arm's own read, the text arm's
+ *  rows, or a typechange's text half. */
+type RowsFrom = "read" | "rows" | "half";
+
+function paneReportOf(rows: RowsReport, truncated: boolean): PaneReport {
+  return {
+    path: rows.path,
+    patch: rows.text,
+    whitespaceHidden: rows.whitespaceHidden,
+    truncated,
+    cut: rows.cut,
+    anchors: rows.anchors,
+  };
+}
+
+function sameRows(a: RowsReport, b: RowsReport): boolean {
+  return (
+    a.text === b.text &&
+    a.cut === b.cut &&
+    a.path === b.path &&
+    a.whitespaceHidden === b.whitespaceHidden &&
+    a.anchors.length === b.anchors.length &&
+    a.anchors.every((k, i) => k === b.anchors[i])
+  );
+}
+
+/** Counts a line anchor's row as mounted for exactly as long as it is. */
+function AnchorMount({
+  registry,
+  anchor,
+}: {
+  registry: AnchorRegistry;
+  anchor: string;
+}) {
+  useLayoutEffect(() => registry.add(anchor), [registry, anchor]);
+  return null;
+}
+
+function LineWidgetBody({
+  render,
+}: {
+  render: (rowsBehind: boolean) => ReactNode;
+}) {
+  return render(useContext(PaintedRowsBehindContext));
 }
 
 /** A normalized diff-line range on one side (`from <= to`), used by the
@@ -359,7 +442,9 @@ export function GitDiffView({
   rebuildsOnWhitespace,
   forgePatch,
   dataIsPlaceholder,
+  whitespaceHidden,
   lineKeeper,
+  onRows,
 }: {
   filePath: string;
   /** The path the old side's whole-file read uses (a rename's source).
@@ -392,9 +477,15 @@ export function GitDiffView({
   /** `text` is the previous record's diff, painted while this one's loads:
    *  its build stays, whatever record `forgePatch.scope` names. */
   dataIsPlaceholder?: boolean;
+  /** `text` is a `-w` diff (the diff's `whitespaceHidden` mark): under
+   *  `forgePatch`, the hunk-match guard compares lines as `-w` does. */
+  whitespaceHidden?: boolean;
   /** Filled with the call that keeps the top visible line across a layout
    *  change above the rows in `scrollerRef` (see `useModeLineAnchor`). */
   lineKeeper?: { current: (() => void) | null };
+  /** Takes what the rows draw and mount, on mount and on each change, and
+   *  nothing drawn when they unmount (DiffContent's report). */
+  onRows?: (rows: RowsReport) => void;
 }) {
   const sinkRef = useRef<HTMLSpanElement>(null);
   return (
@@ -418,7 +509,9 @@ export function GitDiffView({
           rebuildsOnWhitespace={rebuildsOnWhitespace}
           forgePatch={forgePatch}
           dataIsPlaceholder={dataIsPlaceholder}
+          whitespaceHidden={whitespaceHidden}
           lineKeeper={lineKeeper}
+          onRows={onRows}
         />
       </DiffErrorBoundary>
     </>
@@ -570,6 +663,20 @@ export function createDiffFile(
   }
 }
 
+/** A whole-file read content mode can't use, judged from its exact sizes so
+ *  it is never decoded (a local read is capped at the 20 MB image cap alone).
+ *  A side past FORGE_CONTENT_BUDGET_BYTES fails `fitsBudget` once decoded,
+ *  except one a byte-order mark puts over (the decoder drops the mark): that
+ *  side alone is refused while its text would fit. */
+function overContentBudget(bytes: FileBytes | null | undefined): boolean {
+  if (!bytes) return false;
+  return (
+    bytes.tooLarge ||
+    (bytes.size ?? 0) > FORGE_CONTENT_BUDGET_BYTES ||
+    base64Bytes(bytes.base64) > FORGE_CONTENT_BUDGET_BYTES
+  );
+}
+
 /**
  * Reads the full old/new file text for whole-file highlight context (content
  * mode). `content` is `{old,new}` for {@link createDiffFile}, or null when
@@ -605,6 +712,9 @@ export function useFileContent(
   // text), and whether `diffText` is a previous record's placeholder paint.
   scope: string | undefined = forgePatch?.scope,
   placeholder = false,
+  // `diffText` is a `-w` diff (its `whitespaceHidden` mark, deferred with
+  // the text): the guard compares lines as `-w` does.
+  whitespaceHidden = false,
 ): {
   content: { old: string; new: string } | null;
   pending: boolean;
@@ -648,13 +758,21 @@ export function useFileContent(
   // and so does a refused one, whose payload carries no base64.
   const oldB64 = oldQ.data?.base64 ?? null;
   const newB64 = newQ.data?.base64 ?? null;
+  const oldOver = oldRev !== undefined && overContentBudget(oldQ.data);
+  const newOver = newRev !== undefined && overContentBudget(newQ.data);
   const oldText = useMemo(
-    () => (oldRev !== undefined && oldB64 ? decodeBase64Utf8(oldB64) : ""),
-    [oldRev, oldB64],
+    () =>
+      oldRev !== undefined && oldB64 && !oldOver
+        ? decodeBase64Utf8(oldB64)
+        : "",
+    [oldRev, oldB64, oldOver],
   );
   const newText = useMemo(
-    () => (newRev !== undefined && newB64 ? decodeBase64Utf8(newB64) : ""),
-    [newRev, newB64],
+    () =>
+      newRev !== undefined && newB64 && !newOver
+        ? decodeBase64Utf8(newB64)
+        : "",
+    [newRev, newB64, newOver],
   );
   // Usable once the enabled side-reads settle and both files fit the highlight
   // budget (a 1-line change in a huge file stays hunk-only, no whole-file walk).
@@ -673,6 +791,8 @@ export function useFileContent(
   const useContent =
     wantContent &&
     settled &&
+    !oldOver &&
+    !newOver &&
     (oldText !== "" || newText !== "") &&
     fitsBudget(oldText) &&
     fitsBudget(newText) &&
@@ -680,7 +800,10 @@ export function useFileContent(
     covers(oldText, maxOldLine) &&
     // A forge's text isn't built from these files: content mode lays them
     // around its hunks only when the text is exactly their change.
-    (forgePatch === undefined || hunksMatchContent(diffText, oldText, newText));
+    (forgePatch === undefined ||
+      hunksMatchContent(diffText, oldText, newText, {
+        ignoreWhitespace: whitespaceHidden,
+      }));
   // A forge-patch host's build on screen: its record, path and text, and the
   // content it was built with (null: hunk-only), recorded from its first paint.
   const [shown, setShown] = useState<{
@@ -1352,7 +1475,9 @@ function RenderedDiff({
   rebuildsOnWhitespace = false,
   forgePatch,
   dataIsPlaceholder = false,
+  whitespaceHidden = false,
   lineKeeper,
+  onRows,
 }: {
   filePath: string;
   oldPath?: string;
@@ -1367,15 +1492,15 @@ function RenderedDiff({
   rebuildsOnWhitespace?: boolean;
   forgePatch?: ForgePatch;
   dataIsPlaceholder?: boolean;
+  whitespaceHidden?: boolean;
   lineKeeper?: { current: (() => void) | null };
+  onRows?: (rows: RowsReport) => void;
 }) {
   const settings = useSettings();
   const isDark = useIsDark();
   // The narrow-pane override renders unified without ever writing the setting,
   // so widening the pane restores the user's split preference on its own.
-  const viewMode = forceUnified
-    ? "unified"
-    : (settings.data?.diffViewMode ?? "unified");
+  const viewMode = drawnLayout(forceUnified, settings.data?.diffViewMode);
 
   // Large diffs are capped (the renderer isn't virtualized — see cap-diff.ts);
   // "Show full diff" opts into the whole thing. Reset when the file changes so
@@ -1401,6 +1526,10 @@ function RenderedDiff({
   // render pairs the old text with these values' old state.
   const deferredScope = useDeferredValue(forgePatch?.scope);
   const deferredPlaceholder = useDeferredValue(dataIsPlaceholder);
+  const deferredWhitespaceHidden = useDeferredValue(whitespaceHidden);
+  // The anchors ride the text they were built for: a host hands a new diff's
+  // anchors in the urgent render that still draws the previous text's rows.
+  const deferredAnchors = useDeferredValue(lineAnchors);
 
   // Reset on the DEFERRED path, not the urgent `filePath`: `blocked` derives
   // from `deferredText`, so an urgent reset would re-block the OUTGOING mega
@@ -1453,6 +1582,7 @@ function RenderedDiff({
     editorOpen,
     deferredScope,
     deferredPlaceholder,
+    deferredWhitespaceHidden,
   );
 
   const { shown, hidden, shortened } = useMemo(() => {
@@ -1481,6 +1611,19 @@ function RenderedDiff({
       shortened: short.shortened,
     };
   }, [deferredText, showFull, content, blocked, longestLine]);
+  // What a build of the deferred text draws of it.
+  const drawnNow = useMemo<Omit<RowsReport, "anchors">>(
+    () => ({
+      path: deferredPath,
+      text: deferredText,
+      cut: ((): PaintedCut | null => {
+        if (blocked) return "mega-line";
+        return hidden > 0 ? "cap" : null;
+      })(),
+      whitespaceHidden: deferredWhitespaceHidden,
+    }),
+    [deferredPath, deferredText, blocked, hidden, deferredWhitespaceHidden],
+  );
 
   // Syntax prefs follow the active repo (repo-scoped custom languages); the
   // active repo owns every surface that supplies content, so this matches.
@@ -1511,20 +1654,46 @@ function RenderedDiff({
   // highlighting painted on it (the worker answers nothing while held).
   const diffFile = useRetained(builtDiffFile, !contentHold);
   const shownHighlighter = useRetained(workerHighlighter, !contentHold);
+  // What the rows on screen draw, and the text they were built from, retained
+  // with their build.
+  const paintedShown = useRetained(
+    builtDiffFile === null ? null : drawnNow,
+    !contentHold,
+  );
+  const paintedText = paintedShown?.text ?? null;
+  const rowsBehind = paintedText !== text;
 
+  // The anchor rows this diff has mounted, whatever build they belong to.
+  const [anchorRegistry] = useState(createAnchorRegistry);
   // Per-side extendData maps, keyed by String(line). Memoized for referential
   // stability: the vendored DiffView is store-based and a fresh object each
-  // render thrashes it.
+  // render thrashes it. Each row counts its line as mounted: the report's
+  // anchors are these rows, an expanded gap's included, never lines read off
+  // the patch. The anchors are deferred with the text, so a build pairs with
+  // the anchors handed beside its own diff. The path gate is kept: a deferred
+  // frame still showing another file drops that file's anchors, as before.
+  const anchorsFitRows = deferredPath === filePath;
   const extendData = useMemo(() => {
-    if (!lineAnchors || lineAnchors.length === 0) return undefined;
+    if (!anchorsFitRows || !deferredAnchors || deferredAnchors.length === 0)
+      return undefined;
     const oldFile: AnchorExtendData = {};
     const newFile: AnchorExtendData = {};
-    for (const a of lineAnchors) {
+    for (const a of deferredAnchors) {
       const target = a.side === "old" ? oldFile : newFile;
-      target[String(a.line)] = { data: { render: a.render } };
+      const anchor = anchorKey(a.side, a.line);
+      target[String(a.line)] = {
+        data: {
+          render: () => (
+            <>
+              <AnchorMount registry={anchorRegistry} anchor={anchor} />
+              {a.render()}
+            </>
+          ),
+        },
+      };
     }
     return { oldFile, newFile };
-  }, [lineAnchors]);
+  }, [anchorsFitRows, deferredAnchors, anchorRegistry]);
 
   // --- Drag-range survival across the "+" click (vendored-library workaround) ---
   // DiffViewWithMultiSelect honors a stored multi-select range ONLY when the
@@ -1763,21 +1932,26 @@ function RenderedDiff({
           data-diff-line-widget={rebuildsOnWhitespace ? "whitespace" : "layout"}
           className="m-2 rounded-none border bg-popover p-3 font-sans text-xs text-popover-foreground shadow-md"
         >
-          {lineWidget.render({
-            side: resolved.side,
-            line: resolved.to,
-            fromLine: overrode ? resolved.from : undefined,
-            onClose: () => {
-              // Clear our captured range, the active override, and the highlight
-              // when the widget closes so the next press starts clean (a
-              // previously-ranged line then opens single-line).
-              dragRangeRef.current = null;
-              changeRangeRef.current = null;
-              activeOverrideRef.current = null;
-              syncPreselect(null);
-              onClose();
-            },
-          })}
+          <LineWidgetBody
+            render={(rowsBehind) =>
+              lineWidget.render({
+                side: resolved.side,
+                line: resolved.to,
+                fromLine: overrode ? resolved.from : undefined,
+                rowsBehind,
+                onClose: () => {
+                  // Clear our captured range, the active override, and the
+                  // highlight when the widget closes so the next press starts
+                  // clean (a previously-ranged line then opens single-line).
+                  dragRangeRef.current = null;
+                  changeRangeRef.current = null;
+                  activeOverrideRef.current = null;
+                  syncPreselect(null);
+                  onClose();
+                },
+              })
+            }
+          />
         </div>
       );
     },
@@ -1813,6 +1987,49 @@ function RenderedDiff({
   // A refresh's hold over a paint that never built (a grammar was still
   // loading) has nothing to keep, so it renders nothing too.
   const holdBlank = contentHold && diffFile === null;
+  // Reported by value (a host keeps it in state): what the rows on screen
+  // draw, never a text still building behind them through a hold or a
+  // deferred frame. The placeholder and an unbuilt paint draw nothing.
+  const unbuilt = {
+    path: deferredPath,
+    text: deferredText,
+    whitespaceHidden: deferredWhitespaceHidden,
+  };
+  const reported = ((): Omit<RowsReport, "anchors"> => {
+    if (blocked) return drawnNow;
+    if (contentPending || holdForGrammar || holdBlank)
+      return { ...unbuilt, cut: "pending" };
+    return paintedShown ?? { ...unbuilt, cut: null };
+  })();
+  // The anchors are read when the report runs, after this commit's rows ran
+  // their effects. A row the library mounts without rendering this component
+  // (a gap expand) re-renders it through the registry, so the report re-runs.
+  const [, rowsMoved] = useState(0);
+  useLayoutEffect(
+    () => anchorRegistry.subscribe(() => rowsMoved((n) => n + 1)),
+    [anchorRegistry],
+  );
+  const lastShown = useRef<RowsReport | null>(null);
+  useLayoutEffect(() => {
+    if (onRows === undefined) return;
+    const rows = { ...reported, anchors: anchorRegistry.snapshot() };
+    const prev = lastShown.current;
+    if (prev !== null && sameRows(prev, rows)) return;
+    lastShown.current = rows;
+    onRows(rows);
+  });
+  // Leaving draws and mounts nothing. Under an error fallback, which reports
+  // nothing itself, this report stands; another arm of the pane reports over
+  // it in the same commit.
+  const leaving = useLatestRef({ onRows, unbuilt });
+  useLayoutEffect(
+    () => () => {
+      lastShown.current = null;
+      const { onRows: report, unbuilt: left } = leaving.current;
+      report?.({ ...left, cut: null, anchors: [] });
+    },
+    [],
+  );
   // The blocked placeholder is final; the pending arm below renders nothing.
   useReportPaneSettled(
     blocked ||
@@ -1956,35 +2173,37 @@ function RenderedDiff({
       {lineWidget?.enabled ? (
         // Line-comment mode: the multi-select variant adds clickable line numbers
         // and drag-to-select, opening the composer below the line. Opt-in only.
-        <DiffViewWithMultiSelect<{ render: () => ReactNode }>
-          ref={multiSelectRef}
-          diffFile={diffFile}
-          // Worker ASTs land as a highlighter PROP, not a rebuild: the view's
-          // effect applies them to its own clone, so expansion state survives.
-          registerHighlighter={shownHighlighter}
-          diffViewMode={diffViewMode}
-          diffViewTheme={isDark ? "dark" : "light"}
-          diffViewHighlight
-          diffViewWrap
-          diffViewFontSize={12}
-          extendData={extendData}
-          renderExtendLine={renderExtendLine}
-          // Makes line-number cells clickable (flows through to the inner
-          // DiffView), which is what opens the widget slot.
-          diffViewAddWidget
-          enableMultiSelect
-          // Track the drag range ourselves so a "+" press on ANY line of it opens
-          // a range composer. The library's own max-line fast path never fires:
-          // "+" mousedown starts a native single-line selection in an ANCESTOR
-          // listener (before React's synthetic handlers), wiping the stored
-          // multiResult; the React onMouseDown then opens the widget and calls
-          // clearSelection, so mouseup fires no onSelectionComplete. The widget
-          // renders during the mousedown flush, BEFORE mouseup — so our captured
-          // range still holds at render time and overrides the single-line report.
-          onMultiSelectComplete={onMultiSelectComplete}
-          onMultiSelectChange={onMultiSelectChange}
-          renderWidgetLine={renderWidgetLine}
-        />
+        <PaintedRowsBehindContext value={rowsBehind}>
+          <DiffViewWithMultiSelect<{ render: () => ReactNode }>
+            ref={multiSelectRef}
+            diffFile={diffFile}
+            // Worker ASTs land as a highlighter PROP, not a rebuild: the view's
+            // effect applies them to its own clone, so expansion state survives.
+            registerHighlighter={shownHighlighter}
+            diffViewMode={diffViewMode}
+            diffViewTheme={isDark ? "dark" : "light"}
+            diffViewHighlight
+            diffViewWrap
+            diffViewFontSize={12}
+            extendData={extendData}
+            renderExtendLine={renderExtendLine}
+            // Makes line-number cells clickable (flows through to the inner
+            // DiffView), which is what opens the widget slot.
+            diffViewAddWidget
+            enableMultiSelect
+            // Track the drag range ourselves so a "+" press on ANY line of it opens
+            // a range composer. The library's own max-line fast path never fires:
+            // "+" mousedown starts a native single-line selection in an ANCESTOR
+            // listener (before React's synthetic handlers), wiping the stored
+            // multiResult; the React onMouseDown then opens the widget and calls
+            // clearSelection, so mouseup fires no onSelectionComplete. The widget
+            // renders during the mousedown flush, BEFORE mouseup — so our captured
+            // range still holds at render time and overrides the single-line report.
+            onMultiSelectComplete={onMultiSelectComplete}
+            onMultiSelectChange={onMultiSelectChange}
+            renderWidgetLine={renderWidgetLine}
+          />
+        </PaintedRowsBehindContext>
       ) : (
         <DiffView<{ render: () => ReactNode }>
           diffFile={diffFile}
@@ -2335,6 +2554,7 @@ export function DiffSurface({
   lineWidget,
   stagingSide,
   forgePatch,
+  paintsOtherCommit,
 }: {
   filePath: string;
   diff: UseQueryResult<FileDiff>;
@@ -2349,6 +2569,8 @@ export function DiffSurface({
   stagingSide?: StagingSide;
   /** See {@link DiffContent}'s prop of the same name. */
   forgePatch?: ForgePatch;
+  /** See {@link DiffContent}'s prop of the same name. */
+  paintsOtherCommit?: boolean;
 }) {
   return (
     <DiffContent
@@ -2368,6 +2590,7 @@ export function DiffSurface({
       lineWidget={lineWidget}
       stagingSide={stagingSide}
       forgePatch={forgePatch}
+      paintsOtherCommit={paintsOtherCommit}
       whitespaceControl
     />
   );
@@ -2397,6 +2620,8 @@ export function DiffContent({
   whitespaceControl = false,
   forgePatch,
   typechangeAnchors = false,
+  whitespaceNote,
+  paintsOtherCommit = false,
 }: {
   filePath: string;
   /** Absent only when the source query has nothing to show; never an empty
@@ -2439,8 +2664,8 @@ export function DiffContent({
    *  the commit on Commits). undefined = local surface. See BinaryFileSummary. */
   anchorCommit?: string | null;
   /** Adds the whitespace section to the Diff options sheet and answers the
-   *  whitespace palette action. Only {@link DiffSurface} sets it, so the
-   *  remote PR hosts get neither. */
+   *  whitespace palette action: set by {@link DiffSurface} and by the
+   *  forge-patch hosts whose `data` comes through `useForgeWhitespaceDiff`. */
   whitespaceControl?: boolean;
   /** The diff text came from a forge (a pull request's patch), not from
    *  `contentRevs`: content mode builds only when the hunk-match guard
@@ -2451,6 +2676,13 @@ export function DiffContent({
    *  (hosts that draw no binary pane's comments elsewhere). Omitted = the half
    *  is read-only. */
   typechangeAnchors?: boolean;
+  /** One quiet line above a text diff (a forge-patch file that keeps its
+   *  whitespace changes, and why). Not a live region. */
+  whitespaceNote?: string;
+  /** The host's comments name another commit than the one this paint shows
+   *  (History while its header or its diff read lags the selection): the
+   *  painted report says pending, so no comment is judged against it. */
+  paintsOtherCommit?: boolean;
 }) {
   // The pane measures itself: this surface mounts at widths from a full window
   // down to a rail-flanked column, and both the split gate and the toolbar's
@@ -2496,9 +2728,12 @@ export function DiffContent({
   // refetch after a flip, and it keeps painting: the two answers differ only in
   // whitespace lines, so a flip never blanks a read-only host. The one stale
   // case is a hunkless whitespace-only `-w` answer once the mode is off: its
-  // empty text would claim "No changes to show".
+  // empty text would claim "No changes to show". A forge-patch host's view
+  // (useForgeWhitespaceDiff) follows the mode itself, and holds a `-w` view
+  // past a flip only while an editor is open, so its marks are never stale.
   const modeStale =
     whitespaceControl &&
+    forgePatch === undefined &&
     !hideWhitespace &&
     data !== undefined &&
     data.whitespaceOnly === true;
@@ -2506,7 +2741,7 @@ export function DiffContent({
   const retainedOther =
     data !== undefined && (data.filePath !== filePath || modeStale);
   const whitespaceOnly =
-    hideWhitespace &&
+    (hideWhitespace || forgePatch !== undefined) &&
     data !== undefined &&
     !retainedOther &&
     data.whitespaceOnly === true;
@@ -2531,6 +2766,9 @@ export function DiffContent({
   const canPreview =
     showsToolbar && canPreviewMarkdown(filePath, repoPath, previewRevs);
   const previewOn = canPreview && mdView === "preview";
+  // The text arm's Preview body's own guard, read before the returns.
+  const previewShown =
+    previewOn && Boolean(repoPath) && previewRevs !== undefined;
   // Each capture node records whether it held focus in its own ref cleanup,
   // which runs before that node's removal: never React's deletion order between
   // siblings, nor a blur event that removal may not fire.
@@ -2825,6 +3063,116 @@ export function DiffContent({
     </div>
   );
 
+  // A binary file's arms, read before the returns: the image arm's guard below,
+  // and a typechange's stacked halves (on an image path too, for a host that
+  // anchors the text half).
+  const halves = data?.isBinary ? typechangeHalves(data.text, filePath) : null;
+  const imageArm =
+    data?.isBinary === true &&
+    Boolean(repoPath) &&
+    imageRevs !== undefined &&
+    imageMime(filePath) !== null &&
+    !(typechangeAnchors && halves !== null);
+  // One report stream for every arm, by value: the text arm's rows and a
+  // typechange's text half report what they draw and mount, and every other
+  // arm mounts no rows. It goes to the enclosing file slot as the pane's
+  // painted report (painted-view.ts), published only while this pane is
+  // mounted.
+  const publish = usePaintedPublish();
+  const latest = useRef<PaneReport | null>(null);
+  const published = useRef<PaneReport | null>(null);
+  const mounted = useRef(false);
+  const dataTruncated = data?.isTruncated === true;
+  // A report's patch is the text its rows build from (an arm with no rows
+  // names its data's), and `truncated` is that text's own cut mark. Each
+  // source says how its rows came in; the mark (and a half's own overrides)
+  // derive from this render's read, so a replay never reuses a stale result.
+  const fromRows: Record<RowsFrom, (rows: RowsReport) => PaneReport> = {
+    read: (rows) => paneReportOf(rows, dataTruncated),
+    // Rows still showing an earlier text (a deferred frame) claim no mark.
+    rows: (rows) =>
+      paneReportOf(rows, dataTruncated && rows.text === data?.text),
+    // A typechange's text half builds from its own section of the read.
+    half: (rows) =>
+      paneReportOf(
+        {
+          ...rows,
+          path: filePath,
+          whitespaceHidden: data?.whitespaceHidden === true,
+        },
+        dataTruncated && rows.text === halves?.text,
+      ),
+  };
+  const lastIn = useRef<{ rows: RowsReport; from: RowsFrom } | null>(null);
+  const report = (rows: RowsReport, from: RowsFrom) => {
+    lastIn.current = { rows, from };
+    const built = fromRows[from](rows);
+    const next: PaneReport = paintsOtherCommit
+      ? { ...built, cut: "pending" }
+      : built;
+    latest.current = next;
+    if (!mounted.current || samePaneReport(published.current, next)) return;
+    published.current = next;
+    publish(next);
+  };
+  const rowsReport =
+    !isPending &&
+    !retainedOther &&
+    data !== undefined &&
+    (data.isBinary
+      ? !imageArm && halves !== null
+      : !whitespaceOnly && !emptyDiff && headerOnly === null && !previewShown);
+  // A failed read with nothing to show paints no patch at all: pending too.
+  const armCut = ((): PaintedCut | null => {
+    if (previewShown) return "preview";
+    return isPending || retainedOther || data === undefined ? "pending" : null;
+  })();
+  // Whether the rows arm's diff has reported since the arm came up: one that
+  // never commits (a renderer throw on its first mount) mounts nothing, and
+  // the pane says so as a pending paint.
+  const rowsSeen = useRef(false);
+  const noRows = (cut: PaintedCut | null): RowsReport => ({
+    path: filePath,
+    text: data?.text ?? "",
+    cut,
+    whitespaceHidden: data?.whitespaceHidden === true,
+    anchors: [],
+  });
+  useLayoutEffect(() => {
+    if (!rowsReport) {
+      rowsSeen.current = false;
+      report(noRows(armCut), "read");
+    } else if (!rowsSeen.current) report(noRows("pending"), "read");
+    // The rows report only when they change: re-run their last report, so a
+    // `paintsOtherCommit` flip or a new read under unchanged rows still
+    // reaches the host.
+    else if (lastIn.current !== null)
+      report(lastIn.current.rows, lastIn.current.from);
+  });
+  // Declared after the arm report, so a mount publishes that commit's report;
+  // the pane's children report before it on every later commit.
+  useLayoutEffect(() => {
+    mounted.current = true;
+    published.current = latest.current;
+    publish(published.current);
+    return () => {
+      mounted.current = false;
+      published.current = null;
+      publish(null);
+    };
+  }, [publish]);
+  const rowsIn = (rows: RowsReport) => {
+    rowsSeen.current = true;
+    report(rows, "rows");
+  };
+  const halfReport =
+    data === undefined
+      ? undefined
+      : (half: RowsReport) => {
+          rowsSeen.current = true;
+          report(half, "half");
+        };
+
   // Diffs load near-instantly from local git, so a skeleton only adds a flash
   // and a layout shift on the way to the real content: the body stays blank
   // under the path row until it's ready. A read parked offline would stay
@@ -2880,7 +3228,6 @@ export function DiffContent({
   // The binary, image, empty and header-only arms draw retained data too, so
   // they carry the same notice as the text diff.
   if (data.isBinary) {
-    const halves = typechangeHalves(data.text, filePath);
     // A host that anchors the typechange halves draws them on an image path
     // too: its text half carries that host's comments and composer.
     if (
@@ -2948,6 +3295,7 @@ export function DiffContent({
           forceUnified={narrowPane}
           revealLanding={controlsRef}
           scrollerRef={scrollerRef}
+          onRows={halfReport}
         />
       );
       return shell(
@@ -3057,6 +3405,9 @@ export function DiffContent({
           {UNDECODABLE_NOTE_COPY[stagingSide]}
         </InfoNote>
       )}
+      {whitespaceNote !== undefined && (
+        <InfoNote className="shrink-0">{whitespaceNote}</InfoNote>
+      )}
       <div ref={scrollerCaptureRef} className="min-h-0 flex-1 overflow-auto">
         {previewOn && repoPath && previewRevs ? (
           // Passed the raw revs, not the truncation-stripped pair below:
@@ -3100,6 +3451,7 @@ export function DiffContent({
               }
               forgePatch={forgePatch}
               dataIsPlaceholder={dataIsPlaceholder}
+              whitespaceHidden={data.whitespaceHidden === true}
               lineAnchors={lineAnchors}
               lineWidget={lineWidget}
               forceUnified={narrowPane}
@@ -3107,6 +3459,7 @@ export function DiffContent({
               scrollerRef={scrollerRef}
               rebuildsOnWhitespace={whitespaceControl}
               lineKeeper={keeper}
+              onRows={rowsIn}
             />
           </>
         )}

@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
@@ -44,6 +45,10 @@ import {
   useRemoteListFilter,
 } from "@/features/conversations/useRemoteListFilter";
 import { useScopeProbeReason } from "@/features/conversations/useScopeProbeReason";
+import {
+  lineComposerOpen,
+  OPEN_PR_REFRESH_HELD,
+} from "@/features/diff/whitespace-mode";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import type { PrStateFilter } from "@/lib/git/api";
@@ -56,6 +61,7 @@ import {
   keepPreviousDataForKeyAxes,
   pendingWriteMatching,
   prDetailsOptions,
+  refreshOpenPr,
   repoKeys,
   useForgeStatus,
   useHoverPrefetch,
@@ -500,6 +506,15 @@ export function PullRequestsPanel({
       .catch(() => {
         // Best-effort: a failed reload leaves the last known records.
       });
+    // The open pull request is read from the store at the press, under this
+    // panel's lens. A re-read can rebuild its diff, so an editor open inside a
+    // diff holds that half of the press.
+    const sel = useUiStore.getState().selectedPr;
+    const open = sel?.kind === "remote" ? Number(sel.id) : Number.NaN;
+    if (Number.isInteger(open) && open > 0) {
+      if (lineComposerOpen()) toast.info(OPEN_PR_REFRESH_HELD(prNoun));
+      else void refreshOpenPr(queryClient, repoPath, lens, open);
+    }
   }
 
   useHotkeyAction("focus-filter", () => filterRef.current?.focus());

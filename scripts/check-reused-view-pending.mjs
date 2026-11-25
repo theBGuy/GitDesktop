@@ -168,6 +168,7 @@ export const ALLOWLIST = [
     ["reviewThreads", "usePrReviewThreads", ["isPaused"], QUERY],
     ["approvals", "usePrApprovals", ["isPending"], QUERY],
     ["prDiff", "usePrDiff", ["isPending", "isPaused"], QUERY],
+    ["contentRevs", "usePrContentRevs", ["isPaused"], QUERY],
   ]),
   ...entries("src/features/pulls/CommitComments.tsx", "CommitComments", [
     ["comments", "useCommitComments", ["isPaused"], QUERY],

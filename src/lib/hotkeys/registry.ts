@@ -1021,7 +1021,8 @@ export const ACTIONS = [
     // Two-way on purpose: a palette row can't show the mode it would flip.
     label: "Show or hide whitespace changes",
     category: "Changes",
-    // Palette-only: live only while a local diff is on screen.
+    // Palette-only: live only while a diff that follows the setting is on
+    // screen (local diffs and pull request diffs).
     defaultBinding: null,
   },
   {

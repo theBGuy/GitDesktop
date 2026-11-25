@@ -142,8 +142,10 @@ unstaged changes (in your working copy or an agent session's) opens in its
 default program (a file your system would run instead is refused), or shows
 in Explorer, right from its diff; for a deleted file, Explorer opens the
 nearest folder that still exists.
-Hide whitespace changes in any local diff to read a re-indented file by the
-lines whose content changed.
+Hide whitespace changes in your working-tree, commit, file-history, compare,
+stash and agent-session diffs, in local pull requests, and in pull request
+diffs on GitHub, GitLab and Bitbucket, to read a re-indented file by the lines
+whose content changed.
 Filter the changes list by path or category, and read a file's `+added -deleted`
 line counts without opening it; a binary file that was only renamed or had its
 mode changed says so when Git can confirm its content is unchanged.
@@ -639,7 +641,10 @@ in one click.
 - **Refresh on demand**: a refresh button beside the list's search box (or
   **Refresh pull requests** in the command palette) re-reads the list you're
   looking at along with its checks, conflict chips, review-state grouping,
-  and your local pull requests.
+  and your local pull requests, plus the pull request you have open (its
+  details, review threads and diff). While you're writing a comment inside a
+  diff, the open pull request keeps what it shows: finish or close the
+  comment, then refresh again to update it.
 - **Fork · Upstream lens**: on a GitHub fork (a repo with an `upstream`
   remote), a **Fork | Upstream** switch in the list toolbar points the
   remote PR list, and every PR you open under it (description, comments,

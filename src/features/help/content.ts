@@ -706,9 +706,9 @@ the last list up, with a line above it saying it couldn't refresh.
   palette (palette-only by default — bind a key in **Settings → Keyboard**) switches
   the layout too while a diff is on screen and wide enough for split, though not
   during a line selection, a discard confirmation or Markdown preview. While you're
-  writing a line comment, replying to a thread in a diff, or editing a pending review
-  comment there, Unified and Split stay locked until you finish or close it, and that
-  diff's **Show full diff** waits too, so the text isn't lost.
+  writing a line comment, replying to a thread in a diff, or editing a review comment
+  or a pending review comment there, Unified and Split stay locked until you finish or
+  close it, and that diff's **Show full diff** waits too, so the text isn't lost.
 - **Split renders as unified** while the pane is too narrow for two readable columns;
   hovering the sheet's **Split** option shows why, and screen readers read the reason
   with it. Your preference is kept either way, so widening the pane brings the split
@@ -717,19 +717,29 @@ the last list up, with a line above it saying it couldn't refresh.
   touch spaces, tabs or line endings, so a re-indented file shows only the lines whose
   content changed; an added or removed blank line still shows. It applies to every
   local diff (the working tree, commit details, a file's history, branch compare,
-  stashes and an agent session's changes) and stays on until you turn it off; a dot
-  on the gear marks it. While it is on, hunks and lines can't be staged, unstaged or
-  discarded from the Changes diff, and the note above the diff offers **Show
+  stashes and an agent session's changes) and to pull request diffs on GitHub, GitLab
+  and Bitbucket (the **Files** tab and a commit in the **Commits** tab), and stays on
+  until you turn it off; a dot on the gear marks it. While it is on, hunks and lines
+  can't be staged, unstaged or discarded from the Changes diff, and the note above the
+  diff offers **Show
   whitespace**; whole files still stage from their rows. A file whose
   only changes are whitespace says so. The line counts in file lists keep counting
   whitespace changes. While a diff is on screen, *Show or hide whitespace changes* in
   the command palette (palette-only by default — bind a key in **Settings → Keyboard**)
-  flips it too. While you're writing a line comment on one of these diffs, or
-  editing one of the open file's line comments in the list below the diff, it
-  stays locked until you finish or close the comment, so the draft isn't lost. A
-  commit comment on a line hidden this way stays in the comment list; while its
-  file is open, **Show whitespace** sits beside it. Diffs of pull requests on a
-  forge always show whitespace.
+  flips it too. While you're writing a line comment on one of these diffs, replying to
+  a thread, editing a comment or editing a pending review comment inside it, it stays
+  locked until you finish or close the comment, so the draft isn't lost. A commit
+  comment you're editing in the list below the diff stays in that list, draft and
+  all, until you finish or close the edit, whatever the diff shows meanwhile. A commit
+  comment on a line hidden this way stays in the comment list; while its file is open,
+  **Show whitespace** sits beside it. A commit comment the open diff doesn't draw for
+  another reason stays listed too, naming each control that draws it inline, in the
+  order you press them: **Raw** while Markdown **Preview** is up, **Show diff anyway**
+  on a file that looks generated, and **Show full diff** past the shown part of a
+  long diff. A pull request file keeps showing whitespace
+  changes, and says so above its diff, when its two versions couldn't be compared, when
+  it is over the size limit, when the versions read don't match the pull request's
+  diff, or when you're offline and a version it needs can't be read.
 - **The file list beside a diff collapses** to a thin strip, handing the diff the whole
   pane. Use the caret above the list, or *Collapse or expand the diff file list*
   (palette-only by default — bind a key in Settings); a pane too narrow to hold both
@@ -1819,9 +1829,12 @@ list (any of them matches), while picks in different groups narrow it. The **Min
 rows are remembered per repository; author and label picks last for the session.
 **Refresh pull requests** (**Refresh merge requests** on GitLab), beside the search
 box, re-reads the list you're looking at along with its checks, conflict chips,
-review-state grouping and your local pull requests; it spins while the forge read is
-in flight. *Refresh pull requests* in the command palette does the same (palette-only
-by default — bind a key in **Settings → Keyboard**).
+review-state grouping, your local pull requests and the pull request you have open (its
+details, review threads and diff); it spins while the list's forge read is in flight.
+While you're writing a comment inside a diff, the open pull request waits: finish or
+close the comment, then refresh again to update it. *Refresh pull requests* in the
+command palette does the same (palette-only by default — bind a key in
+**Settings → Keyboard**).
 While a newly created pull request is still holding its place in the list, the list chases
 the forge on its own for a short spell, so the real row usually arrives without a press.
 
@@ -2286,6 +2299,10 @@ reach across a gap between two blocks of the diff, expanded or not; **GitLab** a
 **Bitbucket** need only its last line in the diff. Where a range breaks that rule,
 **Add single comment** and **Start a review** (**Add to review** once a review is in
 progress) stay disabled and say why.
+
+When the pull request is updated while you're writing a line comment, both buttons
+stay disabled and say why until its new diff is on screen, whether that diff is still
+loading, failed to load, or can't load while you're offline.
 
 A **Review in progress** bar shows the pending count with **Submit review…** and
 **Discard**. Submitting opens a dialog to choose a **verdict** — **Comment**, **Approve**,
@@ -4049,7 +4066,10 @@ with its narration. When GitDesktop can tell a conversation can't be continued (
 agent doesn't have it, or the installed opencode can't continue it), the turn starts a
 fresh one and the timeline says so.
 **Expand any edit step** to see that file's diff inline, watch its
-**live changes** mid-turn, or read the cumulative diff under **Changes**. If a step's diff
+**live changes** mid-turn, or read the cumulative diff under **Changes**. While
+whitespace changes are hidden, an expanded step whose diff shows changed lines says
+so above them, with **Show whitespace**, and a step whose only changes are whitespace
+says that instead, with the same button. If a step's diff
 fails to refresh, the last one stays with a line saying it couldn't refresh and a
 **Retry**, and its live changes pause until a refresh succeeds, such as after **Retry** or
 when you come back to the window. One that fails to load says why and offers **Retry**.

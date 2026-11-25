@@ -53,6 +53,7 @@ import {
   placeholderPaneView,
   type SlotRead,
   useFileSlots,
+  usePaintedView,
   useSlotRead,
   useSlotWidget,
 } from "@/features/diff/file-slot";
@@ -61,6 +62,7 @@ import {
   CommitComments,
   CommitLineComposer,
   type DiffSections,
+  useCommentPins,
   useCommitCommentsGate,
   useCommitLineAnchors,
 } from "@/features/pulls/CommitComments";
@@ -94,7 +96,6 @@ import {
 } from "@/lib/git/queries";
 import {
   type CommitCommentOut,
-  type DiffStatEntry,
   type FileDiff,
   type ForgeProvider,
   providerLabel,
@@ -121,7 +122,6 @@ import {
   OP_IN_PROGRESS_HINT,
   revertCommitConfirm,
 } from "./commit-confirms";
-import { drawnDiffFor } from "./drawn-diff";
 import { EditDatesDialog, type EditDatesTarget } from "./EditDatesDialog";
 import { RESOLVE_CONFLICTS_HINT } from "./edit-dates-route";
 import { headAgrees } from "./editable-set";
@@ -241,14 +241,10 @@ export function CommitDetailView({
     ? keyedPaneView(repoPath, hash, deferredPath, deferredPath)
     : placeholderPaneView(hash);
   const diffSlots = useFileSlots(diffTarget);
-  // The shown file's own diff read (the slot's query): a binary one renders no
-  // line anchors, so its comments stay in the pane's labelled group.
-  const shownDiff = useCommitFileDiff(
-    repoPath,
-    hash,
-    deferredPath,
-    deferredPath !== null && diffEnabledFor(deferredPath),
-  );
+  // What the visible slot has mounted, which the comment list reads.
+  const painted = usePaintedView(diffSlots);
+  // Open list edits: kept out of the pane's anchors and in the list.
+  const pins = useCommentPins();
   // The commit the header shows: while the selected one's details are still a
   // placeholder, the last one whose details settled (the placeholder's source).
   const [settledHash, setSettledHash] = useState(hash);
@@ -318,6 +314,14 @@ export function CommitDetailView({
     () => splitUnifiedDiff(remoteDiff.data ?? ""),
     [remoteDiff.data],
   );
+  // The one patch the slot's anchors, its line composer and the comment list
+  // all resolve a `position` against, so a comment never resolves on one side
+  // only. A failed refetch keeps its answer, still this commit's: the read is
+  // sha-addressed.
+  const commentPatch =
+    providerKey === "github" && remoteDiff.data !== undefined
+      ? remoteSections
+      : undefined;
 
   // Line-anchored comments + the inline composer target the RENDERED file: each
   // diff slot computes them for its own path (CommitFileDiffSlot), so a held
@@ -330,77 +334,8 @@ export function CommitDetailView({
   // While the header lags the selection, the diff is still the rendered commit's
   // only as long as the file list is a placeholder too: a settled list starts
   // the selected commit's diff, which must not take the rendered one's anchors.
+  // The slot folds this into the one gate its anchors and its report share.
   const anchorsMatchDiff = renderedHash === hash || files.isPlaceholderData;
-  const anchorPath = anchorsMatchDiff ? deferredPath : null;
-  // The last SETTLED binary verdict and file list, stamped with the commit they
-  // describe: a commit switch's placeholder window keeps the shown file's
-  // comments grouped from them, never from placeholder data (a text file must
-  // never read as binary off the previous selection's diff).
-  const [retainedDiff, setRetainedDiff] = useState<{
-    hash: string;
-    path: string;
-    isBinary: boolean;
-    data: FileDiff;
-  } | null>(null);
-  if (
-    !shownDiff.isPlaceholderData &&
-    shownDiff.data !== undefined &&
-    deferredPath !== null
-  ) {
-    const isBinary = shownDiff.data.isBinary === true;
-    if (
-      retainedDiff?.hash !== hash ||
-      retainedDiff.path !== deferredPath ||
-      retainedDiff.isBinary !== isBinary ||
-      retainedDiff.data !== shownDiff.data
-    )
-      setRetainedDiff({
-        hash,
-        path: deferredPath,
-        isBinary,
-        data: shownDiff.data,
-      });
-  }
-  // A settled read, or a placeholder whose content is the rendered commit's last
-  // settled read (of the shown, anchored path while the header lags the
-  // selection): a placeholder can be a settled read never rendered.
-  const shownIsRendered =
-    !shownDiff.isPlaceholderData ||
-    (retainedDiff?.hash === renderedHash &&
-      (hash === renderedHash || retainedDiff.path === anchorPath) &&
-      sameDiffContent(retainedDiff.data, shownDiff.data));
-  const [retainedFiles, setRetainedFiles] = useState<{
-    hash: string;
-    rows: DiffStatEntry[];
-  } | null>(null);
-  if (
-    !files.isPlaceholderData &&
-    files.data !== undefined &&
-    (retainedFiles?.hash !== hash || retainedFiles.rows !== files.data)
-  )
-    setRetainedFiles({ hash, rows: files.data });
-  const selectedBinary = (() => {
-    if (!shownDiff.isPlaceholderData) return shownDiff.data?.isBinary === true;
-    if (shownIsRendered && retainedDiff?.path === anchorPath)
-      return retainedDiff.isBinary;
-    if (retainedFiles?.hash !== renderedHash) return false;
-    // Content-changed binaries only: a proven mode-only or pure-rename row's own
-    // diff carries no Binary line, so its settled verdict is non-binary too.
-    const row = retainedFiles.rows.find((r) => r.path === anchorPath);
-    return row !== undefined && row.isBinary && row.binaryKind == null;
-  })();
-  // A shown diff whose placeholder isn't the rendered commit's settled read draws
-  // no inline anchors, so the list keeps a text file's comments too; a binary
-  // file's stay in its group.
-  const selectedPathProp =
-    !shownIsRendered && !selectedBinary ? null : anchorPath;
-  const drawnDiff = drawnDiffFor({
-    selectedPathProp,
-    shownDiff,
-    hash,
-    renderedHash,
-    retainedDiff,
-  });
   // Both commit queries keep serving the PREVIOUS commit while the selected one
   // loads, so everything derived from them is that commit's until it lands.
   const stale = details.isPlaceholderData || files.isPlaceholderData;
@@ -567,6 +502,20 @@ export function CommitDetailView({
   // True exactly when the early returns below fall through to the content; they
   // keep their own pane comparisons, which the detail-pane retention scan reads.
   const commit = details.data;
+  // The header's subject and body scrollers open each commit at the top. Reset
+  // in place, never by a re-key, so a focused subject keeps focus; only for a
+  // commit other than the last one reset for, since an <Activity> re-show
+  // replays this effect over the same commit.
+  const subjectRef = useRef<HTMLHeadingElement | null>(null);
+  const bodyRef = useRef<HTMLParagraphElement | null>(null);
+  const shownHash = commit?.hash;
+  const resetFor = useRef(shownHash);
+  useLayoutEffect(() => {
+    if (shownHash === undefined || shownHash === resetFor.current) return;
+    resetFor.current = shownHash;
+    for (const el of [subjectRef.current, bodyRef.current])
+      if (el) el.scrollTop = 0;
+  }, [shownHash]);
   const fileList = files.data;
   const contentArm =
     pane !== "skeleton" &&
@@ -772,11 +721,20 @@ export function CommitDetailView({
         aria-busy={Boolean(staleDim)}
       >
         <header className="flex flex-col gap-1 border-b px-4 py-3">
-          <h2 className={cn("text-sm font-medium", PLACEHOLDER_FADE, staleDim)}>
+          <h2
+            ref={subjectRef}
+            tabIndex={0}
+            className={cn(
+              "max-h-10 overflow-y-auto text-sm font-medium break-words outline-none focus-visible:ring-1 focus-visible:ring-ring/50",
+              PLACEHOLDER_FADE,
+              staleDim,
+            )}
+          >
             {commit.subject}
           </h2>
           {commit.body && (
             <p
+              ref={bodyRef}
               className={cn(
                 "max-h-24 overflow-y-auto text-xs whitespace-pre-wrap text-muted-foreground",
                 PLACEHOLDER_FADE,
@@ -1061,13 +1019,11 @@ export function CommitDetailView({
                     stale={stale}
                     comments={comments.data}
                     commentsReady={commentsReady}
-                    // A null list path keeps every file's comments in the
-                    // list, so no slot may draw them inline then.
-                    anchorsOn={commentsReady && selectedPathProp !== null}
+                    mayPaintRendered={anchorsMatchDiff}
+                    pinned={pins.pinned}
                     commentRefs={commentRefs}
                     providerKey={providerKey}
-                    remoteSections={remoteSections}
-                    remoteDiffReady={remoteDiff.isSuccess}
+                    commentPatch={commentPatch}
                     reportRead={diffSlots.reportRead}
                   />
                 ) : (
@@ -1087,16 +1043,13 @@ export function CommitDetailView({
           sha={renderedHash}
           canComment={canCommentCommits}
           remoteLabel={remoteLabel}
-          diffSections={providerKey === "github" ? remoteSections : undefined}
+          diffSections={commentPatch}
           // Only GitHub resolves a comment's line through the fetched patch, so only
           // GitHub has to wait for it; the others anchor by plain line and are always
           // ready.
-          diffReady={providerKey !== "github" || remoteDiff.isSuccess}
-          // Null keeps every file's comments in the list, so every slot's inline
-          // anchors are off then (the slots' `anchorsOn`).
-          selectedPath={selectedPathProp}
-          selectedBinary={selectedBinary}
-          drawnDiff={drawnDiff}
+          diffReady={providerKey !== "github" || commentPatch !== undefined}
+          painted={painted}
+          pins={pins}
           onSelectFile={selectFileFromComments}
           lens="origin"
           stale={stale}
@@ -1152,11 +1105,11 @@ function CommitFileDiffSlot({
   stale,
   comments,
   commentsReady,
-  anchorsOn,
+  mayPaintRendered,
+  pinned,
   commentRefs,
   providerKey,
-  remoteSections,
-  remoteDiffReady,
+  commentPatch,
   reportRead,
 }: {
   repoPath: string;
@@ -1170,13 +1123,16 @@ function CommitFileDiffSlot({
   stale: boolean;
   comments: CommitCommentOut[] | undefined;
   commentsReady: boolean;
-  /** Inline anchors are allowed: the list names a file (null makes the list
-   *  keep every comment, so no slot may draw inline then). */
-  anchorsOn: boolean;
+  /** The diff may still be the rendered commit's (the header's selection
+   *  hasn't moved past it with a settled file list). */
+  mayPaintRendered: boolean;
+  /** The host's open list edits, which draw no anchor here. */
+  pinned: ReadonlySet<string>;
   commentRefs: MarkdownRefs | undefined;
   providerKey: ForgeProvider;
-  remoteSections: DiffSections;
-  remoteDiffReady: boolean;
+  /** GitHub's patch of the rendered commit, the list's too; undefined until
+   *  read, and on every other forge. */
+  commentPatch: DiffSections | undefined;
   reportRead: (read: SlotRead) => void;
 }) {
   const diff = useCommitFileDiff(repoPath, hash, path, enabled);
@@ -1198,16 +1154,24 @@ function CommitFileDiffSlot({
       settledRead.data !== diff.data)
   )
     setSettledRead({ hash, path, data: diff.data });
+  // A read of its own key is the rendered commit's only when the selection is:
+  // a cached diff of the selected commit can answer, its fetch disabled, while
+  // the header and comments are still the previous commit's.
   const diffIsRendered =
-    !diff.isPlaceholderData ||
+    (!diff.isPlaceholderData && hash === renderedHash) ||
     (settledRead?.hash === renderedHash &&
       settledRead.path === path &&
       sameDiffContent(settledRead.data, diff.data));
+  // Whether the paint is the commit the comments name: the one gate for the
+  // anchors and the pane's painted report, so the list never judges a comment
+  // against another commit's patch.
+  const paintsRendered = mayPaintRendered && diffIsRendered;
   const lineAnchors = useCommitLineAnchors(
     comments,
-    providerKey === "github" ? remoteSections : undefined,
-    anchorsOn && diffIsRendered ? path : null,
+    commentPatch,
+    commentsReady && paintsRendered ? path : null,
     commentRefs,
+    pinned,
   );
   // The diff query outlasts the commit's own stale window with the previous
   // FILE's diff, so the rendered lines can belong to another file or commit than
@@ -1219,13 +1183,14 @@ function CommitFileDiffSlot({
     // with a path and line read off the previous one's diff.
     if (diffStale) return undefined;
     // On GitHub the composer recovers its `position` from the FORGE diff; until
-    // that fetch succeeds `remoteSections` is empty, so every line would open the
+    // that read answers there is no patch, so every line would open the
     // composer disabled with "This line isn't in the commit's diff for this file"
     // — a reason that blames the line rather than the missing patch. So keep the
     // line numbers un-clickable (read-only diff) until the remote diff loads; the
     // whole-commit composer in the pane below still works. GitLab/Bitbucket anchor
     // by plain line and need no remote diff, so they're unaffected.
-    if (providerKey === "github" && !remoteDiffReady) return undefined;
+    if (providerKey === "github" && commentPatch === undefined)
+      return undefined;
     return {
       enabled: true,
       render: ({ side, line, fromLine, onClose }) => (
@@ -1237,9 +1202,7 @@ function CommitFileDiffSlot({
           line={line}
           fromLine={fromLine}
           provider={providerKey}
-          fileSection={
-            providerKey === "github" ? remoteSections.get(path) : undefined
-          }
+          fileSection={commentPatch?.get(path)}
           onClose={onClose}
           lens="origin"
         />
@@ -1252,8 +1215,7 @@ function CommitFileDiffSlot({
     repoPath,
     hash,
     providerKey,
-    remoteSections,
-    remoteDiffReady,
+    commentPatch,
   ]);
   const lineWidget = useSlotWidget(widget);
   return (
@@ -1265,6 +1227,7 @@ function CommitFileDiffSlot({
       contentRevs={{ oldRev: `${hash}~1`, newRev: hash }}
       lineAnchors={lineAnchors}
       lineWidget={lineWidget}
+      paintsOtherCommit={!paintsRendered}
     />
   );
 }

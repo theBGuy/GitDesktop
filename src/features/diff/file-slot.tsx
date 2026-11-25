@@ -1,12 +1,15 @@
 import {
+  createContext,
   type ReactNode,
   type RefObject,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import {
@@ -28,6 +31,12 @@ import {
   slotWidget,
   startPaneHold,
 } from "./diff-pane-slots";
+import {
+  createPaintedRelay,
+  type PaintedRelay,
+  type PaintedView,
+  type PaneReport,
+} from "./painted-view";
 
 // The diff panes' file slots, shared by the Changes pane and every file-rail
 // host. Imports stay this light (never ./DiffSurface): hosts outside the diff
@@ -50,6 +59,27 @@ const SLOT_FRAME_CLASS: Record<SlotPhase, string> = {
   // PLACEHOLDER_FADE would fade the slot in instead of showing it at once.
   preparing: "absolute inset-0 [clip-path:inset(50%)]",
 };
+
+const ignoreReport = () => undefined;
+
+/** Where the diff inside a file slot reports what it has mounted (see
+ *  painted-view.ts). Outside a slot, nowhere. */
+const PaintedPublish =
+  createContext<(report: PaneReport | null) => void>(ignoreReport);
+
+/** The slot's report sink for a diff pane: call it with every change of what
+ *  the pane has mounted, and with null when the pane goes. */
+export function usePaintedPublish(): (report: PaneReport | null) => void {
+  return useContext(PaintedPublish);
+}
+
+/** What the host's visible slot has mounted; null while no visible slot
+ *  reports, which means nothing is inline. */
+export function usePaintedView(slots: {
+  painted: PaintedRelay;
+}): PaintedView | null {
+  return useSyncExternalStore(slots.painted.subscribe, slots.painted.view);
+}
 
 /** A host's no-file placeholder or a conflict view. Only the placeholder is
  *  ever held (a first selection prepares out of sight, clipped over it), and
@@ -77,6 +107,7 @@ function FileSlot({
   phase,
   onSettled,
   focusRescue,
+  relay,
   children,
 }: {
   slotKey: string;
@@ -90,8 +121,33 @@ function FileSlot({
     settled: boolean,
   ) => void;
   focusRescue: RefObject<HTMLElement | null>;
+  relay: PaintedRelay;
   children: ReactNode;
 }) {
+  // The diff's latest report, relayed to the host while this slot is visible
+  // (shown or held): a preparing slot is out of sight, so what it mounts is
+  // inline nowhere. Its children's effects run before this slot's, so the
+  // effect below re-relays a report made in a commit that moved the slot.
+  const [owner] = useState(() => ({}));
+  const relayed = useRef<{
+    report: PaneReport | null;
+    visible: boolean;
+  }>({ report: null, visible: false });
+  const publish = useCallback(
+    (report: PaneReport | null) => {
+      const r = relayed.current;
+      r.report = report;
+      if (r.visible) relay.set(owner, report);
+    },
+    [relay, owner],
+  );
+  useLayoutEffect(() => {
+    const r = relayed.current;
+    r.visible = phase !== "preparing";
+    if (!r.visible) relay.clear(owner);
+    else relay.set(owner, r.report);
+  }, [phase, relay, owner]);
+  useLayoutEffect(() => () => relay.clear(owner), [relay, owner]);
   const frameRef = useRef<HTMLDivElement>(null);
   const [gates, setGates] = useState<ReadonlyMap<object, boolean>>(
     () => new Map(),
@@ -136,7 +192,9 @@ function FileSlot({
       )}
       inert={phase !== "shown"}
     >
-      <DiffPaneHold value={hold}>{children}</DiffPaneHold>
+      <DiffPaneHold value={hold}>
+        <PaintedPublish value={publish}>{children}</PaintedPublish>
+      </DiffPaneHold>
     </div>
   );
 }
@@ -167,6 +225,8 @@ export interface FileSlotsState<F> {
   /** Where focus inside a slot that turns held lands; also a landing for a
    *  host's own focus moves that leave the pane with nothing to focus. */
   sinkRef: RefObject<HTMLSpanElement | null>;
+  /** The visible slot's report; read it with {@link usePaintedView}. */
+  painted: PaintedRelay;
 }
 
 /**
@@ -208,7 +268,8 @@ export function useFileSlots<F>(target: PaneView<F>): FileSlotsState<F> {
     [],
   );
   const sinkRef = useRef<HTMLSpanElement>(null);
-  return { hold, holding, read, reportRead, onSettled, sinkRef };
+  const [painted] = useState(createPaintedRelay);
+  return { hold, holding, read, reportRead, onSettled, sinkRef, painted };
 }
 
 /**
@@ -246,6 +307,7 @@ export function FileSlots<F>({
             phase={phase}
             onSettled={slots.onSettled}
             focusRescue={slots.sinkRef}
+            relay={slots.painted}
           >
             {children(view)}
           </FileSlot>

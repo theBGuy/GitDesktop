@@ -39,19 +39,28 @@ export const WHITESPACE_ANNOUNCEMENT: { hidden: string; shown: string } = {
   shown: "Whitespace changes are shown.",
 };
 
+/** An agent transcript's step diff read with whitespace hidden: it has no hunk
+ *  or line actions to switch off, so it says only what the diff leaves out. */
+export const WHITESPACE_HIDDEN_NOTE = "Whitespace changes are hidden.";
+
 export const WHITESPACE_COMPOSER_HELD =
-  "Finish or close the line comment you're writing (here or in another tab), then change the whitespace view.";
+  "Finish or close the comment you're writing (here or in another tab), then change the whitespace view.";
 
 /** The layout twin: switching Unified/Split rebuilds the view, and an editor
  *  open inside a diff (a line composer, or a comment edit, a thread reply or a
  *  pending draft's edit in an anchor row) would lose its text with it. */
 export const LAYOUT_COMPOSER_HELD =
-  "Finish or close the line comment you're writing (here or in another tab), then change the diff display.";
+  "Finish or close the comment you're writing (here or in another tab), then change the diff display.";
 
 /** Show full diff rebuilds only its own diff, so it holds only on an editor
  *  open inside that diff (`diffEditorOpen` over the diff's root). */
 export const SHOW_FULL_COMPOSER_HELD =
   "Finish or close the comment you're writing, then show the full diff.";
+
+/** The list's Refresh re-reads the open pull request, which can rebuild its
+ *  diff: an editor open inside a diff holds that half of the press. */
+export const OPEN_PR_REFRESH_HELD = (noun: string) =>
+  `Finish or close the comment you're writing in a diff (here or in another tab), then refresh again to update the open ${noun}.`;
 
 // Both diff settings are app-wide and hidden tabs keep their DOM under
 // `<Activity>`, so a flip from any pane rebuilds a hidden tab's composer too.
@@ -74,17 +83,19 @@ export function lineComposerOpen(): boolean {
   return diffEditorOpen(document);
 }
 
-/** The whitespace probe: a composer is open on a diff a whitespace flip
- *  re-reads, or a comment edit is open in a commit-comments row the flip may
- *  drop. The composer wrapper's `data-diff-line-widget` is "whitespace"
- *  exactly on a host with a whitespace mode (DiffContent's
- *  `whitespaceControl`); a forge patch ("layout") never changes with the
- *  setting. A row marked `data-whitespace-row` unmounts with its Thread, whose
- *  root carries `data-thread-editing` while its editor is open. */
+/** The whitespace probe: an editor is open in a diff a whitespace flip
+ *  rebuilds. The composer wrapper's `data-diff-line-widget` and an anchor
+ *  row's `data-diff-anchor` are "whitespace" exactly on a host with a
+ *  whitespace mode (DiffContent's `whitespaceControl`), where an anchor row's
+ *  comment edit, thread Reply or draft edit counts too; a diff without one
+ *  ("layout") never changes with the setting. A listed comment's edit is no
+ *  arm: its row is pinned to the list (painted-view.ts `placeComments`), so
+ *  no flip unmounts it. ONE literal, read here directly (CommitComments'
+ *  observer filter lists its attribute names). */
 export function whitespaceComposerOpen(): boolean {
   return (
     document.querySelector(
-      '[data-diff-line-widget="whitespace"], [data-whitespace-row] [data-thread-editing]',
+      '[data-diff-line-widget="whitespace"], [data-diff-anchor="whitespace"] [data-thread-editing], [data-diff-anchor="whitespace"] [data-diff-editor]',
     ) !== null
   );
 }
