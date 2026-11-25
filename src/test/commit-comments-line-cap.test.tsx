@@ -88,6 +88,8 @@ const HEADER =
 // A 300-line added file: past the pane's 200-line cap, so a hunk-only diff
 // draws its first lines until Show full diff.
 const LONG = `${HEADER}@@ -0,0 +1,300 @@\n${Array.from({ length: 300 }, (_, i) => `+l${i + 1}\n`).join("")}`;
+// A 3-line file: a comment on line 50 has no row to draw on.
+const SHORT = `${HEADER}@@ -0,0 +1,3 @@\n+a\n+b\n+c\n`;
 // A minified-looking first line: the pane shows a placeholder, no rows.
 const MEGA = `${HEADER}@@ -0,0 +1,2 @@\n+${"x".repeat(20_001)}\n+short\n`;
 
@@ -241,6 +243,33 @@ describe("a commit comment past the pane's line cap", () => {
       .click(screen.getByRole("button", { name: "Show diff anyway" }));
     await waitFor(() => expect(inline()).not.toBeNull());
     expect(screen.getAllByText(BODY)).toHaveLength(1);
+    client.clear();
+  }, 30_000);
+});
+
+describe("a listed comment note keeps its leading space", () => {
+  // A flex item drops leading white space, so the note span must preserve it.
+  const noteSpan = (text: RegExp) =>
+    screen.getByText(text, { selector: "span" });
+
+  it("on a step note", async () => {
+    const client = renderPrCommit(LONG, 250);
+    await waitFor(() => expect(newLine(150)).not.toBeNull(), {
+      timeout: 10_000,
+    });
+    const span = await waitFor(() => noteSpan(/inline after Show full diff/));
+    expect(span.textContent).toBe(" · inline after Show full diff");
+    expect(span.classList.contains("whitespace-pre")).toBe(true);
+    client.clear();
+  }, 30_000);
+
+  it("on the couldn't place note", async () => {
+    const client = renderPrCommit(SHORT, 50);
+    const span = await waitFor(() => noteSpan(/couldn't place in this diff/), {
+      timeout: 10_000,
+    });
+    expect(span.textContent).toBe(" · couldn't place in this diff");
+    expect(span.classList.contains("whitespace-pre")).toBe(true);
     client.clear();
   }, 30_000);
 });

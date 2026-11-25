@@ -939,7 +939,9 @@ export function CommitComments({
                                   {lineLabel}
                                 </span>
                               )}
-                              <span className="shrink-0 font-sans">{note}</span>
+                              <span className="shrink-0 whitespace-pre font-sans">
+                                {note}
+                              </span>
                             </p>
                           );
                           if (reason !== "whitespace") return annotated;
