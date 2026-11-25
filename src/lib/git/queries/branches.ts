@@ -378,8 +378,15 @@ export function useDeleteBranch(repo: string) {
   );
 }
 
+export type DeleteRemoteBranchArgs = {
+  remote: string;
+  name: string;
+  expectedTip: string | undefined;
+};
+
 /** Deletes a branch on its remote, leased on the `expectedTip` the caller
  *  passes; the backend refuses the delete when that tip is absent or empty.
+ *  The key is required so a caller can't leave the lease out.
  *  Invalidates the remote-branches list (the row disappears), the local
  *  branches (their upstream may now be gone), and the PR rows across both
  *  lenses: GitHub closes a PR whose head branch is deleted asynchronously, so
@@ -391,7 +398,7 @@ export function useDeleteRemoteBranch(repo: string) {
   const prListKeys = headDeletePrListKeys(repo);
   return useRepoMutation(
     repo,
-    (args: { remote: string; name: string; expectedTip?: string }) =>
+    (args: DeleteRemoteBranchArgs) =>
       api.gitDeleteRemoteBranch(repo, args.remote, args.name, args.expectedTip),
     {
       invalidate: [

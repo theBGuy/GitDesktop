@@ -1510,6 +1510,11 @@ describe("the check and the lookup", () => {
         ],
       }),
     ],
+    [
+      "the same request read again as a new object",
+      openOne,
+      checked([{ ...meanwhileItem }]),
+    ],
   ])(
     "renames once at Rename anyway when its re-read finds %s",
     async (_n, shownPulls, freshPulls) => {
@@ -1610,6 +1615,11 @@ describe("the check and the lookup", () => {
     [
       "another provider",
       checked([meanwhileItem], { provider: "gitlab" }),
+      null,
+    ],
+    [
+      "the same request at another host's address",
+      checked([{ ...meanwhileItem, url: "https://ghe.example/a/b/pull/7" }]),
       null,
     ],
   ])(
@@ -1790,7 +1800,7 @@ describe("the check and the lookup", () => {
     [
       "oldFetchedByName",
       { code: "oldFetchedByName" },
-      "This clone's fetch settings name feat on origin, so fetching would fail once it's renamed there. Untick to rename only here.",
+      "This clone's fetch settings name feat on origin, so fetching could fail once it's renamed there. Untick to rename only here.",
     ],
     [
       "remoteDefault",
@@ -2135,7 +2145,7 @@ describe("the check and the lookup", () => {
       timeout: 2000,
     });
     expect(uncheckedLinesShown().map((p) => p.textContent)).toEqual([
-      "Couldn't check origin for open pull requests: GitHub CLI (gh) not found.",
+      "Couldn't check origin, or its parent repository if it's a fork, for open pull requests: GitHub CLI (gh) not found.",
     ]);
     expect(submit()).toHaveTextContent("Rename anyway");
   });
@@ -2900,7 +2910,7 @@ describe("the outcome", () => {
     ],
     [
       { code: "oldFetchedByName" },
-      "Didn't rename feat: This clone's fetch settings name feat on origin, so fetching would fail once it's renamed there.",
+      "Didn't rename feat: This clone's fetch settings name feat on origin, so fetching could fail once it's renamed there.",
     ],
   ])(
     "toasts only the reason of a refusal that settles after a dismissal",

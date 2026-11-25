@@ -294,6 +294,31 @@ impl PushConfig {
         )
     }
 
+    /// Every `remote.<r>.fetch` value in config order, joined with `\n` and nothing after
+    /// the last: the text `config --get-all` prints, minus its final newline. A valueless
+    /// entry is an empty line; unset is empty.
+    pub(crate) fn fetch_entries(&self, remote: &str) -> String {
+        config_values(&self.0, &format!("remote.{remote}.fetch"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every other remote's `remote.<r>.fetch` values, in config order and joined like
+    /// [`Self::fetch_entries`]. The remote name runs from `remote.` to the key's LAST dot,
+    /// so a dotted name stays whole; a key with no subsection names no remote.
+    pub(crate) fn other_fetch_entries(&self, remote: &str) -> String {
+        self.0
+            .iter()
+            .filter(|(k, _)| {
+                k.strip_prefix("remote.")
+                    .and_then(|rest| rest.rsplit_once('.'))
+                    .is_some_and(|(name, var)| var == "fetch" && name != remote)
+            })
+            .map(|(_, v)| v.as_deref().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// `branch.<b>.remote`, the last value set; None when unset.
     pub(crate) fn branch_remote(&self, branch: &str) -> Option<&str> {
         config_last(&self.0, &format!("branch.{branch}.remote"))
@@ -1667,6 +1692,99 @@ mod tests {
         assert!(on(
             "remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0remote.origin.fetch\n^refs/heads/main\0"
         ));
+    }
+
+    /// The values in config order, joined by newlines: a valueless or empty value is an
+    /// empty line and a value holding a newline spans two; the subsection is exact and other
+    /// remotes' values never appear.
+    #[test]
+    fn fetch_entries_lists_the_remotes_values_one_per_line() {
+        let on = |text: &str| PushConfig::from_listing(text).fetch_entries("origin");
+        assert_eq!(on(""), "");
+        assert_eq!(
+            on("remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0"),
+            ""
+        );
+        assert_eq!(
+            on("remote.Origin.fetch\n+refs/heads/a:refs/remotes/o/a\0"),
+            ""
+        );
+        assert_eq!(
+            on("remote.origin.fetch\n+refs/heads/*:refs/remotes/origin/*\0"),
+            "+refs/heads/*:refs/remotes/origin/*"
+        );
+        assert_eq!(
+            on(concat!(
+                "remote.origin.fetch\n+refs/heads/a:refs/remotes/origin/a\0",
+                "remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0",
+                "REMOTE.origin.FETCH\nrefs/heads/b:refs/remotes/origin/b\0",
+                "remote.origin.fetch\0",
+                "remote.origin.fetch\n\0",
+                "remote.origin.fetch\n+refs/heads/nl\nrefs/heads/second:x\0",
+                "remote.origin.fetch\nrefs/heads/trail  \0",
+            )),
+            concat!(
+                "+refs/heads/a:refs/remotes/origin/a\n",
+                "refs/heads/b:refs/remotes/origin/b\n",
+                "\n",
+                "\n",
+                "+refs/heads/nl\nrefs/heads/second:x\n",
+                "refs/heads/trail  ",
+            )
+        );
+        let spans: Vec<String> = on("remote.origin.fetch\n+refs/heads/nl\nrefs/heads/second:x\0")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(spans, ["+refs/heads/nl", "refs/heads/second:x"]);
+    }
+
+    #[test]
+    fn other_fetch_entries_lists_every_other_remotes_values() {
+        let listing = PushConfig::from_listing(concat!(
+            "remote.origin.fetch\n+refs/heads/*:refs/remotes/origin/*\0",
+            "remote.up.stream.fetch\n+refs/heads/*:refs/remotes/up.stream/*\0",
+            "remote.fetch\nrefs/heads/none:refs/remotes/none\0",
+            "remote.Origin.fetch\n+refs/heads/a:refs/remotes/Origin/a\0",
+            "remote.origin.url\n/srv/o.git\0",
+            "remote.second.fetch\0",
+            "REMOTE.second.FETCH\nrefs/heads/b:refs/remotes/second/b\0",
+        ));
+        assert_eq!(
+            listing.other_fetch_entries("origin"),
+            concat!(
+                "+refs/heads/*:refs/remotes/up.stream/*\n",
+                "+refs/heads/a:refs/remotes/Origin/a\n",
+                "\n",
+                "refs/heads/b:refs/remotes/second/b",
+            )
+        );
+        assert_eq!(
+            listing.other_fetch_entries("up"),
+            concat!(
+                "+refs/heads/*:refs/remotes/origin/*\n",
+                "+refs/heads/*:refs/remotes/up.stream/*\n",
+                "+refs/heads/a:refs/remotes/Origin/a\n",
+                "\n",
+                "refs/heads/b:refs/remotes/second/b",
+            )
+        );
+        assert_eq!(
+            listing.other_fetch_entries("up.stream"),
+            concat!(
+                "+refs/heads/*:refs/remotes/origin/*\n",
+                "+refs/heads/a:refs/remotes/Origin/a\n",
+                "\n",
+                "refs/heads/b:refs/remotes/second/b",
+            )
+        );
+        let alone =
+            PushConfig::from_listing("remote.origin.fetch\n+refs/heads/*:refs/remotes/origin/*\0");
+        assert_eq!(alone.other_fetch_entries("origin"), "");
+        assert_eq!(
+            PushConfig::from_listing("").other_fetch_entries("origin"),
+            ""
+        );
     }
 
     /// A bare push's remote is None only when the winning value is empty.

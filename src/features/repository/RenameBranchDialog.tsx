@@ -54,6 +54,7 @@ import {
 import {
   type FileEntry,
   type OldKeptCause,
+  type PullScope,
   providerLabel,
   type RemoteBranchPulls,
   type RemoteRenameOutcome,
@@ -265,7 +266,7 @@ const REFUSAL_COPY: {
     advice: UNTICK,
   }),
   oldFetchedByName: (n) => ({
-    reason: `This clone's fetch settings name ${n.old} on ${n.remote}, so fetching would fail once it's renamed there.`,
+    reason: `This clone's fetch settings name ${n.old} on ${n.remote}, so fetching could fail once it's renamed there.`,
     advice: UNTICK,
   }),
   remoteDefault: (n) => ({
@@ -321,8 +322,9 @@ function pullsNeedConfirm(pulls: RemoteBranchPulls | undefined): boolean {
 }
 
 /** Whether a Rename anyway press may act on `fresh`: nothing in it is missing
- *  from `shown`. A request is its provider, scope, repo and number; an
- *  unchecked scope is its scope; an unidentified answer is its host. */
+ *  from `shown`. A request is its provider, scope, repo, number and web
+ *  address (`url`); an unchecked scope is its scope; an unidentified answer is
+ *  its host. */
 function pullsCovered(
   shown: RemoteBranchPulls | undefined,
   fresh: RemoteBranchPulls,
@@ -340,7 +342,10 @@ function pullsCovered(
         fresh.items.every((f) =>
           shown.items.some(
             (s) =>
-              s.scope === f.scope && s.repo === f.repo && s.number === f.number,
+              s.scope === f.scope &&
+              s.repo === f.repo &&
+              s.number === f.number &&
+              s.url === f.url,
           ),
         ) &&
         fresh.unchecked.every((f) =>
@@ -489,19 +494,27 @@ function PullRow({
   );
 }
 
+type UncheckedLineScope = PullScope | "both";
+
+const UNCHECKED_SUBJECT: Record<UncheckedLineScope, (n: Names) => string> = {
+  repository: (n) => n.remote,
+  parent: () => "the parent repository",
+  both: (n) => `${n.remote}, or its parent repository if it's a fork,`,
+};
+
 /** One line per unchecked scope, each reason one sentence. Scopes that failed
- *  for the same reason (a missing or signed-out CLI) read as one line, under
- *  the repository's name. */
+ *  for the same reason (a missing or signed-out CLI) read as one `both` line,
+ *  whose subject says neither was checked without claiming a parent exists. */
 function uncheckedLines(
   unchecked: Extract<RemoteBranchPulls, { status: "checked" }>["unchecked"],
-): { scope: "repository" | "parent"; summary: string }[] {
+): { scope: UncheckedLineScope; summary: string }[] {
   const lines = unchecked.map((u) => ({
     scope: u.scope,
     summary: sentence(presentError(u.error).summary),
   }));
   const shared =
     lines.length > 1 && lines.every((l) => l.summary === lines[0].summary);
-  return shared ? [{ scope: "repository", summary: lines[0].summary }] : lines;
+  return shared ? [{ scope: "both", summary: lines[0].summary }] : lines;
 }
 
 /** What the lookup found, under the check's own line. `showNone` prints the
@@ -577,9 +590,8 @@ function PullsBlock({
           <div className="space-y-1 wrap-break-word">
             {uncheckedLines(unchecked).map((u) => (
               <p key={u.scope}>
-                Couldn't check{" "}
-                {u.scope === "parent" ? "the parent repository" : names.remote}{" "}
-                for open {noun}s: {u.summary}
+                Couldn't check {UNCHECKED_SUBJECT[u.scope](names)} for open{" "}
+                {noun}s: {u.summary}
               </p>
             ))}
             <p>

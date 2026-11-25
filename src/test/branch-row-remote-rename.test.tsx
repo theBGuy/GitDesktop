@@ -39,6 +39,7 @@ import {
 import {
   BRANCH_PUSH_ELSEWHERE_MESSAGE,
   branchPushHoldReason,
+  type DeleteRemoteBranchArgs,
   remoteBranchesOptions,
   usePush,
   useRenameBranchOnRemote,
@@ -102,6 +103,12 @@ vi.mock("@/lib/git/worktree", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/worktree")>()),
   listUserWorktrees: vi.fn(),
 }));
+
+// A type query, not a named import: publish-hold-routes fails any named
+// import of a push callee outside the api package.
+type DeleteRemoteParams = Parameters<
+  typeof import("@/lib/git/api")["gitDeleteRemoteBranch"]
+>;
 
 const REPO = "C:/repos/ren-row";
 // Another checkout of the same repository: both resolve to one identity.
@@ -753,5 +760,32 @@ describe("the Remote group's Delete", () => {
     expect(deleteRemoteSpy).toHaveBeenCalledWith(REPO, "origin", "gone", TIP);
     error.mockRestore();
     success.mockRestore();
+  });
+
+  it("types the remote delete's tip as a required key", () => {
+    // @ts-expect-error the api call can't leave the lease's tip out
+    const apiOmits: DeleteRemoteParams = [REPO, "origin", "gone"];
+    const apiUndefined: DeleteRemoteParams = [
+      REPO,
+      "origin",
+      "gone",
+      undefined,
+    ];
+    // @ts-expect-error the hook's args can't leave the lease's tip out
+    const hookOmits: DeleteRemoteBranchArgs = {
+      remote: "origin",
+      name: "gone",
+    };
+    const hookUndefined: DeleteRemoteBranchArgs = {
+      remote: "origin",
+      name: "gone",
+      expectedTip: undefined,
+    };
+    expect([
+      apiOmits.length,
+      apiUndefined.length,
+      hookOmits.name,
+      hookUndefined.expectedTip,
+    ]).toEqual([3, 4, "gone", undefined]);
   });
 });

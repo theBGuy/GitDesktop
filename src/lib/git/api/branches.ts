@@ -155,7 +155,7 @@ export const gitDeleteRemoteBranch = (
   repoPath: string,
   remote: string,
   name: string,
-  expectedTip?: string,
+  expectedTip: string | undefined,
 ) =>
   invoke<void>("git_delete_remote_branch", {
     repoPath,

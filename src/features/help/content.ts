@@ -1225,7 +1225,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   had read for it when the confirmation opened, so a branch that changed on the remote
   since is kept; and it can't be undone from the app). It's refused, with nothing deleted,
   when the remote has more than one push address, or a push address GitDesktop can't match
-  to the repository it fetches from.
+  to the repository it fetches from. It's also refused when GitDesktop can't confirm from
+  your clone's fetch settings that the listed branch came from the remote's branch of the
+  same name (a pull request fetched as \`origin/pr/5\`, for example).
 - The **Merge** dialog previews the result before you commit to it — *fast-forward*, *already
   up to date*, *clean merge*, or *which files will conflict* — worked out in memory without
   touching your files.
