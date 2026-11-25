@@ -246,9 +246,11 @@ describe("the PR commit view on a short window", () => {
     await act(async () => undefined);
     rerender(view(true));
     await act(async () => undefined);
-    // The same nodes, at the scroll they were left at.
-    expect(scrollers()).toEqual(shown);
-    expect(shown.map((el) => el.scrollTop)).toEqual([30, 30]);
+    // The same nodes, at the scroll they were left at (toEqual compares DOM
+    // nodes by structure, so identity is checked per node).
+    const live = scrollers();
+    for (const [i, el] of live.entries()) expect(el).toBe(shown[i]);
+    expect(live.map((el) => el.scrollTop)).toEqual([30, 30]);
     client.clear();
   }, 30_000);
 });

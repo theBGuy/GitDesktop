@@ -173,8 +173,10 @@ describe("History's commit subject", () => {
     await act(async () => undefined);
     view.rerender(ui(HASH_B, true));
     await act(async () => undefined);
-    expect(scrollers()).toEqual(shownB);
-    expect(shownB.map((el) => el.scrollTop)).toEqual([30, 30]);
+    // The same nodes (toEqual compares DOM nodes by structure), at that scroll.
+    const live = scrollers();
+    for (const [i, el] of live.entries()) expect(el).toBe(shownB[i]);
+    expect(live.map((el) => el.scrollTop)).toEqual([30, 30]);
     client.clear();
   }, 30_000);
 });
