@@ -589,17 +589,28 @@ impl ActiveSpecs {
 }
 
 /// The index paths `submodule.active`'s pathspecs match, git doing the matching with
-/// every value as written; None when it is unset.
+/// every value as written; None when it is unset, or when any of its records has no
+/// value: git's read of the list then fails ("missing value", config.c v2.51.1
+/// `check_multi_string`) and its activity check falls through to the URL.
 async fn active_spec_matches(repo_path: &str) -> AppResult<Option<Vec<Vec<u8>>>> {
-    let args = ["config", "-z", "--get-all", "submodule.active"];
-    let Some(values) = config_answer(run_git_raw(Some(repo_path), &args, DEFAULT_TIMEOUT).await?)?
+    // `--get-all -z` prints a valueless record and an empty value alike; with the key
+    // `--get-regexp` prints first, only a record that has a value carries a newline.
+    let args = ["config", "-z", "--get-regexp", r"^submodule\.active$"];
+    let Some(records) = config_answer(run_git_raw(Some(repo_path), &args, DEFAULT_TIMEOUT).await?)?
     else {
         return Ok(None);
     };
-    let values = String::from_utf8(values.stdout)
+    let records = String::from_utf8(records.stdout)
         .map_err(|_| AppError::Command("Couldn't read submodule.active.".into()))?;
+    let mut values = Vec::new();
+    for record in records.strip_suffix('\0').unwrap_or(&records).split('\0') {
+        match record.split_once('\n') {
+            Some((_, value)) => values.push(value),
+            None => return Ok(None),
+        }
+    }
     let mut args = vec!["ls-files", "-z", "--"];
-    args.extend(values.strip_suffix('\0').unwrap_or(&values).split('\0'));
+    args.extend(values);
     let listed = run_git_raw(Some(repo_path), &args, DEFAULT_TIMEOUT)
         .await?
         .exit_verdict()?
@@ -15006,7 +15017,6 @@ mod tests {
             .join("libs/a")
             .to_string_lossy()
             .into_owned();
-        git(&f.sub, &["submodule", "deinit", "-q", "-f", "deep/leaf"]).await;
         for name in ["libs/dep", "libs/a"] {
             let key = format!("submodule.{name}.active");
             git(&f.host, &["config", key.as_str(), "true"]).await;
@@ -15014,17 +15024,21 @@ mod tests {
         git(&f.host, &["config", "submodule.active", ""]).await;
         let dep = Some("libs/dep".to_string());
         for path in [None, dep.clone()] {
+            deinit_leaves(&[f.sub.as_str(), a.as_str()]).await;
             git_submodule_update_core(&state, f.host.clone(), path.clone(), true)
                 .await
                 .unwrap_or_else(|e| panic!("every flag set, {path:?}: {e}"));
+            assert!(exists(&f.sub, "deep/leaf/.git"), "{path:?}: dep's");
+            let a_leaf = exists(&a, "deep/leaf/.git");
+            assert_eq!(a_leaf, path.is_none(), "{path:?}: a's");
         }
-        assert!(exists(&f.sub, "deep/leaf/.git"), "dep's nested leg ran");
-        assert!(exists(&a, "deep/leaf/.git"), "a's nested leg ran");
 
         git(&f.host, &["config", "--unset", "submodule.libs/a.active"]).await;
+        deinit_leaves(&[f.sub.as_str()]).await;
         git_submodule_update_core(&state, f.host.clone(), dep, true)
             .await
             .unwrap_or_else(|e| panic!("a unset, dep named: {e}"));
+        assert!(exists(&f.sub, "deep/leaf/.git"), "a unset: dep's");
         let own = ["submodule", "update", "--init", "--remote"];
         let own = run_git_raw(Some(&f.host), &own, TEST_GIT_HANG_GUARD)
             .await
@@ -15037,6 +15051,72 @@ mod tests {
         match git_submodule_update_core(&state, f.host.clone(), None, true).await {
             Err(AppError::Git { stderr, .. }) => assert_eq!(first(&stderr), first(&own.stderr)),
             other => panic!("a unset, every submodule: {other:?}"),
+        }
+    }
+
+    /// Takes each checkout's nested `deep/leaf` down, so the next update has to set it up
+    /// again; a checkout that never set it up answers on its own.
+    async fn deinit_leaves(subs: &[&str]) {
+        for &sub in subs {
+            let deinit = ["submodule", "deinit", "-q", "-f", "deep/leaf"];
+            run_git_raw(Some(sub), &deinit, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
+            assert!(!exists(sub, "deep/leaf/.git"), "{sub}: taken down");
+        }
+    }
+
+    /// A `submodule.active` record with no value fails git's read of the whole list
+    /// ("missing value for 'submodule.active'"), so git falls back to each submodule's
+    /// URL, a valued record beside it included (measured, git 2.47.3, 2.51.1, 2.56.1): an
+    /// update over every submodule settles the one with a URL and leaves the one without
+    /// alone, and naming that one sets it up.
+    #[tokio::test]
+    async fn remote_update_reads_a_valueless_submodule_active_as_unset() {
+        let f = nested_fixture("update-active-bare").await;
+        let state = AppState::default();
+        let a = Some("libs/a".to_string());
+        git_submodule_add_core(&state, f.host.clone(), "../mid".into(), a, None)
+            .await
+            .unwrap();
+        git(&f.host, &["commit", "-qm", "add a"]).await;
+        let a = Path::new(&f.host)
+            .join("libs/a")
+            .to_string_lossy()
+            .into_owned();
+        let config = Path::new(&f.host).join(".git").join("config");
+        let cases = [
+            ("bare", "\tactive\n"),
+            ("beside a value", "\tactive\n\tactive = libs/a\n"),
+        ];
+        for (case, records) in cases {
+            git(&f.host, &["submodule", "deinit", "-q", "-f", "libs/a"]).await;
+            deinit_leaves(&[f.sub.as_str()]).await;
+            for key in [
+                "submodule.libs/dep.active",
+                "submodule.libs/a.active",
+                "submodule.active",
+            ] {
+                let unset = ["config", "--unset-all", key];
+                let out = run_git_raw(Some(&f.host), &unset, TEST_GIT_HANG_GUARD)
+                    .await
+                    .unwrap();
+                assert!(matches!(out.code, 0 | 5), "{case}: {key}: {}", out.stderr);
+            }
+            let mut text = std::fs::read_to_string(&config).unwrap();
+            text.push_str(&format!("\n[submodule]\n{records}"));
+            std::fs::write(&config, text).unwrap();
+
+            git_submodule_update_core(&state, f.host.clone(), None, true)
+                .await
+                .unwrap_or_else(|e| panic!("{case}, every submodule: {e}"));
+            assert!(exists(&f.sub, "deep/leaf/.git"), "{case}: dep's nested leg");
+            assert!(!exists(&a, ".git"), "{case}: a left alone");
+            let named = Some("libs/a".to_string());
+            git_submodule_update_core(&state, f.host.clone(), named, true)
+                .await
+                .unwrap_or_else(|e| panic!("{case}, a named: {e}"));
+            assert!(exists(&a, "deep/leaf/.git"), "{case}: a named");
         }
     }
 
