@@ -1600,7 +1600,7 @@ describe("the check and the lookup", () => {
           { scope: "parent", error: { kind: "gh", message: "signed out" } },
         ],
       }),
-      "Couldn't check the parent repository",
+      "Couldn't check origin's parent repository, if it's a fork,",
     ],
     [
       "a forge it can't identify",
@@ -2099,7 +2099,7 @@ describe("the check and the lookup", () => {
           },
         ],
       },
-      /Couldn't check the parent repository for open pull requests: .*A pull request from feat would be closed\./,
+      /Couldn't check origin's parent repository, if it's a fork, for open pull requests: .*A pull request from feat would be closed\./,
     ],
     [
       "an unidentified forge",
@@ -2162,7 +2162,7 @@ describe("the check and the lookup", () => {
     });
     expect(uncheckedLinesShown().map((p) => p.textContent)).toEqual([
       "Couldn't check origin for open pull requests: The lookup stopped early.",
-      "Couldn't check the parent repository for open pull requests: GitHub CLI (gh) not found.",
+      "Couldn't check origin's parent repository, if it's a fork, for open pull requests: GitHub CLI (gh) not found.",
     ]);
     expect(submit()).toHaveTextContent("Rename anyway");
   });

@@ -498,13 +498,13 @@ type UncheckedLineScope = PullScope | "both";
 
 const UNCHECKED_SUBJECT: Record<UncheckedLineScope, (n: Names) => string> = {
   repository: (n) => n.remote,
-  parent: () => "the parent repository",
+  parent: (n) => `${n.remote}'s parent repository, if it's a fork,`,
   both: (n) => `${n.remote}, or its parent repository if it's a fork,`,
 };
 
 /** One line per unchecked scope, each reason one sentence. Scopes that failed
- *  for the same reason (a missing or signed-out CLI) read as one `both` line,
- *  whose subject says neither was checked without claiming a parent exists. */
+ *  for the same reason (a missing or signed-out CLI) read as one `both` line.
+ *  No subject that names the parent claims one exists. */
 function uncheckedLines(
   unchecked: Extract<RemoteBranchPulls, { status: "checked" }>["unchecked"],
 ): { scope: UncheckedLineScope; summary: string }[] {
