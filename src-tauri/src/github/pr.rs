@@ -7348,6 +7348,9 @@ struct RawPr {
     /// event data to this head, where the commit list can stop short of it.
     #[serde(default, deserialize_with = "null_to_default")]
     head_ref_oid: String,
+    /// The base commit GitHub's diff refs name (not the live base tip).
+    #[serde(default, deserialize_with = "null_to_default")]
+    base_ref_oid: String,
     #[serde(default)]
     additions: u32,
     #[serde(default)]
@@ -7736,6 +7739,10 @@ pub struct PrDetails {
     /// Bitbucket's newest commit (its PR source hash is abbreviated);
     /// null when none could be read.
     pub head_sha: Option<String>,
+    /// The commit the forge's diff refs name as the base (GitHub's `baseRefOid`,
+    /// GitLab's `diff_refs.base_sha`), an identity for the diff read and never a
+    /// merge base to compute with; null where the forge names none (Bitbucket).
+    pub base_sha: Option<String>,
     pub additions: u32,
     pub deletions: u32,
     pub url: String,
@@ -7942,7 +7949,7 @@ pub struct ApprovalState {
     pub viewer_requested_changes: bool,
 }
 
-const PR_VIEW_FIELDS: &str = "id,number,title,body,author,state,isDraft,baseRefName,headRefName,headRefOid,additions,deletions,url,commits,files,reviews,comments,statusCheckRollup,labels,assignees,reviewRequests,mergeable,mergeStateStatus,isCrossRepository,maintainerCanModify,headRepositoryOwner";
+const PR_VIEW_FIELDS: &str = "id,number,title,body,author,state,isDraft,baseRefName,headRefName,headRefOid,baseRefOid,additions,deletions,url,commits,files,reviews,comments,statusCheckRollup,labels,assignees,reviewRequests,mergeable,mergeStateStatus,isCrossRepository,maintainerCanModify,headRepositoryOwner";
 
 /// Never add review-level `viewerCannotUpdateReasons` here: it errors while a PR is
 /// archived and would take the merge settings down with it. The top-level PR fields
@@ -8695,6 +8702,7 @@ pub async fn gh_pr_view(
         base_ref_name: raw.base_ref_name,
         head_ref_name: raw.head_ref_name,
         head_sha: (!raw.head_ref_oid.is_empty()).then_some(raw.head_ref_oid),
+        base_sha: (!raw.base_ref_oid.is_empty()).then_some(raw.base_ref_oid),
         additions: raw.additions,
         deletions: raw.deletions,
         url: raw.url,
@@ -9581,8 +9589,8 @@ pub async fn review_submit(
         "request_changes" => "REQUEST_CHANGES",
         other => return Err(AppError::InvalidArgument(format!("invalid verdict: {other}"))),
     };
-    // Anchor the review's inline comments against the head the reviewer's lines were
-    // computed on (not whatever head exists at submit time), like `thread_create`.
+    // The head is read at submit time, like `thread_create`, so inline comments anchor
+    // to the head the forge names then.
     let commit_id = head_ref_oid(repo_path, number, lens).await?;
     let mut payload = serde_json::json!({ "event": event, "commit_id": commit_id });
     if let Some(s) = summary.filter(|s| !s.trim().is_empty()) {
@@ -9628,7 +9636,7 @@ pub async fn review_submit(
 /// (HTTP 406 `too_large`). Matched generously within that family — but only that
 /// family — so a real too-large diff degrades to the files-API fallback while
 /// every other failure keeps propagating raw.
-fn is_diff_too_large(msg: &str) -> bool {
+pub(crate) fn is_diff_too_large(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     m.contains("too_large")
         || m.contains("exceeded the maximum number of files")
@@ -12163,6 +12171,7 @@ mod tests {
             base_ref_name: String::new(),
             head_ref_name: String::new(),
             head_sha: None,
+            base_sha: None,
             additions: 0,
             deletions: 0,
             url: String::new(),

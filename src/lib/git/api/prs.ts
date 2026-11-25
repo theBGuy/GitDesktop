@@ -145,6 +145,29 @@ export const forgePrDiff = (
   lens: RemoteLens,
 ) => invoke<string>("forge_pr_diff", { repoPath, number, lens });
 
+/** A diff read's proof: the text is the head's against its base, couldn't be tied to
+ *  them, or the forge named another head or base (the text is then empty). */
+export interface PrDiffAt {
+  diff: string;
+  headProof: "proven" | "unproven" | "moved";
+}
+
+/** The pull request's diff tied to the head and base its details named. */
+export const forgePrDiffAt = (
+  repoPath: string,
+  number: number,
+  lens: RemoteLens,
+  target: { head: string; baseRef: string; baseSha: string | null },
+) =>
+  invoke<PrDiffAt>("forge_pr_diff_at", {
+    repoPath,
+    number,
+    lens,
+    headSha: target.head,
+    baseRef: target.baseRef,
+    baseSha: target.baseSha,
+  });
+
 /** The unified diff for a single commit of a PR/MR (per-commit review view). */
 export const forgePrCommitDiff = (
   repoPath: string,

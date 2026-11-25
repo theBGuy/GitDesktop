@@ -106,6 +106,7 @@ export function SubmitReviewDialog({
   remoteLabel,
   prNoun,
   lens,
+  headHeldReason = null,
 }: {
   repoPath: string;
   number: number;
@@ -117,6 +118,9 @@ export function SubmitReviewDialog({
   prNoun: PrNoun;
   /** The origin|upstream lens the parent PR view resolved. */
   lens: RemoteLens;
+  /** Set while the diff on screen is an older head's or unproven: Submit holds
+   *  with this reason, and nothing else in the dialog does. */
+  headHeldReason?: string | null;
 }) {
   const drafts = useReviewDrafts(repoPath, lens, number);
   const submitReview = useSubmitReview(repoPath, lens);
@@ -187,7 +191,7 @@ export function SubmitReviewDialog({
       number,
       lens,
     );
-  const submitHeld = pending || submitInFlight;
+  const submitHeld = pending || submitInFlight || headHeldReason !== null;
   // Submit holds offline rather than park: a parked post keeps `pending` set,
   // which locks this dialog open until the connection returns.
   const offlineHold = useOfflineHold();
@@ -384,6 +388,9 @@ export function SubmitReviewDialog({
             // keeps the button aria-disabled through either flip.
             reason={(() => {
               switch (true) {
+                // Below a running submit, which explains its own lock.
+                case headHeldReason !== null && !submitInFlight && !pending:
+                  return headHeldReason;
                 case summaryMissing:
                   return "A summary is required to request changes.";
                 case submitInFlight:

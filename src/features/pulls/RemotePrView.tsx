@@ -259,6 +259,7 @@ import {
   type PrListPage,
   type PrThreadOut,
   prConversationHold,
+  prDiffTarget,
   prHeadSha,
   type RemoteLens,
   savedProvider,
@@ -302,7 +303,11 @@ import { useRetained } from "@/lib/use-retained";
 import { useToastClearance } from "@/lib/use-toast-clearance";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
-import { headPendingKind } from "./head-pending";
+import {
+  type HeadPendingKind,
+  headPendingKind,
+  submitReviewHeadHold,
+} from "./head-pending";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import {
   type DeleteBranchBlock,
@@ -1002,7 +1007,7 @@ export function RemotePrView({
     number,
     lens,
     targetDetails.data !== undefined && !targetDetails.isPlaceholderData
-      ? (prHeadSha(targetDetails.data) ?? null)
+      ? prDiffTarget(targetDetails.data)
       : undefined,
   );
   const targetReactions = usePrReactions(
@@ -1060,7 +1065,7 @@ export function RemotePrView({
     shownNumber,
     lens,
     details.data !== undefined && !detailsPlaceholder
-      ? (prHeadSha(details.data) ?? null)
+      ? prDiffTarget(details.data)
       : undefined,
   );
   // The selected PR's late reads, warmed while the hold keeps the old one on
@@ -1290,7 +1295,7 @@ export function RemotePrView({
   // (`prSectionAnswered`, the hold's rule too): reviews, comments, claimed
   // threads, timeline events, reaction counts and the Bitbucket tasks above them
   // appear together, so no row inserts above another after.
-  const feedReady = prSectionAnswered("conversation", {
+  const feedAnswered = prSectionAnswered("conversation", {
     threads: reviewThreads,
     timeline: provider ? timeline : null,
     forgeSettled: !forge.isPending,
@@ -1298,6 +1303,15 @@ export function RemotePrView({
     tasks: canTasks ? prTasks : null,
     diff: prDiff,
   });
+  // Once open, the feed stays open for its PR: a later refetch of a read that
+  // failed with nothing loaded turns it pending again, which would close the
+  // feed and unmount the section whose mount refetched it. Each section shows
+  // its own wait or failure from there. A PR switch closes it.
+  const [feedOpenFor, setFeedOpenFor] = useState<string | null>(null);
+  let feedLatch = feedOpenFor === hold.shownKey ? feedOpenFor : null;
+  if (feedAnswered) feedLatch = hold.shownKey;
+  if (feedLatch !== feedOpenFor) setFeedOpenFor(feedLatch);
+  const feedReady = feedLatch !== null;
   // The header chip's "View" asks for the tasks section, which mounts with the
   // feed: armed per shown PR and consumed once the section is in the DOM.
   const [tasksScrollFor, setTasksScrollFor] = useState<string | null>(null);
@@ -3166,14 +3180,26 @@ export function RemotePrView({
   const diffHeadPending = !diffStale && prDiff.placeholderOf === "olderHead";
   // Either: the revs the details name are not the painted text's.
   const diffNotOwn = diffStale || diffHeadPending;
-  const headPending = diffHeadPending ? headPendingKind(prDiff) : null;
+  // An older head outranks a moved answer under check, which reads as loading
+  // over this key's own text; an unproven diff holds on its own reason.
+  const headPending: HeadPendingKind | null = (() => {
+    switch (true) {
+      case diffHeadPending && !prDiff.headUnproven:
+        return headPendingKind(prDiff);
+      case !diffStale && prDiff.headChecking:
+        return "loading";
+      default:
+        return null;
+    }
+  })();
+  const headUnproven = !diffStale && prDiff.headUnproven;
   // The Files tab's whole-file reads: the rendered pull request's merge base
   // and head. Read only on that tab, and never for a placeholder's head.
   const contentRevs = usePrContentRevs(
     repoPath,
     shownNumber,
     lens,
-    pr ? (prHeadSha(pr) ?? null) : null,
+    pr ? prDiffTarget(pr) : null,
     section === "files" && !detailsPlaceholder,
   );
   // No binary flag from a previous PR's placeholder diff or details.
@@ -3365,6 +3391,15 @@ export function RemotePrView({
   // something to report — someone approved, or a GitLab Premium project requires
   // N approvals.
   const approval = approvals.data;
+  // Approving and requesting changes post a verdict on the head the forge names
+  // when it lands, so they hold like Submit review; revoking either vouches for
+  // no diff and stays free.
+  const approveHeadHold = approval?.viewerHasApproved
+    ? null
+    : submitReviewHeadHold(headPending, headUnproven, prNoun);
+  const requestChangesHeadHold = approval?.viewerRequestedChanges
+    ? null
+    : submitReviewHeadHold(headPending, headUnproven, prNoun);
   const approvalNote =
     approval &&
     (approval.approvalsRequired > 0 || approval.approvedBy.length > 0)
@@ -3940,14 +3975,9 @@ export function RemotePrView({
       // resolve it from the PR's own diff (not local base..head refs),
       // so this works for fork PRs / unfetched head branches.
       async (settings) => {
-        const [text, exclude] = await Promise.all([
+        const [{ text }, exclude] = await Promise.all([
           queryClient.ensureQueryData(
-            prDiffOptions(
-              repoPath,
-              shownNumber,
-              lens,
-              prHeadSha(prForGen) ?? null,
-            ),
+            prDiffOptions(repoPath, shownNumber, lens, prDiffTarget(prForGen)),
           ),
           aiExcludePatterns(repoPath, settings.aiIgnorePatterns),
         ]);
@@ -4063,6 +4093,7 @@ export function RemotePrView({
               lens={lens}
               onClose={onClose}
               headPending={headPending}
+              headUnproven={headUnproven}
               rowsBehind={rowsBehind}
             />
           ),
@@ -4996,14 +5027,9 @@ export function RemotePrView({
             loadDiff: () =>
               queryClient
                 .ensureQueryData(
-                  prDiffOptions(
-                    repoPath,
-                    shownNumber,
-                    lens,
-                    prHeadSha(pr) ?? null,
-                  ),
+                  prDiffOptions(repoPath, shownNumber, lens, prDiffTarget(pr)),
                 )
-                .then((text) => {
+                .then(({ text }) => {
                   // The Files tab's own binary verdict, read from this diff.
                   const bins = binaryRowPaths(pr.files, splitUnifiedDiff(text));
                   return {
@@ -5408,7 +5434,10 @@ export function RemotePrView({
                         // Every term of `disabled` gets words this way, `busy`'s via
                         // `composerReason`, so the hold is never mute.
                         disabled={
-                          busy || approvals.isPending || approvals.isError
+                          busy ||
+                          approvals.isPending ||
+                          approvals.isError ||
+                          approveHeadHold !== null
                         }
                         reason={(() => {
                           switch (true) {
@@ -5420,6 +5449,8 @@ export function RemotePrView({
                               );
                             case approvals.isPending:
                               return "Checking approval state…";
+                            case approveHeadHold !== null:
+                              return approveHeadHold;
                             default:
                               return undefined;
                           }
@@ -5482,7 +5513,8 @@ export function RemotePrView({
                         ) ||
                         requestHeldForAttaching(
                           approval?.viewerRequestedChanges ?? false,
-                        )
+                        ) ||
+                        requestChangesHeadHold !== null
                       }
                       reason={(() => {
                         switch (true) {
@@ -5500,6 +5532,8 @@ export function RemotePrView({
                             approval?.viewerRequestedChanges ?? false,
                           ):
                             return ATTACHING_REASON;
+                          case requestChangesHeadHold !== null:
+                            return requestChangesHeadHold;
                           default:
                             return undefined;
                         }
@@ -6087,6 +6121,7 @@ export function RemotePrView({
         remoteLabel={remoteLabel}
         prNoun={prNoun}
         lens={lens}
+        headHeldReason={submitReviewHeadHold(headPending, headUnproven, prNoun)}
       />
 
       {/* Palette-triggered "Discard pending review" confirmation (the bar has its

@@ -3,9 +3,12 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  HEAD_PENDING_DIALOG_REASON,
   HEAD_PENDING_REVIEW_REASON,
+  HEAD_UNPROVEN_REVIEW_REASON,
   type HeadPendingKind,
   headPendingKind,
+  submitReviewHeadHold,
 } from "@/features/pulls/head-pending";
 import { ReviewComposer } from "@/features/pulls/ReviewComposer";
 import { forgeStatus } from "@/lib/git/api";
@@ -56,6 +59,7 @@ function composer(
   headPending: HeadPendingKind | null,
   provider: "github" | "gitlab" | "bitbucket" = "gitlab",
   draftCount = 0,
+  headUnproven = false,
 ) {
   const onClose = vi.fn();
   return {
@@ -75,6 +79,7 @@ function composer(
           lens="origin"
           onClose={onClose}
           headPending={headPending}
+          headUnproven={headUnproven}
         />
       </QueryClientProvider>
     ),
@@ -160,6 +165,62 @@ describe("the review composer over an older head's diff (AC-A10, AC-A11)", () =>
     expect(writes.thread).toHaveBeenCalledTimes(1);
     expect(writes.thread).toHaveBeenCalledWith(
       expect.objectContaining({ line: 2, side: "new", body: "kept" }),
+    );
+  });
+});
+
+describe("the review composer over an unproven diff (AC-U1)", () => {
+  it("both submit paths and the chord hold with M1; typing and Cancel work; the hold lifts in place", async () => {
+    const { node, onClose } = composer(null, "github", 0, true);
+    const { rerender } = render(node);
+    const user = userEvent.setup();
+    await user.click(editor());
+    await user.keyboard("kept");
+    const box = editor();
+    expectHeld(HEAD_UNPROVEN_REVIEW_REASON("pull request"));
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await user.click(single());
+    expect(writes.thread).not.toHaveBeenCalled();
+    expect(writes.draft).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    rerender(composer(null, "github", 0, false).node);
+    expect(editor()).toBe(box);
+    expect(box).toHaveValue("kept");
+    for (const button of submitButtons())
+      expect(button).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+  });
+
+  it("an older head's reason outranks the unproven one", () => {
+    render(composer("loading", "gitlab", 0, true).node);
+    expectHeld(HEAD_PENDING_REVIEW_REASON.loading("merge request"));
+  });
+});
+
+describe("the Submit review dialog's head hold reasons (AC-D*, AC-P*)", () => {
+  it.each([
+    ["loading", false, HEAD_PENDING_REVIEW_REASON.loading("pull request")],
+    ["offline", false, HEAD_PENDING_REVIEW_REASON.offline("pull request")],
+    ["failed", true, HEAD_PENDING_DIALOG_REASON.failed("pull request")],
+    [null, true, HEAD_UNPROVEN_REVIEW_REASON("pull request")],
+    [null, false, null],
+  ] as const)("%s / unproven %s", (pending, unproven, reason) => {
+    expect(submitReviewHeadHold(pending, unproven, "pull request")).toBe(
+      reason,
+    );
+  });
+
+  it("no dialog reason sends the user to a Retry above the diff", () => {
+    for (const kind of ["loading", "failed", "offline"] as const)
+      expect(HEAD_PENDING_DIALOG_REASON[kind]("pull request")).not.toMatch(
+        /Retry above the diff/,
+      );
+    expect(HEAD_UNPROVEN_REVIEW_REASON("pull request")).not.toMatch(/updated/);
+  });
+
+  it("the failed reason names the tab whose notice carries the Retry", () => {
+    expect(HEAD_PENDING_DIALOG_REASON.failed("pull request")).toBe(
+      "This pull request was updated and its new diff couldn't load. Retry it on the Files tab.",
     );
   });
 });

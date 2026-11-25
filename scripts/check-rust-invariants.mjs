@@ -453,9 +453,9 @@ const COMPARE_ENDPOINT_ALLOWLIST = [
   },
   {
     file: "forge/pr_content.rs",
-    fn: "github_merge_base",
+    fn: "github_compare_path",
     rationale:
-      "both ends are 40/64-hex shas validated before the call (`head` by full_sha at the command, `base` by sha_at from the pull request JSON), so no branch name, brace, `#` or `?` reaches the basehead",
+      "validates both ends with full_sha at fn entry, so no branch name, brace, `#` or `?` reaches the basehead",
   },
 ];
 
@@ -475,9 +475,9 @@ const SHORT_REF_ALLOWLIST = [
 const BARE_REV_ALLOWLIST = [
   {
     file: "forge/pr_content.rs",
-    fn: "github_merge_base",
+    fn: "github_compare_path",
     rationale:
-      "both ends of the compare range are 40/64-hex shas validated before the call (`head` by full_sha at the command, `base` by sha_at from the pull request JSON), so no branch name or tag can reach the rev position",
+      "validates both ends of the compare range with full_sha at fn entry, so no branch name or tag can reach the rev position",
   },
   {
     file: "git/compare.rs",

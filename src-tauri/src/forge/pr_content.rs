@@ -78,6 +78,77 @@ pub async fn forge_pr_content_revs(
     })
 }
 
+/// What a pull request diff read proved about its text: the diff of the caller's head
+/// against its base, a text no read could tie to them, or the forge naming another
+/// head or base (the text is then dropped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HeadProof {
+    Proven,
+    Unproven,
+    Moved,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrDiffAt {
+    /// The unified diff, capped like `forge_pr_diff`; empty when `head_proof` is moved.
+    pub diff: String,
+    pub head_proof: HeadProof,
+}
+
+fn diff_at(diff: String, head_proof: HeadProof) -> PrDiffAt {
+    PrDiffAt {
+        diff: if head_proof == HeadProof::Moved {
+            String::new()
+        } else {
+            diff
+        },
+        head_proof,
+    }
+}
+
+/// A pull request's diff tied to the head and base the caller's details named.
+/// `base_ref` is only compared with the forge's answer, never put in a path or argv.
+#[tauri::command]
+pub async fn forge_pr_diff_at(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+    head_sha: String,
+    base_ref: String,
+    base_sha: Option<String>,
+) -> AppResult<PrDiffAt> {
+    lens_remote(lens.as_deref())?;
+    full_sha(&head_sha)?;
+    if let Some(base) = &base_sha {
+        full_sha(base)?;
+    }
+    let base_sha = base_sha.as_deref();
+    let (diff, proof) = match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => {
+            Box::pin(crate::forge::gitlab::diff_pr_at(
+                &repo_path, number, &head_sha, &base_ref, base_sha,
+            ))
+            .await?
+        }
+        Some((Provider::Bitbucket, _)) => {
+            Box::pin(bitbucket_diff_at(&repo_path, number, &head_sha, &base_ref)).await?
+        }
+        _ => {
+            Box::pin(github_diff_at(
+                &repo_path,
+                number,
+                lens.as_deref(),
+                &head_sha,
+                base_sha,
+            ))
+            .await?
+        }
+    };
+    Ok(diff_at(diff, proof))
+}
+
 /// First parent of `oid`; None = a root commit.
 #[tauri::command]
 pub async fn forge_commit_first_parent(
@@ -381,7 +452,7 @@ fn whitespace_hunks(stdout: &[u8]) -> WhitespaceHunks {
     WhitespaceHunks { hunks, is_binary }
 }
 
-fn is_full_sha(sha: &str) -> bool {
+pub(crate) fn is_full_sha(sha: &str) -> bool {
     matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -533,12 +604,7 @@ async fn github_merge_base(
     head: &str,
 ) -> AppResult<String> {
     let slug = gh_lens_slug(repo, lens).await?;
-    let pr = gh_json(
-        repo,
-        &format!("repos/{slug}/pulls/{number}"),
-        "the pull request",
-    )
-    .await?;
+    let pr = github_pr(repo, &slug, number).await?;
     let base = sha_at(&pr, "/base/sha")
         .ok_or_else(|| gh_unreadable("the pull request", "its base sha is missing".into()))?;
     let both = vec![base.clone(), head.to_string()];
@@ -546,13 +612,168 @@ async fn github_merge_base(
         crate::git::compare::git_objects_present(repo.to_string(), both).await,
         Ok(true)
     );
-    let endpoint = format!("repos/{slug}/compare/{base}...{head}?per_page=1");
+    let endpoint = format!("{}?per_page=1", github_compare_path(&slug, &base, head)?);
     let compare = async {
         let compare = gh_json(repo, &endpoint, "the comparison").await?;
         sha_at(&compare, "/merge_base_commit/sha")
             .ok_or_else(|| gh_unreadable("the comparison", "its merge base sha is missing".into()))
     };
     merge_base_local_first(repo, &base, head, present, compare).await
+}
+
+async fn github_pr(repo: &str, slug: &str, number: u64) -> AppResult<Value> {
+    gh_json(
+        repo,
+        &format!("repos/{slug}/pulls/{number}"),
+        "the pull request",
+    )
+    .await
+}
+
+/// The base repo's three-dot comparison of two commits. The one builder of that path,
+/// so the diff text and the content revs read one comparison.
+fn github_compare_path(slug: &str, base: &str, head: &str) -> AppResult<String> {
+    full_sha(base)?;
+    full_sha(head)?;
+    Ok(format!("repos/{slug}/compare/{base}...{head}"))
+}
+
+/// The webview's diff ceiling, `gh_pr_diff`'s cap. A compare text past it is never cut:
+/// every later file would lose its section.
+const PR_DIFF_CAP: usize = 2_000_000;
+
+const GH_DIFF_ACCEPT: &str = "Accept: application/vnd.github.diff";
+
+/// Distinct over-cap comparisons remembered before the memo starts over.
+const OVER_CAP_MEMO_MAX: usize = 256;
+
+/// Comparisons whose diff measured over the cap. A verdict over two immutable commits
+/// and a constant cap, so it needs no expiry or auth epoch.
+static OVER_CAP: std::sync::LazyLock<std::sync::Mutex<OverCapMemo>> =
+    std::sync::LazyLock::new(Default::default);
+
+#[derive(Debug, PartialEq)]
+enum ComparePlan {
+    Compare,
+    Skip,
+}
+
+#[derive(Debug, Default)]
+struct OverCapMemo(std::collections::HashSet<(String, String, String)>);
+
+impl OverCapMemo {
+    fn key(slug: &str, base: &str, head: &str) -> (String, String, String) {
+        (
+            slug.to_string(),
+            base.to_ascii_lowercase(),
+            head.to_ascii_lowercase(),
+        )
+    }
+
+    fn plan(&self, slug: &str, base: &str, head: &str) -> ComparePlan {
+        if self.0.contains(&Self::key(slug, base, head)) {
+            ComparePlan::Skip
+        } else {
+            ComparePlan::Compare
+        }
+    }
+
+    fn note(&mut self, slug: &str, base: &str, head: &str) {
+        let key = Self::key(slug, base, head);
+        if self.0.len() >= OVER_CAP_MEMO_MAX && !self.0.contains(&key) {
+            self.0.clear();
+        }
+        self.0.insert(key);
+    }
+}
+
+fn over_cap_memo() -> std::sync::MutexGuard<'static, OverCapMemo> {
+    OVER_CAP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[derive(Debug, PartialEq)]
+enum CompareAnswer {
+    Text(String),
+    /// Over the cap, refused as too large, or not found: the by-number read answers.
+    NotAddressable,
+}
+
+/// The compare diff's verdict. Only an exit-0 body over the cap is noted in `memo`: a
+/// 404 or 406 depends on the account or the forge, and costs no body.
+fn gh_compare_outcome(
+    result: AppResult<GhOutput>,
+    memo: &mut OverCapMemo,
+    slug: &str,
+    base: &str,
+    head: &str,
+) -> AppResult<CompareAnswer> {
+    let out = result?;
+    if out.code == 0 {
+        if out.stdout.len() > PR_DIFF_CAP {
+            memo.note(slug, base, head);
+            return Ok(CompareAnswer::NotAddressable);
+        }
+        return Ok(CompareAnswer::Text(out.stdout_lossy()));
+    }
+    match classify_gh_failure(&out.stderr) {
+        GhFailure::NotFound => Ok(CompareAnswer::NotAddressable),
+        GhFailure::Answered if crate::github::pr::is_diff_too_large(&out.stderr) => {
+            Ok(CompareAnswer::NotAddressable)
+        }
+        GhFailure::RateLimited | GhFailure::Transport | GhFailure::Answered => {
+            Err(AppError::Gh(gh_failure_reason(&out)))
+        }
+    }
+}
+
+/// A re-read pull request against the caller's head and base sha: an unreadable re-read
+/// or one missing either sha proves nothing; any other mismatch is another comparison.
+fn gh_reread_proof(pr: &AppResult<Value>, head: &str, base_sha: Option<&str>) -> HeadProof {
+    let Ok(pr) = pr else {
+        return HeadProof::Unproven;
+    };
+    let (Some(pr_head), Some(pr_base)) = (sha_at(pr, "/head/sha"), sha_at(pr, "/base/sha")) else {
+        return HeadProof::Unproven;
+    };
+    let same_base = base_sha.is_none_or(|sha| pr_base.eq_ignore_ascii_case(sha));
+    if pr_head.eq_ignore_ascii_case(head) && same_base {
+        HeadProof::Proven
+    } else {
+        HeadProof::Moved
+    }
+}
+
+/// The compare diff by sha when the caller names a base and the memo hasn't measured it
+/// over the cap; otherwise the by-number diff, then a re-read of the pull request.
+async fn github_diff_at(
+    repo: &str,
+    number: u64,
+    lens: Option<&str>,
+    head: &str,
+    base_sha: Option<&str>,
+) -> AppResult<(String, HeadProof)> {
+    let slug = gh_lens_slug(repo, lens).await?;
+    if let Some(base) = base_sha {
+        if over_cap_memo().plan(&slug, base, head) == ComparePlan::Compare {
+            let path = github_compare_path(&slug, base, head)?;
+            let result = run_gh_raw(
+                Some(repo),
+                &["api", "-H", GH_DIFF_ACCEPT, &path],
+                GH_NETWORK_TIMEOUT,
+            )
+            .await;
+            let answer = gh_compare_outcome(result, &mut over_cap_memo(), &slug, base, head)?;
+            if let CompareAnswer::Text(text) = answer {
+                return Ok((text, HeadProof::Proven));
+            }
+        }
+    }
+    let diff =
+        crate::github::pr::gh_pr_diff(repo.to_string(), number, lens.map(str::to_string)).await?;
+    let pr = github_pr(repo, &slug, number).await;
+    Ok((diff, gh_reread_proof(&pr, head, base_sha)))
 }
 
 /// The local merge base when the clone holds both commits, is measured not shallow and
@@ -1074,6 +1295,56 @@ async fn bitbucket_merge_base(
         .ok_or_else(|| bb_unreadable("merge base", "its commit hash is missing".into()))
 }
 
+/// The by-number diff, then a re-read of the pull request: the diff endpoint answers
+/// text alone, so only the re-read can tie it to the caller's head and base branch.
+async fn bitbucket_diff_at(
+    repo: &str,
+    number: u64,
+    head: &str,
+    base_ref: &str,
+) -> AppResult<(String, HeadProof)> {
+    let diff = crate::forge::bitbucket::diff_pr(repo, number).await?;
+    let pr = async {
+        let creds = http::load_credentials().await?;
+        let base = bb_repo_base(repo).await?;
+        http::bb_get_json::<Value>(
+            &creds,
+            &format!("{base}/pullrequests/{number}"),
+            "pull request",
+            BbOpKind::Read,
+        )
+        .await
+    }
+    .await;
+    Ok((diff, bb_reread_proof(&pr, head, base_ref)))
+}
+
+/// The PR's source hash is abbreviated, so it proves the head as a prefix of it. A
+/// re-read that fails or lacks a readable hash or branch proves nothing.
+fn bb_reread_proof(pr: &AppResult<Value>, head: &str, base_ref: &str) -> HeadProof {
+    let Ok(pr) = pr else {
+        return HeadProof::Unproven;
+    };
+    let source = pr
+        .pointer("/source/commit/hash")
+        .and_then(Value::as_str)
+        .filter(|hash| bb_short_hash(hash));
+    let dest = pr
+        .pointer("/destination/branch/name")
+        .and_then(Value::as_str);
+    let (Some(source), Some(dest)) = (source, dest) else {
+        return HeadProof::Unproven;
+    };
+    let same_head = head
+        .get(..source.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(source));
+    if same_head && dest == base_ref {
+        HeadProof::Proven
+    } else {
+        HeadProof::Moved
+    }
+}
+
 /// A commit hash Bitbucket may abbreviate: git's shortest abbreviation (7) up to a full
 /// SHA-256 id.
 fn bb_short_hash(hash: &str) -> bool {
@@ -1264,6 +1535,217 @@ mod tests {
         assert!(value.get("old_sha").is_none() && value.get("new_sha").is_none());
     }
 
+    #[test]
+    fn diff_at_serializes_to_the_pinned_wire_shape() {
+        for (proof, wire) in [
+            (HeadProof::Proven, "proven"),
+            (HeadProof::Unproven, "unproven"),
+            (HeadProof::Moved, "moved"),
+        ] {
+            let value = serde_json::to_value(diff_at("d".into(), proof)).unwrap();
+            let diff = if proof == HeadProof::Moved { "" } else { "d" };
+            assert_eq!(value, json!({ "diff": diff, "headProof": wire }));
+            assert!(value.get("head_proof").is_none());
+        }
+    }
+
+    const SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const OTHER: &str = "fedcba9876543210fedcba9876543210fedcba98";
+    const TOO_MANY_LINES: &str =
+        "gh: Sorry, the diff exceeded the maximum number of lines (20000) (HTTP 406)";
+    const TOO_MANY_FILES: &str = "gh: Sorry, the diff exceeded the maximum number of files (300). Consider using 'List pull requests files' API or locally cloning the repository instead. (HTTP 406)";
+    const TRANSPORT_STDERR: &str =
+        "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com";
+
+    fn compare(result: AppResult<GhOutput>, memo: &mut OverCapMemo) -> AppResult<CompareAnswer> {
+        gh_compare_outcome(result, memo, "o/r", SHA, SHA256)
+    }
+
+    #[test]
+    fn compare_answers_split_text_fallback_and_failure() {
+        assert!(matches!(
+            classify_gh_failure(TRANSPORT_STDERR),
+            GhFailure::Transport
+        ));
+        let mut memo = OverCapMemo::default();
+        let at_cap = "a".repeat(PR_DIFF_CAP);
+        assert_eq!(
+            compare(gh_output(0, &at_cap, ""), &mut memo).unwrap(),
+            CompareAnswer::Text(at_cap.clone())
+        );
+        assert_eq!(memo.plan("o/r", SHA, SHA256), ComparePlan::Compare);
+        let over = "a".repeat(PR_DIFF_CAP + 1);
+        assert_eq!(
+            compare(gh_output(0, &over, ""), &mut memo).unwrap(),
+            CompareAnswer::NotAddressable
+        );
+        for stderr in [TOO_MANY_LINES, TOO_MANY_FILES, NOT_FOUND_STDERR] {
+            assert_eq!(
+                compare(gh_output(1, "", stderr), &mut memo).unwrap(),
+                CompareAnswer::NotAddressable,
+                "{stderr}"
+            );
+        }
+        for stderr in [HELD_REST_STDERR, TRANSPORT_STDERR, ANSWERED_STDERR, ""] {
+            assert!(
+                matches!(
+                    compare(gh_output(1, "", stderr), &mut memo),
+                    Err(AppError::Gh(_))
+                ),
+                "{stderr}"
+            );
+        }
+        assert!(compare(Err(AppError::GhNotFound), &mut memo).is_err());
+    }
+
+    #[test]
+    fn only_an_over_cap_body_is_remembered() {
+        let over = "a".repeat(PR_DIFF_CAP + 1);
+        let mut memo = OverCapMemo::default();
+        for stderr in [TOO_MANY_LINES, NOT_FOUND_STDERR, HELD_REST_STDERR] {
+            let _ = compare(gh_output(1, "", stderr), &mut memo);
+        }
+        let _ = compare(Err(AppError::GhNotFound), &mut memo);
+        assert_eq!(memo.plan("o/r", SHA, SHA256), ComparePlan::Compare);
+        compare(gh_output(0, &over, ""), &mut memo).unwrap();
+        assert_eq!(memo.plan("o/r", SHA, SHA256), ComparePlan::Skip);
+        let upper = (SHA.to_ascii_uppercase(), SHA256.to_ascii_uppercase());
+        assert_eq!(memo.plan("o/r", &upper.0, &upper.1), ComparePlan::Skip);
+        assert_eq!(memo.plan("o/r", SHA, OTHER), ComparePlan::Compare);
+        assert_eq!(memo.plan("o/r", OTHER, SHA256), ComparePlan::Compare);
+        assert_eq!(memo.plan("o/other", SHA, SHA256), ComparePlan::Compare);
+    }
+
+    #[test]
+    fn the_memo_never_holds_more_than_its_cap() {
+        let mut memo = OverCapMemo::default();
+        for n in 0..=OVER_CAP_MEMO_MAX {
+            memo.note("o/r", SHA, &format!("{n:040x}"));
+            assert!(memo.0.len() <= OVER_CAP_MEMO_MAX);
+        }
+        assert_eq!(memo.0.len(), 1);
+        let last = format!("{OVER_CAP_MEMO_MAX:040x}");
+        assert_eq!(memo.plan("o/r", SHA, &last), ComparePlan::Skip);
+        // Noting a remembered triple at the cap keeps the rest.
+        let mut full = OverCapMemo::default();
+        for n in 0..OVER_CAP_MEMO_MAX {
+            full.note("o/r", SHA, &format!("{n:040x}"));
+        }
+        full.note("o/r", SHA, &format!("{:040x}", 0));
+        assert_eq!(full.0.len(), OVER_CAP_MEMO_MAX);
+    }
+
+    fn gh_pr(head: Option<&str>, base: Option<&str>) -> AppResult<Value> {
+        let mut pr = json!({ "number": 1 });
+        if let Some(head) = head {
+            pr["head"] = json!({ "sha": head });
+        }
+        if let Some(base) = base {
+            pr["base"] = json!({ "sha": base });
+        }
+        Ok(pr)
+    }
+
+    #[test]
+    fn github_reread_proves_only_the_callers_head_and_base() {
+        let failed: AppResult<Value> = Err(AppError::Gh("HTTP 502".into()));
+        assert_eq!(gh_reread_proof(&failed, SHA, None), HeadProof::Unproven);
+        for base in [None, Some(SHA256)] {
+            assert_eq!(
+                gh_reread_proof(&gh_pr(Some(SHA), Some(SHA256)), SHA, base),
+                HeadProof::Proven
+            );
+        }
+        assert_eq!(
+            gh_reread_proof(
+                &gh_pr(Some(&SHA.to_ascii_uppercase()), Some(SHA256)),
+                SHA,
+                Some(&SHA256.to_ascii_uppercase())
+            ),
+            HeadProof::Proven
+        );
+        assert_eq!(
+            gh_reread_proof(&gh_pr(Some(OTHER), Some(SHA256)), SHA, Some(SHA256)),
+            HeadProof::Moved
+        );
+        assert_eq!(
+            gh_reread_proof(&gh_pr(Some(SHA), Some(OTHER)), SHA, Some(SHA256)),
+            HeadProof::Moved
+        );
+        for pr in [
+            gh_pr(None, Some(SHA256)),
+            gh_pr(Some(SHA), None),
+            gh_pr(Some("abc1234"), Some(SHA256)),
+        ] {
+            assert_eq!(gh_reread_proof(&pr, SHA, None), HeadProof::Unproven);
+        }
+    }
+
+    fn bb_pr(hash: Option<&str>, branch: Option<&str>) -> AppResult<Value> {
+        let mut pr = json!({ "id": 1, "source": {}, "destination": {} });
+        if let Some(hash) = hash {
+            pr["source"]["commit"] = json!({ "hash": hash });
+        }
+        if let Some(branch) = branch {
+            pr["destination"]["branch"] = json!({ "name": branch });
+        }
+        Ok(pr)
+    }
+
+    #[test]
+    fn bitbucket_reread_proves_the_head_by_prefix_and_the_base_by_branch() {
+        let failed: AppResult<Value> = Err(AppError::Command("offline".into()));
+        assert_eq!(bb_reread_proof(&failed, SHA, "main"), HeadProof::Unproven);
+        for head in [SHA, SHA256] {
+            assert_eq!(
+                bb_reread_proof(&bb_pr(Some(&head[..12]), Some("main")), head, "main"),
+                HeadProof::Proven
+            );
+        }
+        assert_eq!(
+            bb_reread_proof(
+                &bb_pr(Some(&SHA[..12].to_ascii_uppercase()), Some("main")),
+                SHA,
+                "main"
+            ),
+            HeadProof::Proven
+        );
+        assert_eq!(
+            bb_reread_proof(&bb_pr(Some(&OTHER[..12]), Some("main")), SHA, "main"),
+            HeadProof::Moved
+        );
+        assert_eq!(
+            bb_reread_proof(&bb_pr(Some(&SHA[..12]), Some("develop")), SHA, "main"),
+            HeadProof::Moved
+        );
+        // A readable hash longer than the head can't be its prefix.
+        let longer = format!("{SHA}0");
+        assert_eq!(
+            bb_reread_proof(&bb_pr(Some(&longer), Some("main")), SHA, "main"),
+            HeadProof::Moved
+        );
+        for pr in [
+            bb_pr(Some(&SHA[..6]), Some("main")),
+            bb_pr(Some("0123456789zz"), Some("main")),
+            bb_pr(None, Some("main")),
+            bb_pr(Some(&SHA[..12]), None),
+        ] {
+            assert_eq!(bb_reread_proof(&pr, SHA, "main"), HeadProof::Unproven);
+        }
+    }
+
+    #[test]
+    fn the_compare_path_takes_only_full_shas() {
+        assert_eq!(
+            github_compare_path("o/r", SHA, SHA256).unwrap(),
+            ["repos/o/r/compare/", SHA, "...", SHA256].concat()
+        );
+        for bad in ["main", "abc1234", "{branch}", &format!("{SHA}?x")] {
+            assert!(github_compare_path("o/r", bad, SHA).is_err());
+            assert!(github_compare_path("o/r", SHA, bad).is_err());
+        }
+    }
+
     #[tokio::test]
     async fn invalid_input_is_refused_before_any_spawn() {
         // A missing folder: any git, gh or glab spawn would fail with another kind.
@@ -1301,6 +1783,19 @@ mod tests {
                 .map(|_| ()),
             "unknown remote lens",
         );
+        invalid(
+            forge_pr_diff_at(
+                repo.clone(),
+                1,
+                Some("fork".into()),
+                "abc".into(),
+                "main".into(),
+                Some("abc".into()),
+            )
+            .await
+            .map(|_| ()),
+            "unknown remote lens",
+        );
         for bad in [
             "",
             "abc1234",
@@ -1321,6 +1816,33 @@ mod tests {
                 forge_commit_first_parent(repo.clone(), bad.to_string(), Some("upstream".into()))
                     .await
                     .map(|_| ()),
+                "expected a full commit sha",
+            );
+            // A bad head refuses, and so does a bad base beside a full head.
+            invalid(
+                forge_pr_diff_at(
+                    repo.clone(),
+                    1,
+                    None,
+                    bad.to_string(),
+                    "main".into(),
+                    Some("abc".into()),
+                )
+                .await
+                .map(|_| ()),
+                "expected a full commit sha",
+            );
+            invalid(
+                forge_pr_diff_at(
+                    repo.clone(),
+                    1,
+                    Some("upstream".into()),
+                    SHA.into(),
+                    "main".into(),
+                    Some(bad.to_string()),
+                )
+                .await
+                .map(|_| ()),
                 "expected a full commit sha",
             );
             // The sha precedes the path.

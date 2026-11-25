@@ -28,6 +28,7 @@ use crate::forge::model::{
 use crate::forge::my_work::{
     merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
 };
+use crate::forge::pr_content::HeadProof;
 use crate::forge::session::{classify_glab_failure_for_host, mask_host_tokens, GlabFailure};
 use crate::forge::{
     c_quote_label, c_quote_path, cap_readme, paren_parts, validate_owner, validate_repo_name,
@@ -2233,6 +2234,10 @@ struct GlabMrChanges {
     labels: Vec<String>,
     #[serde(default, deserialize_with = "null_to_default")]
     changes: Vec<GlabChange>,
+    /// The commits this payload's diff was computed between. Unreadable refs read
+    /// as absent, so they never fail the diff or the view that parse this payload.
+    #[serde(default, deserialize_with = "tolerant_diff_refs")]
+    diff_refs: Option<GlabDiffRefs>,
     #[serde(default, deserialize_with = "null_to_default")]
     overflow: bool,
     /// The head commit's pipeline (`null` when the MR has no CI). Its jobs become the
@@ -2670,6 +2675,11 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     } else {
         Some(mr.sha)
     };
+    let base_sha = mr
+        .diff_refs
+        .as_ref()
+        .map(|refs| refs.base_sha.clone())
+        .filter(|sha| crate::forge::pr_content::is_full_sha(sha));
 
     // Resolve the signed-in user once, tolerantly — a failure just hides every
     // comment's edit/delete (drives `viewer_did_author`), it must not fail the view.
@@ -2778,6 +2788,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         base_ref_name: mr.target_branch,
         head_ref_name: mr.source_branch,
         head_sha,
+        base_sha,
         additions,
         deletions,
         url: mr.web_url,
@@ -3498,6 +3509,31 @@ fn gl_range_from_changes(
 /// The unified diff for one merge request, rebuilt from `/changes` into the same
 /// `git`-style format `gh pr diff` produces so the frontend diff viewer parses it.
 pub async fn diff_pr(repo_path: &str, number: u64) -> AppResult<String> {
+    let mr = mr_changes(repo_path, number).await?;
+    Ok(changes_diff(&mr))
+}
+
+/// `diff_pr`'s text plus whether the same payload's diff refs prove it is the diff of
+/// `head` against the caller's base (`base_ref`, and `base_sha` when it names one).
+pub async fn diff_pr_at(
+    repo_path: &str,
+    number: u64,
+    head: &str,
+    base_ref: &str,
+    base_sha: Option<&str>,
+) -> AppResult<(String, HeadProof)> {
+    let mr = mr_changes(repo_path, number).await?;
+    let proof = gl_diff_proof(
+        mr.diff_refs.as_ref(),
+        &mr.target_branch,
+        head,
+        base_ref,
+        base_sha,
+    );
+    Ok((changes_diff(&mr), proof))
+}
+
+async fn mr_changes(repo_path: &str, number: u64) -> AppResult<GlabMrChanges> {
     let enc = encode_project(&project_path(repo_path).await?);
     let out = run_glab(
         Some(repo_path),
@@ -3508,12 +3544,15 @@ pub async fn diff_pr(repo_path: &str, number: u64) -> AppResult<String> {
         GLAB_NETWORK_TIMEOUT,
     )
     .await?;
-    let mr: GlabMrChanges = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+    serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gl_unreadable(
             "merge request changes",
             format!("could not parse GitLab merge request changes: {e}"),
         )
-    })?;
+    })
+}
+
+fn changes_diff(mr: &GlabMrChanges) -> String {
     let mut diff = String::new();
     for c in &mr.changes {
         diff.push_str(&reconstruct_file_diff(c));
@@ -3521,7 +3560,26 @@ pub async fn diff_pr(repo_path: &str, number: u64) -> AppResult<String> {
     // Cap to match the GitHub path (`gh_pr_diff`), so a pathologically large MR
     // can't blow up the diff viewer.
     let (text, _) = crate::git::diff::truncate_at_char_boundary(diff, 2_000_000);
-    Ok(text)
+    text
+}
+
+/// Missing refs prove nothing either way; refs naming another head, target branch or
+/// base sha prove the payload is another comparison's. Shas compare case-insensitively.
+fn gl_diff_proof(
+    refs: Option<&GlabDiffRefs>,
+    target_branch: &str,
+    head: &str,
+    base_ref: &str,
+    base_sha: Option<&str>,
+) -> HeadProof {
+    let Some(refs) = refs.filter(|refs| !refs.head_sha.is_empty()) else {
+        return HeadProof::Unproven;
+    };
+    let other_base = base_sha.is_some_and(|sha| !refs.base_sha.eq_ignore_ascii_case(sha));
+    if !refs.head_sha.eq_ignore_ascii_case(head) || target_branch != base_ref || other_base {
+        return HeadProof::Moved;
+    }
+    HeadProof::Proven
 }
 
 /// Validate a commit sha before it's interpolated into an API path — a hex value
@@ -9600,6 +9658,15 @@ struct GlabDiffRefs {
     start_sha: String,
     #[serde(default)]
     head_sha: String,
+}
+
+/// `diff_refs` that are absent, null or of any unreadable shape read as None.
+fn tolerant_diff_refs<'de, D>(deserializer: D) -> Result<Option<GlabDiffRefs>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// Fetch an MR's `diff_refs`. Errors clearly when GitLab omits them (a not-yet-diffable
@@ -21220,6 +21287,80 @@ mod tests {
         let out = reconstruct_file_diff(&c);
         assert!(out.contains("--- a/gone.txt\n"));
         assert!(out.contains("+++ /dev/null\n"));
+    }
+
+    const DIFF_AT_HEAD: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const DIFF_AT_BASE: &str = "fedcba9876543210fedcba9876543210fedcba98";
+    const DIFF_AT_OTHER: &str = "1111111111111111111111111111111111111111";
+
+    fn changes_body(refs: &str, target: &str) -> GlabMrChanges {
+        let body = format!(
+            r#"{{"iid":6,"web_url":"u","title":"t","target_branch":"{target}",
+            "source_branch":"feat","state":"opened"{refs},"changes":[
+            {{"old_path":"a.txt","new_path":"a.txt","diff":"@@ -1 +1 @@\n-x\n+y\n"}},
+            {{"old_path":"n.md","new_path":"n.md","new_file":true,"diff":"@@ -0,0 +1 @@\n+hi"}}]}}"#
+        );
+        serde_json::from_str(&body).unwrap()
+    }
+
+    fn refs(base: &str, head: &str) -> String {
+        format!(r#","diff_refs":{{"base_sha":"{base}","start_sha":"{base}","head_sha":"{head}"}}"#)
+    }
+
+    #[test]
+    fn the_changes_rebuild_is_the_by_number_diff() {
+        let expected = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\n\
+            diff --git a/n.md b/n.md\nnew file mode 100644\n--- /dev/null\n+++ b/n.md\n@@ -0,0 +1 @@\n+hi\n";
+        for refs in ["".to_string(), refs(DIFF_AT_BASE, DIFF_AT_HEAD)] {
+            assert_eq!(changes_diff(&changes_body(&refs, "main")), expected);
+        }
+    }
+
+    #[test]
+    fn diff_refs_prove_the_payload_only_for_the_callers_comparison() {
+        let proof = |refs: &str, target: &str, head: &str, base_sha: Option<&str>| {
+            let mr = changes_body(refs, target);
+            gl_diff_proof(
+                mr.diff_refs.as_ref(),
+                &mr.target_branch,
+                head,
+                "main",
+                base_sha,
+            )
+        };
+        let full = refs(DIFF_AT_BASE, DIFF_AT_HEAD);
+        for unreadable in [
+            "".to_string(),
+            r#","diff_refs":null"#.to_string(),
+            r#","diff_refs":"x""#.to_string(),
+            r#","diff_refs":{"base_sha":null,"head_sha":null}"#.to_string(),
+            refs(DIFF_AT_BASE, ""),
+        ] {
+            assert_eq!(
+                proof(&unreadable, "main", DIFF_AT_HEAD, None),
+                HeadProof::Unproven,
+                "{unreadable}"
+            );
+        }
+        assert_eq!(proof(&full, "main", DIFF_AT_HEAD, None), HeadProof::Proven);
+        assert_eq!(
+            proof(
+                &full,
+                "main",
+                &DIFF_AT_HEAD.to_ascii_uppercase(),
+                Some(&DIFF_AT_BASE.to_ascii_uppercase())
+            ),
+            HeadProof::Proven
+        );
+        assert_eq!(proof(&full, "main", DIFF_AT_OTHER, None), HeadProof::Moved);
+        assert_eq!(
+            proof(&full, "develop", DIFF_AT_HEAD, None),
+            HeadProof::Moved
+        );
+        assert_eq!(
+            proof(&full, "main", DIFF_AT_HEAD, Some(DIFF_AT_OTHER)),
+            HeadProof::Moved
+        );
     }
 
     // The three shape tests below assert header/rename/`+++` lines that match

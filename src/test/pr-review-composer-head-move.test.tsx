@@ -14,12 +14,18 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HEAD_PENDING_REVIEW_REASON } from "@/features/pulls/head-pending";
+import {
+  HEAD_PENDING_DIALOG_REASON,
+  HEAD_PENDING_REVIEW_REASON,
+  HEAD_UNPROVEN_REVIEW_REASON,
+} from "@/features/pulls/head-pending";
 import { RemotePrView } from "@/features/pulls/RemotePrView";
 import {
+  forgeBbPrTasks,
   forgeGlMrMergeState,
   forgePrApprovals,
   forgePrDiff,
+  forgePrDiffAt,
   forgePrReviewThreads,
   forgePrThreadCreate,
   forgePrThreadReply,
@@ -27,8 +33,13 @@ import {
   forgeStatus,
   gitFindRemotePrResolve,
 } from "@/lib/git/api";
-import { prDetailsOptions } from "@/lib/git/queries";
-import type { ForgeStatus, PrDetails, ReviewThreadOut } from "@/lib/git/types";
+import { prDetailsOptions, prDiffOptions } from "@/lib/git/queries";
+import type {
+  ForgeStatus,
+  PrDetails,
+  PrTask,
+  ReviewThreadOut,
+} from "@/lib/git/types";
 import type { ReviewDraft } from "@/lib/pulls/review-drafts";
 import { loadSettings, saveSettingsMerged } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
@@ -82,11 +93,27 @@ vi.mock("@/lib/settings/api", async (importOriginal) => ({
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   forgeStatus: vi.fn(),
+  forgeBbPrTasks: vi.fn(),
   forgePrView: vi.fn(),
   forgePrApprovals: vi.fn(),
   forgePrReviewThreads: vi.fn(),
   forgeGlMrMergeState: vi.fn(),
   forgePrDiff: vi.fn(),
+  // The proven by-target read, delegating to the by-number mock's text.
+  forgePrDiffAt: vi.fn(
+    async (
+      repo: string,
+      number: number,
+      lens: import("@/lib/git/types").RemoteLens,
+    ) => ({
+      diff: await (await import("@/lib/git/api")).forgePrDiff(
+        repo,
+        number,
+        lens,
+      ),
+      headProof: "proven" as const,
+    }),
+  ),
   forgePrThreadCreate: vi.fn(async () => ({})),
   forgePrThreadReply: vi.fn(async () => ({})),
   forgePrMergeMessageDefaults: vi.fn(async () => ({
@@ -251,6 +278,10 @@ Element.prototype.scrollIntoView = vi.fn();
 const REPO = "C:/repo";
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const SHA8 = "89abcdef01".repeat(4);
+/** The diff entry of a head under the fixtures' base. */
+const diffKey = (head: string) =>
+  prDiffOptions(REPO, 7, "origin", { head, baseRef: "main", baseSha: null })
+    .queryKey;
 const BASE = "fedcba9876".repeat(4);
 const ALL_ON = new Proxy({}, { get: () => true });
 const GITLAB = {
@@ -378,6 +409,8 @@ beforeEach(() => {
   vi.mocked(saveSettingsMerged).mockResolvedValue(DEFAULT_SETTINGS);
   vi.mocked(forgeStatus).mockResolvedValue(GITLAB);
   vi.mocked(forgePrView).mockImplementation(async () => pr());
+  // The fixture's capabilities are all on, tasks included; their read fails.
+  vi.mocked(forgeBbPrTasks).mockRejectedValue(new Error("tasks unavailable"));
   vi.mocked(forgePrDiff).mockImplementation(async () => {
     const next = diffs.shift();
     return next ? next() : (text ?? patch(files));
@@ -693,10 +726,7 @@ describe("over the real diff (AC-A10's D13 case, AC-A11)", () => {
     // The new head's diff is this pull request's own answer: no older-head
     // placeholder holds the composer any more.
     await waitFor(() =>
-      expect(
-        client.getQueryState(["repo", REPO, "pr", "origin", 7, "diff", SHA8])
-          ?.status,
-      ).toBe("success"),
+      expect(client.getQueryState(diffKey(SHA8))?.status).toBe("success"),
     );
     await settleWrites();
     // The rows under the composer are still the older text's.
@@ -725,10 +755,14 @@ describe("over the real diff (AC-A10's D13 case, AC-A11)", () => {
     const user = userEvent.setup();
     const client = mount();
     const box = await openComposer(user);
+    // The diff read keeps its own retry policy: one retry, a second later.
+    diffs.push(() => Promise.reject(new Error("boom")));
     diffs.push(() => Promise.reject(new Error("boom")));
     await moveHead(client, SHA8);
     await screen.findByText(
       "Couldn't refresh this diff — showing the last loaded version.",
+      undefined,
+      { timeout: 5_000 },
     );
     expect(box.isConnected).toBe(true);
     expect(box).toHaveValue("kept");
@@ -737,10 +771,7 @@ describe("over the real diff (AC-A10's D13 case, AC-A11)", () => {
     await user.click(screen.getByRole("button", { name: DIFF_RETRY }));
     await waitFor(expectLifted);
     expect(vi.mocked(forgePrDiff).mock.calls.length).toBe(reads + 1);
-    expect(
-      client.getQueryState(["repo", REPO, "pr", "origin", 7, "diff", SHA8])
-        ?.status,
-    ).toBe("success");
+    expect(client.getQueryState(diffKey(SHA8))?.status).toBe("success");
     expect(composerBox()).toBe(box);
     await user.click(single());
     await waitFor(() => expect(forgePrThreadCreate).toHaveBeenCalledTimes(1));
@@ -769,4 +800,309 @@ describe("over the real diff (AC-A10's D13 case, AC-A11)", () => {
     expect(composerBox()).toBe(box);
     expect(box).toHaveValue("kept");
   }, 30_000);
+});
+
+describe("the head holds of every review submit, in the view (F3, F5)", () => {
+  type DiffAt = Awaited<ReturnType<typeof forgePrDiffAt>>;
+  const unproven = async (): Promise<DiffAt> => ({
+    diff: patch(files),
+    headProof: "unproven",
+  });
+  const openConversation = (user: ReturnType<typeof userEvent.setup>) =>
+    user.click(screen.getByRole("button", { name: /^Conversation/ }));
+  const dialogSubmit = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.click(
+      byTitle("Submit a review (verdict, summary, and any pending comments)"),
+    );
+    const dialog = await screen.findByRole("dialog");
+    return within(dialog).getByRole("button", { name: "Submit review" });
+  };
+  /** A button by its title: a role query over the whole view is slow. */
+  const byTitle = (title: string) =>
+    document.querySelector<HTMLElement>(
+      `button[title="${title}"]`,
+    ) as HTMLElement;
+  const expectButtonHeld = (button: HTMLElement, reason: string) => {
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveAccessibleDescription(reason);
+  };
+  /** The direct verdict toggle, by its label: its title follows the draft. */
+  const requestChangesButton = () => {
+    const button = [...document.querySelectorAll("button")].find((b) =>
+      /^(Request changes|Changes requested)$/.test(b.textContent?.trim() ?? ""),
+    );
+    expect(button).toBeTruthy();
+    return button as HTMLElement;
+  };
+  /** The first details read answers; every re-read after it stays unanswered,
+   *  so no details fetch proves the diff. */
+  const holdDetailsRereads = () =>
+    vi
+      .mocked(forgePrView)
+      .mockImplementation(() => new Promise<PrDetails>(() => undefined))
+      .mockImplementationOnce(async () => pr());
+
+  it("(a) an unproven diff holds the composer's submits, Approve, Request changes and Submit review's Submit with its reason", async () => {
+    holdDetailsRereads();
+    vi.mocked(forgePrDiffAt).mockImplementationOnce(unproven);
+    const user = userEvent.setup();
+    mount();
+    await openFilesTab(user);
+    await user.type(await waitFor(composerBox), "kept");
+    const reason = HEAD_UNPROVEN_REVIEW_REASON(NOUN);
+    await waitFor(() => expectHeld(reason));
+    await openConversation(user);
+    await waitFor(() =>
+      expectButtonHeld(byTitle(`Approve this ${NOUN}`), reason),
+    );
+    expectButtonHeld(requestChangesButton(), reason);
+    expectButtonHeld(await dialogSubmit(user), reason);
+  }, 20_000);
+
+  it("(a) revoking an approval stays free under the hold", async () => {
+    vi.mocked(forgePrApprovals).mockResolvedValue({
+      viewerHasApproved: true,
+      approvedBy: ["me"],
+      approvalsRequired: 0,
+      approvalsLeft: 0,
+      viewerRequestedChanges: false,
+    });
+    holdDetailsRereads();
+    vi.mocked(forgePrDiffAt).mockImplementationOnce(unproven);
+    const user = userEvent.setup();
+    mount();
+    await openFilesTab(user);
+    await waitFor(composerBox);
+    await waitFor(() => expectHeld(HEAD_UNPROVEN_REVIEW_REASON(NOUN)));
+    await openConversation(user);
+    const approved = await waitFor(() => {
+      const button = byTitle("Revoke your approval");
+      expect(button).toBeTruthy();
+      return button;
+    });
+    expect(approved).toHaveTextContent("Approved");
+    expect(approved).not.toHaveAttribute("aria-disabled", "true");
+  }, 20_000);
+
+  it("(a) a change request already made stays free under the hold", async () => {
+    vi.mocked(forgePrApprovals).mockResolvedValue({
+      viewerHasApproved: false,
+      approvedBy: [],
+      approvalsRequired: 0,
+      approvalsLeft: 0,
+      viewerRequestedChanges: true,
+    });
+    holdDetailsRereads();
+    vi.mocked(forgePrDiffAt).mockImplementationOnce(unproven);
+    const user = userEvent.setup();
+    mount();
+    await openFilesTab(user);
+    await waitFor(composerBox);
+    await waitFor(() => expectHeld(HEAD_UNPROVEN_REVIEW_REASON(NOUN)));
+    await openConversation(user);
+    // GitLab's requested state is a focusable indicator (its undo is
+    // Premium-only); Bitbucket's revoke takes the same free arm.
+    const requested = await waitFor(() => {
+      const button = requestChangesButton();
+      expect(button).toHaveTextContent("Changes requested");
+      return button;
+    });
+    expect(requested).not.toHaveAttribute("aria-disabled", "true");
+  }, 20_000);
+
+  it("(d) Request changes is free over a proven head and holds as loading while a moved answer is checked", async () => {
+    const user = userEvent.setup();
+    const client = mount();
+    await openFilesTab(user);
+    await user.type(await waitFor(composerBox), "kept");
+    await waitFor(expectLifted);
+    const held = deferred<DiffAt>();
+    vi.mocked(forgePrDiffAt)
+      .mockImplementationOnce(async () => ({
+        diff: patch(files),
+        headProof: "moved",
+      }))
+      .mockImplementationOnce(() => held.promise);
+    await openConversation(user);
+    await waitFor(() =>
+      expect(requestChangesButton()).not.toHaveAttribute(
+        "aria-disabled",
+        "true",
+      ),
+    );
+    act(() => {
+      void client.invalidateQueries({ queryKey: diffKey(SHA), exact: true });
+    });
+    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expectButtonHeld(
+        requestChangesButton(),
+        HEAD_PENDING_DIALOG_REASON.loading(NOUN),
+      ),
+    );
+    await act(async () =>
+      held.resolve({ diff: patch(files), headProof: "proven" }),
+    );
+    await waitFor(() =>
+      expect(requestChangesButton()).not.toHaveAttribute(
+        "aria-disabled",
+        "true",
+      ),
+    );
+  }, 20_000);
+
+  it("(b) a moved answer under check holds as loading, and no reason points at a Retry", async () => {
+    const user = userEvent.setup();
+    const client = mount();
+    await openFilesTab(user);
+    await user.type(await waitFor(composerBox), "kept");
+    await waitFor(expectLifted);
+    const held = deferred<DiffAt>();
+    vi.mocked(forgePrDiffAt)
+      .mockImplementationOnce(async () => ({
+        diff: patch(files),
+        headProof: "moved",
+      }))
+      .mockImplementationOnce(() => held.promise);
+    act(() => {
+      void client.invalidateQueries({ queryKey: diffKey(SHA), exact: true });
+    });
+    await waitFor(() => expectHeld(HEAD_PENDING_REVIEW_REASON.loading(NOUN)));
+    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(3));
+    expect(document.body.textContent).not.toContain("Retry above the diff");
+    expect(document.body.textContent).not.toContain(
+      HEAD_PENDING_DIALOG_REASON.failed(NOUN),
+    );
+    await act(async () =>
+      held.resolve({ diff: patch(files), headProof: "proven" }),
+    );
+    await waitFor(expectLifted);
+  }, 20_000);
+
+  it("(c) a base-branch change alone holds as loading in the composer and in Submit review", async () => {
+    const user = userEvent.setup();
+    const client = mount();
+    await openFilesTab(user);
+    await user.type(await waitFor(composerBox), "kept");
+    await waitFor(expectLifted);
+    const reads = vi.mocked(forgePrDiffAt).mock.calls.length;
+    vi.mocked(forgePrDiffAt).mockImplementationOnce(
+      () => new Promise<DiffAt>(() => undefined),
+    );
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      baseRefName: "release",
+    }));
+    await act(() =>
+      client.refetchQueries({
+        queryKey: prDetailsOptions(REPO, 7, "origin").queryKey,
+        exact: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(vi.mocked(forgePrDiffAt).mock.calls.length).toBe(reads + 1),
+    );
+    expect(vi.mocked(forgePrDiffAt).mock.calls[reads]?.[3].baseRef).toBe(
+      "release",
+    );
+    await waitFor(() => expectHeld(HEAD_PENDING_REVIEW_REASON.loading(NOUN)));
+    await openConversation(user);
+    expectButtonHeld(
+      await dialogSubmit(user),
+      HEAD_PENDING_DIALOG_REASON.loading(NOUN),
+    );
+  }, 20_000);
+});
+
+describe("the Conversation feed over a failing tasks read", () => {
+  const tasksReads = () => vi.mocked(forgeBbPrTasks).mock.calls.length;
+  const FEED_LOADING = "Loading the conversation";
+  const feedLoading = () => screen.queryByText(new RegExp(FEED_LOADING));
+  const tasksRetry = () =>
+    document.querySelector<HTMLElement>(
+      'button[aria-label="Retry loading tasks"]',
+    );
+  const idle = (ms: number) =>
+    act(() => new Promise((resolve) => setTimeout(resolve, ms)));
+  /** Whether the feed's loading line was added at any point until the call. */
+  const watchFeedLoading = () => {
+    let seen = false;
+    const observer = new MutationObserver((records) => {
+      for (const record of records)
+        for (const node of record.addedNodes)
+          if (node.textContent?.includes(FEED_LOADING)) seen = true;
+    });
+    observer.observe(document.body, { subtree: true, childList: true });
+    return () => {
+      observer.disconnect();
+      return seen;
+    };
+  };
+  /** Mounts the view on `first`; the returned call moves the selection. */
+  function mountAt(first: number) {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    clients.push(client);
+    const tree = (n: number) => (
+      <QueryClientProvider client={client}>
+        <RemotePrView repoPath={REPO} number={n} />
+      </QueryClientProvider>
+    );
+    const view = render(tree(first));
+    return (n: number) => {
+      act(() =>
+        useUiStore.setState({ selectedPr: { kind: "remote", id: String(n) } }),
+      );
+      view.rerender(tree(n));
+    };
+  }
+
+  it("stays open with the Tasks error and its Retry, reading tasks once per request", async () => {
+    const user = userEvent.setup();
+    mount();
+    await idle(500);
+    // One read: the section's own observer mounting on the failure sends none.
+    const reads = tasksReads();
+    expect(reads).toBe(1);
+    await screen.findByText("Couldn't load tasks.");
+    const retry = tasksRetry();
+    expect(retry).not.toBeNull();
+    const stop = watchFeedLoading();
+    await idle(500);
+    expect(tasksReads()).toBe(reads);
+    // The same node: the section never remounted.
+    expect(tasksRetry()).toBe(retry);
+    await user.click(retry as HTMLElement);
+    await idle(500);
+    expect(stop()).toBe(false);
+    expect(tasksReads()).toBe(reads + 1);
+    expect(screen.getByText("Couldn't load tasks.")).toBeInTheDocument();
+    expect(feedLoading()).toBeNull();
+  }, 20_000);
+
+  it("a PR switch closes it: the next PR's feed waits for that PR's own reads", async () => {
+    let answer: (tasks: PrTask[]) => void = () => undefined;
+    vi.mocked(forgePrView).mockImplementation(async (_repo, n) => ({
+      ...pr(),
+      id: `PR_${n}`,
+      number: n,
+      title: `Merge request ${n}`,
+    }));
+    vi.mocked(forgeBbPrTasks).mockImplementation((_repo, n) =>
+      n === 8
+        ? new Promise<PrTask[]>((resolve) => {
+            answer = resolve;
+          })
+        : Promise.reject(new Error("tasks unavailable")),
+    );
+    const moveTo = mountAt(7);
+    await screen.findByText("Couldn't load tasks.");
+    expect(feedLoading()).toBeNull();
+    moveTo(8);
+    await screen.findAllByText("Merge request 8");
+    await waitFor(() => expect(feedLoading()).not.toBeNull());
+    act(() => answer([]));
+    await waitFor(() => expect(feedLoading()).toBeNull());
+  }, 20_000);
 });

@@ -1,3 +1,4 @@
+import { FULL_OID_RE } from "../oid.ts";
 import type { ForgeProvider, ForgeUserRef, RepoLabel } from "./forge";
 import type { CompletedReviewerWithState, PrThreadOut } from "./pr-reviews";
 
@@ -439,6 +440,10 @@ export interface PrDetails {
    *  abbreviated); null when none could be read. GitHub lists commits
    *  oldest-first under a cap, so the list's tail is not the head there. */
   headSha: string | null;
+  /** The commit the forge's diff refs name as its base (GitHub `baseRefOid`,
+   *  GitLab `diff_refs.base_sha`); null or absent where the forge names none. An
+   *  identity for the diff read, never a merge base to compute with. */
+  baseSha?: string | null;
   /** True when the files read failed or may be incomplete — never present
    *  `files` as complete. A partial list may be retained; an empty one is a
    *  missing list, not a PR without changed files. */
@@ -591,6 +596,27 @@ export function prHeadSha(
   pr: Pick<PrDetails, "headSha" | "commits">,
 ): string | undefined {
   return pr.headSha || pr.commits.at(-1)?.oid;
+}
+
+/** The comparison a pull request's diff read is tied to: its head, its base branch
+ *  and, when the forge names one as a full id, its base commit. */
+export interface PrDiffTarget {
+  head: string | null;
+  baseRef: string;
+  baseSha: string | null;
+}
+
+export function prDiffTarget(
+  pr: Pick<PrDetails, "headSha" | "commits" | "baseRefName" | "baseSha">,
+): PrDiffTarget {
+  return {
+    head: prHeadSha(pr) ?? null,
+    baseRef: pr.baseRefName,
+    baseSha:
+      typeof pr.baseSha === "string" && FULL_OID_RE.test(pr.baseSha)
+        ? pr.baseSha
+        : null,
+  };
 }
 
 /** How far a pull request's head has drifted from its base — the update-branch

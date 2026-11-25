@@ -313,15 +313,32 @@ describe.each(HOOKS)("$name optimistic patch", (hook) => {
   });
 });
 
-it("the PR diff key is the details key plus the diff and its head", () => {
-  expect(prDiffOptions(REPO, N, "origin", "abc123").queryKey).toEqual([
+it("the PR diff key is the details key plus the diff and its target", () => {
+  const base = "b".repeat(40);
+  expect(
+    prDiffOptions(REPO, N, "origin", {
+      head: "abc123",
+      baseRef: "main",
+      baseSha: base,
+    }).queryKey,
+  ).toEqual([
     ...prDetailsOptions(REPO, N, "origin").queryKey,
     "diff",
     "abc123",
+    "main",
+    base,
   ]);
-  expect(prDiffOptions(REPO, N, "origin", null).queryKey).toEqual([
+  expect(
+    prDiffOptions(REPO, N, "origin", {
+      head: null,
+      baseRef: "main",
+      baseSha: null,
+    }).queryKey,
+  ).toEqual([
     ...prDetailsOptions(REPO, N, "origin").queryKey,
     "diff",
+    null,
+    "main",
     null,
   ]);
 });

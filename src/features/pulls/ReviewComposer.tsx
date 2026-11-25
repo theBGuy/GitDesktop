@@ -13,6 +13,7 @@ import { useAddReviewDraft } from "@/lib/pulls/review-drafts";
 import { toastError } from "@/lib/toast";
 import {
   HEAD_PENDING_REVIEW_REASON,
+  HEAD_UNPROVEN_REVIEW_REASON,
   type HeadPendingKind,
 } from "./head-pending";
 import { buildSuggestionFence, extractNewSideLines } from "./suggestion-utils";
@@ -44,6 +45,9 @@ export interface ReviewComposerProps {
   onClose: () => void;
   /** Set while the painted diff is an older head's: both submit paths hold with its reason. */
   headPending?: HeadPendingKind | null;
+  /** Set while the painted diff is this head's but no head read has proven it:
+   *  both submit paths hold, below an older head's reason. */
+  headUnproven?: boolean;
   /** The diff's rows on screen are not yet the live text's (`LineWidget`'s
    *  `rowsBehind`): held as a loading head, since `fileSection` already is. */
   rowsBehind?: boolean;
@@ -71,6 +75,7 @@ export function ReviewComposer({
   lens,
   onClose,
   headPending = null,
+  headUnproven = false,
   rowsBehind = false,
 }: ReviewComposerProps) {
   const [body, setBody] = useState("");
@@ -110,9 +115,19 @@ export function ReviewComposer({
   })();
   const offPatchReason =
     offPatch === null ? null : OFF_PATCH_REVIEW_REASON[offPatch];
-  const held = headPending ?? (rowsBehind ? "loading" : null);
-  const heldReason =
-    held === null ? null : HEAD_PENDING_REVIEW_REASON[held](PR_NOUN[provider]);
+  const noun = PR_NOUN[provider];
+  const heldReason = (() => {
+    switch (true) {
+      case headPending !== null:
+        return HEAD_PENDING_REVIEW_REASON[headPending](noun);
+      case headUnproven:
+        return HEAD_UNPROVEN_REVIEW_REASON(noun);
+      case rowsBehind:
+        return HEAD_PENDING_REVIEW_REASON.loading(noun);
+      default:
+        return null;
+    }
+  })();
 
   // Suggestions replace NEW-side code, so an old-side anchor can't be suggested
   // on. Bitbucket suggestions are single-line only. Otherwise we need the current

@@ -183,6 +183,10 @@ export const prTasksOptions = (repo: string, number: number) =>
     queryFn: () => api.forgeBbPrTasks(repo, number),
     staleTime: 30_000,
     retry: false,
+    // The tasks section mounts its own observer once the feed opens on a failed
+    // read, and a mount retry would re-send it at once; its Retry and a switch
+    // back to the pull request still re-read it.
+    retryOnMount: false,
   });
 
 // PR-task mutations invalidate the exact tasks key onSettled; the component patches its

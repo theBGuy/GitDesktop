@@ -1961,6 +1961,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         base_ref_name: branch_name(&pr.destination),
         head_ref_name: branch_name(&pr.source),
         head_sha: full_head_oid(&commits),
+        base_sha: None,
         additions,
         deletions,
         url: html_href(&pr.links),

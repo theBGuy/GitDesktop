@@ -1788,14 +1788,19 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `data-diff-editor`. It counts a `data-diff-editor` or `data-thread-editing`
   mark only inside a `[data-diff-anchor]` row; the line composer matches by its
   own `[data-diff-line-widget]` wrapper. The pull request diff keys on the
-  head its details name (`prDiffOptions`' last axis), and `usePrDiff` reports
+  target its details name (head, base ref and base sha, from `prDiffTarget`;
+  the content revs key on the same target), and `usePrDiff` reports
   `placeholderOf`, so a host tells an older head of the same pull request from
   another record's diff. `refreshOpenPr` (`queries/prs.ts`) is the one re-read
   that orders the details before the head-keyed children, which it addresses
-  by the exact key of the head the details then name, never by prefix. The
-  inline line composer holds its submits while the painted diff is an older
-  head's (`headPending` on `ReviewComposer`, its only consumer), the editor
-  staying mounted; Submit review's line-anchored drafts are not held.
+  by the exact key of the target (head and base) the details then name, never
+  by prefix. `ReviewComposer` (its hold-reason chain), `SubmitReviewDialog`
+  and the view's direct Approve and Request changes (through
+  `submitReviewHeadHold`; revoking either stays free) hold
+  their submits while the painted diff is an older head's, unproven
+  (`usePrDiff`'s `headUnproven`), or under the check of a moved answer
+  (`headChecking`, which holds as `loading`), the editor and the dialog
+  staying mounted.
 - **Commit comment placement** — a resolved comment is inline exactly while
   its anchor row is mounted in the visible slot, else listed: never both,
   and never neither while the host's list is mounted (the PR commit view

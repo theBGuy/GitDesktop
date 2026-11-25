@@ -90,6 +90,13 @@ vi.mock("sonner", async (importOriginal) => ({
     warning: vi.fn(),
   }),
 }));
+/** The diff target the details fixtures name (base "main", no base sha). */
+const diffTarget = <H extends string | null>(head: H) => ({
+  head,
+  baseRef: "main",
+  baseSha: null as string | null,
+});
+
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   forgeStatus: vi.fn(),
@@ -98,6 +105,21 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgePrReviewThreads: vi.fn(),
   forgeGlMrMergeState: vi.fn(),
   forgePrDiff: vi.fn(),
+  // The proven by-target read, delegating to the by-number mock's text.
+  forgePrDiffAt: vi.fn(
+    async (
+      repo: string,
+      number: number,
+      lens: import("@/lib/git/types").RemoteLens,
+    ) => ({
+      diff: await (await import("@/lib/git/api")).forgePrDiff(
+        repo,
+        number,
+        lens,
+      ),
+      headProof: "proven" as const,
+    }),
+  ),
   forgePrMergeMessageDefaults: vi.fn(async () => ({
     commits: [],
     reason: null,
@@ -780,7 +802,9 @@ describe("Pull request Files tab under Hide whitespace", () => {
     const client = mount();
     await screen.findByRole("button", { name: /^Files \(\d+\)$/ });
     // The diff is already read; only the revs read parks.
-    await client.prefetchQuery(prDiffOptions(REPO, 7, "origin", SHA));
+    await client.prefetchQuery(
+      prDiffOptions(REPO, 7, "origin", diffTarget(SHA)),
+    );
     act(() => onlineManager.setOnline(false));
     await openFilesTab(user);
     // The forge diff's first changed line is on screen.

@@ -85,6 +85,21 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgePrTimeline: vi.fn(async () => []),
   // The view's other reads, answered quietly so the transport records none.
   forgePrDiff: vi.fn(async () => ""),
+  // The proven by-target read, delegating to the by-number mock's text.
+  forgePrDiffAt: vi.fn(
+    async (
+      repo: string,
+      number: number,
+      lens: import("@/lib/git/types").RemoteLens,
+    ) => ({
+      diff: await (await import("@/lib/git/api")).forgePrDiff(
+        repo,
+        number,
+        lens,
+      ),
+      headProof: "proven" as const,
+    }),
+  ),
   forgePrReactions: vi.fn(async () => ({ body: [], comments: {} })),
   forgeRepoWriteAccess: vi.fn(async () => ({
     canPush: null,
