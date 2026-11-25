@@ -14967,12 +14967,7 @@ mod tests {
             ),
         ];
         for (case, setup, path, dep_settles) in cases {
-            for sub in [&f.sub, &a] {
-                let deinit = ["submodule", "deinit", "-q", "-f", "deep/leaf"];
-                run_git_raw(Some(sub), &deinit, TEST_GIT_HANG_GUARD)
-                    .await
-                    .unwrap();
-            }
+            deinit_leaves(&[f.sub.as_str(), a.as_str()]).await;
             for args in setup {
                 let mut argv = vec!["config"];
                 argv.extend_from_slice(args);
