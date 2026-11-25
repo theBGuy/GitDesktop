@@ -179,6 +179,7 @@ const LOCAL_CALLEES = [
   "gitSubmoduleRemove",
   "gitSubmoduleSetUrl",
   "gitSubmoduleSetBranch",
+  "gitSubmoduleSetCommit",
   "gitHookWrite",
   "gitHookSetEnabled",
   "gitHookDelete",
@@ -217,6 +218,7 @@ const NETWORK_CALLEES = [
   "gitDeleteTagOnOrigin",
   "gitSubmoduleUpdate",
   "gitSubmoduleAdd",
+  "gitSubmoduleFetch",
   "gitMergeRemotePr",
   "gitFinishRemotePrResolve",
   "gitRemoteDefaultBranch",
@@ -238,6 +240,8 @@ const NEUTRAL_CALLEES = [
   "isDirtyTreeRefusal",
   "literalPathspec",
   "invalidateRepoAfterWrite",
+  // Waits for the submodule's own in-flight reads before the settle; no I/O.
+  "submoduleWriteSettled",
   // Projects board-write bookkeeping and pure plan builders around the gh writes.
   "trackBoardWrite",
   "moveWrite",

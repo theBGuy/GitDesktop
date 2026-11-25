@@ -144,11 +144,17 @@ pub fn run() {
                     git::compare::sweep_stale_persistent_review_worktrees();
                 });
                 // Remove image-staging sessions a day idle. Startup only, never at exit:
-                // a second instance's drafts may still point at their folders. The root
-                // is the per-user cache dir; unresolved, staging refuses instead.
+                // a second instance's drafts may still point at their folders. Its root and
+                // the whitespace diff's live in the per-user cache dir; unresolved, both
+                // refuse instead.
                 match tauri::Manager::path(app).app_cache_dir() {
-                    Ok(cache) => attachments::init_root(&cache),
-                    Err(e) => eprintln!("gitdesktop: image staging unavailable: {e}"),
+                    Ok(cache) => {
+                        attachments::init_root(&cache);
+                        forge::pr_content::init_whitespace_root(&cache);
+                    }
+                    Err(e) => {
+                        eprintln!("gitdesktop: image staging and whitespace diffs unavailable: {e}")
+                    }
                 }
                 tauri::async_runtime::spawn_blocking(attachments::sweep_stale_sessions);
                 // Capture the login shell's PATH for children spawned through
@@ -440,6 +446,10 @@ pub fn run() {
             forge::forge_issue_timeline,
             forge::forge_pr_diff,
             forge::forge_pr_commit_diff,
+            forge::pr_content::forge_pr_content_revs,
+            forge::pr_content::forge_commit_first_parent,
+            forge::pr_content::forge_file_at_sha,
+            forge::pr_content::git_diff_bytes_ignoring_whitespace,
             forge::forge_commit_comments,
             forge::forge_commit_comment_create,
             forge::forge_commit_comment_edit,
@@ -787,6 +797,11 @@ pub fn run() {
             git::submodule::git_submodule_changes,
             git::submodule::git_submodule_conflict,
             git::submodule::git_accept_submodule_conflict_side,
+            git::submodule::git_submodule_commits,
+            git::submodule::git_submodule_refs,
+            git::submodule::git_submodule_pick_plan,
+            git::submodule::git_submodule_set_commit,
+            git::submodule::git_submodule_fetch,
             secrets::set_secret,
             secrets::get_secret,
             secrets::delete_secret,

@@ -475,7 +475,7 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 
 /// The root is a real directory, never a link, and on unix also owned by this user
 /// with no group or other access. Errs when it is absent.
-fn root_is_private(root: &Path) -> std::io::Result<bool> {
+pub(crate) fn root_is_private(root: &Path) -> std::io::Result<bool> {
     let meta = fs::symlink_metadata(root)?;
     #[cfg(unix)]
     {

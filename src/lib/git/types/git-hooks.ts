@@ -27,7 +27,12 @@ export interface HooksInfo {
 export interface KeepLocalHookStatus {
   state: "installed" | "absent" | "blocked";
   /** Non-null exactly when `state` is "blocked". */
-  blocked: "hookManager" | "customHooksPath" | "foreignHook" | null;
+  blocked:
+    | "hookManager"
+    | "customHooksPath"
+    | "foreignHook"
+    | "linkedHook"
+    | null;
   /** Non-null exactly when `blocked` is "hookManager". */
   manager: "husky" | "pre-commit" | "lefthook" | null;
   /** GitDesktop's own marked pre-push file is in the clone's own hooks folder:

@@ -1,7 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { PaintedCut, PaintedView } from "@/features/diff/painted-view";
 import {
   SHOW_WHITESPACE_LABEL,
   WHITESPACE_COMPOSER_HELD,
@@ -10,6 +12,7 @@ import {
 import {
   CommitComments,
   newSideLines,
+  useCommentPins,
   useCommitLineAnchors,
 } from "@/features/pulls/CommitComments";
 import {
@@ -115,15 +118,84 @@ afterEach(() => {
     n.remove();
 });
 
+const NO_PINS: ReadonlySet<string> = new Set();
+
+/** The pane's paint, as its painted report says it: `drawn` is the read its
+ *  rows were built from (null: nothing reports); `mounts: false`, a cut that
+ *  mounts no rows. */
+interface Paint {
+  drawn: FileDiff | null;
+  cut?: PaintedCut | null;
+  mounts?: boolean;
+}
+
+/** A host: its pins shared by the list and the pane, whose report mounts an
+ *  anchor row for each unpinned comment whose line the paint draws. */
+function Host({
+  comments,
+  paint,
+  diffSections,
+  onPins,
+}: {
+  comments: CommitCommentOut[];
+  paint: Paint;
+  diffSections?: ReturnType<typeof splitUnifiedDiff>;
+  onPins: (pinned: ReadonlySet<string>) => void;
+}) {
+  const pins = useCommentPins();
+  // Reported from a layout effect, so a replayed or discarded render reports
+  // nothing.
+  useLayoutEffect(() => onPins(pins.pinned));
+  const { drawn, cut = null, mounts = true } = paint;
+  const drawnLines = newSideLines(drawn?.text ?? "");
+  const painted: PaintedView | null =
+    drawn === null
+      ? null
+      : {
+          path: "x",
+          patch: drawn.text,
+          whitespaceHidden: drawn.whitespaceHidden === true,
+          truncated: drawn.isTruncated,
+          cut,
+          anchors: comments
+            .filter(
+              (c) =>
+                c.path === "x" &&
+                mounts &&
+                c.line != null &&
+                drawnLines.has(c.line) &&
+                !pins.pinned.has(c.id),
+            )
+            .map((c) => `new:${c.line}`)
+            .sort(),
+        };
+  return (
+    <CommitComments
+      repoPath="/repo"
+      sha={SHA}
+      canComment={false}
+      remoteLabel="origin"
+      diffSections={diffSections}
+      painted={painted}
+      pins={pins}
+      lens="origin"
+    />
+  );
+}
+
 function renderPane({
   comments,
   hide,
   drawnDiff,
+  cut,
+  mounts,
   diffSections,
 }: {
   comments: CommitCommentOut[];
   hide: boolean;
-  drawnDiff?: FileDiff | null;
+  drawnDiff: FileDiff | null;
+  cut?: PaintedCut | null;
+  mounts?: boolean;
   diffSections?: ReturnType<typeof splitUnifiedDiff>;
 }) {
   vi.mocked(forgeCommitComments).mockResolvedValue([...comments, WHOLE]);
@@ -132,21 +204,26 @@ function renderPane({
     defaultOptions: { queries: { retry: false } },
   });
   client.setQueryData(settingsKeys.settings, stored);
-  const props = drawnDiff === undefined ? {} : { drawnDiff };
-  return render(
+  let pinned: ReadonlySet<string> = NO_PINS;
+  const ui = (paint: Paint) => (
     <QueryClientProvider client={client}>
-      <CommitComments
-        repoPath="/repo"
-        sha={SHA}
-        canComment={false}
-        remoteLabel="origin"
-        selectedPath="x"
+      <Host
+        comments={comments}
+        paint={paint}
         diffSections={diffSections}
-        lens="origin"
-        {...props}
+        onPins={(p) => {
+          pinned = p;
+        }}
       />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const view = render(ui({ drawn: drawnDiff, cut, mounts }));
+  return {
+    unmount: view.unmount,
+    /** The pane paints another read. */
+    repaint: (paint: Paint) => view.rerender(ui(paint)),
+    pinned: () => pinned,
+  };
 }
 
 /** The list landed: the whole-commit comment always renders. */
@@ -293,7 +370,7 @@ describe("CommitComments over lines the drawn diff lacks", () => {
     expect(button()).toBeNull();
   });
 
-  it("calls a line past the pane's line cap unplaced (AC4d)", async () => {
+  it("blames whitespace first for a hidden line past the shown view's cap (AC4d)", async () => {
     const body = Array.from({ length: 210 }, (_, i) => ` l${i + 1}`).join("\n");
     const long = `${HEADER}@@ -1,210 +1,210 @@\n${body}\n@@ -300,1 +300,1 @@\n-p\n+  p\n`;
     vi.mocked(gitCommitFileDiff).mockImplementation(async (_r, _h, _f, iw) =>
@@ -305,10 +382,11 @@ describe("CommitComments over lines the drawn diff lacks", () => {
       drawnDiff: HIDDEN,
     });
     await landed();
+    // Show whitespace is the first control it needs; the cap's note follows.
     await waitFor(() =>
-      expect(labelOf("c300")).toContain("couldn't place in this diff"),
+      expect(labelOf("c300")).toContain("on a line hidden by Hide whitespace"),
     );
-    expect(button()).toBeNull();
+    expect(button()).not.toBeNull();
     expect(plainCalls()).toBe(1);
   });
 
@@ -316,6 +394,7 @@ describe("CommitComments over lines the drawn diff lacks", () => {
     renderPane({
       comments: [comment("c21", 21), comment("c50", 50)],
       hide: true,
+      drawnDiff: diff(PLAIN),
       diffSections: splitUnifiedDiff(PLAIN),
     });
     await landed();
@@ -347,16 +426,30 @@ describe("CommitComments over lines the drawn diff lacks", () => {
     expect(plainCalls()).toBe(0);
   });
 
-  it("judges nothing by a -w read once the setting is already off (AC4h)", async () => {
+  it("lists every comment with no note while nothing reports, whatever the setting", async () => {
     renderPane({
-      comments: [comment("c2", 2)],
+      comments: [comment("c2", 2), comment("c21", 21)],
+      hide: true,
+      drawnDiff: null,
+    });
+    await landed();
+    await settle();
+    expect(labelOf("c2")).toBe("x:2");
+    expect(labelOf("c21")).toBe("x:21");
+    expect(plainCalls()).toBe(0);
+  });
+
+  it("judges a `-w` paint by what it mounts, whatever the setting says (AC4h)", async () => {
+    renderPane({
+      comments: [comment("c2", 2), comment("c21", 21)],
       hide: false,
       drawnDiff: HIDDEN,
     });
     await landed();
-    await settle();
-    expect(listed("c2")).toBe(false);
-    expect(plainCalls()).toBe(0);
+    await waitFor(() =>
+      expect(labelOf("c2")).toContain("on a line hidden by Hide whitespace"),
+    );
+    expect(listed("c21")).toBe(false);
   });
 
   it("reads nothing when no comment is anchored", async () => {
@@ -431,64 +524,24 @@ describe("CommitComments over lines the drawn diff lacks", () => {
     expect(button()?.getAttribute("aria-disabled")).toBeNull();
   });
 
-  it("holds Show whitespace while a listed thread's edit is open, keeping its draft", async () => {
-    const user = userEvent.setup();
-    renderPane({
-      comments: [comment("c2", 2, { viewerDidAuthor: true })],
-      hide: true,
-      drawnDiff: HIDDEN,
-    });
-    await landed();
-    await waitFor(() => expect(button()).toBeTruthy());
-    await user.click(
-      within(rowOf("c2")).getByRole("button", { name: "Comment actions" }),
-    );
-    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
-    const editor = await screen.findByRole("textbox", { name: "Edit comment" });
-    await user.type(editor, " more");
-    const held = button() as HTMLElement;
-    await user.click(held);
-    await settle();
-    await settle();
-    // The flip would draw the thread inline and drop this row, editor and all.
-    expect(screen.queryByRole("textbox", { name: "Edit comment" })).toHaveValue(
-      "note c2 more",
-    );
-    expect(saveSettingsPatch).not.toHaveBeenCalled();
-    expect(held.getAttribute("aria-disabled")).toBe("true");
-    expect(description(held)).toBe(
-      `x:2 · on a line hidden by Hide whitespace ${WHITESPACE_COMPOSER_HELD}`,
-    );
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
-    await waitFor(() =>
-      expect(button()?.getAttribute("aria-disabled")).toBeNull(),
-    );
-  });
-
-  // Only a whitespace row leaves the list on the flip; these editors stay mounted.
+  // An open list edit pins its row: no flip waits on it, and none moves it.
   it.each([
+    ["the row it belongs to", comment("c2", 2, { viewerDidAuthor: true })],
     ["the whole-commit list", comment("w2", null, { path: null })],
     ["a row on another file", comment("y1", 1, { path: "y" })],
   ])("lets an open edit in %s keep Show whitespace free", async (_, own) => {
     const user = userEvent.setup();
     const authored = { ...own, viewerDidAuthor: true };
-    renderPane({
-      comments: [comment("c2", 2), authored],
+    const others = own.id === "c2" ? [] : [comment("c2", 2)];
+    const pane = renderPane({
+      comments: [...others, authored],
       hide: true,
       drawnDiff: HIDDEN,
     });
     await landed();
     await waitFor(() => expect(button()).toBeTruthy());
-    const thread = screen
-      .getByText(`note ${own.id}`)
-      .closest(".group") as HTMLElement;
-    await user.click(
-      within(thread).getByRole("button", { name: "Comment actions" }),
-    );
-    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
-    const editor = await screen.findByRole("textbox", { name: "Edit comment" });
-    await user.type(editor, " more");
-    await settle();
+    await editAndType(user, own.id);
+    expect(whitespaceComposerOpen()).toBe(false);
     expect(button()?.getAttribute("aria-disabled")).toBeNull();
     await user.click(button() as HTMLElement);
     await waitFor(() =>
@@ -496,7 +549,12 @@ describe("CommitComments over lines the drawn diff lacks", () => {
         expect.objectContaining({ diffHideWhitespace: false }),
       ),
     );
-    await waitFor(() => expect(listed("c2")).toBe(false));
+    pane.repaint({ drawn: diff(PLAIN) });
+    // The pinned row stays listed with its draft (its label shows, its body
+    // is the editor); an unpinned line 2 goes inline.
+    await waitFor(() =>
+      expect(screen.queryByText("x:2") !== null).toBe(own.id === "c2"),
+    );
     expect(screen.getByRole("textbox", { name: "Edit comment" })).toHaveValue(
       `note ${own.id} more`,
     );
@@ -521,124 +579,68 @@ async function editAndType(
   );
 }
 
-// Turning Hide whitespace off leaves every selected-file row with a resolved
-// line out of the list until the shown read lands, whatever its reason.
-describe("an open edit in a row the flip may drop", () => {
-  it("holds while the plain read is out", async () => {
+describe("an open list edit pins its row", () => {
+  it("keeps the row listed while the pane draws its line, and frees it on Cancel", async () => {
     const user = userEvent.setup();
-    vi.mocked(gitCommitFileDiff).mockImplementation(async (_r, _h, _f, iw) =>
-      iw ? HIDDEN : new Promise<FileDiff>(() => undefined),
-    );
-    renderPane({
+    const pane = renderPane({
       comments: [comment("c2", 2, { viewerDidAuthor: true })],
       hide: true,
       drawnDiff: HIDDEN,
     });
     await landed();
-    await settle();
-    expect(button()).toBeNull();
-    expect(whitespaceComposerOpen()).toBe(false);
     await editAndType(user, "c2");
-    expect(whitespaceComposerOpen()).toBe(true);
+    expect(pane.pinned()).toEqual(new Set(["c2"]));
+    expect(whitespaceComposerOpen()).toBe(false);
+    pane.repaint({ drawn: diff(PLAIN) });
+    await settle();
+    expect(screen.getByText("x:2")).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Edit comment" })).toHaveValue(
+      "note c2 more",
+    );
     await user.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(whitespaceComposerOpen()).toBe(false);
+    await waitFor(() => expect(listed("c2")).toBe(false));
+    expect(pane.pinned()).toEqual(new Set());
   });
 
-  it("holds when the plain read failed", async () => {
+  it("names no cut for a pinned row on a line the patch holds", async () => {
     const user = userEvent.setup();
-    vi.mocked(gitCommitFileDiff).mockImplementation(async (_r, _h, _f, iw) => {
-      if (iw) return HIDDEN;
-      throw new Error("boom");
-    });
-    renderPane({
+    const pane = renderPane({
       comments: [comment("c2", 2, { viewerDidAuthor: true })],
-      hide: true,
-      drawnDiff: HIDDEN,
-    });
-    await landed();
-    await waitFor(() =>
-      expect(labelOf("c2")).toContain("couldn't place in this diff"),
-    );
-    expect(whitespaceComposerOpen()).toBe(false);
-    await editAndType(user, "c2");
-    expect(whitespaceComposerOpen()).toBe(true);
-  });
-
-  // Turning Hide whitespace on draws a `-w` read, whose hunks git can align
-  // over lines no shown hunk covers, or past a truncated shown read's cut.
-  it.each([
-    // Line 20 is in the `-w` read's hunk, past the cut of a read that kept only
-    // the first hunk.
-    ["c20", 20, diff(HEADER + WS_HUNK, { isTruncated: true })],
-    // A complete shown read: line 11 is in the realigned `-w` hunk only.
-    ["c11", 11, diff(REALIGN_SHOWN)],
-  ])(
-    "with whitespace shown, an edit on listed %s holds the flip",
-    async (id, line, drawnDiff) => {
-      const user = userEvent.setup();
-      renderPane({
-        comments: [comment(id, line, { viewerDidAuthor: true })],
-        hide: false,
-        drawnDiff,
-      });
-      await landed();
-      await waitFor(() => expect(listed(id)).toBe(true));
-      expect(whitespaceComposerOpen()).toBe(false);
-      await editAndType(user, id);
-      expect(whitespaceComposerOpen()).toBe(true);
-    },
-  );
-
-  it("never holds on a host whose diff doesn't follow the setting", async () => {
-    const user = userEvent.setup();
-    renderPane({
-      comments: [comment("c10", 10, { viewerDidAuthor: true })],
       hide: false,
-      diffSections: splitUnifiedDiff(PLAIN),
+      drawnDiff: null,
     });
     await landed();
-    await waitFor(() => expect(listed("c10")).toBe(true));
-    await editAndType(user, "c10");
-    expect(whitespaceComposerOpen()).toBe(false);
-  });
-
-  it("holds on a line the shown read also lacks, keeping the draft", async () => {
-    const user = userEvent.setup();
-    renderPane({
-      comments: [
-        comment("c2", 2),
-        comment("c10", 10, { viewerDidAuthor: true }),
-      ],
-      hide: true,
-      drawnDiff: HIDDEN,
-    });
-    await landed();
-    await waitFor(() => expect(button()).toBeTruthy());
-    expect(labelOf("c10")).toContain("couldn't place in this diff");
-    await editAndType(user, "c10");
-    const held = button() as HTMLElement;
-    await waitFor(() =>
-      expect(held.getAttribute("aria-disabled")).toBe("true"),
-    );
-    await user.click(held);
+    await editAndType(user, "c2");
+    pane.repaint({ drawn: diff(PLAIN), cut: "cap" });
     await settle();
-    await settle();
-    expect(saveSettingsPatch).not.toHaveBeenCalled();
-    expect(screen.queryByRole("textbox", { name: "Edit comment" })).toHaveValue(
-      "note c10 more",
-    );
+    expect(screen.getByText("x:2")).toBeTruthy();
+    expect(screen.queryByText(/inline after/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(listed("c2")).toBe(false));
   });
 });
 
 /** The inline anchors the commit diff draws for file `x`. */
-function InlineAnchors({ comments }: { comments: CommitCommentOut[] }) {
-  const anchors = useCommitLineAnchors(comments, splitUnifiedDiff(PLAIN), "x");
+function InlineAnchors({
+  comments,
+  pinned = NO_PINS,
+}: {
+  comments: CommitCommentOut[];
+  pinned?: ReadonlySet<string>;
+}) {
+  const anchors = useCommitLineAnchors(
+    comments,
+    splitUnifiedDiff(PLAIN),
+    "x",
+    undefined,
+    pinned,
+  );
   return <div>{anchors.map((a) => a.render())}</div>;
 }
 
 describe("inline commit comment anchors", () => {
-  // A whitespace flip moves a comment between the diff and the hidden list, so
-  // an editor added here would need the whitespace probe's mark too.
+  // An inline anchor offers no edit: an edit opens only in the list, where it
+  // pins its row.
   it("offer no edit on a whitespace-only line or a real change", async () => {
     vi.mocked(forgeCommitComments).mockResolvedValue([]);
     const client = new QueryClient({
@@ -658,5 +660,65 @@ describe("inline commit comment anchors", () => {
     expect(screen.getByText("note c20")).toBeTruthy();
     expect(screen.queryAllByRole("button")).toHaveLength(0);
     expect(screen.queryAllByRole("textbox")).toHaveLength(0);
+  });
+
+  it("leave out a pinned comment, keeping its line's others", async () => {
+    vi.mocked(forgeCommitComments).mockResolvedValue([]);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <InlineAnchors
+          comments={[comment("a", 2), comment("b", 2), comment("c", 20)]}
+          pinned={new Set(["a", "c"])}
+        />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("note b")).toBeTruthy();
+    expect(screen.queryByText("note a")).toBeNull();
+    expect(screen.queryByText("note c")).toBeNull();
+  });
+});
+
+describe("a listed comment's note on the painted file", () => {
+  it("leaves an unresolved position unnoted while the paint is pending", async () => {
+    const view = renderPane({
+      comments: [comment("u", null)],
+      hide: false,
+      drawnDiff: diff(PLAIN),
+      cut: "pending",
+    });
+    await landed();
+    await settle();
+    expect(labelOf("u")).toBe("x");
+    view.repaint({ drawn: diff(PLAIN), cut: null });
+    await waitFor(() =>
+      expect(labelOf("u")).toBe("x · couldn't place in this diff"),
+    );
+  });
+
+  it("names Raw, then Show diff anyway, then Show full diff over a mega-line Markdown preview", async () => {
+    const mega = "m".repeat(20_001);
+    const body = Array.from({ length: 300 }, (_, i) =>
+      i === 0 ? `+${mega}` : `+l${i + 1}`,
+    ).join("\n");
+    const text = `diff --git a/x b/x\n--- /dev/null\n+++ b/x\n@@ -0,0 +1,300 @@\n${body}\n`;
+    renderPane({
+      comments: [comment("early", 2), comment("late", 250)],
+      hide: false,
+      drawnDiff: diff(text),
+      cut: "preview",
+      mounts: false,
+    });
+    await landed();
+    await waitFor(() =>
+      expect(labelOf("early")).toBe(
+        "x:2 · inline in Raw, then Show diff anyway",
+      ),
+    );
+    expect(labelOf("late")).toBe(
+      "x:250 · inline in Raw, then Show diff anyway, then Show full diff",
+    );
   });
 });

@@ -11,7 +11,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
 import { SHOW_WHITESPACE_LABEL } from "@/features/diff/whitespace-mode";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
-import { drawnDiffFor } from "@/features/history/drawn-diff";
 import {
   commitOnRemote,
   forgeCommitComments,
@@ -63,7 +62,8 @@ vi.mock("@/lib/settings/api", async (importOriginal) => ({
   saveSettingsPatch: vi.fn(),
 }));
 
-/** False holds every pane's anchors back, as a diff still building would. */
+/** False holds every pane's anchor rows back, as rows still building would:
+ *  the pane reports its patch with nothing mounted. */
 const drawGate = vi.hoisted(() => ({
   open: true,
   listeners: new Set<() => void>(),
@@ -81,6 +81,7 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
     "@/features/diff/diff-pane-hold"
   );
   const { useSyncExternalStore } = await import("react");
+  const { useStandInReport } = await import("./painted-stand-in");
   const subscribe = (l: () => void) => {
     drawGate.listeners.add(l);
     return () => drawGate.listeners.delete(l);
@@ -102,23 +103,33 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
     return out;
   }
   function DiffSurface({
+    filePath,
     diff,
     lineAnchors,
+    paintsOtherCommit,
   }: {
+    filePath: string;
     diff: { data?: FileDiff; isPlaceholderData: boolean };
     lineAnchors?: DiffLineAnchor[];
+    paintsOtherCommit?: boolean;
   }) {
     useReportPaneSettled(diff.data !== undefined && !diff.isPlaceholderData);
     const open = useSyncExternalStore(subscribe, () => drawGate.open);
+    const lines = drawnLines(diff.data?.text ?? "");
+    const drawn = (lineAnchors ?? []).filter((a) => lines.has(a.line));
+    useStandInReport(
+      filePath,
+      diff.data,
+      false,
+      open ? drawn : [],
+      paintsOtherCommit,
+    );
     if (diff.data === undefined || !open) return null;
-    const lines = drawnLines(diff.data.text);
     return (
       <div data-testid="inline-anchors">
-        {lineAnchors
-          ?.filter((a) => lines.has(a.line))
-          .map((a) => (
-            <div key={`${a.side}:${a.line}`}>{a.render()}</div>
-          ))}
+        {drawn.map((a) => (
+          <div key={`${a.side}:${a.line}`}>{a.render()}</div>
+        ))}
       </div>
     );
   }
@@ -526,67 +537,5 @@ describe("CommitDetailView's Show whitespace focus", () => {
     );
     await settle();
     expect(document.activeElement).toBe(sink());
-  });
-});
-
-describe("drawnDiffFor", () => {
-  const xDiff = diff("x", PLAIN_X);
-  const yDiff = diff("y", Y_TEXT);
-
-  it("takes a settled read of the listed path for the rendered commit", () => {
-    const shownDiff = { data: xDiff, isPlaceholderData: false };
-    expect(
-      drawnDiffFor({
-        selectedPathProp: "x",
-        shownDiff,
-        hash: A,
-        renderedHash: A,
-        retainedDiff: null,
-      }),
-    ).toBe(xDiff);
-    expect(
-      drawnDiffFor({
-        selectedPathProp: "y",
-        shownDiff,
-        hash: A,
-        renderedHash: A,
-        retainedDiff: null,
-      }),
-    ).toBeNull();
-  });
-
-  it("never lets the previous file's placeholder judge the selected file", () => {
-    expect(
-      drawnDiffFor({
-        selectedPathProp: "y",
-        shownDiff: { data: xDiff, isPlaceholderData: true },
-        hash: A,
-        renderedHash: A,
-        retainedDiff: { hash: A, path: "x", data: xDiff },
-      }),
-    ).toBeNull();
-  });
-
-  it("serves the retained read through a commit switch only for its own commit and path", () => {
-    const shownDiff = { data: yDiff, isPlaceholderData: true };
-    const retainedDiff = { hash: A, path: "y", data: yDiff };
-    expect(
-      drawnDiffFor({
-        selectedPathProp: "y",
-        shownDiff,
-        hash: B,
-        renderedHash: A,
-        retainedDiff,
-      }),
-    ).toBe(yDiff);
-    expect(
-      drawnDiffFor({
-        selectedPathProp: "y",
-        shownDiff,
-        hash: B,
-        renderedHash: B,
-        retainedDiff,
-      }),
-    ).toBeNull();
   });
 });

@@ -3,7 +3,14 @@ import {
   QueryClient,
   QueryClientProvider,
 } from "@tanstack/react-query";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   afterAll,
@@ -26,11 +33,14 @@ import {
   forgeStatus,
   gitFindRemotePrResolve,
 } from "@/lib/git/api";
-import type { ForgeStatus, PrDetails } from "@/lib/git/types";
+import { prContentRevsOptions } from "@/lib/git/queries";
+import type { ForgeStatus, PrDetails, ReviewThreadOut } from "@/lib/git/types";
 import type { ReviewDraft } from "@/lib/pulls/review-drafts";
 import { loadSettings, saveSettingsMerged } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useUiStore } from "@/lib/stores/ui";
+import { invoke } from "@/lib/tauri/invoke";
+import { stubCanvas } from "./canvas-stub";
 
 // The pending-review drafts the view reads; none unless a test seeds them.
 const seeded = vi.hoisted(() => ({ drafts: undefined as unknown }));
@@ -45,11 +55,22 @@ const mergeRemotePr = vi.hoisted(() =>
   vi.fn<(...args: unknown[]) => Promise<unknown>>(),
 );
 
+// The wire answers a test may install (undefined = unanswered), and whether
+// the Files pane is the real diff instead of the stand-in.
+const wire = vi.hoisted(() => ({
+  answer: undefined as
+    | ((cmd: string, args: Record<string, unknown>) => unknown)
+    | undefined,
+  realPane: false,
+}));
+
 // Reads this file does not answer fail at the wire, as in the merge-message
 // harness, so a leaked read cannot reach the shared transport.
 vi.mock("@/lib/tauri/invoke", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/tauri/invoke")>()),
-  invoke: vi.fn(async (cmd: string) => {
+  invoke: vi.fn(async (cmd: string, args: Record<string, unknown> = {}) => {
+    const answer = wire.answer?.(cmd, args);
+    if (answer !== undefined) return answer;
     throw new Error(`unanswered read: ${cmd}`);
   }),
 }));
@@ -137,19 +158,25 @@ vi.mock("@/lib/use-container-width", () => ({
 }));
 // The stand-in pane names the file it shows and the diff text it was handed,
 // renders the line composer once, so the composer's path is observable, and
-// renders each line anchor it was handed (the drafts' cards among them).
-vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
+// renders each line anchor it was handed (the drafts' cards among them), and
+// names the whole-file revs it was handed. `wire.realPane` swaps in the real
+// diff.
+vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
+  const real =
+    await importOriginal<typeof import("@/features/diff/DiffSurfaceLazy")>();
   const { useReportPaneSettled } = await import(
     "@/features/diff/diff-pane-hold"
   );
-  function DiffContent({
+  function StandIn({
     filePath,
     data,
+    contentRevs,
     lineAnchors,
     lineWidget,
   }: {
     filePath: string;
     data?: { filePath: string; text: string };
+    contentRevs?: { oldRev?: string | null; newRev?: string | null };
     lineAnchors?: {
       side: "new" | "old";
       line: number;
@@ -169,6 +196,9 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
         data-open-file={filePath}
         data-diff-path={data?.filePath}
         data-diff-text={data?.text}
+        data-content-revs={
+          contentRevs ? `${contentRevs.oldRev}..${contentRevs.newRev}` : "none"
+        }
       >
         {lineWidget?.render({ side: "new", line: 1, onClose: () => undefined })}
         {lineAnchors?.map((a) => (
@@ -179,7 +209,14 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
       </div>
     );
   }
-  return { DiffSurface: DiffContent, DiffContent };
+  function DiffContent(props: React.ComponentProps<typeof real.DiffContent>) {
+    return wire.realPane ? (
+      <real.DiffContent {...props} />
+    ) : (
+      <StandIn {...props} />
+    );
+  }
+  return { ...real, DiffSurface: DiffContent, DiffContent };
 });
 // The takeover's stand-in only offers its way out.
 vi.mock("@/features/pulls/ResolveRemotePrView", async (importOriginal) => ({
@@ -192,16 +229,41 @@ vi.mock("@/features/pulls/ResolveRemotePrView", async (importOriginal) => ({
     </button>
   ),
 }));
-vi.mock("@/features/pulls/ReviewComposer", () => ({
-  ReviewComposer: ({ path }: { path: string }) => (
-    <div data-composer-path={path} />
-  ),
-}));
+// A controlled draft field and a way out, so a test can tell whether the
+// composer kept its text and close it.
+vi.mock("@/features/pulls/ReviewComposer", async () => {
+  const { useState } = await import("react");
+  function ReviewComposer({
+    path,
+    onClose,
+  }: {
+    path: string;
+    onClose?: () => void;
+  }) {
+    const [text, setText] = useState("");
+    return (
+      <div data-composer-path={path}>
+        <textarea
+          aria-label="Review comment"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        <button type="button" onClick={onClose}>
+          Close composer
+        </button>
+      </div>
+    );
+  }
+  return { ReviewComposer };
+});
 
 Element.prototype.scrollIntoView = vi.fn();
 
 const REPO = "C:/repo";
 const SHA = "0123456789abcdef0123456789abcdef01234567";
+/** Another head, and the merge base the revs read answers. */
+const SHA8 = "89abcdef01".repeat(4);
+const BASE = "fedcba9876".repeat(4);
 const ALL_ON = new Proxy({}, { get: () => true });
 const GITLAB = {
   provider: "gitlab",
@@ -301,6 +363,8 @@ beforeEach(() => {
   views = {};
   binaries = new Set();
   seeded.drafts = undefined;
+  wire.answer = undefined;
+  wire.realPane = false;
   useFileFilterStore.setState({ texts: {} });
   vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
   vi.mocked(saveSettingsMerged).mockResolvedValue(DEFAULT_SETTINGS);
@@ -357,6 +421,7 @@ function mount(number = 7) {
   );
   const view = render(ui(number));
   return {
+    client,
     show: (n: number) => {
       act(() =>
         useUiStore.setState({ selectedPr: { kind: "remote", id: String(n) } }),
@@ -806,4 +871,423 @@ describe("Pull request Files tab file filter", () => {
       onlineManager.setOnline(true);
     }
   }, 10_000);
+});
+
+describe("Pull request Files tab whole-file reads", () => {
+  const sent = () => vi.mocked(invoke).mock.calls.map(([cmd]) => cmd);
+  const revsReads = () =>
+    vi
+      .mocked(invoke)
+      .mock.calls.filter(([cmd]) => cmd === "forge_pr_content_revs");
+
+  it("reads nothing new on the Conversation tab, and the head's revs on Files", async () => {
+    lists[7] = ["src/a.ts"];
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole("button", { name: /^Files \(\d+\)$/ });
+    await act(async () => undefined);
+    for (const cmd of [
+      "forge_pr_content_revs",
+      "forge_commit_first_parent",
+      "forge_file_at_sha",
+    ])
+      expect(sent()).not.toContain(cmd);
+    await openFilesTab(user);
+    await waitFor(() => expect(revsReads().length).toBeGreaterThan(0));
+    expect(revsReads()[0]?.[1]).toMatchObject({
+      repoPath: REPO,
+      number: 7,
+      headSha: SHA,
+    });
+    // A cold mount of the whole view: dev-build render time sets its length.
+  }, 30_000);
+
+  /** The revs the shown pane was handed, as `old..new`, or "none". */
+  const paneRevs = () => live("data-content-revs");
+  const revsFor = (n: number) =>
+    revsReads()
+      .map(([, args]) => args as { number: number; headSha: string })
+      .filter((a) => a.number === n)
+      .map((a) => a.headSha);
+  const answerRevs = () => {
+    wire.answer = (cmd, args) =>
+      cmd === "forge_pr_content_revs"
+        ? { oldSha: BASE, newSha: args.headSha }
+        : undefined;
+  };
+  /** Long enough for a read answered at once to reach its observers and the
+   *  pane's presence read after it. */
+  const settle = () =>
+    act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+
+  it("AC-L1: hands the pane no revs while its diff is another pull request's", async () => {
+    lists[7] = ["src/a.ts"];
+    lists[8] = ["src/a.ts"];
+    views[8] = async () => pr(8, { headSha: SHA8 });
+    const diff8 = deferred<string>();
+    vi.mocked(forgePrDiff).mockImplementation(async (_repo, number) =>
+      number === 8 ? diff8.promise : patch(lists[number] ?? []),
+    );
+    answerRevs();
+    const user = userEvent.setup();
+    const { client, show } = mount();
+    await openFilesTab(user);
+    await waitFor(() => expect(paneRevs()).toBe(`${BASE}..${SHA}`));
+    // Switched from Conversation, the hold settles on the details alone, so
+    // Files opens on PR 8's own details over PR 7's placeholder diff.
+    await user.click(screen.getByRole("button", { name: /^Conversation/ }));
+    show(8);
+    await screen.findByText("Merge request 8");
+    await openFilesTab(user);
+    const key = prContentRevsOptions(REPO, 8, "origin", SHA8).queryKey;
+    await waitFor(() => expect(client.getQueryData(key)).toBeDefined());
+    await settle();
+    expect(openFile()).toBe("src/a.ts");
+    expect(paneRevs()).toBe("none");
+    await act(async () => diff8.resolve(patch(lists[8])));
+    await waitFor(() => expect(paneRevs()).toBe(`${BASE}..${SHA8}`));
+  }, 30_000);
+
+  it("AC-L1: keeps the revs it has through a failed refetch", async () => {
+    lists[7] = ["src/a.ts"];
+    let refuse = false;
+    wire.answer = (cmd, args) => {
+      if (cmd !== "forge_pr_content_revs") return undefined;
+      // A refusal is never retried, so the refetch settles at once.
+      return refuse
+        ? Promise.reject({ kind: "invalidArgument", message: "refused" })
+        : { oldSha: BASE, newSha: args.headSha };
+    };
+    const user = userEvent.setup();
+    const { client } = mount();
+    await openFilesTab(user);
+    await waitFor(() => expect(paneRevs()).toBe(`${BASE}..${SHA}`));
+    refuse = true;
+    const key = prContentRevsOptions(REPO, 7, "origin", SHA).queryKey;
+    await act(() => client.refetchQueries({ queryKey: key }));
+    expect(client.getQueryState(key)?.status).toBe("error");
+    await settle();
+    expect(paneRevs()).toBe(`${BASE}..${SHA}`);
+  }, 30_000);
+
+  it("AC-L2: never reads revs under a placeholder's head", async () => {
+    lists[7] = ["src/a.ts"];
+    lists[8] = ["src/a.ts"];
+    const held = deferred<PrDetails>();
+    views[8] = () => held.promise;
+    answerRevs();
+    const user = userEvent.setup();
+    const { show } = mount();
+    await openFilesTab(user);
+    await waitFor(() => expect(paneRevs()).toBe(`${BASE}..${SHA}`));
+    show(8);
+    // Past the hold's bound the view moves to PR 8 over PR 7's placeholder
+    // details, whose head is PR 7's.
+    await act(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(resolve, ENTITY_HOLD_BOUND_MS + 200),
+        ),
+    );
+    await settle();
+    expect(revsFor(8)).toEqual([]);
+    await act(async () => held.resolve(pr(8, { headSha: SHA8 })));
+    await waitFor(() => expect(revsFor(8)).toEqual([SHA8]));
+    await waitFor(() => expect(paneRevs()).toBe(`${BASE}..${SHA8}`));
+  }, 30_000);
+});
+
+describe("Pull request Files tab drawn by the real diff", () => {
+  const lines = (n: number) =>
+    Array.from({ length: n }, (_, i) => `line ${i + 1}\n`).join("");
+  /** A 40-line file edited at lines 2 and 32: two hunks over a gap. */
+  const OLD = lines(40);
+  const NEW = OLD.replace("line 2\n", "line two\n").replace(
+    "line 32\n",
+    "line thirty-two\n",
+  );
+  const TEXT =
+    "diff --git a/f.txt b/f.txt\nindex 1111111..2222222 100644\n--- a/f.txt\n+++ b/f.txt\n" +
+    "@@ -1,3 +1,3 @@\n line 1\n-line 2\n+line two\n line 3\n" +
+    "@@ -31,3 +31,3 @@\n line 31\n-line 32\n+line thirty-two\n line 33\n";
+  /** git's order for a binary file turned into a symbolic link. */
+  const TYPECHANGE =
+    "diff --git a/link b/link\ndeleted file mode 100644\nindex 1111111..0000000\nBinary files a/link and /dev/null differ\n" +
+    "diff --git a/link b/link\nnew file mode 120000\nindex 0000000..2222222\n--- /dev/null\n+++ b/link\n@@ -0,0 +1 @@\n+target/path\n\\ No newline at end of file\n";
+  const thread = (
+    id: string,
+    path: string,
+    line: number,
+    body: string,
+  ): ReviewThreadOut => ({
+    id,
+    reviewId: "",
+    path,
+    line,
+    startLine: 0,
+    side: "new",
+    isResolved: false,
+    isOutdated: false,
+    diffHunk: "",
+    comments: [
+      {
+        author: "someone",
+        authorAvatarUrl: "",
+        state: "",
+        body,
+        date: "2026-01-01T00:00:00Z",
+        id: `N_${id}`,
+        url: "",
+        viewerDidAuthor: false,
+        isMinimized: false,
+        minimizedReason: "",
+        reviewId: "",
+      },
+    ],
+  });
+  const bytes = (text: string) => ({
+    base64: Buffer.from(text).toString("base64"),
+    mime: null,
+    tooLarge: false,
+    size: text.length,
+  });
+  const expands = () =>
+    document.querySelectorAll<HTMLElement>('[title^="Expand"]');
+  /** Every drawing of `text`, and how many sit in an inline diff anchor
+   *  carrying `mark`. */
+  const drawn = (text: string, mark: "whitespace" | "layout") => {
+    const all = screen.queryAllByText(text);
+    return {
+      count: all.length,
+      inline: all.filter((el) => el.closest(`[data-diff-anchor="${mark}"]`))
+        .length,
+    };
+  };
+
+  beforeEach(() => {
+    stubCanvas();
+    wire.realPane = true;
+    // The pull request's revs, and each side's whole file by its sha.
+    wire.answer = (cmd, args) => {
+      if (cmd === "forge_pr_content_revs")
+        return { oldSha: BASE, newSha: args.headSha };
+      if (cmd === "forge_file_at_sha")
+        return bytes(args.sha === BASE ? OLD : NEW);
+      return undefined;
+    };
+  });
+
+  it("AC-R3: an off-patch thread and draft draw once, inline, when their gap opens", async () => {
+    lists[7] = ["f.txt"];
+    vi.mocked(forgePrDiff).mockResolvedValue(TEXT);
+    vi.mocked(forgePrReviewThreads).mockResolvedValue({
+      threads: [thread("T1", "f.txt", 16, "On a gap line")],
+      threadsTruncated: false,
+    });
+    seeded.drafts = [
+      {
+        id: "d1",
+        path: "f.txt",
+        line: 20,
+        side: "new",
+        body: "Draft on a gap line",
+        createdAt: "2026-01-01T00:00:00Z",
+      } satisfies ReviewDraft,
+    ];
+    const user = userEvent.setup();
+    mount();
+    await openFilesTab(user);
+    // Content mode is up once the gap rows offer to expand.
+    await waitFor(() => expect(expands().length).toBeGreaterThan(0), {
+      timeout: 10_000,
+    });
+    expect(drawn("On a gap line", "whitespace").count).toBe(0);
+    expect(drawn("Draft on a gap line", "whitespace").count).toBe(0);
+    for (let i = 0; i < 20 && expands().length > 0; i++)
+      await user.click(expands()[0]);
+    await waitFor(() =>
+      expect(drawn("On a gap line", "whitespace")).toEqual({
+        count: 1,
+        inline: 1,
+      }),
+    );
+    expect(drawn("Draft on a gap line", "whitespace")).toEqual({
+      count: 1,
+      inline: 1,
+    });
+  }, 30_000);
+
+  it("AC-T2: a binary-to-link typechange draws its link half, the thread once inline, and the composer there", async () => {
+    lists[7] = ["link"];
+    vi.mocked(forgePrDiff).mockResolvedValue(TYPECHANGE);
+    vi.mocked(forgePrReviewThreads).mockResolvedValue({
+      threads: [thread("T2", "link", 1, "On the link")],
+      threadsTruncated: false,
+    });
+    const user = userEvent.setup();
+    mount();
+    await openFilesTab(user);
+    expect(
+      await screen.findByText("Binary file removed", undefined, {
+        timeout: 10_000,
+      }),
+    ).toBeTruthy();
+    const linkLine = () =>
+      document.querySelector('span[data-line-new-num="1"]');
+    await waitFor(() => expect(linkLine()).not.toBeNull());
+    await waitFor(() =>
+      expect(drawn("On the link", "layout")).toEqual({ count: 1, inline: 1 }),
+    );
+    const num = linkLine()?.closest(".diff-line-num") as HTMLElement;
+    fireEvent.mouseOver(num);
+    fireEvent.mouseDown(
+      num.closest("tr")?.querySelector(".diff-add-widget") as HTMLElement,
+    );
+    await waitFor(() =>
+      expect(
+        document
+          .querySelector('[data-composer-path="link"]')
+          ?.closest('[data-diff-line-widget="layout"]'),
+      ).not.toBeNull(),
+    );
+  }, 30_000);
+
+  it("keeps a composer's text through a failed first revs read and its retry, upgrading once it closes", async () => {
+    lists[7] = ["f.txt"];
+    vi.mocked(forgePrDiff).mockResolvedValue(TEXT);
+    let refuse = true;
+    wire.answer = (cmd, args) => {
+      if (cmd === "forge_pr_content_revs")
+        return refuse
+          ? Promise.reject({ kind: "invalidArgument", message: "refused" })
+          : { oldSha: BASE, newSha: args.headSha };
+      if (cmd === "forge_file_at_sha")
+        return bytes(args.sha === BASE ? OLD : NEW);
+      return undefined;
+    };
+    const fileReads = () =>
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(([cmd]) => cmd === "forge_file_at_sha").length;
+    const user = userEvent.setup();
+    const { client } = mount();
+    await openFilesTab(user);
+    const key = prContentRevsOptions(REPO, 7, "origin", SHA).queryKey;
+    await waitFor(
+      () => expect(client.getQueryState(key)?.status).toBe("error"),
+      { timeout: 10_000 },
+    );
+    const num = await waitFor(
+      () => {
+        const cell = document
+          .querySelector('span[data-line-new-num="2"]')
+          ?.closest(".diff-line-num");
+        expect(cell).toBeTruthy();
+        return cell as HTMLElement;
+      },
+      { timeout: 10_000 },
+    );
+    fireEvent.mouseOver(num);
+    fireEvent.mouseDown(
+      num.closest("tr")?.querySelector(".diff-add-widget") as HTMLElement,
+    );
+    const draft = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Review comment",
+    });
+    await user.type(draft, "kept");
+    // The retry answers: the presence read, then the forge reads follow.
+    refuse = false;
+    await act(() => client.refetchQueries({ queryKey: key }));
+    await waitFor(() => expect(fileReads()).toBe(2));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
+    expect(draft.isConnected).toBe(true);
+    expect(draft.value).toBe("kept");
+    expect(expands().length).toBe(0);
+    await user.click(screen.getByRole("button", { name: "Close composer" }));
+    await waitFor(() => expect(expands().length).toBeGreaterThan(0));
+  }, 30_000);
+
+  it("drops an image's old-head pair once a push's revs read is refused, never while it reads", async () => {
+    binaries.add("img.png");
+    lists[7] = ["img.png"];
+    const newRevs = deferred<unknown>();
+    wire.answer = (cmd, args) => {
+      if (cmd === "forge_pr_content_revs")
+        return args.headSha === SHA8
+          ? newRevs.promise
+          : { oldSha: BASE, newSha: args.headSha };
+      if (cmd === "forge_file_at_sha")
+        return {
+          base64: "iVBORw0KGgo=",
+          mime: "image/png",
+          tooLarge: false,
+          size: 8,
+        };
+      return undefined;
+    };
+    const user = userEvent.setup();
+    const { client } = mount();
+    await openFilesTab(user);
+    const figures = () => document.querySelectorAll("figure");
+    await waitFor(() => expect(figures()).toHaveLength(2), { timeout: 10_000 });
+    const nodes = [...figures()];
+    // A push moves the head; its revs read is in flight.
+    views[7] = async () => pr(7, { headSha: SHA8 });
+    await act(() => client.invalidateQueries());
+    const key = prContentRevsOptions(REPO, 7, "origin", SHA8).queryKey;
+    await waitFor(() =>
+      expect(client.getQueryState(key)?.fetchStatus).toBe("fetching"),
+    );
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect([...figures()]).toEqual(nodes);
+    // Refused, so never retried: it settles at once.
+    await act(async () =>
+      newRevs.reject({ kind: "invalidArgument", message: "refused" }),
+    );
+    await waitFor(() =>
+      expect(client.getQueryState(key)?.status).toBe("error"),
+    );
+    await waitFor(() => expect(figures()).toHaveLength(0));
+    expect(nodes.some((n) => n.isConnected)).toBe(false);
+    expect(screen.getAllByText(/^Binary file/).length).toBeGreaterThan(0);
+  }, 30_000);
+
+  it("drops an image's pair once refreshed details name no head, never while they load", async () => {
+    binaries.add("img.png");
+    lists[7] = ["img.png"];
+    wire.answer = (cmd, args) => {
+      if (cmd === "forge_pr_content_revs")
+        return { oldSha: BASE, newSha: args.headSha };
+      if (cmd === "forge_file_at_sha")
+        return {
+          base64: "iVBORw0KGgo=",
+          mime: "image/png",
+          tooLarge: false,
+          size: 8,
+        };
+      return undefined;
+    };
+    const user = userEvent.setup();
+    const { client } = mount();
+    await openFilesTab(user);
+    const figures = () => document.querySelectorAll("figure");
+    await waitFor(() => expect(figures()).toHaveLength(2), { timeout: 10_000 });
+    const nodes = [...figures()];
+    // A refresh is in flight: the details on screen still name the head.
+    const refreshed = deferred<PrDetails>();
+    views[7] = () => refreshed.promise;
+    act(() => void client.invalidateQueries());
+    const detailsKey = ["repo", REPO, "pr", "origin", 7];
+    await waitFor(() =>
+      expect(client.getQueryState(detailsKey)?.fetchStatus).toBe("fetching"),
+    );
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect([...figures()]).toEqual(nodes);
+    // It lands with no head (Bitbucket's commits read failed): the revs read
+    // stays disabled, never errors, and the kept pair goes.
+    await act(async () => refreshed.resolve(pr(7, { headSha: "" })));
+    await waitFor(() => expect(figures()).toHaveLength(0));
+    expect(nodes.some((n) => n.isConnected)).toBe(false);
+    expect(screen.getAllByText(/^Binary file/).length).toBeGreaterThan(0);
+  }, 30_000);
 });

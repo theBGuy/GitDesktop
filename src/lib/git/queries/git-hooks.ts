@@ -22,10 +22,13 @@ export function useHooks(repo: string) {
   });
 }
 
+export const hookContentKey = (repo: string, name: string | null) =>
+  ["repo", repo, "hook", name] as const;
+
 /** A hook's script content, loaded when one is selected for editing. */
 export function useHookContent(repo: string, name: string | null) {
   return useQuery({
-    queryKey: ["repo", repo, "hook", name] as const,
+    queryKey: hookContentKey(repo, name),
     queryFn: () => api.gitHookRead(repo, name ?? ""),
     enabled: name !== null,
     networkMode: "always",
@@ -36,8 +39,8 @@ export function useWriteHook(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
-    (args: { name: string; content: string }) =>
-      api.gitHookWrite(repo, args.name, args.content),
+    (args: { name: string; content: string; expectedManaged?: boolean }) =>
+      api.gitHookWrite(repo, args.name, args.content, args.expectedManaged),
     {
       // Local hook write — never park it offline.
       networkMode: "always",
@@ -50,8 +53,13 @@ export function useSetHookEnabled(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
-    (args: { name: string; enabled: boolean }) =>
-      api.gitHookSetEnabled(repo, args.name, args.enabled),
+    (args: { name: string; enabled: boolean; expectedManaged?: boolean }) =>
+      api.gitHookSetEnabled(
+        repo,
+        args.name,
+        args.enabled,
+        args.expectedManaged,
+      ),
     {
       // Local hook write — never park it offline.
       networkMode: "always",

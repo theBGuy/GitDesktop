@@ -991,28 +991,139 @@ pub async fn gh_issue_comment(
     })
 }
 
-/// Closes an issue. `reason` is "completed" or "not_planned" (GitHub's two
-/// close reasons); empty defaults to completed.
+/// gh's `--reason` enum spells this with a space, unlike the API's `not_planned`.
+const GH_CLOSE_REASON_NOT_PLANNED: &str = "not planned";
+
+/// A close reason in gh's `--reason` spelling. The argv builder takes this
+/// instead of `&str`, so a caller can't hand it the raw input string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GhCloseReason(&'static str);
+
+/// Maps a close reason to the value gh's `--reason` accepts.
+fn gh_close_reason(reason: crate::forge::CloseReason) -> GhCloseReason {
+    match reason {
+        crate::forge::CloseReason::Completed => GhCloseReason("completed"),
+        crate::forge::CloseReason::NotPlanned => GhCloseReason(GH_CLOSE_REASON_NOT_PLANNED),
+    }
+}
+
+fn issue_close_args<'a>(n: &'a str, slug: &'a str, gh_reason: GhCloseReason) -> [&'a str; 7] {
+    ["issue", "close", n, "--repo", slug, "--reason", gh_reason.0]
+}
+
+/// The fields of a REST issue body an issue write checks first.
+#[derive(Deserialize)]
+struct IssueKindState {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    pull_request: Option<serde_json::Value>,
+}
+
+/// Parses a REST issue body, refusing a pull request: GitHub's issue endpoints and
+/// `gh issue` commands act on a pull request given its number.
+fn gh_issue_not_a_pull_request(body: &str, number: u64) -> AppResult<IssueKindState> {
+    let issue: IssueKindState = serde_json::from_str(body)
+        .map_err(|e| gh_unreadable("the issue", format!("could not parse the issue: {e}")))?;
+    if issue.pull_request.is_some() {
+        return Err(AppError::InvalidArgument(format!(
+            "#{number} is a pull request, not an issue"
+        )));
+    }
+    Ok(issue)
+}
+
+/// Whether a REST issue body reads as closed, refusing a pull request. A missing or
+/// unknown state is an error, so the write never proceeds on a guess.
+fn gh_issue_is_closed(body: &str, number: u64) -> AppResult<bool> {
+    let issue = gh_issue_not_a_pull_request(body, number)?;
+    match issue.state.as_deref() {
+        Some("open") => Ok(false),
+        Some("closed") => Ok(true),
+        other => Err(gh_unreadable(
+            "the issue",
+            format!("unexpected issue state: {other:?}"),
+        )),
+    }
+}
+
+/// Reads whether the issue is closed now, ahead of a close or reopen: gh exits 0
+/// without writing when the issue is already in the asked-for state. An issue
+/// converted to a pull request between this read and gh's write isn't caught.
+async fn gh_issue_closed_now(repo_path: &str, slug: &str, number: u64) -> AppResult<bool> {
+    let issue_path = format!("repos/{slug}/issues/{number}");
+    let state = run_gh(Some(repo_path), &["api", &issue_path], GH_TIMEOUT).await?;
+    gh_issue_is_closed(&state.stdout_lossy(), number)
+}
+
+/// Refuses a pull request's number ahead of an issue write that addresses by number
+/// (comment, edit, assignees, milestone, labels): GitHub serves those for a pull
+/// request too. The same read-to-write gap as `gh_issue_closed_now` applies.
+pub async fn gh_refuse_pull_request(repo_path: String, number: u64) -> AppResult<()> {
+    let slug = crate::github::gh_lens_slug(&repo_path, None).await?;
+    let issue_path = format!("repos/{slug}/issues/{number}");
+    let out = run_gh(Some(&repo_path), &["api", &issue_path], GH_TIMEOUT).await?;
+    gh_issue_not_a_pull_request(&out.stdout_lossy(), number).map(|_| ())
+}
+
+/// gh's stderr notices when `issue close` / `issue reopen` met an issue already in
+/// that state; it exits 0 without writing (pkg/cmd/issue/{close,reopen}, gh v2.103.3).
+const GH_ALREADY_CLOSED: &str = " is already closed";
+const GH_ALREADY_OPEN: &str = " is already open";
+
+/// gh's telemetry "log" mode ends stderr with this header and its payload, after the
+/// command's own output (internal/telemetry/telemetry.go, gh v2.103.3): the line
+/// `Telemetry payload: none`, or the header alone followed by an indented JSON
+/// payload. The runner disables colour, so the header is the whole line.
+const GH_TELEMETRY_LOG_HEADER: &str = "Telemetry payload:";
+
+/// Whether gh's outcome line is `notice`'s: the last non-empty stderr line once a
+/// trailing telemetry block is set aside. Titles can carry newlines (GitHub keeps
+/// them), so the block is recognised only in its exact shapes: gh's outcome line
+/// always ends with the notice or with the title's closing `)`, which neither shape
+/// can end with, so no title can forge a block or make a success read as a no-op.
+fn gh_reported_noop(stderr: &str, notice: &str) -> bool {
+    let lines: Vec<&str> = stderr.lines().map(str::trim_end).collect();
+    let mut end = lines.len();
+    while end > 0 && lines[end - 1].is_empty() {
+        end -= 1;
+    }
+    if end > 0 && lines[end - 1] == format!("{GH_TELEMETRY_LOG_HEADER} none") {
+        end -= 1;
+    } else if let Some(header) = lines[..end]
+        .iter()
+        .rposition(|line| *line == GH_TELEMETRY_LOG_HEADER)
+    {
+        let payload = lines[header + 1..end].join("\n");
+        if serde_json::from_str::<serde_json::Value>(&payload).is_ok() {
+            end = header;
+        }
+    }
+    lines[..end]
+        .iter()
+        .rfind(|line| !line.is_empty())
+        .is_some_and(|line| line.ends_with(notice))
+}
+
+/// Closes an issue with `reason`, translated to gh's spelling. The state is read
+/// first; gh's own no-op notice also catches a close that lands before gh's fetch,
+/// narrowing the race to gh's fetch-to-write gap.
 pub async fn gh_issue_close(
     repo_path: String,
     number: u64,
-    reason: String,
+    reason: crate::forge::CloseReason,
     lens: Option<String>,
-) -> AppResult<()> {
+) -> AppResult<crate::forge::IssueCloseOutcome> {
+    use crate::forge::IssueCloseOutcome;
     let n = number.to_string();
-    let reason = match reason.as_str() {
-        "" | "completed" => "completed",
-        "not_planned" => "not_planned",
-        _ => {
-            return Err(AppError::InvalidArgument(format!(
-                "unknown close reason: {reason}"
-            )));
-        }
-    };
+    let gh_reason = gh_close_reason(reason);
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    if gh_issue_closed_now(&repo_path, &slug, number).await? {
+        return Ok(IssueCloseOutcome::AlreadyClosed);
+    }
     let result = run_gh(
         Some(&repo_path),
-        &["issue", "close", &n, "--repo", &slug, "--reason", reason],
+        &issue_close_args(&n, &slug, gh_reason),
         GH_NETWORK_TIMEOUT,
     )
     .await;
@@ -1020,14 +1131,26 @@ pub async fn gh_issue_close(
     let result = result.map_err(|e| {
         crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
     });
-    result?;
-    Ok(())
+    let out = result?;
+    if gh_reported_noop(&out.stderr, GH_ALREADY_CLOSED) {
+        return Ok(IssueCloseOutcome::AlreadyClosed);
+    }
+    Ok(IssueCloseOutcome::Closed(Some(reason)))
 }
 
-/// Reopens a closed issue.
-pub async fn gh_issue_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
+/// Reopens a closed issue. Like the close, it reads the state first and also
+/// honours gh's own no-op notice.
+pub async fn gh_issue_reopen(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<crate::forge::IssueReopenOutcome> {
+    use crate::forge::IssueReopenOutcome;
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    if !gh_issue_closed_now(&repo_path, &slug, number).await? {
+        return Ok(IssueReopenOutcome::AlreadyOpen);
+    }
     let result = run_gh(
         Some(&repo_path),
         &["issue", "reopen", &n, "--repo", &slug],
@@ -1038,8 +1161,11 @@ pub async fn gh_issue_reopen(repo_path: String, number: u64, lens: Option<String
     let result = result.map_err(|e| {
         crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
     });
-    result?;
-    Ok(())
+    let out = result?;
+    if gh_reported_noop(&out.stderr, GH_ALREADY_OPEN) {
+        return Ok(IssueReopenOutcome::AlreadyOpen);
+    }
+    Ok(IssueReopenOutcome::Reopened)
 }
 
 // An edit without images goes through the REST API: `gh issue edit` on older gh
@@ -1902,13 +2028,375 @@ pub fn read_issue_templates(repo_path: String) -> AppResult<Vec<String>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         empty_filtered_issues, is_issues_disabled, issue_set_type_args, map_gh_too_old,
         ISSUE_TIMELINE_QUERY,
     };
     use crate::error::AppError;
+    use crate::forge::CloseReason;
     use crate::github::test_support::{gh_output, HELD_REST_STDERR};
+
+    #[test]
+    fn issue_close_args_spell_not_planned_the_way_gh_accepts() {
+        let reason = super::gh_close_reason(CloseReason::parse("not_planned").unwrap());
+        let args = super::issue_close_args("7", "o/r", reason);
+        assert_eq!(
+            args,
+            [
+                "issue",
+                "close",
+                "7",
+                "--repo",
+                "o/r",
+                "--reason",
+                "not planned"
+            ]
+        );
+    }
+
+    #[test]
+    fn issue_close_reason_defaults_to_completed() {
+        for input in ["", "completed"] {
+            let reason = super::gh_close_reason(CloseReason::parse(input).unwrap());
+            let args = super::issue_close_args("7", "o/r", reason);
+            assert_eq!(args[5..], ["--reason", "completed"], "{input:?}");
+        }
+    }
+
+    #[test]
+    fn issue_close_state_read_refuses_pull_requests_and_guesses() {
+        assert!(!super::gh_issue_is_closed(r#"{"state":"open"}"#, 7).unwrap());
+        assert!(!super::gh_issue_is_closed(r#"{"state":"open","pull_request":null}"#, 7).unwrap());
+        assert!(
+            super::gh_issue_is_closed(r#"{"state":"closed","state_reason":"not_planned"}"#, 7)
+                .unwrap()
+        );
+        for pr in [
+            r#"{"state":"open","pull_request":{"url":"u"}}"#,
+            r#"{"state":"closed","pull_request":{}}"#,
+        ] {
+            let refused = super::gh_issue_is_closed(pr, 7);
+            assert!(
+                matches!(&refused, Err(AppError::InvalidArgument(m))
+                    if m == "#7 is a pull request, not an issue"),
+                "{pr}: {refused:?}"
+            );
+        }
+        for unreadable in ["{}", r#"{"state":"OPEN"}"#, r#"{"state":null}"#, "not json"] {
+            let refused = super::gh_issue_is_closed(unreadable, 7);
+            assert!(
+                matches!(&refused, Err(AppError::Gh(_))),
+                "{unreadable}: {refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gh_noop_notice_matches_only_at_the_end_of_a_line() {
+        use super::{gh_reported_noop, GH_ALREADY_CLOSED, GH_ALREADY_OPEN};
+        // gh's success lines end with the title in parentheses, whatever it says.
+        let closed = "✓ Closed issue o/r#7 (Socket is already closed)\n";
+        let reopened = "✓ Reopened issue o/r#7 (Docs say it is already open)\n";
+        assert!(!gh_reported_noop(closed, GH_ALREADY_CLOSED));
+        assert!(!gh_reported_noop(reopened, GH_ALREADY_OPEN));
+        let closed_noop = "! Issue o/r#7 (Socket is already closed) is already closed\n";
+        assert!(gh_reported_noop(closed_noop, GH_ALREADY_CLOSED));
+        assert!(gh_reported_noop(
+            "! Issue o/r#7 (t) is already closed\r\n",
+            GH_ALREADY_CLOSED
+        ));
+        assert!(gh_reported_noop(
+            "! Issue o/r#7 (t) is already open\n",
+            GH_ALREADY_OPEN
+        ));
+        assert!(!gh_reported_noop(
+            "! Issue o/r#7 (t) is already open\n",
+            GH_ALREADY_CLOSED
+        ));
+        assert!(!gh_reported_noop("", GH_ALREADY_CLOSED));
+        // Only the last line counts, so a title with a newline can't forge a notice.
+        let split_title = "✓ Closed issue o/r#7 (a is already closed\nb)\n";
+        assert!(!gh_reported_noop(split_title, GH_ALREADY_CLOSED));
+        let split_noop = "! Issue o/r#7 (a is already closed\nb) is already closed\n\n";
+        assert!(gh_reported_noop(split_noop, GH_ALREADY_CLOSED));
+        // gh's telemetry "log" mode appends its block after the outcome line.
+        let logged = "\nTelemetry payload:\n{\n  \"events\": []\n}\n";
+        assert!(gh_reported_noop(
+            &format!("! Issue o/r#7 (t) is already open{logged}"),
+            GH_ALREADY_OPEN
+        ));
+        assert!(gh_reported_noop(
+            "! Issue o/r#7 (t) is already closed\nTelemetry payload: none\n",
+            GH_ALREADY_CLOSED
+        ));
+        assert!(!gh_reported_noop(
+            &format!("✓ Closed issue o/r#7 (t){logged}"),
+            GH_ALREADY_CLOSED
+        ));
+        // GitHub keeps newlines in titles (probed live), so a title can carry a line
+        // that looks like the telemetry header; only the exact trailing block counts.
+        for title in [
+            "a is already closed\nTelemetry payload: x",
+            "a is already closed\nTelemetry payload: none",
+            "a is already closed\nTelemetry payload:\n{}",
+        ] {
+            let closed = format!("✓ Closed issue o/r#7 ({title})\n");
+            assert!(!gh_reported_noop(&closed, GH_ALREADY_CLOSED), "{title:?}");
+            let closed_logged = format!("✓ Closed issue o/r#7 ({title}){logged}");
+            assert!(
+                !gh_reported_noop(&closed_logged, GH_ALREADY_CLOSED),
+                "{title:?}"
+            );
+            let noop_logged = format!("! Issue o/r#7 ({title}) is already closed{logged}");
+            assert!(
+                gh_reported_noop(&noop_logged, GH_ALREADY_CLOSED),
+                "{title:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_writes_refuse_a_pull_requests_number_whatever_its_state() {
+        for body in [r#"{"state":"open"}"#, r#"{"state":"weird"}"#, "{}"] {
+            assert!(
+                super::gh_issue_not_a_pull_request(body, 7).is_ok(),
+                "{body}"
+            );
+        }
+        let refused = super::gh_issue_not_a_pull_request(r#"{"pull_request":{}}"#, 7).err();
+        assert!(
+            matches!(&refused, Some(AppError::InvalidArgument(m))
+                if m == "#7 is a pull request, not an issue"),
+            "{refused:?}"
+        );
+        assert!(matches!(
+            super::gh_issue_not_a_pull_request("not json", 7),
+            Err(AppError::Gh(_))
+        ));
+    }
+
+    /// `text` with `/* */` blocks dropped, nesting the way Rust's do; an unclosed
+    /// block drops the rest. Pinned bodies hold no `/*` inside a string literal.
+    pub(crate) fn strip_block_comments(text: &str) -> String {
+        let (mut out, mut depth, mut rest) = (String::new(), 0usize, text);
+        while !rest.is_empty() {
+            if rest.starts_with("/*") {
+                depth += 1;
+                rest = &rest[2..];
+            } else if depth > 0 && rest.starts_with("*/") {
+                depth -= 1;
+                rest = &rest[2..];
+                if depth == 0 {
+                    out.push(' ');
+                }
+            } else {
+                let ch = rest.chars().next().unwrap();
+                if depth == 0 {
+                    out.push(ch);
+                }
+                rest = &rest[ch.len_utf8()..];
+            }
+        }
+        out
+    }
+
+    /// `name`'s body in `src`, with whole-line `//` comments and (nested) `/* */`
+    /// blocks dropped and whitespace collapsed, so a pin matches code text only.
+    pub(crate) fn flat_body(src: &str, name: &str) -> String {
+        let body = crate::github::repo_meta::tests::wiring_body(src, name);
+        let body = strip_block_comments(&body);
+        body.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn block_comments_strip_with_rust_nesting() {
+        assert_eq!(strip_block_comments("a /* b */ c"), "a   c");
+        assert_eq!(strip_block_comments("a /* b /* c */ d */ e"), "a   e");
+        assert_eq!(strip_block_comments("a /* b"), "a ");
+        assert_eq!(strip_block_comments("é */ f"), "é */ f");
+    }
+
+    /// Whether every part occurs in `flat`, in this order.
+    pub(crate) fn in_order(flat: &str, parts: &[&str]) -> bool {
+        let found: Vec<_> = parts.iter().map(|part| flat.find(part)).collect();
+        found.iter().all(Option::is_some) && found.windows(2).all(|w| w[0] < w[1])
+    }
+
+    /// Each mutant (one replacement after `anchor`) must turn `pinned` false.
+    pub(crate) fn assert_mutants_fail(
+        src: &str,
+        anchor: &str,
+        mutants: &[(&str, &str)],
+        pinned: impl Fn(&str) -> bool,
+    ) {
+        assert!(pinned(src), "the pin must hold on the real source");
+        let at = src.find(anchor).unwrap();
+        for (from, to) in mutants {
+            let mutant = format!("{}{}", &src[..at], src[at..].replacen(from, to, 1));
+            assert_ne!(mutant, src, "{from}");
+            assert!(!pinned(&mutant), "mutant passed: {from} -> {to}");
+        }
+    }
+
+    fn issue_rs_source() -> String {
+        let src = include_str!("issue.rs").replace("\r\n", "\n");
+        src.split("\npub(crate) mod tests {")
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    /// The state reads target the requested issue, uncached.
+    #[test]
+    fn issue_state_read_targets_the_requested_issue() {
+        let src = issue_rs_source();
+        assert!(!src.contains("fn gh_noop_notice_matches"), "tests stripped");
+        let pinned = |src: &str| {
+            let read = flat_body(src, "gh_issue_closed_now");
+            in_order(
+                &read,
+                &[
+                    "let issue_path = format!(\"repos/{slug}/issues/{number}\");",
+                    "run_gh(Some(repo_path), &[\"api\", &issue_path], GH_TIMEOUT)",
+                ],
+            ) && read.ends_with("gh_issue_is_closed(&state.stdout_lossy(), number)")
+                && {
+                    let refuse = flat_body(src, "gh_refuse_pull_request");
+                    in_order(
+                        &refuse,
+                        &[
+                            "let slug = crate::github::gh_lens_slug(&repo_path, None).await?;",
+                            "let issue_path = format!(\"repos/{slug}/issues/{number}\");",
+                            "run_gh(Some(&repo_path), &[\"api\", &issue_path], GH_TIMEOUT)",
+                        ],
+                    ) && refuse.ends_with(
+                        "gh_issue_not_a_pull_request(&out.stdout_lossy(), number).map(|_| ())",
+                    )
+                }
+        };
+        assert_mutants_fail(
+            &src,
+            "async fn gh_issue_closed_now(",
+            &[
+                ("issues/{number}", "issues/1"),
+                (
+                    "run_gh(Some(repo_path)",
+                    "run_gh_cached_get(Some(repo_path)",
+                ),
+                (
+                    "(&state.stdout_lossy(), number)",
+                    "(&state.stdout_lossy(), number).or(Ok(false))",
+                ),
+                ("/{number}\");\n    let out", "/1\");\n    let out"),
+                ("(&out.stdout_lossy(), number)", "(\"{}\", number)"),
+                (".map(|_| ())", "; Ok(())"),
+            ],
+            pinned,
+        );
+    }
+
+    /// The close reads the state before writing, honours gh's own no-op notice, and
+    /// reports the reason that went into the argv.
+    #[test]
+    fn issue_close_reports_what_it_wrote() {
+        let src = issue_rs_source();
+        let pinned = |src: &str| {
+            let flat = flat_body(src, "gh_issue_close");
+            flat.matches("return ").count() == 2
+                && in_order(
+                    &flat,
+                    &[
+                        "let n = number.to_string();",
+                        "let gh_reason = gh_close_reason(reason);",
+                        "let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;",
+                        "if gh_issue_closed_now(&repo_path, &slug, number).await? { \
+                         return Ok(IssueCloseOutcome::AlreadyClosed); }",
+                        "let result = run_gh( Some(&repo_path), \
+                         &issue_close_args(&n, &slug, gh_reason), GH_NETWORK_TIMEOUT, )",
+                        "if gh_reported_noop(&out.stderr, GH_ALREADY_CLOSED) { \
+                         return Ok(IssueCloseOutcome::AlreadyClosed); }",
+                        "Ok(IssueCloseOutcome::Closed(Some(reason)))",
+                    ],
+                )
+        };
+        assert_mutants_fail(
+            &src,
+            "pub async fn gh_issue_close(",
+            &[
+                (
+                    "Closed(Some(reason))",
+                    "Closed(Some(crate::forge::CloseReason::Completed))",
+                ),
+                ("GH_ALREADY_CLOSED) {", "GH_ALREADY_OPEN) {"),
+                ("return Ok(IssueCloseOutcome::AlreadyClosed);", ""),
+                ("&slug, number).await?", "&slug, 1).await?"),
+                ("number.to_string()", "(number + 1).to_string()"),
+                ("lens.as_deref()", "None"),
+                ("let result = run_gh(", "let result = run_gh_raw("),
+                (
+                    "let slug =",
+                    "return Ok(IssueCloseOutcome::Closed(Some(reason))); let slug =",
+                ),
+                // Commented out whole, the guard must not count: flat_body drops it.
+                (
+                    "if gh_issue_closed_now(&repo_path, &slug, number).await? {\n        \
+                     return Ok(IssueCloseOutcome::AlreadyClosed);\n    }",
+                    "/* if gh_issue_closed_now(&repo_path, &slug, number).await? { \
+                     return Ok(IssueCloseOutcome::AlreadyClosed); } */",
+                ),
+                // A nested block comment must not end the outer one early.
+                (
+                    "if gh_issue_closed_now(&repo_path, &slug, number).await? {\n        \
+                     return Ok(IssueCloseOutcome::AlreadyClosed);\n    }",
+                    "/* x /* y */ if gh_issue_closed_now(&repo_path, &slug, number).await? { \
+                     return Ok(IssueCloseOutcome::AlreadyClosed); } */",
+                ),
+            ],
+            pinned,
+        );
+    }
+
+    /// The reopen reads the state before writing and honours gh's own no-op notice.
+    #[test]
+    fn issue_reopen_reports_what_it_did() {
+        let src = issue_rs_source();
+        let pinned = |src: &str| {
+            let flat = flat_body(src, "gh_issue_reopen");
+            flat.matches("return ").count() == 2
+                && in_order(
+                    &flat,
+                    &[
+                        "let n = number.to_string();",
+                        "let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;",
+                        "if !gh_issue_closed_now(&repo_path, &slug, number).await? { \
+                         return Ok(IssueReopenOutcome::AlreadyOpen); }",
+                        "let result = run_gh( Some(&repo_path), \
+                         &[\"issue\", \"reopen\", &n, \"--repo\", &slug], GH_NETWORK_TIMEOUT, )",
+                        "if gh_reported_noop(&out.stderr, GH_ALREADY_OPEN) { \
+                         return Ok(IssueReopenOutcome::AlreadyOpen); }",
+                        "Ok(IssueReopenOutcome::Reopened)",
+                    ],
+                )
+        };
+        assert_mutants_fail(
+            &src,
+            "pub async fn gh_issue_reopen(",
+            &[
+                ("if !gh_issue_closed_now(", "if gh_issue_closed_now("),
+                ("GH_ALREADY_OPEN) {", "GH_ALREADY_CLOSED) {"),
+                ("return Ok(IssueReopenOutcome::AlreadyOpen);", ""),
+                ("number.to_string()", "(number + 1).to_string()"),
+                ("lens.as_deref()", "None"),
+                ("let result = run_gh(", "let result = run_gh_raw("),
+                (
+                    "let slug =",
+                    "return Ok(IssueReopenOutcome::Reopened); let slug =",
+                ),
+            ],
+            pinned,
+        );
+    }
 
     #[test]
     fn created_issue_ref_reads_each_field_on_its_own() {

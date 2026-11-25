@@ -92,6 +92,10 @@ const RUNTIME_LABEL = { docker: "Docker", podman: "Podman" } as const;
 const CONTAINER_BLOCKED_TEXT =
   "Container isolation isn't ready — open Options for details.";
 
+/** Why Send is held while this session's Keep or Discard runs: a hold, not a problem,
+ *  so it reads muted and carries no warning icon. */
+const BUSY_HOLD_TEXT = "Wait for Keep or Discard to finish.";
+
 /**
  * The single line under the composer's Isolation control. Container is
  * pick-then-warn: it surfaces the same readiness probe Settings runs, with a
@@ -300,6 +304,11 @@ export function SessionComposer({
   const startedRef = useRef(false);
 
   const running = session?.running ?? false;
+  // This session's Keep or Discard is in flight (the composer never mounts for a
+  // kept session, so Resume never applies here).
+  const busy = useSessionsStore(
+    (s) => session != null && s.busyId === session.id,
+  );
   const model = session ? session.model : startModelForAgent;
   // Agent is fixed once a session exists; while starting, it's user-selectable.
   const agent = session ? session.agent : startAgent;
@@ -571,7 +580,8 @@ export function SessionComposer({
     !creating &&
     draft.trim().length > 0 &&
     !containerBlocked &&
-    !settingsPending;
+    !settingsPending &&
+    !busy;
   // The one line under the Isolation control — a container-readiness warning or the
   // host-downgrade disclosure. Hoisted out of the JSX so the blocked strip and the
   // best-of-N toast can name the SPECIFIC reason instead of the generic fallback.
@@ -589,6 +599,15 @@ export function SessionComposer({
         agentInImage,
       });
   const blockedReason = isolationNote?.text ?? CONTAINER_BLOCKED_TEXT;
+  // Send's one stated reason: a container that isn't ready (a problem with a
+  // remedy) wins over the busy hold.
+  let sendReason: string | null = null;
+  if (busy) sendReason = BUSY_HOLD_TEXT;
+  if (containerBlocked) sendReason = blockedReason;
+  let reasonLineClass = "sr-only";
+  if (busy) reasonLineClass = "text-[11px] text-muted-foreground";
+  if (containerBlocked)
+    reasonLineClass = "flex items-start gap-1.5 text-[11px] text-foreground";
   // The note's "Set up in Settings…" jump. Opening Settings unmounts
   // RepositoryView (App.tsx renders it behind `view === "repo"`), which would take
   // this composer's draft AND its isolation pick with it — a task typed, switched
@@ -759,6 +778,8 @@ export function SessionComposer({
     }
     const text = draft.trim();
     if (!text || running || creating) return;
+    // A Keep, Discard or Resume in flight refuses the send, so the draft stays.
+    if (session && useSessionsStore.getState().busyId === session.id) return;
     const prompt = resolvePrompt(text);
     if (prompt === null) return;
     const typed = draft;
@@ -1063,11 +1084,7 @@ export function SessionComposer({
               // its CONTENT change. `sr-only` (not `hidden`) keeps the empty state
               // in the accessibility tree while taking it out of flow entirely, so
               // the column's flex gap shows no phantom row.
-              className={
-                containerBlocked
-                  ? "flex items-start gap-1.5 text-[11px] text-foreground"
-                  : "sr-only"
-              }
+              className={reasonLineClass}
             >
               {containerBlocked ? (
                 <>
@@ -1094,6 +1111,9 @@ export function SessionComposer({
                     </Button>
                   ) : null}
                 </>
+              ) : null}
+              {!containerBlocked && busy ? (
+                <span id={blockedId}>{BUSY_HOLD_TEXT}</span>
               ) : null}
             </p>
             <div className="flex items-center gap-2 border-t pt-2">
@@ -1168,18 +1188,16 @@ export function SessionComposer({
                     transition={quickTransition}
                   >
                     {/* A `title` on a DISABLED button never fires, so the
-                        container-not-ready reason rides a wrapper span. */}
+                        reason Send is held rides a wrapper span. */}
                     <span
                       className="inline-flex"
-                      title={containerBlocked ? blockedReason : undefined}
+                      title={sendReason ?? undefined}
                     >
                       <Button
                         size="sm"
                         className="min-w-20"
                         disabled={!canSubmit}
-                        aria-describedby={
-                          containerBlocked ? blockedId : undefined
-                        }
+                        aria-describedby={sendReason ? blockedId : undefined}
                         onClick={submit}
                       >
                         {creating && !session

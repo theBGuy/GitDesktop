@@ -1,0 +1,1 @@
+- Binary file sizes in a diff are read again after you switch GitHub accounts.

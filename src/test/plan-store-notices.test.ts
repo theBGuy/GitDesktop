@@ -6,6 +6,7 @@ import {
 } from "@/features/plan/store";
 import {
   type AgentSessionArgs,
+  cancelAgentSession,
   type ReviewEvent,
   runAgentSession,
 } from "@/lib/ai/agent";
@@ -117,6 +118,7 @@ async function startTurn(id: string): Promise<Turn> {
 
 beforeEach(() => {
   runs = [];
+  vi.mocked(cancelAgentSession).mockClear();
   vi.mocked(runAgentSession).mockImplementation(
     (args) =>
       new Promise<ReviewEvent | null>((resolve) => {
@@ -580,4 +582,49 @@ describe("plan store: notices and the stored conversation id", () => {
       expect(find("a")).toEqual(row);
     },
   );
+});
+
+describe("plan store: every Stop and Dismiss cancels its own turn's run id", () => {
+  const cancelCalls = () => vi.mocked(cancelAgentSession).mock.calls;
+
+  it("(22) [T4] a follow-up after a Stop during setup runs under a new run id", async () => {
+    const held = deferred<string | null>();
+    vi.mocked(readRepoInstructions).mockImplementationOnce(() => held.promise);
+    const id = usePlanStore.getState().start(ARGS);
+    usePlanStore.getState().cancel(id);
+    expect(cancelCalls()).toHaveLength(1);
+    const stoppedId = cancelCalls()[0][0];
+    expect(stoppedId).not.toBe(find(id)?.sessionId);
+    usePlanStore.getState().sendFollowUp(id, "Tighten step 2");
+    await vi.waitFor(() => expect(runs).toHaveLength(1));
+    expect(runs[0].args.runId).not.toBe(stoppedId);
+    held.resolve(null);
+    await flush();
+    runs[0].settle();
+  });
+
+  it("(23) [T5] Dismiss cancels the generating turn by its run id", async () => {
+    usePlanStore.setState({ runs: [plan("a")] });
+    const turn = await startTurn("a");
+    usePlanStore.getState().remove("a");
+    expect(cancelCalls()).toEqual([[runs[0].args.runId]]);
+    expect(runs[0].args.runId).not.toBe("sid-a");
+    await turn.settleStale();
+  });
+
+  it("(24) [T7] Restart then Stop targets the new run", async () => {
+    usePlanStore.setState({ runs: [plan("a")] });
+    const first = await startTurn("a");
+    usePlanStore.getState().cancel("a");
+    await first.settleStale();
+    usePlanStore.getState().restart("a");
+    await vi.waitFor(() => expect(runs).toHaveLength(2));
+    usePlanStore.getState().cancel("a");
+    expect(cancelCalls()).toEqual([[runs[0].args.runId], [runs[1].args.runId]]);
+    expect(runs[1].args.runId).not.toBe(runs[0].args.runId);
+    expect(runs[1].args.sessionId).not.toBe("sid-a");
+    expect(runs[1].args.sessionId).toBe(find("a")?.sessionId);
+    runs[1].settle();
+    await flush();
+  });
 });

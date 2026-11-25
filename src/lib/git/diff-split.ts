@@ -68,7 +68,11 @@ function unescapeCQuoted(body: string): string {
     for (const byte of encoder.encode(char)) bytes.push(byte);
     i += char.length;
   }
-  return new TextDecoder().decode(new Uint8Array(bytes));
+  // `ignoreBOM`: a leading U+FEFF is part of the name, and a prefix-less
+  // rename/copy name starts the buffer with it.
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+    new Uint8Array(bytes),
+  );
 }
 
 /**
@@ -78,6 +82,11 @@ function unescapeCQuoted(body: string): string {
  * genuinely ends in a space survives.
  */
 function newFilePath(token: string): string | undefined {
+  return sideFilePath(token, "b/");
+}
+
+/** {@link newFilePath} for either side's prefix (`---` names take `a/`). */
+function sideFilePath(token: string, prefix: "a/" | "b/"): string | undefined {
   if (!token) return undefined;
   let path: string;
   if (token.startsWith('"')) {
@@ -87,7 +96,7 @@ function newFilePath(token: string): string | undefined {
   } else {
     path = token.split("\t")[0];
   }
-  return path.startsWith("b/") ? path.slice(2) : undefined;
+  return path.startsWith(prefix) ? path.slice(2) : undefined;
 }
 
 /**
@@ -210,7 +219,8 @@ export interface HeaderOnlyDiff {
 }
 
 const MODE_LINE = /^(old|new) mode ([0-7]{6})$/;
-const MOVE_LINE = /^(rename|copy) (from|to) (.+)$/;
+// `[^\n]`, never `.`: a path may hold "\r", U+2028 or U+2029, which `.` skips.
+const MOVE_LINE = /^(rename|copy) (from|to) ([^\n]+)$/;
 /** Header lines that carry no change of their own. */
 const QUIET_LINE =
   /^(?:index [0-9a-f]+\.\.[0-9a-f]+(?: [0-7]{6})?|(?:dis)?similarity index \d+%)$/;
@@ -690,17 +700,144 @@ export function diffSectionStats(diff: string): DiffStatEntry[] {
  * an unkeyable section has no file row to attach to. A binary creation joins
  * its path's earlier section, so the size line sees the typechange; otherwise
  * the later section wins, since the text viewer parses one section per file
- * (a binary→symlink keeps its symlink text).
+ * (a binary→symlink keeps its symlink text). `joinTypechanges` also joins a
+ * section to an earlier BINARY one, so a binary→symlink keeps both halves; it
+ * is opt-in, for hosts that draw both halves (the pull request views).
  */
-export function splitUnifiedDiff(diff: string): Map<string, string> {
+export function splitUnifiedDiff(
+  diff: string,
+  opts?: { joinTypechanges?: boolean },
+): Map<string, string> {
   const sections = new Map<string, string>();
   for (const part of diff.split(DIFF_SECTION_BOUNDARY)) {
     if (!part.trim()) continue;
     const path = sectionFilePath(part);
     if (!path) continue;
     const prev = sections.get(path);
-    const join = prev !== undefined && sectionIsBinary(part);
+    const join =
+      prev !== undefined &&
+      (sectionIsBinary(part) ||
+        (opts?.joinTypechanges === true && sectionIsBinary(prev)));
     sections.set(path, join ? prev + part : part);
   }
   return sections;
+}
+
+/** A section's decoded `rename from` / `copy from` path, read from its own
+ *  header; without one, its `--- a/<old>` name when that differs from the new
+ *  path (GitLab drops the rename lines when it withholds a body). Undefined for
+ *  any other section. */
+export function sectionOldPath(section: string): string | undefined {
+  const lines = section.split("\n");
+  const first = (lines[0] ?? "").replace(/\r$/, "");
+  if (!first.startsWith("diff --git ")) return undefined;
+  const header = first.slice("diff --git ".length);
+  for (const raw of lines.slice(1)) {
+    const line = raw.replace(/\r$/, "");
+    if (line.startsWith("--- ")) {
+      const old = sideFilePath(line.slice(4), "a/");
+      return old !== undefined && old !== sectionFilePath(section)
+        ? old
+        : undefined;
+    }
+    if (
+      line.startsWith("diff --git ") ||
+      line.startsWith("---") ||
+      line.startsWith("@@")
+    )
+      return undefined;
+    const move = MOVE_LINE.exec(line);
+    if (move && move[2] === "from") return movedSourcePath(move[3], header);
+  }
+  return undefined;
+}
+
+const PATCH_HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+/**
+ * A diff text's lines, for every walk over its hunks. A final newline ends the
+ * last line rather than starting an empty one, so a hunk a byte cap cut short
+ * ends at the text's real end. Every other empty line stays: inside a hunk it
+ * is a blank context line written without its space (`diff.suppressBlankEmpty`).
+ */
+export function diffLines(text: string): string[] {
+  const lines = text.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+/**
+ * A diff text with each blank context line's leading space restored: inside a
+ * hunk that still owes lines (bounded like {@link patchLines}), a row that is
+ * empty or only "\r" becomes " " or " \r". The diff renderer refuses a CRLF
+ * patch's bare "\r" row, so its input takes this; the hunk walks read the text
+ * as it came. Returns `text` itself when no row changes.
+ */
+export function withBlankContextSpaces(text: string): string {
+  const lines = diffLines(text);
+  let oldLeft = 0;
+  let newLeft = 0;
+  let changed = false;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (oldLeft <= 0 && newLeft <= 0) {
+      const m = PATCH_HUNK.exec(l);
+      if (m) {
+        oldLeft = m[2] === undefined ? 1 : Number(m[2]);
+        newLeft = m[4] === undefined ? 1 : Number(m[4]);
+      }
+      continue;
+    }
+    if (l.startsWith("\\")) continue;
+    if (l === "" || l === "\r") {
+      lines[i] = ` ${l}`;
+      changed = true;
+    }
+    if (!l.startsWith("+")) oldLeft--;
+    if (!l.startsWith("-")) newLeft--;
+  }
+  if (!changed) return text;
+  const joined = lines.join("\n");
+  return text.endsWith("\n") ? `${joined}\n` : joined;
+}
+
+/**
+ * The line numbers each side of a section's hunks draws, each hunk bounded by
+ * its header's counts (an omitted count is 1), so a second file's header in a
+ * joined section is never read as a line. Every hunk-line walk agrees with it
+ * (scripts/diff-split.test.mjs pins that).
+ */
+export function patchLines(section: string): {
+  old: ReadonlySet<number>;
+  new: ReadonlySet<number>;
+} {
+  const oldSide = new Set<number>();
+  const newSide = new Set<number>();
+  let oldLeft = 0;
+  let newLeft = 0;
+  let oldLine = 0;
+  let newLine = 0;
+  for (const l of diffLines(section)) {
+    if (oldLeft <= 0 && newLeft <= 0) {
+      const m = PATCH_HUNK.exec(l);
+      if (m) {
+        oldLine = Number(m[1]);
+        oldLeft = m[2] === undefined ? 1 : Number(m[2]);
+        newLine = Number(m[3]);
+        newLeft = m[4] === undefined ? 1 : Number(m[4]);
+      }
+      continue;
+    }
+    if (l.startsWith("\\")) continue;
+    if (!l.startsWith("+")) {
+      if (oldLeft > 0) oldSide.add(oldLine);
+      oldLine++;
+      oldLeft--;
+      if (l.startsWith("-")) continue;
+    }
+    if (newLeft > 0) newSide.add(newLine);
+    newLine++;
+    newLeft--;
+  }
+  return { old: oldSide, new: newSide };
 }

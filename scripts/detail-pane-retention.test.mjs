@@ -124,6 +124,8 @@ const SITES = [
     noun: "diff",
     noticeNoun: "this diff",
     stale: "diff.isPlaceholderData",
+    // The step's kept answer: a whitespace flip's read paints the last one.
+    hasData: "loaded !== null",
     shell: "notice",
     // No arm-swap refocus: several steps' diffs can be open at once, so one
     // landing while focus sits on <body> would take focus it never held.
@@ -504,7 +506,7 @@ function scan(site) {
 /** The one `const shell = (content…) => (…)` helper, as its `(…)` span. */
 function shellSpan(site, masked, body) {
   const re =
-    /\bconst\s+shell\s*=\s*\(\s*content\s*(?::\s*ReactNode\s*)?\)\s*=>\s*\(/g;
+    /\bconst\s+shell\s*=\s*\(\s*content\s*(?::\s*ReactNode\s*)?(?:,\s*note\s*\??\s*(?::\s*ReactNode\s*)?)?\)\s*=>\s*\(/g;
   re.lastIndex = body.open;
   const found = [];
   for (
@@ -1095,6 +1097,27 @@ test("the transcript diff's notice sits above its scroller, which the host wraps
   );
 });
 
+test("shellSpan finds a shell with an optional note, and only a shell", () => {
+  const site = { file: "x.tsx", component: "X" };
+  const span = (code) => shellSpan(site, code, { open: 0, close: code.length });
+  const two =
+    "{ const shell = (content: ReactNode, note?: ReactNode) => (<div>{note}{content}</div>); }";
+  const found = span(two);
+  assert.equal(two.slice(found.from, found.to), "(<div>{note}{content}</div>)");
+  assert.ok(span("{ const shell = (content: ReactNode) => (<div />); }"));
+  assert.throws(
+    () => span("{ const shell = (body: ReactNode) => (<div />); }"),
+    /expected one `const shell = \(content\) => \(`/,
+  );
+  assert.throws(
+    () =>
+      span(
+        "{ const shell = (content: ReactNode, extra: number) => (<div />); }",
+      ),
+    /expected one `const shell = \(content\) => \(`/,
+  );
+});
+
 test("a TODO's untracked fallback opens only on a blame with nothing loaded", () => {
   const file = "src/features/code-todos/CodeTodoDetailView.tsx";
   const { raw, masked } = load(file);
@@ -1159,11 +1182,20 @@ const FILE_AT_REV_GATES = {
         "newRev === undefined || !(newQ.isPending && newQ.errorUpdateCount === 0)",
     },
   },
+  "src/features/diff/use-forge-whitespace-diff.ts": {
+    queries: ["oldQ", "newQ"],
+    decls: {
+      oldFirstRead:
+        'oldQ.isPending && oldQ.errorUpdateCount === 0 && oldQ.fetchStatus === "fetching"',
+      newFirstRead:
+        'newQ.isPending && newQ.errorUpdateCount === 0 && newQ.fetchStatus === "fetching"',
+    },
+  },
   "src/features/diff/ImageDiff.tsx": {
     queries: ["oldFile", "newFile"],
     decls: {
       pending:
-        "(oldFile.isPending && oldFile.errorUpdateCount === 0) || (newFile.isPending && newFile.errorUpdateCount === 0)",
+        '(oldFile.isPending && oldFile.errorUpdateCount === 0 && oldFile.fetchStatus === "fetching") || (newFile.isPending && newFile.errorUpdateCount === 0 && newFile.fetchStatus === "fetching")',
     },
   },
   "src/features/diff/MarkdownPreview.tsx": {
@@ -1187,25 +1219,30 @@ function srcFiles() {
     .map((d) => relative(root, join(d.parentPath, d.name)).replace(/\\/g, "/"));
 }
 
+// The diff feature reads through `useFileAtSource` (content-source.ts), which
+// is `useFileAtRev`'s query for a local source, so both spell a caller.
 test("file-at-rev reads pend on a first read only", () => {
   const files = srcFiles();
   assert.ok(files.length > 0, "no source files under src/");
   const callers = files
     .filter((file) =>
-      readFileSync(new URL(`../${file}`, import.meta.url), "utf8").includes(
-        "useFileAtRev",
+      /useFileAt(?:Rev|Source)/.test(
+        readFileSync(new URL(`../${file}`, import.meta.url), "utf8"),
       ),
     )
     .filter((file) =>
-      /(?<![\w$])useFileAtRev\s*\(/.test(
-        load(file).masked.replace(/\bfunction\s+useFileAtRev\s*\(/g, ""),
+      /(?<![\w$])useFileAt(?:Rev|Source)\s*\(/.test(
+        load(file).masked.replace(
+          /\bfunction\s+useFileAt(?:Rev|Source)\s*\(/g,
+          "",
+        ),
       ),
     )
     .sort();
   assert.deepEqual(
     callers,
     Object.keys(FILE_AT_REV_GATES).sort(),
-    "the useFileAtRev( callers must match FILE_AT_REV_GATES",
+    "the useFileAtRev( and useFileAtSource( callers must match FILE_AT_REV_GATES",
   );
   for (const [file, { queries, decls }] of Object.entries(FILE_AT_REV_GATES)) {
     const { raw, masked } = load(file);

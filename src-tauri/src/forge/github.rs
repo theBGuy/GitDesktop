@@ -615,14 +615,17 @@ pub async fn comment_issue(
 pub async fn close_issue(
     repo_path: &str,
     number: u64,
-    reason: &str,
+    reason: super::CloseReason,
     lens: Option<String>,
-) -> AppResult<()> {
-    crate::github::issue::gh_issue_close(repo_path.to_string(), number, reason.to_string(), lens)
-        .await
+) -> AppResult<super::IssueCloseOutcome> {
+    crate::github::issue::gh_issue_close(repo_path.to_string(), number, reason, lens).await
 }
 
-pub async fn reopen_issue(repo_path: &str, number: u64, lens: Option<String>) -> AppResult<()> {
+pub async fn reopen_issue(
+    repo_path: &str,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<super::IssueReopenOutcome> {
     crate::github::issue::gh_issue_reopen(repo_path.to_string(), number, lens).await
 }
 

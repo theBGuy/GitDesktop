@@ -67,6 +67,10 @@ const J_BODY_NO_AI =
   "GitDesktop already refuses to push a branch marked Keep local. A pre-push hook makes git push stop as well when it runs in a terminal.";
 const L_BODY =
   "A pre-push hook in this clone stops git push for branches marked Keep local. It covers this clone only, and git push --no-verify skips it.";
+const LINKED =
+  "This clone's pre-push hook is a link to a file that carries GitDesktop's guard. Installing or removing the guard here leaves a linked hook alone, so change or delete the link yourself.";
+const LEFTHOOK_NOTE =
+  "With lefthook, the check sees the pushed refs only when it is the one pre-push command or script that sets use_stdin: true.";
 
 const hookStatus = (
   state: KeepLocalHookStatus["state"],
@@ -408,6 +412,25 @@ describe("a write that doesn't take while its open is shown", () => {
     expect(info).not.toHaveBeenCalled();
   });
 
+  it("Remove answering a pre-push linked to the guard says it wasn't removed", async () => {
+    backend = hookStatus("installed");
+    vi.mocked(gitKeepLocalHookRemove).mockImplementation(async () => {
+      backend = hookStatus("blocked", "linkedHook", null, false);
+      return backend;
+    });
+    const { user } = renderDialog();
+    await screen.findByText(L_BODY);
+    await expectFocusOn("Close");
+    await user.click(button("Remove hook"));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Terminal push guard not removed.",
+    );
+    expect(await screen.findByText(LINKED)).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(success).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
+  });
+
   it("a rejected Install stays open with the error", async () => {
     vi.mocked(gitKeepLocalHookInstall).mockRejectedValue({
       kind: "io",
@@ -519,6 +542,26 @@ describe("a settle after its open is gone", () => {
       expect(info).toHaveBeenCalledWith("Terminal push guard not removed", {
         description:
           "This repository keeps its hooks in a custom folder, so GitDesktop won't add a pre-push hook there.",
+      }),
+    );
+    expect(success).not.toHaveBeenCalled();
+  });
+
+  it("a Remove landing on a pre-push linked to the guard after a close toasts not removed", async () => {
+    backend = hookStatus("installed");
+    const write = deferredWrite(gitKeepLocalHookRemove);
+    const { user } = renderDialog();
+    await screen.findByText(L_BODY);
+    await expectFocusOn("Close");
+    await user.click(button("Remove hook"));
+    await user.click(button("Close"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBe(null));
+    await act(async () =>
+      write.land(hookStatus("blocked", "linkedHook", null, false)),
+    );
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith("Terminal push guard not removed", {
+        description: LINKED,
       }),
     );
     expect(success).not.toHaveBeenCalled();
@@ -674,8 +717,10 @@ describe("the can't-install state", () => {
       const description = await within(d).findByText(
         new RegExp(`^${reason.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
       );
-      expect(description).toHaveTextContent(
-        `${reason} Add this check to your pre-push hook, above anything else that reads the pushed refs, to get the same guard:`,
+      // Only lefthook carries a note between the reason and the check's lead.
+      const note = status.manager === "lefthook" ? ` ${LEFTHOOK_NOTE}` : "";
+      expect(description.textContent).toBe(
+        `${reason}${note} Add this check to your pre-push hook, above anything else that reads the pushed refs, to get the same guard:`,
       );
       expect(within(d).getByText("Terminal push guard")).toBeInTheDocument();
       const pre = d.querySelector("pre");
@@ -691,6 +736,18 @@ describe("the can't-install state", () => {
 
   const INERT =
     "A GitDesktop hook from an earlier install is still in this clone, but it no longer runs because the hooks folder changed.";
+
+  it("a pre-push linked to the guard says so and offers no check", async () => {
+    backend = hookStatus("blocked", "linkedHook");
+    renderDialog();
+    const d = await dialog();
+    const description = await within(d).findByText(LINKED);
+    expect(description.textContent).toBe(LINKED);
+    expect(d.querySelector("pre")).toBe(null);
+    expect(within(d).queryByRole("button", { name: "Copy check" })).toBe(null);
+    expect(within(d).queryByRole("button", { name: "Remove hook" })).toBe(null);
+    await expectFocusOn("Close");
+  });
 
   it("offers neither the leftover line nor Remove when GitDesktop's file isn't there", async () => {
     backend = hookStatus("blocked", "customHooksPath", null, false);
@@ -744,6 +801,82 @@ describe("the can't-install state", () => {
       expect(button("Remove hook")).toHaveAttribute("aria-disabled", "true"),
     );
     expect(button("Close")).not.toHaveAttribute("aria-disabled");
+  });
+
+  describe("a re-read that changes the controls", () => {
+    /** Opens on `from`, puts focus where `focus` says, then re-reads `to`. */
+    async function reread(
+      from: KeepLocalHookStatus,
+      to: KeepLocalHookStatus,
+      focus: (d: HTMLElement) => HTMLElement,
+    ) {
+      backend = from;
+      const { queryClient } = renderDialog();
+      const d = await dialog();
+      await expectFocusOn("Close");
+      const target = focus(d);
+      act(() => target.focus());
+      expect(target).toHaveFocus();
+      backend = to;
+      await act(async () => {
+        await queryClient.invalidateQueries({ queryKey: HOOK_KEY });
+      });
+      await settle();
+      return { d, target };
+    }
+
+    it("lands focus on Close when Copy check goes with it", async () => {
+      const { d } = await reread(
+        hookStatus("blocked", "foreignHook"),
+        hookStatus("blocked", "linkedHook"),
+        () => button("Copy check"),
+      );
+      await within(d).findByText(LINKED);
+      await expectFocusOn("Close");
+    });
+
+    it("lands focus on Close when Remove hook goes with it", async () => {
+      const { d } = await reread(
+        hookStatus("blocked", "customHooksPath", null, true),
+        hookStatus("blocked", "customHooksPath", null, false),
+        () => button("Remove hook"),
+      );
+      expect(within(d).queryByText(INERT)).toBe(null);
+      await expectFocusOn("Close");
+    });
+
+    it("lands focus on Close when it sits on the popup itself", async () => {
+      const { d } = await reread(
+        hookStatus("blocked", "foreignHook"),
+        hookStatus("blocked", "linkedHook"),
+        (popup) => popup,
+      );
+      await within(d).findByText(LINKED);
+      await expectFocusOn("Close");
+    });
+
+    it("leaves focus on Close", async () => {
+      const { d, target } = await reread(
+        hookStatus("blocked", "foreignHook"),
+        hookStatus("blocked", "linkedHook"),
+        () => button("Close"),
+      );
+      await within(d).findByText(LINKED);
+      expect(target).toHaveFocus();
+    });
+
+    it("leaves focus on Remove hook when only Copy check goes", async () => {
+      const { d, target } = await reread(
+        hookStatus("blocked", "customHooksPath", null, true),
+        hookStatus("blocked", "linkedHook", null, true),
+        () => button("Remove hook"),
+      );
+      await within(d).findByText(LINKED);
+      expect(within(d).queryByRole("button", { name: "Copy check" })).toBe(
+        null,
+      );
+      expect(target).toHaveFocus();
+    });
   });
 });
 

@@ -155,9 +155,12 @@ Click the **⋮** menu next to the repo name for repo-wide actions:
 
 **Submodules…** (in the ⋮ menu, or the command palette) manages the repositories this one
 references. Each row shows the submodule's folder, the commit it's checked out at,
-and a status badge — **Up to date**, **Not initialized**, **Modified**, or **Conflict**.
-A submodule marked **Conflict** resolves in the conflict editor: select its row in
-**Changes** and pick the commit to keep (see *Resolving conflicts* below).
+and a status badge — **Up to date**, **Not initialized**, **Modified**, **Conflict**, or
+**Unreadable**. A submodule marked **Conflict** resolves in the conflict editor: select its
+row in **Changes** and pick the commit to keep (see *Resolving conflicts* below).
+A submodule marked **Unreadable** is one git can't open, usually because its repository
+data under \`.git/modules\` is gone; its row says what git reported, and **Remove…** still
+works on it.
 Arrow keys move between rows and Enter runs the row's button, which reads **Initialize**
 for a submodule that has never been checked out and **Update** for the rest.
 
@@ -171,13 +174,31 @@ row stays out of **Stash change** and you stash from inside it. **Open submodule
 double-click on the row) opens it as its own repository, where you stage, commit and stash
 what's inside.
 
-- **Update** checks a submodule out at the commit your repo records, initializing it and
-  any nested submodules on the way; **Update all** in the footer does the whole set.
-- **Update to latest** (on a row's ⋮, or **Update all to latest** in the footer's ⋮) moves
-  a submodule to the tip of the branch it tracks instead: the branch recorded in
-  \`.gitmodules\`, or the remote's default branch when none is recorded. Nested submodules
-  follow to the commits the moved submodule records, not their own tips. That changes the
-  commit your repo points at, so it arrives as a change to review and stage in **Changes**.
+- **Update** follows the submodule's \`update\` setting from your Git config, or from
+  \`.gitmodules\` when your config has none. By default that checks out the commit your
+  repo records; with \`rebase\` your local commits in the submodule are replayed on top of
+  it; with \`merge\` it is merged into the submodule's current branch; with \`none\` the
+  submodule is left alone. It initializes the submodule and any nested submodules on the
+  way, and **Update all** in the footer does the whole set.
+- **Update to latest** (on a row's ⋮, or **Update all to latest** in the footer's ⋮)
+  updates a submodule from the tip of the branch it tracks instead: the branch recorded
+  in \`.gitmodules\`, or the remote's default branch when none is recorded. By default it
+  checks that tip out; with \`rebase\` your local commits are replayed on top of it; with
+  \`merge\` it is merged into the submodule's current branch; with \`none\` the submodule
+  is left alone. Nested submodules follow to the commits the moved submodule records, not
+  their own tips. That changes the commit your repo points at, so it arrives as a change
+  to review and stage in **Changes**.
+- **Choose commit…** (on a row's ⋮) lists the history of a branch or tag inside the
+  submodule; search the commit messages, or paste a commit id to reach any other commit.
+  Arrow keys move through the commits, and {{key:enter}} on one, or **Check out and
+  stage**, checks it out in the submodule and stages the new pointer together. Before you
+  apply, it checks whether the commit would overwrite local changes or files in its way,
+  leave commits behind, isn't fetched yet, or isn't on a remote, and the checkout itself
+  never overwrites local changes or files in its way. **Fetch** reaches the network,
+  as does **Fetch full history** on a shallow submodule; in a partial clone, checking out
+  a commit can download its files.
+  *Choose submodule commit* is a command palette entry that opens straight onto the
+  picker when the repository has one initialized submodule.
 - **Add submodule…** clones another repository into a folder of this one. Give it a URL;
   the folder defaults to the URL's last segment and the branch to the remote's default.
   *Add submodule* is a command palette entry of its own, and opens straight onto the form.
@@ -189,10 +210,11 @@ what's inside.
   repository data under \`.git/modules\` is kept so the submodule can be restored — tick
   **Also delete cached repository data** in the confirmation to erase that too. A
   submodule with local changes, or one at a different commit than this repository
-  records, asks a second time before that state is discarded.
+  records, asks a second time before that state is discarded, and so does one git can't
+  read, since its local changes can't be checked.
 
-Updating fetches over the network; adding, removing, and editing stage their change for
-you to commit. When you clone a repository, the **Clone submodules** checkbox initializes
+Updating fetches over the network; adding, removing, editing, and choosing a commit stage
+their change for you to commit. When you clone a repository, the **Clone submodules** checkbox initializes
 every submodule, including nested ones, in the same pass.
 
 ## Aliases
@@ -637,13 +659,27 @@ the last list up, with a line above it saying it couldn't refresh.
   *1.2 MB → 725 KB · 486 KB smaller (−40%)*, or *Deleted file · 900 KB* for a removed one.
   When two different sizes round to the same figure, the line gives exact byte counts.
   A screen reader always hears the exact counts. A changed file mode gets its own line.
-  GitHub and Bitbucket pull requests show sizes too; on GitHub.com that includes files
-  your clone doesn't have. A non-image binary file with unstaged changes (in your
+  GitHub and Bitbucket pull requests show sizes too, and on GitHub that covers files
+  your clone doesn't have (on a GitHub Enterprise host once \`gh auth login\` has
+  signed you in to it). A non-image binary file with unstaged changes (in your
   working tree or an agent session's) also offers **Open with default program** (a file
   your system would run instead is refused) and **Show in Explorer**; for a deleted one,
   **Show in Explorer** opens the nearest folder that still exists. When a non-image
-  binary file and a symbolic link trade places, local diffs show both the binary side's
-  size line and the link's text, as do pull requests where a link became a binary file.
+  binary file and a symbolic link trade places, in either direction, local diffs show
+  both the binary side's size line and the link's text. A pull request's **Files** and
+  **Commits** tabs do the same for any binary file, an image included (with the size
+  line on GitHub and Bitbucket only). The link's line takes comments on the **Files**
+  tab, and on the **Commits** tab when the file became the link, since commit comments
+  anchor to the new side.
+- **Pull request diffs** on a pull request's **Files** tab, and in a commit opened from
+  its **Commits** tab, expand the lines above and below each change and preview changed
+  images (an SVG shows its preview above its text diff), on GitHub, GitLab and
+  Bitbucket. The files are read from your clone when it holds the pull request's
+  commits, and from the forge otherwise, so on GitHub a pull request from a fork needs
+  nothing checked out. A renamed file's old side is read at its old path, and a commit
+  is compared with its first parent. The diff may show just its changes first, then
+  fill in the surrounding lines in place, keeping the line at the top of the view where
+  it was. A very large file keeps the changes-only view.
 - **Markdown preview** — markdown and MDX diffs add a **Raw / Preview** toggle to the
   diff toolbar. **Preview** renders the file's new version as formatted prose
   (headings, tables, highlighted code fences), so a docs change reads the way it will
@@ -670,8 +706,9 @@ the last list up, with a line above it saying it couldn't refresh.
   palette (palette-only by default — bind a key in **Settings → Keyboard**) switches
   the layout too while a diff is on screen and wide enough for split, though not
   during a line selection, a discard confirmation or Markdown preview. While you're
-  writing a line comment, Unified and Split stay locked until you finish or close
-  it, so the draft isn't lost.
+  writing a line comment, replying to a thread in a diff, or editing a review comment
+  or a pending review comment there, Unified and Split stay locked until you finish or
+  close it, and that diff's **Show full diff** waits too, so the text isn't lost.
 - **Split renders as unified** while the pane is too narrow for two readable columns;
   hovering the sheet's **Split** option shows why, and screen readers read the reason
   with it. Your preference is kept either way, so widening the pane brings the split
@@ -680,19 +717,29 @@ the last list up, with a line above it saying it couldn't refresh.
   touch spaces, tabs or line endings, so a re-indented file shows only the lines whose
   content changed; an added or removed blank line still shows. It applies to every
   local diff (the working tree, commit details, a file's history, branch compare,
-  stashes and an agent session's changes) and stays on until you turn it off; a dot
-  on the gear marks it. While it is on, hunks and lines can't be staged, unstaged or
-  discarded from the Changes diff, and the note above the diff offers **Show
+  stashes and an agent session's changes) and to pull request diffs on GitHub, GitLab
+  and Bitbucket (the **Files** tab and a commit in the **Commits** tab), and stays on
+  until you turn it off; a dot on the gear marks it. While it is on, hunks and lines
+  can't be staged, unstaged or discarded from the Changes diff, and the note above the
+  diff offers **Show
   whitespace**; whole files still stage from their rows. A file whose
   only changes are whitespace says so. The line counts in file lists keep counting
   whitespace changes. While a diff is on screen, *Show or hide whitespace changes* in
   the command palette (palette-only by default — bind a key in **Settings → Keyboard**)
-  flips it too. While you're writing a line comment on one of these diffs, or
-  editing one of the open file's line comments in the list below the diff, it
-  stays locked until you finish or close the comment, so the draft isn't lost. A
-  commit comment on a line hidden this way stays in the comment list; while its
-  file is open, **Show whitespace** sits beside it. Diffs of pull requests on a
-  forge always show whitespace.
+  flips it too. While you're writing a line comment on one of these diffs, replying to
+  a thread, editing a comment or editing a pending review comment inside it, it stays
+  locked until you finish or close the comment, so the draft isn't lost. A commit
+  comment you're editing in the list below the diff stays in that list, draft and
+  all, until you finish or close the edit, whatever the diff shows meanwhile. A commit
+  comment on a line hidden this way stays in the comment list; while its file is open,
+  **Show whitespace** sits beside it. A commit comment the open diff doesn't draw for
+  another reason stays listed too, naming each control that draws it inline, in the
+  order you press them: **Raw** while Markdown **Preview** is up, **Show diff anyway**
+  on a file that looks generated, and **Show full diff** past the shown part of a
+  long diff. A pull request file keeps showing whitespace
+  changes, and says so above its diff, when its two versions couldn't be compared, when
+  it is over the size limit, when the versions read don't match the pull request's
+  diff, or when you're offline and a version it needs can't be read.
 - **The file list beside a diff collapses** to a thin strip, handing the diff the whole
   pane. Use the caret above the list, or *Collapse or expand the diff file list*
   (palette-only by default — bind a key in Settings); a pane too narrow to hold both
@@ -1041,6 +1088,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   into your own hook instead (put it above anything else in the hook that reads the
   pushed refs); if a hook from an earlier install is still in the clone, that dialog
   offers **Remove hook** too.
+  When the clone's pre-push hook is a link to a file that carries the guard, the dialog
+  says so, and installing or removing the guard leaves the link as it is. With lefthook,
+  put the check in the one pre-push command or script that sets \`use_stdin: true\`:
+  lefthook passes the pushed refs to a single such entry.
 - **Clean up branches** opens from the switcher's menu or the command palette and gathers
   stale branches into one reviewed list. Three toggles choose what it lists, in any mix:
   **Merged** (into the default branch directly, or through a recent pull request where the
@@ -1839,9 +1890,12 @@ list (any of them matches), while picks in different groups narrow it. The **Min
 rows are remembered per repository; author and label picks last for the session.
 **Refresh pull requests** (**Refresh merge requests** on GitLab), beside the search
 box, re-reads the list you're looking at along with its checks, conflict chips,
-review-state grouping and your local pull requests; it spins while the forge read is
-in flight. *Refresh pull requests* in the command palette does the same (palette-only
-by default — bind a key in **Settings → Keyboard**).
+review-state grouping, your local pull requests and the pull request you have open (its
+details, review threads and diff); it spins while the list's forge read is in flight.
+While you're writing a comment inside a diff, the open pull request waits: finish or
+close the comment, then refresh again to update it. *Refresh pull requests* in the
+command palette does the same (palette-only by default — bind a key in
+**Settings → Keyboard**).
 While a newly created pull request is still holding its place in the list, the list chases
 the forge on its own for a short spell, so the real row usually arrives without a press.
 
@@ -2283,7 +2337,7 @@ diff excerpt, and every reply — as Markdown.
 
 ## Compose your own review
 
-In the **Files** tab, **click a line number** — or **drag across a range** of them — to
+In the **Files** tab, **click a line number**, or **drag across a range** of them, to
 open an inline composer right under the diff. A dragged range lands as a **real multi-line
 anchor** on **GitHub and GitLab**; **Bitbucket** anchors at the last line, and the composer
 says so. Clicking the **+** on **any line** of a drag (not just its last) reopens the same
@@ -2298,6 +2352,20 @@ range. From there you can:
 - **Add suggestion** — insert a provider-correct \`\`\`suggestion block pre-filled with the
   selected code, ready to edit (GitHub carries the range on the anchor, GitLab uses its
   \`:-N+0\` form, and Bitbucket suggestions are single-line).
+
+A comment goes on a line the pull request's diff contains. A line you expanded into view
+has no **+** of its own, and clicking its number only selects it: you reach it with a
+range you drag across it, and the **+** on any diff line of that range opens the
+composer, which keeps what you write. On **GitHub**, every line of a range has to be one
+the pull request's diff holds on that side, context lines included, so a range can't
+reach across a gap between two blocks of the diff, expanded or not; **GitLab** and
+**Bitbucket** need only its last line in the diff. Where a range breaks that rule,
+**Add single comment** and **Start a review** (**Add to review** once a review is in
+progress) stay disabled and say why.
+
+When the pull request is updated while you're writing a line comment, both buttons
+stay disabled and say why until its new diff is on screen, whether that diff is still
+loading, failed to load, or can't load while you're offline.
 
 A **Review in progress** bar shows the pending count with **Submit review…** and
 **Discard**. Submitting opens a dialog to choose a **verdict** — **Comment**, **Approve**,
@@ -2330,7 +2398,8 @@ commit detail instead). The detail view also carries **commit comments** — a w
 thread and **line-anchored comments** on the commit's diff (click a line, or drag a range),
 with create / edit / delete of your own, on GitHub, GitLab, and Bitbucket. A dragged range is
 a real range on **GitLab**; **GitHub** and **Bitbucket** commit comments anchor to a single
-line, and the composer says so.
+line, and the composer says so. A line you expanded into view isn't in the commit's diff,
+so it can't take a comment; on **GitLab**, both ends of a range have to be in that diff.
 
 The detail view keeps the commit's changes on screen if a background refresh fails, with a
 line saying it couldn't refresh and a **Retry**; while you're offline, the line says so
@@ -4030,7 +4099,7 @@ research** to flesh out the direction you chose — the whole conversation carri
 agent keeps everything it already explored. Keep refining with follow-up messages; the agent
 keeps its sources in context. When a report is ready you can **Turn it into a Plan** (it
 distills the whole session into a plan-ready brief to hand the planner, falling back to the
-full session if distillation is unavailable) or **Save report** as a local Markdown
+full session if distillation is unavailable or stopped) or **Save report** as a local Markdown
 file (written to \`.gitdesktop/research/\` for you to review and commit — never committed for
 you). It searches and reads, and outside opencode it never changes your code. Pick any agent
 (**Claude**, **Codex**, **GitHub Copilot**, or **opencode**; the picker opens on your
@@ -4065,10 +4134,14 @@ empty for your account's default. The agent works in an **isolated git worktree*
 throwaway branch (\`gd/session/…\`) that never touches your working tree, and commits a
 **checkpoint** each turn. It works in the open: the conversation shows a **step-by-step
 transcript** of each file it reads, edits, searches, and command it runs, interleaved
-with its narration. When GitDesktop can tell an opencode conversation can't be
-continued, the turn starts a fresh one and the timeline says so.
+with its narration. When GitDesktop can tell a conversation can't be continued (the
+agent doesn't have it, or the installed opencode can't continue it), the turn starts a
+fresh one and the timeline says so.
 **Expand any edit step** to see that file's diff inline, watch its
-**live changes** mid-turn, or read the cumulative diff under **Changes**. If a step's diff
+**live changes** mid-turn, or read the cumulative diff under **Changes**. While
+whitespace changes are hidden, an expanded step whose diff shows changed lines says
+so above them, with **Show whitespace**, and a step whose only changes are whitespace
+says that instead, with the same button. If a step's diff
 fails to refresh, the last one stays with a line saying it couldn't refresh and a
 **Retry**, and its live changes pause until a refresh succeeds, such as after **Retry** or
 when you come back to the window. One that fails to load says why and offers **Retry**.
@@ -4505,6 +4578,16 @@ the small programs Git runs at points like *before commit* or *before push*. Whe
   installed it's listed here like any other pre-push hook, so editing, disabling or
   deleting it here changes the guard too. While it's active, its row reads **Managed by
   GitDesktop**, and **Save**, **Disable** and **Delete** on it ask first.
+- When a hook changes on disk while it's open, the dialog catches up the next time it
+  reads the script (when you select the hook, after you save, enable or disable one, or
+  when you switch back to the app): an unedited script shows the new text, and an edited
+  one keeps your edit and offers **Reload**. A hook whose script can't be read
+  when you select it shows the reason and a **Retry**. **Save**, **Disable** and
+  **Enable** stop with a notice when the terminal push guard was added or removed since
+  the list loaded, and GitDesktop never writes through a link: **Enable** and **Disable**
+  on a hook that is a link stop and say so, as does **Save** when the active hook is a
+  link. **Delete** removes a hook's active and disabled copies together. A copy that is a
+  link is removed as a link, so a file it points to elsewhere stays.
 - If your repo uses a hook manager — **husky**, **pre-commit**, or **lefthook** —
   GitDesktop detects it, opens its config, and can run the right install/update command
   for you.`,

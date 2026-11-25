@@ -9,6 +9,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   type RefObject,
+  useCallback,
   useEffect,
   useEffectEvent,
   useLayoutEffect,
@@ -239,6 +240,21 @@ export function ConflictResolveView({
   // The resolve view shares the diff pane's width budget, so the preview takes
   // the same legibility gate: below it, render unified.
   const [paneRef, paneWidth] = useContainerWidth<HTMLDivElement>();
+  // The measured body is also the line anchor's scroller. One identity-stable
+  // ref serves both, so a re-render never detaches the width observer, and a
+  // detached scroller is never readable.
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const scrollerCaptureRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      scrollerRef.current = node;
+      paneRef(node);
+      return () => {
+        paneRef(null);
+        scrollerRef.current = null;
+      };
+    },
+    [paneRef],
+  );
   // The action bar is mounted in every phase.
   const actionBarRef = useRef<HTMLDivElement>(null);
   useToastClearance(actionBarRef, true);
@@ -704,7 +720,7 @@ export function ConflictResolveView({
       )}
 
       {/* Body */}
-      <div ref={paneRef} className="min-h-0 flex-1 overflow-auto">
+      <div ref={scrollerCaptureRef} className="min-h-0 flex-1 overflow-auto">
         {phase === "blocked" ? (
           <p className="p-4 text-xs text-muted-foreground">
             {blocked !== null && blockedBody(blocked, baseName(path))}
@@ -733,6 +749,7 @@ export function ConflictResolveView({
               forceUnified={
                 paneWidth !== null && paneWidth < SPLIT_MIN_CONTAINER_PX
               }
+              scrollerRef={scrollerRef}
             />
           ) : (
             <HighlightedCode

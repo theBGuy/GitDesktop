@@ -10,6 +10,7 @@ import {
   renderHook,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
@@ -28,12 +29,17 @@ import { DiffViewer } from "@/features/diff/DiffViewer";
 import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import type { StagingSide } from "@/features/diff/undecodable-note";
 import {
+  diffEditorOpen,
   LAYOUT_COMPOSER_HELD,
+  lineComposerOpen,
+  SHOW_WHITESPACE_LABEL,
   WHITESPACE_ANNOUNCEMENT,
   WHITESPACE_COMPOSER_HELD,
+  WHITESPACE_HIDDEN_NOTE,
   WHITESPACE_ONLY_MESSAGE,
   WHITESPACE_SHEET_STAGING_NOTE,
   WHITESPACE_STRIP_COPY,
+  whitespaceComposerOpen,
 } from "@/features/diff/whitespace-mode";
 import { AgentTranscript } from "@/features/sessions/AgentTranscript";
 import { toDraft } from "@/features/settings/settings-form";
@@ -1772,10 +1778,14 @@ describe("the layout action off a laid-out diff", () => {
 });
 
 describe("an agent transcript's inline diff", () => {
-  /** A whitespace-only edit step, opened, with the mode on. */
-  async function openStep(user: ReturnType<typeof userEvent.setup>) {
+  /** An edit step answering `answer` per read, opened, with the mode `hide`. */
+  async function openStep(
+    user: ReturnType<typeof userEvent.setup>,
+    answer: (iw: boolean) => FileDiff,
+    hide = true,
+  ) {
     vi.mocked(gitSessionFileDiff).mockImplementation(
-      async (...args: unknown[]) => diffOf(args.at(-1) === true ? "" : TEXT),
+      async (...args: unknown[]) => answer(args.at(-1) === true),
     );
     render(
       <AgentTranscript
@@ -1783,43 +1793,444 @@ describe("an agent transcript's inline diff", () => {
         baseDir="/repo"
         editDiffBase="b"
       />,
-      { wrapper: wrap(newClient(true)) },
+      { wrapper: wrap(newClient(hide)) },
     );
     await user.click(screen.getByRole("button", { expanded: false }));
-    return screen.findByRole("button", { name: "Show whitespace" });
   }
+  const whitespaceOnly = (iw: boolean) => diffOf(iw ? "" : TEXT);
+  const content = () => diffOf(TEXT);
+  const host = () => document.querySelector("[data-transcript-diff]");
 
-  it("Show whitespace refuses while a composer on a whitespace diff is open", async () => {
+  it("says whitespace is hidden above a diff with content, and only then", async () => {
     const user = userEvent.setup();
-    const info = vi.spyOn(toast, "info");
-    const show = await openStep(user);
-    const composer = document.createElement("div");
-    composer.setAttribute("data-diff-line-widget", "whitespace");
-    document.body.append(composer);
-    try {
-      await user.click(show);
-      expect(info).toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
-      expect(flips()).toEqual([]);
-    } finally {
-      composer.remove();
-    }
+    await openStep(user, content);
+    const note = await screen.findByText(WHITESPACE_HIDDEN_NOTE, {
+      exact: false,
+    });
+    expect(note.textContent).toBe(
+      `${WHITESPACE_HIDDEN_NOTE} ${SHOW_WHITESPACE_LABEL}`,
+    );
+    expect(
+      within(note).getByRole("button", { name: SHOW_WHITESPACE_LABEL }),
+    ).toBeTruthy();
+    const scroller = host()?.querySelector(".max-h-96");
+    expect(scroller?.contains(note)).toBe(false);
+    expect(
+      note.compareDocumentPosition(scroller as Node) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
-  it("Show whitespace flips past a composer on a PR's fixed patch", async () => {
+  it("adds nothing with the mode off", async () => {
     const user = userEvent.setup();
-    const info = vi.spyOn(toast, "info");
-    const show = await openStep(user);
-    const composer = document.createElement("div");
-    composer.setAttribute("data-diff-line-widget", "layout");
-    document.body.append(composer);
-    try {
+    await openStep(user, content, false);
+    await waitFor(() =>
+      expect(vi.mocked(gitSessionFileDiff)).toHaveBeenCalled(),
+    );
+    await waitFor(() =>
+      expect(host()?.querySelector(".max-h-96 p")).toBeNull(),
+    );
+    expect(screen.queryByText(WHITESPACE_HIDDEN_NOTE, { exact: false })).toBe(
+      null,
+    );
+    expect(screen.queryByRole("button", { name: SHOW_WHITESPACE_LABEL })).toBe(
+      null,
+    );
+  });
+
+  it.each([
+    ["binary", () => ({ ...diffOf(""), isBinary: true }), /Binary file/],
+    ["empty", () => diffOf(""), /No changes to show/],
+    [
+      "header-only",
+      () => diffOf("diff --git a/x b/x\nold mode 100644\nnew mode 100755\n"),
+      /now executable/,
+    ],
+    ["whitespace-only", whitespaceOnly, new RegExp(WHITESPACE_ONLY_MESSAGE)],
+  ] as const)("the %s arm carries no hidden note", async (_, answer, arm) => {
+    const user = userEvent.setup();
+    await openStep(user, answer);
+    await screen.findByText(arm);
+    expect(screen.queryByText(WHITESPACE_HIDDEN_NOTE, { exact: false })).toBe(
+      null,
+    );
+  });
+
+  it.each([
+    ["the hidden note's", content],
+    ["the whitespace-only arm's", whitespaceOnly],
+  ] as const)(
+    "%s Show whitespace flips with focus on the host",
+    async (_, answer) => {
+      const user = userEvent.setup();
+      await openStep(user, answer);
+      const show = await screen.findByRole("button", {
+        name: SHOW_WHITESPACE_LABEL,
+      });
       await user.click(show);
       await waitFor(() =>
         expect(flips()).toEqual([{ diffHideWhitespace: false }]),
       );
-      expect(info).not.toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+      expect(document.activeElement).toBe(host());
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("button", { name: SHOW_WHITESPACE_LABEL }),
+        ).toBeNull(),
+      );
+      expect(document.activeElement).toBe(host());
+    },
+  );
+
+  it.each([
+    ["the hidden note's", content],
+    ["the whitespace-only arm's", whitespaceOnly],
+  ] as const)(
+    "%s Show whitespace refuses while a composer on a whitespace diff is open",
+    async (_, answer) => {
+      const user = userEvent.setup();
+      const info = vi.spyOn(toast, "info");
+      await openStep(user, answer);
+      const show = await screen.findByRole("button", {
+        name: SHOW_WHITESPACE_LABEL,
+      });
+      const composer = document.createElement("div");
+      composer.setAttribute("data-diff-line-widget", "whitespace");
+      document.body.append(composer);
+      try {
+        await user.click(show);
+        expect(info).toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+        expect(flips()).toEqual([]);
+      } finally {
+        composer.remove();
+      }
+    },
+  );
+
+  it.each([
+    ["the hidden note's", content],
+    ["the whitespace-only arm's", whitespaceOnly],
+  ] as const)(
+    "%s Show whitespace flips past a composer on a PR's fixed patch",
+    async (_, answer) => {
+      const user = userEvent.setup();
+      const info = vi.spyOn(toast, "info");
+      await openStep(user, answer);
+      const show = await screen.findByRole("button", {
+        name: SHOW_WHITESPACE_LABEL,
+      });
+      const composer = document.createElement("div");
+      composer.setAttribute("data-diff-line-widget", "layout");
+      document.body.append(composer);
+      try {
+        await user.click(show);
+        await waitFor(() =>
+          expect(flips()).toEqual([{ diffHideWhitespace: false }]),
+        );
+        expect(info).not.toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+      } finally {
+        composer.remove();
+      }
+    },
+  );
+
+  // Each mode's read draws its own rows: `hiddenrow` under -w, `shownrow` off.
+  const modeText = (word: string) =>
+    "diff --git a/x b/x\nindex 1111aaa..2222bbb 100644\n--- a/x\n+++ b/x\n" +
+    `@@ -1 +1 @@\n-${word} old\n+${word} new\n`;
+  /** A read gated per mode: each answers once its gate opens. */
+  function gatedReads() {
+    const gates = new Map<boolean, () => void>();
+    const opened = new Map<boolean, Promise<void>>();
+    for (const iw of [true, false])
+      opened.set(
+        iw,
+        new Promise<void>((resolve) => {
+          gates.set(iw, resolve);
+        }),
+      );
+    vi.mocked(gitSessionFileDiff).mockImplementation(
+      async (...args: unknown[]) => {
+        const iw = args.at(-1) === true;
+        await opened.get(iw);
+        return diffOf(modeText(iw ? "hiddenrow" : "shownrow"));
+      },
+    );
+    return (iw: boolean) => act(() => gates.get(iw)?.());
+  }
+  /** What a painted frame shows wrong: a loading line, no rows or both, or a
+   *  hidden note that disagrees with the rows under it. */
+  const paintedWrong = () => {
+    const rows = host()?.querySelector(".max-h-96")?.textContent ?? "";
+    if (rows.includes("Loading diff")) return "loading";
+    const hidden = rows.includes("hiddenrow");
+    if (hidden === rows.includes("shownrow"))
+      return `rows: ${hidden ? "both" : "none"}`;
+    const note =
+      screen.queryByText(WHITESPACE_HIDDEN_NOTE, { exact: false }) !== null;
+    if (hidden === note) return null;
+    return note ? "note over the shown rows" : "hidden rows without the note";
+  };
+  /** Every state still painted once its task's microtasks drained. */
+  const watchPainted = () => {
+    const painted: string[] = [];
+    const observer = new MutationObserver(() => {
+      let hops = 0;
+      const atTaskEnd = () => {
+        if (++hops < 2000) {
+          queueMicrotask(atTaskEnd);
+          return;
+        }
+        const bad = paintedWrong();
+        if (bad !== null) painted.push(bad);
+      };
+      queueMicrotask(atTaskEnd);
+    });
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+    });
+    return { painted, stop: () => observer.disconnect() };
+  };
+  /** Opens the step with the mode on and its -w rows painted. */
+  async function openHidden(user: ReturnType<typeof userEvent.setup>) {
+    const release = gatedReads();
+    const client = newClient(true);
+    render(
+      <AgentTranscript
+        segments={[{ type: "tool", tool: "edit", target: "/repo/x" }]}
+        baseDir="/repo"
+        editDiffBase="b"
+      />,
+      { wrapper: wrap(client) },
+    );
+    await user.click(screen.getByRole("button", { expanded: false }));
+    return { client, release };
+  }
+  const settled = () => act(() => new Promise((r) => setTimeout(r, 50)));
+
+  it("a flip to an uncached mode keeps the step's rows and note until its read lands; a first open loads", async () => {
+    const user = userEvent.setup();
+    const { release } = await openHidden(user);
+    expect(await screen.findByText("Loading diff…")).toBeTruthy();
+    release(true);
+    await waitFor(() => expect(paintedWrong()).toBeNull());
+    const watch = watchPainted();
+    await user.click(
+      await screen.findByRole("button", { name: SHOW_WHITESPACE_LABEL }),
+    );
+    await waitFor(() =>
+      expect(flips()).toEqual([{ diffHideWhitespace: false }]),
+    );
+    await waitFor(() =>
+      expect(vi.mocked(gitSessionFileDiff).mock.calls.at(-1)?.at(-1)).toBe(
+        false,
+      ),
+    );
+    await settled();
+    expect(paintedWrong()).toBeNull();
+    expect(
+      screen.queryByText(WHITESPACE_HIDDEN_NOTE, { exact: false }),
+    ).not.toBeNull();
+    release(false);
+    await waitFor(() =>
+      expect(host()?.querySelector(".max-h-96")?.textContent).toContain(
+        "shownrow",
+      ),
+    );
+    await settled();
+    watch.stop();
+    expect(watch.painted).toEqual([]);
+    expect(paintedWrong()).toBeNull();
+  });
+
+  it("a flip served from the cache changes the rows and the note in one commit", async () => {
+    const user = userEvent.setup();
+    const { client, release } = await openHidden(user);
+    release(true);
+    release(false);
+    await user.click(
+      await screen.findByRole("button", { name: SHOW_WHITESPACE_LABEL }),
+    );
+    await waitFor(() =>
+      expect(host()?.querySelector(".max-h-96")?.textContent).toContain(
+        "shownrow",
+      ),
+    );
+    // Both modes are cached now: back on, then Show whitespace again.
+    const watch = watchPainted();
+    stored = { ...stored, diffHideWhitespace: true };
+    act(() => client.setQueryData(settingsKeys.settings, stored));
+    await waitFor(() =>
+      expect(host()?.querySelector(".max-h-96")?.textContent).toContain(
+        "hiddenrow",
+      ),
+    );
+    await settled();
+    await user.click(
+      await screen.findByRole("button", { name: SHOW_WHITESPACE_LABEL }),
+    );
+    await waitFor(() =>
+      expect(host()?.querySelector(".max-h-96")?.textContent).toContain(
+        "shownrow",
+      ),
+    );
+    await settled();
+    watch.stop();
+    expect(watch.painted).toEqual([]);
+    expect(paintedWrong()).toBeNull();
+  });
+});
+
+/** A stand-in for an editor marked inside (or outside) a diff anchor row. */
+function standIn(marker: string, anchor: "layout" | "whitespace" | null) {
+  const editor = document.createElement("div");
+  editor.setAttribute(
+    marker,
+    marker === "data-diff-line-widget" ? "layout" : "",
+  );
+  if (anchor === null) {
+    document.body.append(editor);
+    return editor;
+  }
+  const row = document.createElement("div");
+  row.setAttribute("data-diff-anchor", anchor);
+  row.append(editor);
+  document.body.append(row);
+  return row;
+}
+
+describe("the in-diff editor probe", () => {
+  it.each([
+    ["a line composer", "data-diff-line-widget", null],
+    ["a comment edit in a layout row", "data-thread-editing", "layout"],
+    ["a comment edit in a whitespace row", "data-thread-editing", "whitespace"],
+    ["a reply or draft edit in a layout row", "data-diff-editor", "layout"],
+    [
+      "a reply or draft edit in a whitespace row",
+      "data-diff-editor",
+      "whitespace",
+    ],
+  ] as const)("counts %s, and stops once it closes", (_, marker, anchor) => {
+    const node = standIn(marker, anchor);
+    try {
+      expect(diffEditorOpen()).toBe(true);
+      expect(diffEditorOpen(document)).toBe(true);
+      expect(lineComposerOpen()).toBe(true);
     } finally {
-      composer.remove();
+      node.remove();
+    }
+    expect(diffEditorOpen()).toBe(false);
+    expect(lineComposerOpen()).toBe(false);
+  });
+
+  it.each(["data-thread-editing", "data-diff-editor"])(
+    "never counts %s outside any diff anchor",
+    (marker) => {
+      const node = standIn(marker, null);
+      try {
+        expect(diffEditorOpen()).toBe(false);
+        expect(lineComposerOpen()).toBe(false);
+      } finally {
+        node.remove();
+      }
+    },
+  );
+
+  it("answers for its own root only, and while either of two editors is open", () => {
+    const one = standIn("data-diff-editor", "layout");
+    const two = standIn("data-thread-editing", "layout");
+    const other = document.createElement("div");
+    document.body.append(other);
+    try {
+      expect(diffEditorOpen(one)).toBe(true);
+      expect(diffEditorOpen(other)).toBe(false);
+      one.remove();
+      expect(lineComposerOpen()).toBe(true);
+      two.remove();
+      expect(lineComposerOpen()).toBe(false);
+    } finally {
+      for (const n of [one, two, other]) n.remove();
+    }
+  });
+
+  it("leaves the whitespace probe as it was over layout rows", () => {
+    for (const marker of ["data-thread-editing", "data-diff-editor"]) {
+      const node = standIn(marker, "layout");
+      try {
+        expect(whitespaceComposerOpen()).toBe(false);
+      } finally {
+        node.remove();
+      }
+    }
+    // A listed comment's edit sits in no anchor row: its row is pinned to the
+    // list, so no flip waits on it.
+    const editing = document.createElement("div");
+    editing.setAttribute("data-thread-editing", "");
+    document.body.append(editing);
+    try {
+      expect(whitespaceComposerOpen()).toBe(false);
+    } finally {
+      editing.remove();
+    }
+  });
+});
+
+describe("an editor open in a diff anchor holds the layout writers", () => {
+  it.each([
+    ["a reply or draft edit", "data-diff-editor", "layout"],
+    ["a reply or draft edit", "data-diff-editor", "whitespace"],
+    ["a comment edit", "data-thread-editing", "layout"],
+    ["a comment edit", "data-thread-editing", "whitespace"],
+  ] as const)(
+    "%s in a %s row holds the palette flip and the radios",
+    async (_, marker, anchor) => {
+      const user = userEvent.setup();
+      const info = vi.spyOn(toast, "info");
+      render(<SurfaceHarness />, { wrapper: wrap(newClient(false)) });
+      const gear = await gearNamed("Diff options");
+      const node = standIn(marker, anchor);
+      try {
+        act(() => void dispatchAction("toggle-diff-view-mode"));
+        expect(info).toHaveBeenCalledWith(LAYOUT_COMPOSER_HELD);
+        expect(modeWrites()).toEqual([]);
+        await user.click(gear);
+        const group = await screen.findByRole("radiogroup", {
+          name: "Diff display",
+        });
+        expect(group.getAttribute("aria-readonly")).toBe("true");
+        for (const name of ["Unified", "Split"] as const)
+          expect(description(radio(name))).toBe(LAYOUT_COMPOSER_HELD);
+        await user.click(radio("Split"));
+        expect(modeWrites()).toEqual([]);
+        await user.keyboard("{Escape}");
+        await waitFor(() =>
+          expect(screen.queryByRole("radiogroup")).toBeNull(),
+        );
+      } finally {
+        node.remove();
+      }
+      act(() => void dispatchAction("toggle-diff-view-mode"));
+      await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+    },
+  );
+
+  it("a layout row's editor leaves the whitespace checkbox free", async () => {
+    const user = userEvent.setup();
+    render(<SurfaceHarness />, { wrapper: wrap(newClient(false)) });
+    const gear = await gearNamed("Diff options");
+    const node = standIn("data-diff-editor", "layout");
+    try {
+      await user.click(gear);
+      const box = await screen.findByRole("checkbox");
+      expect(box.getAttribute("aria-disabled")).toBeNull();
+      await user.click(box);
+      await waitFor(() =>
+        expect(flips()).toEqual([{ diffHideWhitespace: true }]),
+      );
+    } finally {
+      node.remove();
     }
   });
 });

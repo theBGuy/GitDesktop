@@ -138,13 +138,17 @@ delete), and deep links to the settings GitHub keeps browser-only.
 A unified or split diff with syntax highlighting, collapsible surrounding
 context, image diffing with each side's dimensions and file size, and a size
 change shown for other binary files (`1.2 MB → 725 KB · 486 KB smaller (−40%)`),
-GitHub and Bitbucket pull requests included. A non-image binary file with
+GitHub and Bitbucket pull requests included. Pull request diffs on GitHub,
+GitLab and Bitbucket expand their surrounding context and preview changed
+images too, GitHub fork pull requests included. A non-image binary file with
 unstaged changes (in your working copy or an agent session's) opens in its
 default program (a file your system would run instead is refused), or shows
 in Explorer, right from its diff; for a deleted file, Explorer opens the
 nearest folder that still exists.
-Hide whitespace changes in any local diff to read a re-indented file by the
-lines whose content changed.
+Hide whitespace changes in your working-tree, commit, file-history, compare,
+stash and agent-session diffs, in local pull requests, and in pull request
+diffs on GitHub, GitLab and Bitbucket, to read a re-indented file by the lines
+whose content changed.
 Filter the changes list by path or category, and read a file's `+added -deleted`
 line counts without opening it; a binary file that was only renamed or had its
 mode changed says so when Git can confirm its content is unchanged.
@@ -386,16 +390,19 @@ uploads. When a **GitHub** release carries a `latest.json` updater manifest,
 editing its notes can refresh the manifest in the same save, so apps updating
 from that release show the notes you just wrote.
 
-**Submodules** get a manager of their own: add and remove them, update to the
-commit your repo records or to the tip of the branch each one tracks
-(recursing into nested submodules either way), edit a submodule's URL or
-tracked branch, and open one as its own repository. Adding, removing, and
-editing stage the change for you to commit, and the clone dialog can bring
-every submodule down with the repo. A changed submodule is tagged in Changes
-with what changed; selecting it lists the commits the submodule moved across,
-its unstaged row lists the uncommitted files inside, and **Open submodule** is
-one click away. A conflicted submodule resolves in the conflict editor by
-picking the commit to keep.
+**Submodules** get a manager of their own: add and remove them, update them
+following each submodule's `update` setting (by default, a checkout of the
+commit your repo records) or, under that same setting, against the tip of
+the branch each one tracks (recursing into nested submodules either way),
+edit a submodule's URL or tracked branch, and open one as its own
+repository. Pick the exact commit a submodule points at from a branch or
+tag's history, checked out and staged in one step. Adding, removing,
+editing, and choosing a commit stage the change for you to commit, and the
+clone dialog can bring every submodule down with the repo. A changed
+submodule is tagged in Changes with what changed; selecting it lists the
+commits the submodule moved across, its unstaged row lists the uncommitted
+files inside, and **Open submodule** is one click away. A conflicted
+submodule resolves in the conflict editor by picking the commit to keep.
 
 ### Syncing and conflicts
 
@@ -651,7 +658,10 @@ in one click.
 - **Refresh on demand**: a refresh button beside the list's search box (or
   **Refresh pull requests** in the command palette) re-reads the list you're
   looking at along with its checks, conflict chips, review-state grouping,
-  and your local pull requests.
+  and your local pull requests, plus the pull request you have open (its
+  details, review threads and diff). While you're writing a comment inside a
+  diff, the open pull request keeps what it shows: finish or close the
+  comment, then refresh again to update it.
 - **Fork · Upstream lens**: on a GitHub fork (a repo with an `upstream`
   remote), a **Fork | Upstream** switch in the list toolbar points the
   remote PR list, and every PR you open under it (description, comments,

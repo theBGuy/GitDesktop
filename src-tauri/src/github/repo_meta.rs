@@ -894,7 +894,7 @@ pub(crate) mod tests {
             (
                 issue,
                 "gh_issue_close",
-                "\"issue\", \"close\"",
+                "issue_close_args(",
                 "Changed",
                 1,
                 true,

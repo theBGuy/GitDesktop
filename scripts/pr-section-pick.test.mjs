@@ -180,12 +180,11 @@ function auditPaths(source, expected) {
 
 // Every call a child makes through the prop it is handed `pickPath` on.
 const PICK_PROP_CHILDREN = {
+  // Both user routes reach it through the settled gate, which the jsdom suite
+  // src/test/pr-diff-context.test.tsx pins.
   "src/features/pulls/RemotePrViewParts.tsx": {
     prop: "onSelectPath",
-    calls: [
-      /^\s*onActivate: \(file\) => onSelectPath\(file\.path\),$/,
-      /^\s*onClick=\{\(\) => onSelectPath\(file\.path\)\}$/,
-    ],
+    calls: [/^\s*if \(filter\.rail\.settled\) onSelectPath\(path\);$/],
   },
   "src/features/pulls/CommitComments.tsx": {
     prop: "onSelectFile",
@@ -267,8 +266,8 @@ test("mutation control: an automatic call through a child's pick prop fails the 
   const file = "src/features/pulls/RemotePrViewParts.tsx";
   const source = read(file).replace(/\r\n/g, "\n");
   const auto = source.replace(
-    "    onActivate: (file) => onSelectPath(file.path),",
-    "    onActivate: (file) => onSelectPath(file.path),\n    onFocus: () => onSelectPath(files[0].path),",
+    "    onActivate: (file) => pickRow(file.path),",
+    "    onActivate: (file) => pickRow(file.path),\n    onFocus: () => onSelectPath(files[0].path),",
   );
   assert.notEqual(auto, source, "mutation target not found");
   assert.notDeepEqual(auditChild(auto, PICK_PROP_CHILDREN[file]), []);

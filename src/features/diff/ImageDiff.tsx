@@ -1,13 +1,17 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useLayoutEffect, useState } from "react";
 import { ImageLightbox, type LightboxImage } from "@/components/image-lightbox";
 import { IMAGE_CAPTION_REASON } from "@/components/markdown/markdown-images";
 import { Button } from "@/components/ui/button";
 import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { formatBytes } from "@/lib/format-bytes";
 import type { FileBytes } from "@/lib/git/api";
-import { useFileAtRev } from "@/lib/git/queries";
 import { isAppError } from "@/lib/tauri/invoke";
 import { cn } from "@/lib/utils";
+import {
+  contentSourceKey,
+  type ForgePatch,
+  useFileAtSource,
+} from "./content-source";
 import { useReportPaneSettled } from "./diff-pane-hold";
 
 const IMAGE_MIME: Record<string, string> = {
@@ -68,13 +72,23 @@ type SideRead =
   | { error: SideError }
   | { pending: true };
 
-function sideRead(read: {
-  data: FileBytes | null | undefined;
-  isPending: boolean;
-  isError: boolean;
-  error: unknown;
-}): SideRead {
+function sideRead(
+  read: {
+    data: FileBytes | null | undefined;
+    isPending: boolean;
+    isError: boolean;
+    error: unknown;
+    fetchStatus: string;
+  },
+  forge: boolean,
+): SideRead {
   if (read.data !== undefined) return { bytes: read.data };
+  // A forge read that can't run is unavailable, never loading: a disabled one
+  // (no full sha) answers the same every time, a paused one (offline) may not.
+  if (forge && read.isPending && read.fetchStatus === "idle")
+    return { error: "notImage" };
+  if (forge && read.isPending && read.fetchStatus === "paused")
+    return { error: "readFailed" };
   if (read.isPending) return { pending: true };
   if (!read.isError) return { bytes: null };
   return {
@@ -231,14 +245,64 @@ function FailedSide({
   );
 }
 
-/** Measured sides and the open viewer, scoped to the pair they belong to. */
+/** Measured sides and the open viewer, scoped to the file (a forge-patch host)
+ *  or the pair (any other host) they belong to. */
 interface PanesState {
   id: string;
   old?: Size;
   new?: Size;
   /** Sides whose image fired `error`, so they will never measure. */
   failed?: Partial<Record<PaneKey, true>>;
-  viewing?: number;
+  /** The side the viewer shows: a side, never a slot of the shown ones, which
+   *  shift when a new-only pair gains its old side. */
+  viewing?: PaneKey;
+  /** A forge-patch host's last settled reads of this file, drawn while a new
+   *  pair's first reads are in flight. */
+  settled?: Record<PaneKey, SettledSide>;
+}
+
+/** A settled read with the path it was read at: a kept side's type fallback
+ *  reads that path, never the pair now reading. */
+interface SettledSide {
+  read: SideRead;
+  path: string;
+}
+
+/** The same answer: the same FileBytes object, never a compare of its bytes. */
+function sameRead(a: SideRead, b: SideRead): boolean {
+  if ("bytes" in a) return "bytes" in b && a.bytes === b.bytes;
+  if ("error" in a) return "error" in b && a.error === b.error;
+  return "pending" in b;
+}
+
+/** The same image: one compare of the bytes, made only when the reads'
+ *  FileBytes changed. */
+function sameBytes(a: SideRead, b: SideRead): boolean {
+  if (!("bytes" in a) || !("bytes" in b)) return false;
+  const [x, y] = [a.bytes, b.bytes];
+  return (
+    x === y ||
+    (x !== null && y !== null && x.base64 === y.base64 && x.mime === y.mime)
+  );
+}
+
+/** `prev` keeping `next` as its settled reads: a side whose bytes changed
+ *  drops its measurement and decode failure, which were the previous image's. */
+function keepSettled(
+  prev: PanesState,
+  next: Record<PaneKey, SettledSide>,
+): PanesState {
+  const out: PanesState = { ...prev, settled: next };
+  for (const key of ["old", "new"] as const) {
+    if (
+      prev.settled === undefined ||
+      sameBytes(prev.settled[key].read, next[key].read)
+    )
+      continue;
+    out[key] = undefined;
+    if (out.failed?.[key]) out.failed = { ...out.failed, [key]: undefined };
+  }
+  return out;
 }
 
 /**
@@ -250,44 +314,115 @@ export function ImagePanes({
   filePath,
   oldPath,
   revs,
+  forgePatch,
+  lineKeeper,
 }: {
   repoPath: string;
   filePath: string;
   /** The old side's path: the diff's rename source, else `filePath`. */
   oldPath: string;
   revs: ImageRevs;
+  /** A forge-patch host: each side reads from its source, by sha. */
+  forgePatch?: ForgePatch;
+  /** Set where the panes sit above a diff's rows: called after every change of
+   *  their layout, so the reader's top line stays put. */
+  lineKeeper?: { readonly current: (() => void) | null };
 }) {
-  const oldFile = useFileAtRev(repoPath, revs.old, oldPath, true);
-  const newFile = useFileAtRev(repoPath, revs.new, filePath, true);
-  // Keyed by the pair being shown, so a switch to another file drops the
-  // previous one's measurements and viewer index during render.
+  // A source not known yet reads nothing.
+  const source = forgePatch === undefined ? "local" : forgePatch.source;
+  const forge = source !== null && source !== "local";
+  const oldFile = useFileAtSource({
+    repo: repoPath,
+    source: source ?? "local",
+    rev: revs.old,
+    path: oldPath,
+    enabled: source !== null,
+  });
+  const newFile = useFileAtSource({
+    repo: repoPath,
+    source: source ?? "local",
+    rev: revs.new,
+    path: filePath,
+    enabled: source !== null,
+  });
+  // Keyed by the file on a forge-patch host, whose panes outlive a pair
+  // change, else by the pair: a switch to another file drops the previous
+  // one's measurements and viewer index during render.
   const [state, setState] = useState<PanesState>({ id: "" });
 
   // Only a first read holds the pair back; a side reading again after a failure
-  // (Retry, a focus refetch) pends on its own while the other stays shown.
+  // (Retry, a focus refetch) pends on its own while the other stays shown. A
+  // read that can't run (disabled, paused) never holds it: it's unavailable.
   const pending =
-    (oldFile.isPending && oldFile.errorUpdateCount === 0) ||
-    (newFile.isPending && newFile.errorUpdateCount === 0);
-  const oldRead = sideRead(oldFile);
-  const newRead = sideRead(newFile);
+    (oldFile.isPending &&
+      oldFile.errorUpdateCount === 0 &&
+      oldFile.fetchStatus === "fetching") ||
+    (newFile.isPending &&
+      newFile.errorUpdateCount === 0 &&
+      newFile.fetchStatus === "fetching");
+  const oldRead = sideRead(oldFile, forge);
+  const newRead = sideRead(newFile, forge);
+  // A local first read holds the pair whatever its fetch status.
+  const held =
+    pending ||
+    (!forge &&
+      (("pending" in oldRead && oldFile.errorUpdateCount === 0) ||
+        ("pending" in newRead && newFile.errorUpdateCount === 0)));
+  const keeps = forgePatch !== undefined;
+  const pairId = [
+    filePath,
+    oldPath,
+    revs.old,
+    revs.new,
+    source === null ? "unknown" : contentSourceKey(source),
+  ].join("|");
+  const id = keeps ? filePath : pairId;
+  const current = state.id === id ? state : null;
+  // While a new pair's first reads are in flight, a forge-patch host draws
+  // this file's last settled reads, so panes on screen never blank and swap
+  // in one commit; a new read that failed or can't run shows at once.
+  const snapshot = keeps && pending ? (current?.settled ?? null) : null;
+  const drawn = (live: SideRead, path: string, key: PaneKey): SettledSide =>
+    snapshot !== null && !("error" in live)
+      ? snapshot[key]
+      : { read: live, path };
+  const { read: drawnOld, path: drawnOldPath } = drawn(oldRead, oldPath, "old");
+  const { read: drawnNew, path: drawnNewPath } = drawn(
+    newRead,
+    filePath,
+    "new",
+  );
+  const drawnHeld = held && snapshot === null;
+  if (
+    keeps &&
+    !held &&
+    (current?.settled === undefined ||
+      !sameRead(current.settled.old.read, oldRead) ||
+      !sameRead(current.settled.new.read, newRead) ||
+      current.settled.old.path !== oldPath ||
+      current.settled.new.path !== filePath)
+  )
+    setState((prev) =>
+      keepSettled(prev.id === id ? prev : { id }, {
+        old: { read: oldRead, path: oldPath },
+        new: { read: newRead, path: filePath },
+      }),
+    );
   // Absent only when the read answered so: a failed side might exist.
-  const oldAbsent = "bytes" in oldRead && oldRead.bytes === null;
-  const newAbsent = "bytes" in newRead && newRead.bytes === null;
+  const oldAbsent = "bytes" in drawnOld && drawnOld.bytes === null;
+  const newAbsent = "bytes" in drawnNew && drawnNew.bytes === null;
   // One rescue per side, so each Retry keeps its own claim on focus: a retry
   // resets its read to pending, which unmounts that side's Retry.
   const oldRescue = useRetryFocusRescue(
-    !pending && "error" in oldRead && oldRead.error === "readFailed",
+    !drawnHeld && "error" in drawnOld && drawnOld.error === "readFailed",
   );
   const newRescue = useRetryFocusRescue(
-    !pending && "error" in newRead && newRead.error === "readFailed",
+    !drawnHeld && "error" in drawnNew && drawnNew.error === "readFailed",
   );
   const hostRef = (node: HTMLDivElement | null) => {
     oldRescue.hostRef(node);
     newRescue.hostRef(node);
   };
-
-  const id = [filePath, oldPath, revs.old, revs.new].join("|");
-  const current = state.id === id ? state : null;
   const patch = (next: Partial<PanesState>) =>
     setState((prev) =>
       prev.id === id ? { ...prev, ...next } : { id, ...next },
@@ -324,8 +459,8 @@ export function ImagePanes({
         };
   };
   const panes = [
-    toPane("old", oldRead, oldPath, newAbsent ? "Deleted" : "Old"),
-    toPane("new", newRead, filePath, oldAbsent ? "Added" : "New"),
+    toPane("old", drawnOld, drawnOldPath, newAbsent ? "Deleted" : "Old"),
+    toPane("new", drawnNew, drawnNewPath, oldAbsent ? "Added" : "New"),
   ].filter((pane): pane is Pane => pane !== null);
 
   // A refused side has nothing to show fullscreen, so the viewer indexes only
@@ -337,13 +472,27 @@ export function ImagePanes({
   // caption appears) only then, so settle waits for every shown image of THIS
   // pair to load or fail. Refused sides and the no-image line are final.
   useReportPaneSettled(
-    !pending &&
+    !drawnHeld &&
       !panes.some((pane) => pane.pending) &&
       shown.every(
         (pane) =>
           current?.[pane.key] !== undefined || current?.failed?.[pane.key],
       ),
   );
+
+  // Every change of the panes' layout, a measured caption included.
+  const layout = drawnHeld
+    ? ""
+    : JSON.stringify([
+        panes.map((p) => [p.key, p.label, p.src === null, p.error, p.pending]),
+        current?.old,
+        current?.new,
+        current?.failed,
+      ]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: it runs once per layout, which `layout` names
+  useLayoutEffect(() => {
+    lineKeeper?.current?.();
+  }, [lineKeeper, layout]);
 
   // The root renders on every arm, pending included (empty and unpadded, so an
   // embedding view lays out as before): it is where a pressed Retry's focus
@@ -354,31 +503,39 @@ export function ImagePanes({
       tabIndex={-1}
       className={cn(
         "flex items-start justify-center gap-8 outline-none",
-        !pending && "p-6",
+        !drawnHeld && "p-6",
       )}
     >
       {content}
     </div>
   );
 
-  if (pending) {
+  if (drawnHeld) {
     return shell(null);
   }
 
+  // Keyed by side, so the viewer's zoom and image survive a side's move to
+  // another index (a new-only pair gaining its old side).
   const images: LightboxImage[] = shown.map((pane) => ({
+    id: pane.key,
     src: pane.src,
     alt: pane.label,
     label: pane.label,
     naturalWidth: current?.[pane.key]?.w,
     naturalHeight: current?.[pane.key]?.h,
   }));
-  const viewing = current?.viewing ?? null;
+  // The viewer's slot follows its side; a side that left closes it for good.
+  const viewingAt = shown.findIndex((pane) => pane.key === current?.viewing);
+  const viewing = viewingAt === -1 ? null : viewingAt;
+  if (current?.viewing !== undefined && viewing === null)
+    patch({ viewing: undefined });
 
   return shell(
     <>
       {panes.map((pane) => {
-        // Keyed by the pair as well as the slot: an `<img>` kept across a
-        // file switch paints the previous file until the new src decodes.
+        // Keyed by the panes' scope as well as the slot: an `<img>` kept
+        // across a file switch paints the previous file until the new src
+        // decodes, while a forge-patch host's new pair reuses it.
         const key = `${id}|${pane.key}`;
         if (pane.pending) {
           return <PendingSide key={key} label={pane.label} />;
@@ -408,9 +565,7 @@ export function ImagePanes({
             label={pane.label}
             onMeasure={(size) => patch({ [pane.key]: size })}
             onFail={() => markFailed(pane.key)}
-            onOpen={() =>
-              patch({ viewing: shown.findIndex((s) => s.key === pane.key) })
-            }
+            onOpen={() => patch({ viewing: pane.key })}
             size={current?.[pane.key]}
             bytes={pane.bytes}
             src={src}
@@ -428,7 +583,7 @@ export function ImagePanes({
       <ImageLightbox
         images={images}
         index={viewing ?? 0}
-        onIndexChange={(next) => patch({ viewing: next })}
+        onIndexChange={(next) => patch({ viewing: shown[next]?.key })}
         onOpenChange={(open) => {
           if (!open) patch({ viewing: undefined });
         }}
@@ -447,12 +602,15 @@ export function ImageDiff({
   filePath,
   oldPath,
   revs,
+  forgePatch,
 }: {
   repoPath: string;
   filePath: string;
   /** The old side's path: the diff's rename source, else `filePath`. */
   oldPath: string;
   revs: ImageRevs;
+  /** See {@link ImagePanes}' prop of the same name. */
+  forgePatch?: ForgePatch;
 }) {
   return (
     // ph-no-capture: user image content — block from session replay.
@@ -463,6 +621,7 @@ export function ImageDiff({
           filePath={filePath}
           oldPath={oldPath}
           revs={revs}
+          forgePatch={forgePatch}
         />
       </div>
     </div>

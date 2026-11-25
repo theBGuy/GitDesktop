@@ -36,6 +36,9 @@ export interface LightboxImage {
   /** The web page Open in browser opens, for an image whose `src` isn't one
    *  (a data: URL loaded from the web); omitted, an http(s) `src` is used. */
   webUrl?: string;
+  /** The image's identity across changes to the set, for a host whose images
+   *  can move to another index; omitted, its index is its identity. */
+  id?: string;
 }
 
 type ZoomMode = "fit" | "actual";
@@ -132,7 +135,7 @@ export function ImageLightbox({
   const image = images[index];
   if (!image) return null;
 
-  const key = `${index}:${image.src}`;
+  const key = `${image.id ?? index}:${image.src}`;
   const zoomed = zoomedKey === key;
   const failed = failedKey === key;
   const mode: ZoomMode = zoomed ? "actual" : "fit";
