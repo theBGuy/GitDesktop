@@ -139,7 +139,7 @@ type Pressed = {
   confirm: boolean;
 };
 
-/** A plain Rename's press while its lookup re-read runs, in its repository. */
+/** A remote-step press while its lookup re-read runs, in its repository. */
 type Reading = {
   repoPath: string;
   oldName: string;
@@ -264,6 +264,10 @@ const REFUSAL_COPY: {
     reason: `This clone fetches only certain branches from ${n.remote}, and ${n.new} isn't one of them.`,
     advice: UNTICK,
   }),
+  oldFetchedByName: (n) => ({
+    reason: `This clone's fetch settings name ${n.old} on ${n.remote}, so fetching would fail once it's renamed there.`,
+    advice: UNTICK,
+  }),
   remoteDefault: (n) => ({
     reason: `${n.old} is the default branch on ${n.remote}.`,
     advice: UNTICK,
@@ -313,6 +317,37 @@ function pullsNeedConfirm(pulls: RemoteBranchPulls | undefined): boolean {
       return true;
     case "checked":
       return pulls.items.length > 0 || pulls.unchecked.length > 0;
+  }
+}
+
+/** Whether a Rename anyway press may act on `fresh`: nothing in it is missing
+ *  from `shown`. A request is its provider, scope, repo and number; an
+ *  unchecked scope is its scope; an unidentified answer is its host. */
+function pullsCovered(
+  shown: RemoteBranchPulls | undefined,
+  fresh: RemoteBranchPulls,
+): boolean {
+  switch (fresh.status) {
+    case "noForge":
+      return true;
+    case "unidentified":
+      return shown?.status === "unidentified" && shown.host === fresh.host;
+    case "checked": {
+      if (fresh.items.length === 0 && fresh.unchecked.length === 0) return true;
+      if (shown?.status !== "checked" || shown.provider !== fresh.provider)
+        return false;
+      return (
+        fresh.items.every((f) =>
+          shown.items.some(
+            (s) =>
+              s.scope === f.scope && s.repo === f.repo && s.number === f.number,
+          ),
+        ) &&
+        fresh.unchecked.every((f) =>
+          shown.unchecked.some((s) => s.scope === f.scope),
+        )
+      );
+    }
   }
 }
 
@@ -807,6 +842,8 @@ export function RenameBranchDialog({
         pulls.data?.status === "checked"
           ? providerLabel(pulls.data.provider)
           : null;
+      // The lookup answer a Rename anyway press consented to.
+      const shown = pulls.data;
       const sentTip = clearTip;
       // The check answer the press was made under; a newer one retires the
       // act's refusal.
@@ -854,57 +891,65 @@ export function RenameBranchDialog({
         sessionRef.current = null;
         onClose();
       };
-      // A plain Rename re-reads the lookup: the delete would close a request
-      // opened since its answer. One that needs the confirm, or a failed read,
-      // gives the form back showing it.
-      if (!press.confirm) {
-        const fresh = await queryClient
-          .fetchQuery(pullsOptions)
-          .catch(() => null);
-        // After an await the act builds from the live repository's options,
-        // and a switch away and back closed the dialog.
-        const switchOutcome = "nothing was renamed";
-        const switchWhen = "before the rename started";
-        if (refuseIfSwitched(repoPath, switchOutcome, switchWhen))
-          return release();
-        if (readMark.switched) {
-          notifyRepoChanged(repoPath, switchOutcome, switchWhen);
-          return release();
-        }
-        if (fresh === null || pullsNeedConfirm(fresh)) {
-          // A dialog showing the press gets the answer, as at an act refusal,
-          // except one reopened on the new name (a branch that never got it);
-          // with none, the outcome is a toast.
-          const showing = showingSession();
-          if (showing === null || showing.reopenedOn === newName) {
-            const { away } = landedIn(repoPath);
-            toast.info(
-              fresh === null
-                ? `Didn't rename ${target}${away}: couldn't check ${names.remote} for open requests. Open Rename again to retry.`
-                : `Didn't rename ${target}${away}: the open-request check on ${names.remote} now needs your confirmation. Open Rename again to see it.`,
-            );
-          } else if (showing.reopenedOn !== "") {
-            // Reopening reset the tick; the answer reads under a ticked box.
-            setTick(true);
-          }
-          return release();
-        }
-        // The read took time: every press-time refusal may have changed since.
-        if (
-          refuseWhileOffline() ||
-          refuseWhileBranchPushes(queryClient, repoPath, target, currentName)
-        )
-          return release();
-        if (promotionBlocksCheckout(repoPath)) {
-          toast.info(PROMOTION_BLOCKS_CHECKOUT);
-          return release();
-        }
-        if (
-          refuseWhilePushRuns(queryClient, repoPath) ||
-          refuseWhilePublishing(queryClient, repoPath)
-        )
-          return release();
+      // Every remote-step press reads the lookup from the press on: the delete
+      // would close a request opened since the dialog's answer. A read already
+      // in flight began before the press, so it is cancelled, never joined.
+      await queryClient.cancelQueries({
+        queryKey: pullsOptions.queryKey,
+        exact: true,
+      });
+      const fresh = await queryClient
+        .fetchQuery(pullsOptions)
+        .catch(() => null);
+      // After an await the act builds from the live repository's options,
+      // and a switch away and back closed the dialog.
+      const switchOutcome = "nothing was renamed";
+      const switchWhen = "before the rename started";
+      if (refuseIfSwitched(repoPath, switchOutcome, switchWhen))
+        return release();
+      if (readMark.switched) {
+        notifyRepoChanged(repoPath, switchOutcome, switchWhen);
+        return release();
       }
+      // A failed read gives either press back showing it; so does an answer
+      // that needs the confirm after a plain press, or one asking for more than
+      // the dialog showed after a Rename anyway press.
+      if (
+        fresh === null ||
+        (press.confirm ? !pullsCovered(shown, fresh) : pullsNeedConfirm(fresh))
+      ) {
+        // A dialog showing the press gets the answer, as at an act refusal,
+        // except one reopened on the new name (a branch that never got it);
+        // with none, the outcome is a toast.
+        const showing = showingSession();
+        if (showing === null || showing.reopenedOn === newName) {
+          const { away } = landedIn(repoPath);
+          toast.info(
+            fresh === null
+              ? `Didn't rename ${target}${away}: couldn't check ${names.remote} for open requests. Open Rename again to retry.`
+              : `Didn't rename ${target}${away}: the open-request check on ${names.remote} now needs your confirmation. Open Rename again to see it.`,
+          );
+        } else if (showing.reopenedOn !== "") {
+          // Reopening reset the tick; the answer reads under a ticked box.
+          setTick(true);
+        }
+        return release();
+      }
+      // The read took time: every press-time refusal may have changed since.
+      if (
+        refuseWhileOffline() ||
+        refuseWhileBranchPushes(queryClient, repoPath, target, currentName)
+      )
+        return release();
+      if (promotionBlocksCheckout(repoPath)) {
+        toast.info(PROMOTION_BLOCKS_CHECKOUT);
+        return release();
+      }
+      if (
+        refuseWhilePushRuns(queryClient, repoPath) ||
+        refuseWhilePublishing(queryClient, repoPath)
+      )
+        return release();
       endRead();
       try {
         const outcome = await renameOnRemote.mutateAsync({

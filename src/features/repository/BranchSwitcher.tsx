@@ -5063,7 +5063,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               remote: branch.remote,
               name: branch.name,
               repo: repoPath,
-              tip: branch.tip || undefined,
+              tip: branch.tip,
             });
           }}
         >

@@ -378,12 +378,14 @@ export function useDeleteBranch(repo: string) {
   );
 }
 
-/** Deletes a branch on its remote (`git push <remote> --delete`). Invalidates
- *  the remote-branches list (the row disappears), the local branches (their
- *  upstream may now be gone), and the PR rows across both lenses: GitHub closes a
- *  PR whose head branch is deleted asynchronously, so those rows are re-read once
- *  after a delay. The review-state map rides with the list (its co-invalidation
- *  contract); the CI and mergeability maps re-key on the new rows. */
+/** Deletes a branch on its remote, leased on the `expectedTip` the caller
+ *  passes; the backend refuses the delete when that tip is absent or empty.
+ *  Invalidates the remote-branches list (the row disappears), the local
+ *  branches (their upstream may now be gone), and the PR rows across both
+ *  lenses: GitHub closes a PR whose head branch is deleted asynchronously, so
+ *  those rows are re-read once after a delay. The review-state map rides with
+ *  the list (its co-invalidation contract); the CI and mergeability maps re-key
+ *  on the new rows. */
 export function useDeleteRemoteBranch(repo: string) {
   const queryClient = useQueryClient();
   const prListKeys = headDeletePrListKeys(repo);

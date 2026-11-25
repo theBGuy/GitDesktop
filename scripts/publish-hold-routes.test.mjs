@@ -238,7 +238,7 @@ const HANDLERS = [
     order: [
       "if (refuseWhilePublishing(queryClient, repoPath)) return;",
       "refuseWhileOffline() ||",
-      "toast.info(PROMOTION_BLOCKS_CHECKOUT);\n          return release();",
+      "toast.info(PROMOTION_BLOCKS_CHECKOUT);\n        return release();",
       "refuseWhilePushRuns(queryClient, repoPath) ||",
       "renameOnRemote.mutateAsync(",
     ],

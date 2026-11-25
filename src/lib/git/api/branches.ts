@@ -147,9 +147,10 @@ export const gitDeleteBranch = async (
   return out.status === "deleted" ? { ...out, ...deleteFactsOf(out) } : out;
 };
 
-/** Deletes `name` on `remote` (`git push <remote> --delete`). Idempotent when
- *  the remote ref is already gone. With `expectedTip` (a full commit id) the
- *  delete is leased on it: a remote branch that moved since is not deleted. */
+/** Deletes `name` on `remote`, leased on `expectedTip` (a full commit id): a
+ *  remote branch that moved since is not deleted and, once the backend's
+ *  refusals pass, one already gone answers Ok. The backend refuses an absent
+ *  or empty tip rather than delete unleased. */
 export const gitDeleteRemoteBranch = (
   repoPath: string,
   remote: string,

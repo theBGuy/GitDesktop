@@ -48,7 +48,7 @@ const PINS = [
       "if (refuseWhilePublishing(queryClient, repoPath)) return;",
       "refuseWhileOffline() ||",
       "refuseWhileBranchPushes(queryClient, repoPath, target, currentName)\n",
-      "if (promotionBlocksCheckout(repoPath)) {\n          toast.info(PROMOTION_BLOCKS_CHECKOUT);\n          return release();",
+      "if (promotionBlocksCheckout(repoPath)) {\n        toast.info(PROMOTION_BLOCKS_CHECKOUT);\n        return release();",
       "refuseWhilePushRuns(queryClient, repoPath) ||",
       "refuseWhilePublishing(queryClient, repoPath)\n",
       "await renameOnRemote.mutateAsync",

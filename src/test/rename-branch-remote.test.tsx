@@ -1333,6 +1333,349 @@ describe("the check and the lookup", () => {
     );
   });
 
+  type Checked = Extract<RemoteBranchPulls, { status: "checked" }>;
+  const meanwhileItem = (openOne as Checked).items[0];
+  const laterItem: Checked["items"][number] = {
+    number: 8,
+    title: "Opened later",
+    url: "u8",
+    isDraft: false,
+    scope: "repository",
+    repo: "a/b",
+  };
+  const checked = (
+    items: Checked["items"],
+    more: Partial<Checked> = {},
+  ): RemoteBranchPulls => ({
+    status: "checked",
+    provider: "github",
+    items,
+    unchecked: [],
+    ...more,
+  });
+  const unidentified: RemoteBranchPulls = {
+    status: "unidentified",
+    host: "github-work",
+  };
+  const lookupCalls = () => vi.mocked(forgePrsOnRemoteBranch).mock.calls.length;
+  /** Starts a background re-read of the repository's queries, unawaited. */
+  const startBackgroundRead = (queryClient: QueryClient) =>
+    act(() => {
+      void queryClient.invalidateQueries({ queryKey: ["repo", REPO] });
+    });
+
+  /** Opens with `shownPulls` on screen and waits for an enabled Rename anyway. */
+  async function showAnyway(shownPulls: RemoteBranchPulls = openOne) {
+    vi.mocked(forgePrsOnRemoteBranch).mockResolvedValue(shownPulls);
+    const r = renderDialog();
+    await rename(r.user);
+    await r.user.click(box());
+    await waitFor(
+      () => expect(submit()).toHaveAttribute("aria-disabled", "false"),
+      { timeout: 2000 },
+    );
+    expect(submit()).toHaveTextContent(/Rename anyway$/);
+    return r;
+  }
+
+  it("never takes a plain Rename's answer from a lookup that began before the press", async () => {
+    const { user, queryClient } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    const stale = deferred<RemoteBranchPulls>();
+    const fresh = deferred<RemoteBranchPulls>();
+    vi.mocked(forgePrsOnRemoteBranch)
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValue(fresh.promise);
+    const lookups = lookupCalls();
+    startBackgroundRead(queryClient);
+    await waitFor(() => expect(lookupCalls()).toBe(lookups + 1));
+    expect(submit()).toHaveAttribute("aria-disabled", "false");
+    await user.click(submit());
+    await waitFor(() => expect(lookupCalls()).toBe(lookups + 2));
+    await act(async () => stale.resolve(none));
+    expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+    expectHeld();
+    expect(status()).toHaveTextContent("Renaming feat to feat2 on origin");
+    await act(async () => fresh.resolve(openOne));
+    await waitFor(() => expect(submit()).toHaveTextContent("Rename anyway"));
+    expect(status()).toHaveTextContent("Opened meanwhile");
+    expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+    expect(spies.info).not.toHaveBeenCalled();
+  });
+
+  it("renames at a plain Rename on the read it started, with an older lookup still unanswered", async () => {
+    const { user, queryClient } = renderDialog();
+    await rename(user);
+    await tickClear(user);
+    const stale = deferred<RemoteBranchPulls>();
+    const fresh = deferred<RemoteBranchPulls>();
+    vi.mocked(forgePrsOnRemoteBranch)
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValue(fresh.promise);
+    const lookups = lookupCalls();
+    startBackgroundRead(queryClient);
+    await waitFor(() => expect(lookupCalls()).toBe(lookups + 1));
+    await user.click(submit());
+    await waitFor(() => expect(lookupCalls()).toBe(lookups + 2));
+    await act(async () => fresh.resolve(none));
+    await waitFor(() => expect(gitRenameBranchRemote).toHaveBeenCalledTimes(1));
+    expect(gitRenameBranchRemote).toHaveBeenCalledWith(
+      REPO,
+      "feat",
+      "feat2",
+      "origin",
+      TIP,
+    );
+  });
+
+  it("re-reads the lookup at Rename anyway and renames once over the requests it showed", async () => {
+    const { user } = await showAnyway();
+    const lookups = lookupCalls();
+    await user.click(submit());
+    await waitFor(() => expect(gitRenameBranchRemote).toHaveBeenCalledTimes(1));
+    const lookupOrder = vi.mocked(forgePrsOnRemoteBranch).mock
+      .invocationCallOrder;
+    expect(lookupOrder.length).toBe(lookups + 1);
+    expect(lookupOrder[lookups]).toBeLessThan(
+      vi.mocked(gitRenameBranchRemote).mock.invocationCallOrder[0],
+    );
+  });
+
+  it("gives Rename anyway back showing a request opened since its answer, and renames on the next press", async () => {
+    const { user } = await showAnyway();
+    vi.mocked(forgePrsOnRemoteBranch).mockResolvedValue(
+      checked([meanwhileItem, laterItem]),
+    );
+    await user.click(submit());
+    await waitFor(() => expect(status()).toHaveTextContent("Opened later"));
+    expect(status()).toHaveTextContent("Opened meanwhile");
+    expect(submit()).toHaveTextContent(/Rename anyway$/);
+    await waitFor(() =>
+      expect(submit()).toHaveAttribute("aria-disabled", "false"),
+    );
+    expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+    expect(spies.info).not.toHaveBeenCalled();
+    // An Enter still held from the press never presses the confirm again.
+    const repeat = new KeyboardEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      repeat: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      submit().dispatchEvent(repeat);
+    });
+    expect(repeat.defaultPrevented).toBe(true);
+    await user.click(submit());
+    await waitFor(() => expect(gitRenameBranchRemote).toHaveBeenCalledTimes(1));
+  });
+
+  it("never renames when a Rename anyway press's re-read fails, and offers Retry", async () => {
+    const { user } = await showAnyway();
+    vi.mocked(forgePrsOnRemoteBranch)
+      .mockRejectedValueOnce({ kind: "git", message: "fatal: boom" })
+      .mockReturnValue(deferred<RemoteBranchPulls>().promise);
+    await user.click(submit());
+    await within(status()).findByText(/^Couldn't check origin: /, undefined, {
+      timeout: 2000,
+    });
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expectHeld();
+    expect(submit()).toHaveTextContent(/Rename anyway$/);
+    expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+    expect(spies.info).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, RemoteBranchPulls, RemoteBranchPulls]>([
+    [
+      "fewer requests than it showed",
+      checked([meanwhileItem, laterItem]),
+      openOne,
+    ],
+    ["no request", openOne, none],
+    ["no forge", openOne, { status: "noForge" }],
+    ["an unchanged unidentified answer", unidentified, unidentified],
+    [
+      "the unchecked scope it showed",
+      checked([], {
+        unchecked: [
+          { scope: "parent", error: { kind: "gh", message: "signed out" } },
+        ],
+      }),
+      checked([], {
+        unchecked: [
+          { scope: "parent", error: { kind: "gh", message: "signed out" } },
+        ],
+      }),
+    ],
+  ])(
+    "renames once at Rename anyway when its re-read finds %s",
+    async (_n, shownPulls, freshPulls) => {
+      const { user } = await showAnyway(shownPulls);
+      vi.mocked(forgePrsOnRemoteBranch).mockResolvedValue(freshPulls);
+      const lookups = lookupCalls();
+      await user.click(submit());
+      await waitFor(() =>
+        expect(gitRenameBranchRemote).toHaveBeenCalledTimes(1),
+      );
+      const lookupOrder = vi.mocked(forgePrsOnRemoteBranch).mock
+        .invocationCallOrder;
+      expect(lookupOrder.length).toBe(lookups + 1);
+      expect(lookupOrder[lookups]).toBeLessThan(
+        vi.mocked(gitRenameBranchRemote).mock.invocationCallOrder[0],
+      );
+    },
+  );
+
+  it("renames once at Rename anyway pressed during a background lookup, on the read it started", async () => {
+    const { user, queryClient } = await showAnyway();
+    const stale = deferred<RemoteBranchPulls>();
+    const fresh = deferred<RemoteBranchPulls>();
+    vi.mocked(forgePrsOnRemoteBranch)
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValue(fresh.promise);
+    const lookups = lookupCalls();
+    startBackgroundRead(queryClient);
+    await waitFor(() => expect(lookupCalls()).toBe(lookups + 1));
+    await user.click(submit());
+    await waitFor(() => expect(lookupCalls()).toBe(lookups + 2));
+    // An answer the press isn't covered by: joined, it would give the press back.
+    await act(async () => stale.resolve(checked([meanwhileItem, laterItem])));
+    await act(async () => fresh.resolve(openOne));
+    await waitFor(() => expect(gitRenameBranchRemote).toHaveBeenCalledTimes(1));
+  });
+
+  it("gives Rename anyway back when its re-read finds a forge at another host", async () => {
+    const { user } = await showAnyway(unidentified);
+    vi.mocked(forgePrsOnRemoteBranch).mockResolvedValue({
+      status: "unidentified",
+      host: "github-other",
+    });
+    const lookups = lookupCalls();
+    await user.click(submit());
+    await waitFor(() => expect(lookupCalls()).toBeGreaterThan(lookups));
+    await waitFor(() => {
+      expect(status()).not.toHaveTextContent(
+        "Renaming feat to feat2 on origin",
+      );
+      expect(submit()).toHaveAttribute("aria-disabled", "false");
+    });
+    expect(status()).toHaveTextContent(
+      "can't identify the forge at github-other",
+    );
+    expect(submit()).toHaveTextContent(/Rename anyway$/);
+    expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+    expect(spies.info).not.toHaveBeenCalled();
+  });
+
+  it("toasts a Rename anyway whose dialog was closed during a re-read that found a new request", async () => {
+    const { user, rerenderWith } = await showAnyway();
+    const fresh = deferred<RemoteBranchPulls>();
+    vi.mocked(forgePrsOnRemoteBranch).mockReturnValue(fresh.promise);
+    await user.click(submit());
+    expect(status()).toHaveTextContent("Renaming feat to feat2 on origin…");
+    await rerenderWith({ target: null });
+    await act(async () => fresh.resolve(checked([meanwhileItem, laterItem])));
+    await waitFor(() =>
+      expect(spies.info).toHaveBeenCalledWith(
+        "Didn't rename feat: the open-request check on origin now needs your confirmation. Open Rename again to see it.",
+      ),
+    );
+    expect(spies.info).toHaveBeenCalledTimes(1);
+    expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, RemoteBranchPulls, string | null]>([
+    [
+      "a parent repository it couldn't check",
+      checked([meanwhileItem], {
+        unchecked: [
+          { scope: "parent", error: { kind: "gh", message: "signed out" } },
+        ],
+      }),
+      "Couldn't check the parent repository",
+    ],
+    [
+      "a forge it can't identify",
+      unidentified,
+      "can't identify the forge at github-work",
+    ],
+    [
+      "the same number in the parent repository",
+      checked([{ ...meanwhileItem, scope: "parent", repo: "up/b" }]),
+      "in up/b:",
+    ],
+    [
+      "another provider",
+      checked([meanwhileItem], { provider: "gitlab" }),
+      null,
+    ],
+  ])(
+    "gives Rename anyway back when its re-read finds %s",
+    async (_n, freshPulls, text) => {
+      const { user } = await showAnyway();
+      vi.mocked(forgePrsOnRemoteBranch).mockResolvedValue(freshPulls);
+      const lookups = lookupCalls();
+      await user.click(submit());
+      await waitFor(() => expect(lookupCalls()).toBeGreaterThan(lookups));
+      await waitFor(() => {
+        expect(status()).not.toHaveTextContent(
+          "Renaming feat to feat2 on origin",
+        );
+        expect(submit()).toHaveAttribute("aria-disabled", "false");
+      });
+      if (text !== null) expect(status()).toHaveTextContent(text);
+      expect(submit()).toHaveTextContent(/Rename anyway$/);
+      expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+      expect(spies.info).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each<
+    [
+      string,
+      (r: Awaited<ReturnType<typeof showAnyway>>) => Promise<unknown>,
+      string,
+    ]
+  >([
+    [
+      "a promote started",
+      () =>
+        act(async () => {
+          promote.on = true;
+        }),
+      "A worktree is being promoted to your main workspace. Try again once it finishes.",
+    ],
+    [
+      "the repository was switched away and back",
+      async ({ rerenderWith, switchRepo }) => {
+        // The switch closes the dialog, as the branch menu does.
+        await switchRepo(OTHER);
+        await rerenderWith({ target: null });
+        await switchRepo(REPO);
+      },
+      "You switched repositories before the rename started — nothing was renamed.",
+    ],
+  ])(
+    "never renames at Rename anyway when %s during its re-read",
+    async (_n, during, message) => {
+      const r = await showAnyway();
+      const fresh = deferred<RemoteBranchPulls>();
+      vi.mocked(forgePrsOnRemoteBranch).mockReturnValue(fresh.promise);
+      await r.user.click(submit());
+      await during(r);
+      await act(async () => fresh.resolve(openOne));
+      await waitFor(() => expect(spies.info).toHaveBeenCalledWith(message));
+      expect(spies.info).toHaveBeenCalledTimes(1);
+      expect(gitRenameBranchRemote).not.toHaveBeenCalled();
+      expect(
+        screen.queryByText("Renaming feat to feat2 on origin…"),
+      ).toBeNull();
+    },
+  );
+
   it("never checks the previous session's name right after a reseed", async () => {
     const { user, rerenderWith } = renderDialog();
     await rename(user);
@@ -1443,6 +1786,11 @@ describe("the check and the lookup", () => {
       "newNotFetched",
       { code: "newNotFetched" },
       "This clone fetches only certain branches from origin, and feat2 isn't one of them. Untick to rename only here.",
+    ],
+    [
+      "oldFetchedByName",
+      { code: "oldFetchedByName" },
+      "This clone's fetch settings name feat on origin, so fetching would fail once it's renamed there. Untick to rename only here.",
     ],
     [
       "remoteDefault",
@@ -2549,6 +2897,10 @@ describe("the outcome", () => {
     [
       { code: "unreachable", detail: LONG_UNREACHABLE },
       `Didn't rename feat: ${LONG_UNREACHABLE_SHOWN}`,
+    ],
+    [
+      { code: "oldFetchedByName" },
+      "Didn't rename feat: This clone's fetch settings name feat on origin, so fetching would fail once it's renamed there.",
     ],
   ])(
     "toasts only the reason of a refusal that settles after a dismissal",

@@ -997,16 +997,18 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   request is closed; a Bitbucket pull request stays open and loses its source branch).
   When there are any, or one of those repositories couldn't be checked for them, the
   button reads **Rename anyway** and {{key:enter}} in the name field doesn't rename; a
-  lookup that fails outright holds **Rename** with the reason instead. Pressing **Rename**
-  looks for open requests once more and starts the rename only when the answer is still
-  clear: if it now calls for **Rename anyway**, or that look fails, nothing is renamed and
-  the dialog says why (if the dialog is closed by then, a notice says the branch wasn't
-  renamed). The rename pushes the new name, then deletes the old one only if it hasn't
-  moved since the check; a result that stops partway says what is where, and how to finish
-  when the old name is left on the remote. You can close the dialog while it runs, and the
-  notice still reports the result. Until then the branch's row in the branch menu shows
-  **Renaming on _remote_** and holds what a push of the branch would hold;
-  **Rename branch…** stays available and reopens the dialog on the running rename.
+  lookup that fails outright holds the button with the reason instead. Pressing **Rename**
+  or **Rename anyway** looks for open requests once more. **Rename** goes ahead only when
+  the answer is still clear, and **Rename anyway** only when nothing has turned up that
+  the dialog hadn't listed. Otherwise, or when that look fails, nothing is renamed and the
+  dialog shows the answer it got (if the dialog is closed or showing another branch by
+  then, a notice says the branch wasn't renamed). The rename pushes the new name, then
+  deletes the old one only if it hasn't moved since the check; a result that stops partway
+  says what is where, and how to finish when the old name is left on the remote. You can
+  close the dialog while it runs, and the notice still reports the result. Once the rename
+  has started, the branch's row in the branch menu shows **Renaming on _remote_** and holds
+  what a push of the branch would hold until it ends; **Rename branch…** stays available
+  and reopens the dialog on the running rename.
   Names under \`gd/session/\` are reserved for agent sessions.
   Deleting asks first and removes the branch only at the commit it had when the
   confirmation opened; a branch that changed since is kept. The notice that follows names
@@ -1221,7 +1223,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for
   everyone (protected names are blocked; it removes the branch only at the commit the app
   had read for it when the confirmation opened, so a branch that changed on the remote
-  since is kept; and it can't be undone from the app).
+  since is kept; and it can't be undone from the app). It's refused, with nothing deleted,
+  when the remote has more than one push address, or a push address GitDesktop can't match
+  to the repository it fetches from.
 - The **Merge** dialog previews the result before you commit to it — *fast-forward*, *already
   up to date*, *clean merge*, or *which files will conflict* — worked out in memory without
   touching your files.

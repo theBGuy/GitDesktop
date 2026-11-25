@@ -39,6 +39,7 @@ import {
 import {
   BRANCH_PUSH_ELSEWHERE_MESSAGE,
   branchPushHoldReason,
+  remoteBranchesOptions,
   usePush,
   useRenameBranchOnRemote,
 } from "@/lib/git/queries";
@@ -653,7 +654,7 @@ describe("a repository switch under an open Rename dialog", () => {
     success.mockRestore();
   });
 
-  it("closes an open New branch dialog too", async () => {
+  it("closes an open New branch dialog too, which reopens empty in the new repository and creates nothing", async () => {
     const { user, switchRepo } = renderSwitcher();
     await openList(user);
     await user.click(await screen.findByText("New branch…"));
@@ -664,6 +665,10 @@ describe("a repository switch under an open Rename dialog", () => {
     await waitFor(() =>
       expect(screen.queryByLabelText("Branch name")).toBeNull(),
     );
+    await openList(user);
+    await user.click(await screen.findByText("New branch…"));
+    expect(await screen.findByLabelText("Branch name")).toHaveValue("");
+    expect(createSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -686,20 +691,23 @@ describe("the Remote group's Delete", () => {
     reads.remoteBranches = [remoteBranch("main"), remoteOnly(TIP)];
     const { user, queryClient } = renderSwitcher();
     const confirm = await openDelete(user);
-    let moved = 0;
+    // Every live source now answers the moved tip: the list read, the tips
+    // read and the rendered list's own cache entry.
+    reads.remoteBranches = [remoteBranch("main"), remoteOnly(MOVED)];
+    vi.mocked(gitBranchTips).mockImplementation(async (_repo, names) =>
+      Object.fromEntries(names.map((n) => [n, MOVED])),
+    );
+    const listKey = remoteBranchesOptions(REPO).queryKey;
     act(() => {
-      queryClient.setQueriesData<RemoteBranch[]>(
-        { queryKey: ["repo", REPO, "remote-branches"] },
-        (rows) => {
-          if (rows === undefined) return rows;
-          moved++;
-          return rows.map((b) =>
-            b.name === "gone" ? { ...b, tip: MOVED } : b,
-          );
-        },
+      queryClient.setQueryData<RemoteBranch[]>(listKey, (rows) =>
+        rows?.map((b) => (b.name === "gone" ? { ...b, tip: MOVED } : b)),
       );
     });
-    expect(moved).toBeGreaterThan(0);
+    expect(
+      queryClient
+        .getQueryData<RemoteBranch[]>(listKey)
+        ?.find((b) => b.remote === "origin" && b.name === "gone")?.tip,
+    ).toBe(MOVED);
     await user.click(confirm);
     await waitFor(() => expect(deleteRemoteSpy).toHaveBeenCalledTimes(1));
     expect(deleteRemoteSpy).toHaveBeenCalledWith(REPO, "origin", "gone", TIP);
@@ -709,17 +717,23 @@ describe("the Remote group's Delete", () => {
     ["no known tip", undefined],
     ["an empty tip", ""],
   ] as const) {
-    it(`a row with ${what} sends no lease`, async () => {
+    it(`a row with ${what} sends that tip as is, and the refusal reaches the error toast`, async () => {
+      // The backend's refusal sentence, as fixture data.
+      const refusal =
+        "Couldn't read which commit origin/gone is at, so it wasn't deleted. Fetch, then try again.";
+      deleteRemoteSpy.mockRejectedValue({ kind: "command", message: refusal });
+      const error = vi.spyOn(toast, "error");
+      const success = vi.spyOn(toast, "success");
       reads.remoteBranches = [remoteBranch("main"), remoteOnly(tip)];
       const { user } = renderSwitcher();
       await user.click(await openDelete(user));
-      await waitFor(() => expect(deleteRemoteSpy).toHaveBeenCalledTimes(1));
-      expect(deleteRemoteSpy).toHaveBeenCalledWith(
-        REPO,
-        "origin",
-        "gone",
-        undefined,
-      );
+      await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+      expect(deleteRemoteSpy).toHaveBeenCalledTimes(1);
+      expect(deleteRemoteSpy).toHaveBeenCalledWith(REPO, "origin", "gone", tip);
+      expect(String(error.mock.calls[0][0])).toContain(refusal);
+      expect(success).not.toHaveBeenCalled();
+      error.mockRestore();
+      success.mockRestore();
     });
   }
 

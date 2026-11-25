@@ -100,7 +100,8 @@ export interface RemoteBranch {
   /** ISO-8601 committer date of the branch tip (for recency sorting). */
   lastCommitDate: string;
   /** The tracking ref's commit id as this list read it; a Delete leases on it.
-   *  Absent or empty sends no lease. */
+   *  The backend refuses a Delete whose tip is absent or empty: nothing is
+   *  deleted without a tip to lease on. */
   tip?: string;
 }
 

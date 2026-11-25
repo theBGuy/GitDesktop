@@ -9,8 +9,13 @@ export type RemoteRenameRefusal =
   | { code: "mirror" }
   | { code: "pushUrlDiffers" }
   | { code: "caseOnly" }
-  /** The remote's fetch refspecs provably map no tracking ref for the new name. */
+  /** This clone's fetch settings for the remote provably never fetch the new
+   *  name. */
   | { code: "newNotFetched" }
+  /** A fetch setting for the remote names the old branch as its source, so
+   *  fetching the remote with these settings would fail once it's renamed
+   *  there, unless that spelling also names another ref on the remote. */
+  | { code: "oldFetchedByName" }
   | { code: "unreachable"; detail: string }
   | { code: "remoteDefault" }
   | { code: "remoteGone" }
@@ -44,8 +49,10 @@ export type OldKeptCause =
   | { reason: "failed"; error: AppError };
 
 /** What a remote rename did. Every status but `refused` renamed the branch
- *  here; `warning` is the local rename's, or says the push didn't set the
- *  upstream (`Couldn't set {new}'s upstream to {remote}/{new}.`). `renamed`:
+ *  here; `warning` is the local rename's. On `renamed` and `oldKept` it can
+ *  carry one more sentence: that the push didn't set the upstream (`Couldn't
+ *  set {new}'s upstream to {remote}/{new}.`), or that the new branch shows no
+ *  upstream here because this clone's fetch settings leave it out. `renamed`:
  *  the new name is pushed and the old remote branch was deleted or already
  *  gone. After a push timeout, whether the new name exists on the remote is
  *  unknown. */
