@@ -17,7 +17,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { type ReactNode, useSyncExternalStore } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { HOLD_BOUND_MS } from "@/features/diff/diff-pane-slots";
 import { positionFromLine } from "@/features/pulls/CommitComments";
 import { TabPanel } from "@/features/repository/TabPanel";
@@ -221,6 +221,23 @@ export const newLine = (n: number) =>
     (el) => el.closest(PREPARING) === null,
   ) ?? null;
 
+/** The labels of the diff panes outside the preparing slot. */
+const shownPanes = () =>
+  [...document.querySelectorAll("[aria-label^='Diff of ']")]
+    .filter((el) => el.closest(PREPARING) === null)
+    .map((el) => el.getAttribute("aria-label"));
+/** The new-side line whose row an inline copy of `body` sits under, null
+ *  when it shows no inline copy. */
+const anchorLine = (body: string) => {
+  const hit = copies(body).find((el) => el.closest("[data-diff-anchor]"));
+  let row = hit?.closest("tr")?.previousElementSibling ?? null;
+  for (; row !== null; row = row.previousElementSibling) {
+    const num = row.querySelector("span[data-line-new-num]");
+    if (num) return Number(num.getAttribute("data-line-new-num"));
+  }
+  return null;
+};
+
 /** Where each copy of a comment shows outside the preparing slot: its body
  *  text, or an open editor holding it. */
 function copies(body: string): HTMLElement[] {
@@ -272,10 +289,12 @@ export function expectOnce(state: string, bodies: readonly string[]) {
  */
 export function watchPainted(bodies: readonly string[]) {
   const painted: string[] = [];
+  let disposed = false;
   const observer = new MutationObserver(() => {
-    if (placedOnce(bodies) === null) return;
+    if (disposed || placedOnce(bodies) === null) return;
     let hops = 0;
     const atTaskEnd = () => {
+      if (disposed) return;
       if (++hops < 2000) {
         queueMicrotask(atTaskEnd);
         return;
@@ -291,7 +310,14 @@ export function watchPainted(bodies: readonly string[]) {
     characterData: true,
     attributes: true,
   });
-  return { painted, stop: () => observer.disconnect() };
+  // A test that fails before its own stop() still detaches the observer, and
+  // the samples it already queued drop out.
+  const stop = () => {
+    disposed = true;
+    observer.disconnect();
+  };
+  onTestFinished(stop);
+  return { painted, stop };
 }
 
 const EDITED = " and more";
@@ -360,6 +386,9 @@ export function defineOracleSuite(host: OracleHost) {
     // First in the file: the diff chunk loads once per module graph.
     it("lists every comment while the diff chunk's Suspense fallback is up", async () => {
       const release = host.holdChunk();
+      // A failed assertion before the release below still frees the chunk
+      // for the rest of the file; a second resolve is a no-op.
+      onTestFinished(release);
       host.mount({
         hide: false,
         files: [mixed("f.txt")],
@@ -546,11 +575,14 @@ export function defineOracleSuite(host: OracleHost) {
         hide: false,
         forge: "github",
         files: [f],
-        comments: [positioned(f, 4, F)],
+        // Position 10 counted by hand from MIXED_HUNKS' first line: new line 4
+        // ("    line 3"), independent of the walk the app decodes it with.
+        comments: [{ ...positioned(f, 4, F), position: 10 }],
       });
       await waitFor(() => expect(placeOf(F)).toBe("inline"), LONG_WAIT);
       await settle();
       expectOnce("rows", [F]);
+      expect(anchorLine(F)).toBe(4);
       const watch = watchPainted([F]);
       // Observers hear the failed refetch inside its act, not a task later.
       notifyManager.setScheduler((notify) => notify());
@@ -563,6 +595,7 @@ export function defineOracleSuite(host: OracleHost) {
       watch.stop();
       expectOnce("refetch failed over the cached patch", [F]);
       expect(placeOf(F)).toBe("inline");
+      expect(anchorLine(F)).toBe(4);
       expect(watch.painted).toEqual([]);
     }, 30_000);
 
@@ -981,8 +1014,9 @@ export function defineOracleSuite(host: OracleHost) {
       await settle();
       await sweep(F, async () => {
         pickFile("g.zig");
+        // g.zig's pane is the one shown, outside the preparing slot.
         await waitFor(
-          () => expect(document.querySelector(PREPARING)).toBeNull(),
+          () => expect(shownPanes()).toEqual(["Diff of g.zig"]),
           LONG_WAIT,
         );
       });

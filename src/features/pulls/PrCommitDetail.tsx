@@ -147,19 +147,6 @@ export function PrCommitDetail({
 }: PrCommitDetailProps) {
   const diff = usePrCommitDiff(repoPath, number, commit.oid, lens);
   const comments = useCommitComments(repoPath, commit.oid, lens);
-  // This view is reused across commits: the header's subject and body
-  // scrollers open each one at the top, reset in place rather than re-keyed,
-  // so a focused subject keeps focus; only for a commit other than the last
-  // one reset for, since an <Activity> re-show replays this effect.
-  const subjectRef = useRef<HTMLHeadingElement | null>(null);
-  const bodyRef = useRef<HTMLPreElement | null>(null);
-  const resetFor = useRef(commit.oid);
-  useLayoutEffect(() => {
-    if (commit.oid === resetFor.current) return;
-    resetFor.current = commit.oid;
-    for (const el of [subjectRef.current, bodyRef.current])
-      if (el) el.scrollTop = 0;
-  }, [commit.oid]);
   // Markdown preview reads the file at this commit, so it's offered only once
   // the commit is a local object (after a Check out PR or a fetch).
   const commitPresent = useObjectsPresent(repoPath, [commit.oid]);
@@ -375,17 +362,13 @@ export function PrCommitDetail({
             so a long subject never squeezes out the diff; a tab stop, so a
             keyboard can scroll it too. */}
         <h2
-          ref={subjectRef}
           tabIndex={0}
           className="max-h-10 overflow-y-auto text-sm font-medium break-words outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
         >
           {commit.headline}
         </h2>
         {commit.messageBody && (
-          <pre
-            ref={bodyRef}
-            className="max-h-24 overflow-y-auto font-mono text-xs whitespace-pre-wrap text-muted-foreground"
-          >
+          <pre className="max-h-24 overflow-y-auto font-mono text-xs whitespace-pre-wrap text-muted-foreground">
             {commit.messageBody}
           </pre>
         )}

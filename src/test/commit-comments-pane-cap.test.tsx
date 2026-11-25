@@ -1,6 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  onTestFinished,
+  vi,
+} from "vitest";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
 import {
   commitOnRemote,
@@ -134,6 +142,16 @@ describe("the commit comments pane in History", () => {
       defaultOptions: { queries: { retry: false } },
     });
     client.setQueryData(settingsKeys.settings, DEFAULT_SETTINGS);
+    // jsdom lays nothing out: the comments pane (the list's parent) measures
+    // a real height, so the hold has a nonzero one to keep.
+    const height = vi
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.querySelector(':scope > [aria-label="Commit comments"]')
+          ? 180
+          : 0;
+      });
+    onTestFinished(() => height.mockRestore());
     const view = (h: string) => (
       <QueryClientProvider client={client}>
         <CommitDetailView repoPath={REPO} hash={h} />
@@ -150,9 +168,11 @@ describe("the commit comments pane in History", () => {
     // Another commit's list loading holds the pane at its answered height,
     // capped the same way.
     result.rerender(view(B));
-    await waitFor(() => expect(pane.style.minHeight).not.toBe(""));
-    expect(pane.style.minHeight).toContain("45%");
-    expect(pane.style.minHeight).not.toContain("16rem");
+    const held = () =>
+      screen.getByRole("group", { name: "Commit comments" })
+        .parentElement as HTMLElement;
+    await waitFor(() => expect(held().style.minHeight).not.toBe(""));
+    expect(held().style.minHeight).toBe("min(180px, 45%)");
     await act(async () => undefined);
     client.clear();
   });

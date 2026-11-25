@@ -11,6 +11,7 @@ import {
   type ComponentProps,
   createElement,
   type ReactNode,
+  useCallback,
   useRef,
 } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -495,10 +496,16 @@ function Column({
   jumping: { current: boolean };
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  // The scroll accessors go on as the ref attaches, before the hook's layout
+  // effects first read the column.
+  const attach = useCallback((el: HTMLDivElement | null) => {
+    ref.current = el;
+    if (el) asScroller(el, boxedHeight(el));
+  }, []);
   const column = useColumnLayoutAnchor(ref, jumping);
   const mode = useSettings().data?.diffViewMode ?? "unified";
   return (
-    <div ref={ref} data-testid="column">
+    <div ref={attach} data-testid="column">
       <ColumnLayoutAnchorContext value={column}>
         {layout[mode].map((b, i) => (
           <div key={b.k ?? i} data-transcript-diff="" data-y={b.y} data-h={b.h}>
@@ -534,7 +541,9 @@ function mountColumn({
     </QueryClientProvider>,
   );
   const column = view.getByTestId("column");
-  const scrollTo = asScroller(column, boxedHeight(column));
+  const scrollTo = (y: number) => {
+    top = y;
+  };
   const show = (layout: Layout, hidden = false) =>
     view.rerender(
       <QueryClientProvider client={client}>
@@ -919,7 +928,12 @@ const CELLS = Object.entries(TRIGGERS).flatMap(([trigger, t]) =>
 describe("useColumnLayoutAnchor: every trigger over every last state", () => {
   it.each(CELLS)("%s after %s", (_trigger, _state, t, s) => {
     const mid = laidOut([A, B])[t.from][1];
-    const y = s.pinned ? 2600 : (mid?.y ?? 0) + (mid?.h ?? 0) / 2;
+    const height = (boxes: Box[]) => boxes.reduce((h, b) => h + b.h, 2600);
+    // A pinned edge starts at the column's real bottom, its height less the
+    // 400px viewport.
+    const y = s.pinned
+      ? height(laidOut([A, B])[t.from]) - 400
+      : (mid?.y ?? 0) + (mid?.h ?? 0) / 2;
     if (s.fromMount) top = y;
     const m = mountColumn({ layout: laidOut([A, B]), mode: t.from });
     if (!s.fromMount) m.scrollTo(y);
@@ -928,7 +942,6 @@ describe("useColumnLayoutAnchor: every trigger over every last state", () => {
     t.run(m, pre, post);
     if (s.pinned) {
       // Every trigger changes the boxes' heights, so the bottom moved.
-      const height = (boxes: Box[]) => boxes.reduce((h, b) => h + b.h, 2600);
       const bottom = height(laidOut(post)[t.to]);
       expect(bottom).not.toBe(height(laidOut(pre)[t.from]));
       // The hold writes the bottom unless the column already sits there.

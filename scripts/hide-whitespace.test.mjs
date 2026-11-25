@@ -1175,7 +1175,9 @@ function pinInlineDiffArm(text) {
   const at = once(body, SHOW_HANDLER);
   const params = matchBrace(masked, at + SHOW_HANDLER.length - 1);
   const open = masked.indexOf("{", params);
-  const handler = body.slice(open, matchBrace(masked, open));
+  // Searches read the masked body (offsets kept), so a commented-out call
+  // never counts as one.
+  const handler = masked.slice(open, matchBrace(masked, open));
   const focus = handler.indexOf("host?.focus(");
   const flip = handler.indexOf("setHideWhitespace(false)");
   if (focus < 0 || flip < 0 || focus > flip)
@@ -1183,11 +1185,11 @@ function pinInlineDiffArm(text) {
   if (masked.split("setHideWhitespace(").length !== 2)
     throw new Error("InlineDiff: only the shared handler flips the setting");
   const close = matchBrace(masked, arm + WS_ARM.length - 1);
-  if (!body.slice(arm, close).includes(PASSES_HANDLER))
+  if (!masked.slice(arm, close).includes(PASSES_HANDLER))
     throw new Error(
       "InlineDiff: the whitespace-only arm's button must use the shared handler",
     );
-  const last = body.slice(once(body, "const note =\n"));
+  const last = masked.slice(once(body, "const note =\n"));
   if (!last.includes("<GitDiffView") || !last.includes(PASSES_HANDLER))
     throw new Error(
       "InlineDiff: the diff arm's hidden note must use the shared handler",
@@ -1212,18 +1214,30 @@ test("the transcript's whitespace-only arm: ahead of the empty arm, focus first"
       ),
     /focuses its host before the flip/,
   );
+  // A commented-out call is no call: every search reads the masked body.
+  for (const line of [
+    "    host?.focus({ preventScroll: true });\n",
+    "    setHideWhitespace(false);\n  };\n",
+  ]) {
+    assert.throws(
+      () => pinInlineDiffArm(swap(text, line, `    // ${line.trimStart()}`)),
+      /focuses its host before the flip/,
+    );
+  }
   const wsPass = text.indexOf(PASSES_HANDLER, wsStart);
   assert.ok(wsPass > wsStart && wsPass < emptyAt, "the arm passes the handler");
-  const unpass = (i) =>
-    `${text.slice(0, i)}onClick={() => {}}${text.slice(i + PASSES_HANDLER.length)}`;
-  assert.throws(
-    () => pinInlineDiffArm(unpass(wsPass)),
-    /whitespace-only arm's button must use the shared handler/,
-  );
-  assert.throws(
-    () => pinInlineDiffArm(unpass(text.lastIndexOf(PASSES_HANDLER))),
-    /hidden note must use the shared handler/,
-  );
+  const unpass = (i, kept = "") =>
+    `${text.slice(0, i)}onClick={() => {}}${kept}${text.slice(i + PASSES_HANDLER.length)}`;
+  for (const kept of ["", ` /* ${PASSES_HANDLER} */`]) {
+    assert.throws(
+      () => pinInlineDiffArm(unpass(wsPass, kept)),
+      /whitespace-only arm's button must use the shared handler/,
+    );
+    assert.throws(
+      () => pinInlineDiffArm(unpass(text.lastIndexOf(PASSES_HANDLER), kept)),
+      /hidden note must use the shared handler/,
+    );
+  }
   assert.throws(
     () =>
       pinInlineDiffArm(

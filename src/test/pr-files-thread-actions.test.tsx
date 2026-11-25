@@ -492,7 +492,7 @@ describe("a Files-tab review thread's comment menu", () => {
       name: `Edit — ${PR_ARCHIVED_READONLY_MESSAGE}`,
       disabled: "true",
     });
-    // The Conversation tab holds no Delete on an archive either.
+    // Files doesn't hold Delete on an archive either (a recorded residual).
     expect(rows).toContainEqual({ name: "Delete", disabled: null });
   });
 
@@ -540,7 +540,7 @@ describe("a Files-tab comment edit over the real diff", () => {
     };
   });
 
-  it("C3-3: holds both flips while open, and C3-6: survives a threads refetch", async () => {
+  it("C3-3: an open edit raises both probes, and C3-6: survives a threads refetch", async () => {
     const user = userEvent.setup();
     const client = mount();
     await openFilesTab(user);

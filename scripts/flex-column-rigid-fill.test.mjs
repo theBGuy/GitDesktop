@@ -32,7 +32,8 @@
 //   token can override it on the box.
 // - Component roots: a column-0 `export function`, `export default function`,
 //   `function`, `export const Name =` or `const Name =` (async, generic and
-//   typed forms included) with a capitalized name. Its roots are the
+//   typed forms included; a declared return type is skipped, its object
+//   braces too) with a capitalized name. Its roots are the
 //   parentless tags a `return` reaches with no `;`, `=>` or `function`
 //   between while only the component's own function body is open (control
 //   blocks don't count), or the expression body of the arrow. A transparent
@@ -41,7 +42,7 @@
 //   file's import names (`@/` or relative; a package import resolves to
 //   none), else every exported definition of that name.
 // - A root's className is its LAST writer in attribute order: an explicit
-//   `className` (its own tokens, plus the mount's at the place its `{…}`
+//   `className` (its own tokens, plus the mount's at each place its `{…}`
 //   names `className` or `props.className`, conditional in a conditional
 //   operand, then resolved as above), or a spread, which may carry the
 //   mount's className and so replaces every earlier writer with the mount's
@@ -67,7 +68,8 @@
 //   of `&&`, recursively, parens trimmed. An arm holding JSX counts by its
 //   tags; a tag-free arm counts unless blank or a literal that paints nothing
 //   (`null`, `undefined`, `true`, `false`, a white-space-only string), a bare
-//   identifier bound once in the file to JSX being read as that JSX. A
+//   identifier bound once in the file to JSX (a `let` or `var` only while
+//   never assigned again) being read as that JSX. A
 //   self-closing `<span … />` with no
 //   spread, no `style`, a `className` absent or one string literal, and every
 //   token on the closed non-box list (NON_BOX) doesn't count; a parent's
@@ -113,6 +115,10 @@
 //     count as siblings of each other.
 // 12. The left operand of `&&`, which renders when it is `0` or `NaN`.
 // 13. Whether the content can actually outgrow the space.
+// 14. Compound (`+=` and friends) and destructuring writes to a `let` or
+//     `var` binding: not counted as writes, so its initializer still stands.
+// 15. An arrow's unparenthesized function return type
+//     (`(): () => void => …`): its `=>` is read as the arrow.
 import assert from "node:assert/strict";
 import { posix } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -437,7 +443,7 @@ function parseJsx(text, masked) {
 
 /** A className expression that merges the caller's: `className` or
  *  `props.className`, never another object's member. */
-const FORWARDS = /(?:(?<![\w$.])|(?<=(?<![\w$.])props\.))className(?![\w$])/;
+const FORWARDS = /(?:(?<![\w$.])|(?<=(?<![\w$.])props\.))className(?![\w$])/g;
 
 /** Each string literal and template text segment in masked's [from, to), with
  *  its offset: `literalStrings` (ts-mask) with positions kept. */
@@ -564,7 +570,7 @@ function classInfo(f, node) {
     const v = m.index + m[0].length;
     let end = -1;
     let spans = [];
-    let forwards = null;
+    let forwards = [];
     let merge = false;
     if (masked[v] === '"' || masked[v] === "'") {
       end = masked.indexOf(masked[v], v + 1) + 1;
@@ -576,11 +582,10 @@ function classInfo(f, node) {
       const expr = masked.slice(v, end);
       literal = false;
       if (end > v && end <= e) {
-        const fw = FORWARDS.exec(expr);
-        if (fw) {
+        forwards = [...expr.matchAll(FORWARDS)].map((fw) => {
           const at = v + fw.index;
-          forwards = { at, cond: conditionalAt(masked, v + 1, end - 1, at) };
-        }
+          return { at, cond: conditionalAt(masked, v + 1, end - 1, at) };
+        });
         merge = mergesClasses(f, masked, v, end);
         spans = literalSpans(text, masked, v + 1, end - 1).map((x) => ({
           s: x.s,
@@ -647,16 +652,19 @@ function effectiveClass(info, mount, rest = null) {
   for (const w of info.writers) {
     if (!w.spread) {
       let toks = w.tokens;
-      if (w.forwards && mount) {
-        const at = w.forwards.at;
-        const caller = w.forwards.cond
-          ? mount.map((t) => ({ ...t, cond: true }))
-          : mount;
-        toks = [
-          ...toks.filter((t) => t.at < at),
-          ...caller,
-          ...toks.filter((t) => t.at > at),
-        ];
+      if (mount && w.forwards?.length) {
+        // The caller's tokens land at each forwarding place in order, so the
+        // merge resolves them as the call's last writer would.
+        let from = -1;
+        const merged = [];
+        for (const { at, cond } of w.forwards) {
+          merged.push(...toks.filter((t) => t.at > from && t.at < at));
+          merged.push(
+            ...(cond ? mount.map((t) => ({ ...t, cond: true })) : mount),
+          );
+          from = at;
+        }
+        toks = [...merged, ...toks.filter((t) => t.at > from)];
       }
       eff = twResolve(toks, w.merge);
     } else if (mount && !(rest && w.name === rest)) eff = mount;
@@ -748,6 +756,62 @@ function exprEnd(masked, j) {
   return masked.length;
 }
 
+const TYPE_OPERATORS = new Set([
+  "keyof",
+  "typeof",
+  "readonly",
+  "infer",
+  "unique",
+  "asserts",
+  "is",
+  "extends",
+  "new",
+]);
+
+/** Past a declared return type starting at `i` (`: T`), or `i` when there is
+ *  none: a `{` where the type expects an operand (after `:`, `&`, `|`, `=>`,
+ *  `.` or a type operator) is an object type, any other opens the body. With
+ *  `arrow`, the first `=>` reached where the type is complete is the arrow
+ *  and its offset is returned. */
+function returnTypeEnd(masked, i, arrow = false) {
+  let k = skipWs(masked, i);
+  if (masked[k] !== ":") return i;
+  k++;
+  let operand = true;
+  while (k < masked.length) {
+    k = skipWs(masked, k);
+    const c = masked[k];
+    if (c === "{" || c === "(" || c === "[") {
+      if (c === "{" && !operand) return k;
+      const close = matchBrace(masked, k);
+      if (close < 0) throw new ScanError("an unreadable return type");
+      k = close + 1;
+      operand = false;
+    } else if (c === "<") {
+      k = skipAngles(masked, k);
+      operand = false;
+    } else if (c === "=" && masked[k + 1] === ">") {
+      if (arrow && !operand) return k;
+      k += 2;
+      operand = true;
+    } else if (c === '"' || c === "'" || c === "`") {
+      const close = masked.indexOf(c, k + 1);
+      if (close < 0) throw new ScanError("an unreadable return type");
+      k = close + 1;
+      operand = false;
+    } else if (/[\w$]/.test(c)) {
+      const word = /^[\w$]+/.exec(masked.slice(k, k + 64))[0];
+      k += word.length;
+      operand = TYPE_OPERATORS.has(word);
+    } else if (c === ";") return k;
+    else {
+      operand = "&|.,?:".includes(c) ? true : operand;
+      k++;
+    }
+  }
+  return k;
+}
+
 const DECL =
   /^(export\s+(?:default\s+)?)?(?:async\s+)?(?:function\s*\*?\s*([A-Z][\w$]*)\s*[<(]|const\s+([A-Z][\w$]*)\s*[:=])/gm;
 
@@ -774,7 +838,7 @@ function componentsOf(f) {
       const pc = matchBrace(masked, k);
       if (pc < 0) throw new ScanError(`${name}: unreadable parameters`);
       params = masked.slice(k + 1, pc);
-      let b = pc + 1;
+      let b = returnTypeEnd(masked, pc + 1);
       while (b < masked.length && masked[b] !== "{" && masked[b] !== ";") b++;
       if (masked[b] !== "{") continue;
       body = { kind: "block", from: b, to: matchBrace(masked, b), arrow: -1 };
@@ -791,7 +855,7 @@ function componentsOf(f) {
         if (pc < 0) throw new ScanError(`${name}: unreadable parameters`);
         params = masked.slice(a + 1, pc);
         a = skipWs(masked, pc + 1);
-        if (masked[a] === ":") a = masked.indexOf("=>", a);
+        a = returnTypeEnd(masked, a, true);
       } else {
         const p = /^[\w$]+\s*/.exec(masked.slice(a));
         if (!p) continue;
@@ -878,17 +942,22 @@ function bindingsOf(f) {
   const found = new Map();
   for (const t of trees) {
     if (t.inAttr) continue;
-    const pre = /(?:const|let|var)\s+([\w$]+)\s*=\s*\(?\s*$/.exec(
+    const pre = /(const|let|var)\s+([\w$]+)\s*=\s*\(?\s*$/.exec(
       masked.slice(Math.max(0, t.start - 200), t.start),
     );
     if (!pre || !/^\s*\)?\s*;/.test(masked.slice(t.end))) continue;
+    const name = pre[2].replace(/\$/g, "\\$");
     const decls = masked.match(
-      new RegExp(
-        `\\b(?:const|let|var)\\s+${pre[1].replace(/\$/g, "\\$")}\\b`,
-        "g",
-      ),
+      new RegExp(`\\b(?:const|let|var)\\s+${name}\\b`, "g"),
     );
-    if (decls?.length === 1) found.set(pre[1], [t]);
+    // A let or var assigned again may hold other JSX by the time it renders,
+    // so only its declaration's assignment may stand for it.
+    const writes = masked.match(
+      new RegExp(`(?<![\\w$.])${name}\\s*=(?![=>])`, "g"),
+    );
+    if (decls?.length !== 1) continue;
+    if (pre[1] !== "const" && writes?.length !== 1) continue;
+    found.set(pre[2], [t]);
   }
   return found;
 }
@@ -1929,6 +1998,68 @@ for (const tok of ["contents!", "!contents"]) {
     );
   });
 }
+
+test("F24: the mount's className lands at every place the root forwards it", () => {
+  const twice = 'cn(className, "h-full R", className)';
+  fails(paneMount("min-h-full", twice.replace("R", "min-h-0")), 6);
+  passes(paneMount("min-h-0", twice.replace("R", "min-h-full")));
+  fails(
+    paneMount(
+      "min-h-full",
+      'cn(props.className, "h-full min-h-0", props.className)',
+      "props",
+    ),
+    6,
+  );
+});
+
+test("F25: a declared return type's braces are not the component's body", () => {
+  for (const type of [
+    "React.JSX.Element & {}",
+    "{ a: 1 } & React.ReactNode",
+    "Array<{ a: 1 }> | null",
+    "(() => {}) | JSX.Element",
+    "JSX.Element",
+  ]) {
+    const pane = `function Pane(): ${type} {\n  return <div className="h-full">pane</div>;\n}`;
+    const got = check(host("<Pane />", pane));
+    assert.equal(got.length, 1, `${type}: ${got.join("\n")}`);
+    assert.match(got[0], /Host\.tsx:5: <Pane> takes its parent's whole height/);
+  }
+  for (const type of [
+    "(() => void)",
+    "{ a: () => void }",
+    "JSX.Element",
+    "(() => void) | JSX.Element",
+  ]) {
+    for (const body of [PANE_BODY, `{\n  return ${PANE_BODY};\n}`]) {
+      const pane = `const Pane = (): ${type} => ${body};`;
+      const got = check(host("<Pane />", pane));
+      assert.equal(got.length, 1, `${pane}: ${got.join("\n")}`);
+      assert.match(got[0], /Host\.tsx:5: <Pane> takes/);
+    }
+  }
+});
+
+test("F26: a reassigned let or var binding is read as an unknown child", () => {
+  const solo = (sib) =>
+    host(`${sib}\n      <div className="h-full">body</div>`).replace(
+      '      <header className="border-b">title</header>\n',
+      "",
+    );
+  const bind = (decl, later = "") =>
+    solo("{hint}").replace(
+      "  return (",
+      `  ${decl} hint = <span className="absolute" />;\n${later}  return (`,
+    );
+  const reassign = "  if (Math.random()) hint = <p>Hint</p>;\n";
+  passes(bind("const"));
+  passes(bind("let"));
+  passes(bind("var"));
+  fails(bind("let", reassign), 7);
+  fails(bind("var", reassign), 7);
+  passes(bind("let", "  if (hint == null) void 0;\n"));
+});
 
 /** The installed tailwind-merge, or null where node_modules is absent (the
  *  guards job runs this file without it). */

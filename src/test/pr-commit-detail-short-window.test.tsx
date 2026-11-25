@@ -90,7 +90,7 @@ describe("the PR commit view on a short window", () => {
           number={7}
           commit={commit}
           onBack={() => undefined}
-          canCommentCommits={false}
+          canCommentCommits
           remoteLabel="GitHub"
           lens="origin"
         />
@@ -126,6 +126,10 @@ describe("the PR commit view on a short window", () => {
     expect(classes(list)).toEqual(
       expect.arrayContaining(["min-h-10", "overflow-y-auto"]),
     );
+    // The composer the short window spilled: its Comment button renders inside
+    // the scroll column, so scrolling it reaches the button.
+    const submit = await screen.findByRole("button", { name: "Comment" });
+    expect(submit.closest("main")).toBe(column);
     client.clear();
   }, 30_000);
 
@@ -183,7 +187,7 @@ describe("the PR commit view on a short window", () => {
     client.clear();
   }, 30_000);
 
-  it("opens the next commit with its subject and message scrolled to the top", async () => {
+  it("keeps the subject and message scroll across a tab hide and show", async () => {
     vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
     vi.mocked(forgeStatus).mockResolvedValue({
       provider: "github",
@@ -206,14 +210,19 @@ describe("the PR commit view on a short window", () => {
     });
     client.setQueryData(settingsKeys.settings, DEFAULT_SETTINGS);
     const body = LONG_SUBJECT.replaceAll(" ", "\n");
+    const shownCommit = {
+      ...commit,
+      headline: LONG_SUBJECT,
+      messageBody: body,
+    };
     // Inside a repository tab's panel, which a tab switch hides and shows.
-    const view = (c: PrCommitOut, active = true) => (
+    const view = (active: boolean) => (
       <QueryClientProvider client={client}>
         <TabPanel active={active}>
           <PrCommitDetail
             repoPath="/repo"
             number={7}
-            commit={c}
+            commit={shownCommit}
             onBack={() => undefined}
             canCommentCommits={false}
             remoteLabel="GitHub"
@@ -222,35 +231,22 @@ describe("the PR commit view on a short window", () => {
         </TabPanel>
       </QueryClientProvider>
     );
-    const first = { ...commit, headline: LONG_SUBJECT, messageBody: body };
-    const { rerender } = render(view(first));
+    const { rerender } = render(view(true));
     const scrollers = () => {
       const heading = screen.getByRole("heading", { level: 2 });
       const message = heading.parentElement?.querySelector("pre");
       expect(message).toHaveTextContent(body.split("\n")[0]);
       return [heading, message as HTMLElement];
     };
-    // A keyboard user reading the subject: focus stays on it across the switch.
-    const [subject] = scrollers();
-    act(() => subject.focus());
-    expect(document.activeElement).toBe(subject);
-    // jsdom lays nothing out, so each scroller carries its own scroll offset,
-    // which only the view's reset returns to 0.
-    for (const el of scrollers())
-      Object.defineProperty(el, "scrollTop", { value: 120, writable: true });
-    const next = { ...first, oid: "0123456789".repeat(4) };
-    rerender(view(next));
-    for (const el of scrollers()) expect(el.scrollTop).toBe(0);
-    expect(document.activeElement).toBe(
-      screen.getByRole("heading", { level: 2 }),
-    );
-    // Back to the same commit after a tab switch: the scroll it was left at.
+    // jsdom lays nothing out, so each scroller carries its own scroll offset.
     const shown = scrollers();
-    for (const el of shown) el.scrollTop = 30;
-    rerender(view(next, false));
+    for (const el of shown)
+      Object.defineProperty(el, "scrollTop", { value: 30, writable: true });
+    rerender(view(false));
     await act(async () => undefined);
-    rerender(view(next, true));
+    rerender(view(true));
     await act(async () => undefined);
+    // The same nodes, at the scroll they were left at.
     expect(scrollers()).toEqual(shown);
     expect(shown.map((el) => el.scrollTop)).toEqual([30, 30]);
     client.clear();

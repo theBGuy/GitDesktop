@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PaintedCut, PaintedView } from "@/features/diff/painted-view";
 import {
@@ -142,7 +143,9 @@ function Host({
   onPins: (pinned: ReadonlySet<string>) => void;
 }) {
   const pins = useCommentPins();
-  onPins(pins.pinned);
+  // Reported from a layout effect, so a replayed or discarded render reports
+  // nothing.
+  useLayoutEffect(() => onPins(pins.pinned));
   const { drawn, cut = null, mounts = true } = paint;
   const drawnLines = newSideLines(drawn?.text ?? "");
   const painted: PaintedView | null =

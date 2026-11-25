@@ -379,7 +379,7 @@ export const capabilities: Capability[] = [
   {
     group: "Pull requests & review",
     label:
-      "Refresh the PR list on demand — one press re-reads the list, its checks, conflict chips & review grouping",
+      "Refresh the PR list on demand — one press re-reads the list, its checks, conflict chips, review grouping & the pull request you have open",
   },
 
   // — Forges & trackers —

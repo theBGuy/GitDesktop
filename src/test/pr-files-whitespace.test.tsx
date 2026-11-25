@@ -345,7 +345,8 @@ const wHunks = (args: Record<string, unknown>) => {
     return { hunks: EDIT_W_HUNKS_XI, isBinary: false };
   if (next === DUP_NEW && decode(args.oldBase64) === DUP_OLD)
     return { hunks: DUP_W_HUNKS, isBinary: false };
-  if (next === WSONLY) return { hunks: "", isBinary: false };
+  if (next === WSONLY && decode(args.oldBase64) === OLD)
+    return { hunks: "", isBinary: false };
   throw new Error("no -w fixture for this pair");
 };
 
@@ -632,6 +633,25 @@ const watchFrames = (check: () => void) => {
     characterData: true,
   });
   return () => observer.disconnect();
+};
+/** What the unheld pane draws: f.txt's view and which line 11 it holds. */
+const frame = () => {
+  const text = rowsWith("line XI") > 0 ? "XI" : null;
+  const old = rowsWith("line ELEVEN") > 0 ? "ELEVEN" : null;
+  const which = text ?? old;
+  if (which === null) return "none";
+  return `${newLine(2) !== null ? "forge" : "-w"} ${which}`;
+};
+/** Every distinct frame the pane draws from now on, in order; "none" only
+ *  under `withNone`, so a view that leaves and returns records twice. */
+const record = (withNone = false) => {
+  const seen: string[] = [];
+  const stop = watchFrames(() => {
+    const f = frame();
+    if ((withNone || f !== "none") && seen.at(-1) !== f) seen.push(f);
+  });
+  onTestFinished(stop);
+  return seen;
 };
 /** The details now name `head`; the view re-reads them. */
 const moveHead = async (client: QueryClient, head: string) => {
@@ -1013,6 +1033,7 @@ describe("Pull request Files tab: flipping Hide whitespace", () => {
     const other = document.createElement("div");
     other.setAttribute("data-diff-line-widget", "whitespace");
     document.body.append(other);
+    onTestFinished(() => other.remove());
     await user.click(show);
     expect(saveSettingsPatch).not.toHaveBeenCalled();
     other.remove();
@@ -1036,10 +1057,13 @@ describe("Pull request Files tab: flipping Hide whitespace", () => {
       expect(calls("git_diff_bytes_ignoring_whitespace")).toBe(1),
     );
     await setSetting(client, false);
+    const seen = record();
     await act(async () => gate.resolve());
     await settle();
     expect(newLine(2)).not.toBeNull();
     expect(anyNote()).toBeNull();
+    // Not even for a frame: the late answer never drew its filtered view.
+    expect(seen.filter((f) => f.startsWith("-w"))).toEqual([]);
   }, 30_000);
 
   it("AC-U2: an editor opened after a flip that bypassed the probe keeps its text; the -w view lands once it closes", async () => {
@@ -1262,24 +1286,6 @@ describe("Pull request Files tab: flipping Hide whitespace", () => {
 });
 
 describe("Pull request Files tab: reads that land late or for another record", () => {
-  /** What the unheld pane draws: f.txt's view and which line 11 it holds. */
-  const frame = () => {
-    const text = rowsWith("line XI") > 0 ? "XI" : null;
-    const old = rowsWith("line ELEVEN") > 0 ? "ELEVEN" : null;
-    const which = text ?? old;
-    if (which === null) return "none";
-    return `${newLine(2) !== null ? "forge" : "-w"} ${which}`;
-  };
-  const record = () => {
-    const seen: string[] = [];
-    const stop = watchFrames(() => {
-      const f = frame();
-      if (f !== "none" && seen.at(-1) !== f) seen.push(f);
-    });
-    onTestFinished(stop);
-    return seen;
-  };
-
   it("AC-L2: a slot re-targeted to another pull request's same-named file starts pending, never drawing the first one's view", async () => {
     lists[7] = ["f.txt"];
     lists[8] = ["f.txt"];
@@ -1296,7 +1302,7 @@ describe("Pull request Files tab: reads that land late or for another record", (
       timeout: 10_000,
     });
     await settle();
-    const seen = record();
+    const seen = record(true);
     showPr(8);
     await openFilesTab(user);
     await waitFor(() => expect(readsAt(SHA8)).toBeGreaterThan(0), {
@@ -1307,8 +1313,12 @@ describe("Pull request Files tab: reads that land late or for another record", (
     expect(frame()).toBe("none");
     await act(async () => gate.resolve());
     await waitFor(() => expect(frame()).toBe("-w XI"), { timeout: 10_000 });
-    expect(seen.filter((f) => f !== "-w ELEVEN")).toEqual(["-w XI"]);
-    expect(seen.slice(seen.indexOf("-w XI"))).toEqual(["-w XI"]);
+    const drawn = seen.filter((f) => f !== "none");
+    expect(drawn.filter((f) => f !== "-w ELEVEN")).toEqual(["-w XI"]);
+    expect(drawn.slice(drawn.indexOf("-w XI"))).toEqual(["-w XI"]);
+    // Once PR 7's view left the pane, it never came back.
+    expect(seen).toContain("none");
+    expect(seen.slice(seen.indexOf("none"))).not.toContain("-w ELEVEN");
   }, 30_000);
 
   it("AC-L2, AC-W5: a head move that changed the file paints the new forge text, then its -w view; the placeholder paint reads nothing", async () => {
@@ -1425,9 +1435,17 @@ describe("Pull request Files tab: what the setting leaves alone", () => {
       () => expect(document.body.textContent).toContain("target.dat"),
       { timeout: 10_000 },
     );
+    // Each pick reaches its own display arm, alone in the pane, before the
+    // reads are counted.
+    const shown = () => document.querySelector("main")?.textContent;
     await pick(user, "empty.txt");
-    await settle();
+    await waitFor(() => expect(shown()).toBe("empty.txtNew empty file"), {
+      timeout: 10_000,
+    });
     await pick(user, "e.txt");
+    await waitFor(() => expect(shown()).toBe("e.txtNo changes to show"), {
+      timeout: 10_000,
+    });
     await settle();
     expect(calls("forge_file_at_sha")).toBe(0);
     expect(calls("git_diff_bytes_ignoring_whitespace")).toBe(0);
