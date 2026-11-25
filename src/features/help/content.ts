@@ -705,14 +705,19 @@ the last list up, with a line above it saying it couldn't refresh.
   whitespace changes. While a diff is on screen, *Show or hide whitespace changes* in
   the command palette (palette-only by default — bind a key in **Settings → Keyboard**)
   flips it too. While you're writing a line comment on one of these diffs, replying to
-  a thread, editing a comment or editing a pending review comment inside it, or
-  editing one of the open file's line comments in the list below the diff, it stays
+  a thread, editing a comment or editing a pending review comment inside it, it stays
   locked until you finish or close the comment, so the draft isn't lost. A commit
+  comment you're editing in the list below the diff stays in that list, draft and
+  all, until you finish or close the edit, whatever the diff shows meanwhile. A commit
   comment on a line hidden this way stays in the comment list; while its file is open,
-  **Show whitespace** sits beside it. A pull request file keeps showing whitespace
+  **Show whitespace** sits beside it. A commit comment the open diff doesn't draw for
+  another reason stays listed too, naming each control that draws it inline, in the
+  order you press them: **Raw** while Markdown **Preview** is up, **Show diff anyway**
+  on a file that looks generated, and **Show full diff** past the shown part of a
+  long diff. A pull request file keeps showing whitespace
   changes, and says so above its diff, when its two versions couldn't be compared, when
   it is over the size limit, when the versions read don't match the pull request's
-  diff, or while you're offline.
+  diff, or when you're offline and a version it needs can't be read.
 - **The file list beside a diff collapses** to a thin strip, handing the diff the whole
   pane. Use the caret above the list, or *Collapse or expand the diff file list*
   (palette-only by default — bind a key in Settings); a pane too narrow to hold both
@@ -2272,6 +2277,10 @@ reach across a gap between two blocks of the diff, expanded or not; **GitLab** a
 **Bitbucket** need only its last line in the diff. Where a range breaks that rule,
 **Add single comment** and **Start a review** (**Add to review** once a review is in
 progress) stay disabled and say why.
+
+When the pull request is updated while you're writing a line comment, both buttons
+stay disabled and say why until its new diff is on screen, whether that diff is still
+loading, failed to load, or can't load while you're offline.
 
 A **Review in progress** bar shows the pending count with **Submit review…** and
 **Discard**. Submitting opens a dialog to choose a **verdict** — **Comment**, **Approve**,
@@ -4036,8 +4045,9 @@ agent doesn't have it, or the installed opencode can't continue it), the turn st
 fresh one and the timeline says so.
 **Expand any edit step** to see that file's diff inline, watch its
 **live changes** mid-turn, or read the cumulative diff under **Changes**. While
-whitespace changes are hidden, an expanded step's diff says so above it, with
-**Show whitespace**. If a step's diff
+whitespace changes are hidden, an expanded step whose diff shows changed lines says
+so above them, with **Show whitespace**, and a step whose only changes are whitespace
+says that instead, with the same button. If a step's diff
 fails to refresh, the last one stays with a line saying it couldn't refresh and a
 **Retry**, and its live changes pause until a refresh succeeds, such as after **Retry** or
 when you come back to the window. One that fails to load says why and offers **Retry**.

@@ -1,6 +1,6 @@
 import { DotsThreeIcon, LockIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useLayoutEffect, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Markdown } from "@/components/markdown/markdown";
 import { hostedImagesFor } from "@/components/markdown/markdown-images";
@@ -23,6 +23,7 @@ import type { MinimizeReason } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import { useActiveForgeGhHost, useActiveGhHost } from "@/lib/git/host";
 import type { PrThreadOut, Reaction, RepoLabel } from "@/lib/git/types";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { CommentEditor } from "./CommentEditor";
 import { ReactionBar } from "./ReactionBar";
 import type { MentionSource } from "./useMentionCandidates";
@@ -108,6 +109,7 @@ export function Thread({
   copyMarkdown,
   disabledReason,
   mentions,
+  onEditingChange,
 }: {
   thread: PrThreadOut;
   onQuote?: () => void;
@@ -159,8 +161,17 @@ export function Thread({
   /** Opt in to `@`/`#`/`!` autocomplete in the edit-in-place editor — only
    *  surfaces whose forge autolinks the completed reference pass one. */
   mentions?: MentionSource;
+  /** Told whether the edit-in-place editor is open, in a layout effect: as it
+   *  opens or closes, and as the thread mounts or shows again. Never from a
+   *  cleanup, which an `<Activity>` hide runs with the editor still open; a
+   *  thread that unmounts with it open is told nothing. */
+  onEditingChange?: (editing: boolean) => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const editingChange = useLatestRef(onEditingChange);
+  useLayoutEffect(() => {
+    editingChange.current?.(editing);
+  }, [editing]);
   const [draft, setDraft] = useState("");
   const [expanded, setExpanded] = useState(false);
   const minimized = thread.isMinimized;

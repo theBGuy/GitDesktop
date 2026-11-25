@@ -4,8 +4,7 @@
 // loads, and every arm that draws retained data passes the shell its notice.
 // ImageDiff (ImageDiff.tsx) draws no path row of its own, leaving the shell's
 // row the only one over an image. Every pull request host hands the binary
-// size line its anchor commit, since an omitted one sizes ungated. Every
-// CommitComments host derives `selectedBinary`, which defaults to false.
+// size line its anchor commit, since an omitted one sizes ungated.
 //
 // Not testable here: rendered row height, where focus lands across an arm swap,
 // and the hold's promotion timing. Those need the live app.
@@ -1582,109 +1581,6 @@ test("pull request hosts hand every binary-size hop an anchor commit", () => {
     ],
   ]) {
     const got = prAnchorViolations(mutate(file, from, to));
-    assert.ok(
-      got.some((p) => p.includes(want)),
-      `expected "${want}", got ${JSON.stringify(got)}`,
-    );
-  }
-});
-
-const FEATURES = "src/features";
-const HISTORY_COMMIT = "src/features/history/CommitDetailView.tsx";
-/** Every file rendering `<CommitComments>`, and how many times. The prop
- *  defaults to false, so a host that omits `selectedBinary` drops a binary
- *  file's anchored comments from the fallback group; a new host must land
- *  here. */
-const COMMIT_COMMENTS_HOSTS = { [PR_COMMIT]: 1, [HISTORY_COMMIT]: 1 };
-
-/** Each `<CommitComments>` must derive `selectedBinary`, never a literal. */
-function selectedBinaryViolations(files) {
-  const problems = [];
-  const seen = {};
-  for (const { path, raw } of files) {
-    const masked = maskNonCode(raw, path.endsWith(".tsx"));
-    for (const m of masked.matchAll(/<CommitComments\b/g)) {
-      seen[path] = (seen[path] ?? 0) + 1;
-      const where = `${path}:${lineOf(raw, m.index)} <CommitComments>`;
-      const end = tagEnd(masked, m.index);
-      const attr = /(?<![\w$.-])selectedBinary\s*=\s*\{/.exec(
-        end < 0 ? "" : masked.slice(m.index, end),
-      );
-      if (attr === null) {
-        problems.push(`${where} passes no selectedBinary`);
-        continue;
-      }
-      const open = m.index + attr.index + attr[0].length - 1;
-      const value = flat(raw.slice(open + 1, matchBrace(masked, open)));
-      if (["", "false", "true", "undefined", "null"].includes(value))
-        problems.push(`${where} passes a constant selectedBinary`);
-    }
-  }
-  const paths = new Set([
-    ...Object.keys(seen),
-    ...Object.keys(COMMIT_COMMENTS_HOSTS),
-  ]);
-  for (const path of paths) {
-    const want = COMMIT_COMMENTS_HOSTS[path] ?? 0;
-    if ((seen[path] ?? 0) !== want)
-      problems.push(
-        `${path} renders <CommitComments> ${seen[path] ?? 0}x, not ${want}x`,
-      );
-  }
-  return problems;
-}
-
-// Contract: catches `<CommitComments` tags by name under src/features (counted
-// per file) and a missing or literal `selectedBinary`. Out of reach: a spread
-// carrying the prop, an aliased or namespaced import of CommitComments.
-test("commit comment hosts derive selectedBinary for the shown file", () => {
-  const files = [...sourceFiles(join(ROOT, FEATURES))].map((full) => ({
-    path: relative(ROOT, full).replace(/\\/g, "/"),
-    raw: readFileSync(full, "utf8").replace(/\r\n/g, "\n"),
-  }));
-  assert.deepEqual(selectedBinaryViolations(files), []);
-  const mutate = (file, from, to) =>
-    files.map((f) => {
-      if (f.path !== file) return f;
-      assert.equal(f.raw.split(from).length, 2, `control anchor: ${from}`);
-      return { ...f, raw: f.raw.replace(from, () => to) };
-    });
-  // Negative controls: each host's attribute dropped or made constant, a new
-  // host in a listed file, and a new host in an unlisted one.
-  const prValue = "selectedBinary={selectedBinary}";
-  const historyValue = "selectedBinary={selectedBinary}";
-  const newHost =
-    'function NewHost() {\n  return <CommitComments repoPath="x" />;\n}\n\n';
-  for (const [file, from, to, want] of [
-    [PR_COMMIT, prValue, "", "passes no selectedBinary"],
-    [HISTORY_COMMIT, historyValue, "", "passes no selectedBinary"],
-    [
-      HISTORY_COMMIT,
-      historyValue,
-      "selectedBinary={false}",
-      "passes a constant selectedBinary",
-    ],
-    [
-      PR_COMMIT,
-      "export function PrCommitDetail(",
-      `${newHost}export function PrCommitDetail(`,
-      `${PR_COMMIT} renders <CommitComments> 2x, not 1x`,
-    ],
-  ]) {
-    const got = selectedBinaryViolations(mutate(file, from, to));
-    assert.ok(
-      got.some((p) => p.includes(want)),
-      `expected "${want}", got ${JSON.stringify(got)}`,
-    );
-  }
-  const unlisted = files.map((f) =>
-    f.path === PR_PARTS ? { ...f, raw: `${f.raw}\n${newHost}` } : f,
-  );
-  for (const want of [
-    `${PR_PARTS} renders <CommitComments> 1x, not 0x`,
-    "passes no selectedBinary",
-  ]) {
-    const got = selectedBinaryViolations(unlisted);
     assert.ok(
       got.some((p) => p.includes(want)),
       `expected "${want}", got ${JSON.stringify(got)}`,

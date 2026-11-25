@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { FileListFilter } from "@/components/use-file-list-filter";
+import { refreshFailed } from "@/features/conversations/remote-section-state";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import {
   type DiffContentSource,
@@ -515,9 +516,17 @@ function PrFileDiffSlot({
     revs,
     root: diffRoot,
   });
+  // A placeholder patch without this file (one only a newer head carries)
+  // leaves it waiting on the read, offline while that is parked, until the
+  // read fails: never an empty diff.
+  const awaiting =
+    data === undefined &&
+    (dataIsPlaceholder ?? false) &&
+    !refreshFailed({ isError, isPaused: isPaused ?? false, isFetching });
+  const pending = isPending || awaiting || view.pending;
   useSlotRead(reportRead, {
     isPlaceholderData: dataIsPlaceholder ?? false,
-    isPending: isPending || view.pending,
+    isPending: pending,
     isPaused,
   });
 
@@ -619,7 +628,7 @@ function PrFileDiffSlot({
       <DiffContent
         filePath={path}
         data={view.data}
-        isPending={isPending || view.pending}
+        isPending={pending}
         isError={isError}
         isPaused={isPaused}
         isFetching={isFetching}

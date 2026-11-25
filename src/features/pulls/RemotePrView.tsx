@@ -4018,12 +4018,19 @@ export function RemotePrView({
 
   // No diff loaded means no file diff: an empty section synthesized from the
   // missing text would render as "No changes to show" through a cold outage.
+  // A placeholder (an older head's diff, or another record's) without the
+  // file's section says nothing about it either, so the slot shows its read.
+  const fileSection = effectivePath
+    ? fileSections.get(effectivePath)
+    : undefined;
   const fileDiff =
-    effectivePath && prDiff.data !== undefined
+    effectivePath &&
+    prDiff.data !== undefined &&
+    (fileSection !== undefined || !prDiff.isPlaceholderData)
       ? {
           filePath: effectivePath,
-          text: fileSections.get(effectivePath) ?? "",
-          isBinary: sectionIsBinary(fileSections.get(effectivePath) ?? ""),
+          text: fileSection ?? "",
+          isBinary: sectionIsBinary(fileSection ?? ""),
           isTruncated: false,
         }
       : undefined;
@@ -4041,7 +4048,7 @@ export function RemotePrView({
     canCreateThread && effectivePath && !diffStale
       ? {
           enabled: true,
-          render: ({ side, line, fromLine, onClose }) => (
+          render: ({ side, line, fromLine, onClose, rowsBehind }) => (
             <ReviewComposer
               repoPath={repoPath}
               number={shownNumber}
@@ -4056,6 +4063,7 @@ export function RemotePrView({
               lens={lens}
               onClose={onClose}
               headPending={headPending}
+              rowsBehind={rowsBehind}
             />
           ),
         }

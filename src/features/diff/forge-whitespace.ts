@@ -3,6 +3,7 @@
 // slot draws. Its runtime imports are relative .ts ones only, so
 // scripts/forge-whitespace.test.mjs loads it under Node's type stripping.
 import type { FileBytes } from "../../lib/git/api/workingtree.ts";
+import { diffLines } from "../../lib/git/diff-split.ts";
 import type { FileDiff } from "../../lib/git/types/workingtree.ts";
 import { hasHunk } from "../../lib/git/whitespace-diff.ts";
 import { hunksMatchContent } from "./hunk-match.ts";
@@ -120,15 +121,144 @@ export interface WhitespaceProof {
 }
 const MINTED = new WeakSet<WhitespaceProof>();
 
-/** The exact hunk-match guard over the forge section and the two versions: a
- *  `-w` view of them may replace the section only behind this proof. */
+/** A side's bytes as a string of one char per byte: "" for an empty side
+ *  (null), null for a payload that isn't base64. */
+function rawOf(base64: string | null): string | null {
+  if (base64 === null) return "";
+  try {
+    return atob(base64);
+  } catch {
+    return null;
+  }
+}
+
+/** A side's text as the patch decodes it, invalid bytes as U+FFFD, with a
+ *  leading byte-order mark kept: the `-w` command reads the raw bytes, so a
+ *  mark the patch changes must be in the sides, or sides that agree on it
+ *  would read as whitespace-only. */
+function decodedOf(raw: string): string {
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
+}
+
+/** A side's raw lines, split as hunk-match splits its text: a final newline
+ *  ends the last line, and CRs stay. A lossy decode never makes or eats a
+ *  0x0A byte, so raw line i is the decoded text's line i. */
+function rawLines(raw: string): string[] {
+  if (raw === "") return [];
+  const lines = raw.split("\n");
+  if (raw.endsWith("\n")) lines.pop();
+  return lines;
+}
+
+const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+/** Whether the sides' raw bytes say what the patch says where the decoded
+ *  texts can't tell: every line the patch leaves unchanged (context lines and
+ *  the gaps around hunks) is byte-identical on both sides, CR included, and
+ *  each change block's old and new runs differ, terminators included. A
+ *  lossy decode maps distinct invalid bytes to one U+FFFD and hunk-match
+ *  ignores a line's CR, so without this a raced pair whose change hides there
+ *  proves and `-w` over it hides that change. Runs after `hunksMatchContent`,
+ *  which has checked the counts and line kinds this walk trusts. */
+function rawAgrees(plainText: string, oldRaw: string, newRaw: string): boolean {
+  const oldLines = rawLines(oldRaw);
+  const newLines = rawLines(newRaw);
+  const run = (lines: string[], raw: string, from: number, to: number) => {
+    let bytes = "";
+    for (let i = from; i < to; i++)
+      bytes +=
+        i === lines.length - 1 && !raw.endsWith("\n")
+          ? lines[i]
+          : `${lines[i]}\n`;
+    return bytes;
+  };
+  let oldAt = 0;
+  let newAt = 0;
+  let oldLeft = 0;
+  let newLeft = 0;
+  // Where the open change block starts on each side; null outside one.
+  let blockOld: number | null = null;
+  let blockNew = 0;
+  const closeBlock = (): boolean => {
+    if (blockOld === null) return true;
+    const differ =
+      run(oldLines, oldRaw, blockOld, oldAt) !==
+      run(newLines, newRaw, blockNew, newAt);
+    blockOld = null;
+    return differ;
+  };
+  // The gap up to `oldTo`, which pairs line for line with the new side's.
+  const sameGap = (oldTo: number): boolean => {
+    for (let k = 0; k < oldTo - oldAt; k++)
+      if (oldLines[oldAt + k] !== newLines[newAt + k]) return false;
+    return true;
+  };
+  for (const raw of diffLines(plainText)) {
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    if (oldLeft > 0 || newLeft > 0) {
+      if (line.startsWith("\\")) continue;
+      // An empty line in a hunk is a blank context line without its space.
+      const kind = line === "" ? " " : line[0];
+      if (kind === " ") {
+        if (!closeBlock() || oldLines[oldAt] !== newLines[newAt]) return false;
+        oldAt++;
+        newAt++;
+        oldLeft--;
+        newLeft--;
+      } else {
+        if (blockOld === null) {
+          blockOld = oldAt;
+          blockNew = newAt;
+        }
+        if (kind === "-") {
+          oldAt++;
+          oldLeft--;
+        } else {
+          newAt++;
+          newLeft--;
+        }
+      }
+      if (oldLeft === 0 && newLeft === 0 && !closeBlock()) return false;
+      continue;
+    }
+    if (!line.startsWith("@@")) continue;
+    const m = HUNK_HEADER.exec(line);
+    if (!m) return false;
+    const oldCount = m[2] === undefined ? 1 : Number(m[2]);
+    const newCount = m[4] === undefined ? 1 : Number(m[4]);
+    // A zero count names the line before the hunk, so it starts after it.
+    const oldFrom = oldCount === 0 ? Number(m[1]) : Number(m[1]) - 1;
+    if (!sameGap(oldFrom)) return false;
+    newAt = newCount === 0 ? Number(m[3]) : Number(m[3]) - 1;
+    oldAt = oldFrom;
+    oldLeft = oldCount;
+    newLeft = newCount;
+  }
+  return sameGap(oldLines.length);
+}
+
+/** The proof that two versions, as base64 (null: an empty side), are the
+ *  forge section's own: a `-w` view of them may replace the section only
+ *  behind it. The exact hunk-match guard over their decoded texts, then the
+ *  raw-byte check a lossy decode needs (`rawAgrees`). */
 export function proveForgeSides(
   readsKey: string,
   plainText: string,
-  oldText: string,
-  newText: string,
+  oldBase64: string | null,
+  newBase64: string | null,
 ): WhitespaceProof | null {
-  if (!hunksMatchContent(plainText, oldText, newText)) return null;
+  const oldRaw = rawOf(oldBase64);
+  const newRaw = rawOf(newBase64);
+  if (oldRaw === null || newRaw === null) return null;
+  const match = hunksMatchContent(
+    plainText,
+    decodedOf(oldRaw),
+    decodedOf(newRaw),
+    { keepBom: true },
+  );
+  if (!match || !rawAgrees(plainText, oldRaw, newRaw)) return null;
   const proof: WhitespaceProof = Object.freeze({ readsKey });
   MINTED.add(proof);
   return proof;
@@ -214,20 +344,38 @@ function forgeHeader(text: string, hunks: string): string {
   return text.slice(0, dashes >= 0 && dashes < end ? dashes : end);
 }
 
+/** The bytes a base64 payload decodes to, read from its length and padding
+ *  alone: exact for a well-formed payload. Every size gate that judges a
+ *  whole-file read without decoding it reads this one. */
+export function base64Bytes(b64: string | null | undefined): number {
+  if (!b64) return 0;
+  const pad = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+  return Math.floor((b64.length * 3) / 4) - pad;
+}
+
+/** Whether a side is over `budget`, judged from its sizes without decoding
+ *  it, so an oversized version is refused before any decode or proof runs. */
+function overBudget(side: WhitespaceSide, budget: number): boolean {
+  if (side.kind !== "ready" || side.bytes === null) return false;
+  const { tooLarge, size, base64 } = side.bytes;
+  return tooLarge || (size ?? 0) > budget || base64Bytes(base64) > budget;
+}
+
+/** Either side is over `budget`: the hook skips decoding and the proof. */
+export function sidesOverBudget(
+  oldSide: WhitespaceSide,
+  newSide: WhitespaceSide,
+  budget: number,
+): boolean {
+  return overBudget(oldSide, budget) || overBudget(newSide, budget);
+}
+
 /** The kind a set of reads falls back to, or null while one is still owed. */
 function fallbackKind(
   i: WhitespaceInputs,
 ): WhitespaceShownKind | "wait" | "go" {
   const sides = [i.oldSide, i.newSide];
-  if (
-    sides.some(
-      (s) =>
-        s.kind === "ready" &&
-        s.bytes !== null &&
-        (s.bytes.tooLarge || (s.bytes.size ?? 0) > i.budget),
-    )
-  )
-    return "tooLarge";
+  if (sidesOverBudget(i.oldSide, i.newSide, i.budget)) return "tooLarge";
   if (sides.some((s) => s.kind === "failed")) return "incomparable";
   if (sides.some((s) => s.kind === "ready" && sidePayload(s) === undefined))
     return "incomparable";

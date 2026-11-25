@@ -34,6 +34,7 @@ import {
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
 import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
+import { drawnLayout } from "@/features/diff/drawn-layout";
 import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import {
   SHOW_WHITESPACE_LABEL,
@@ -52,9 +53,11 @@ import {
 import { useSessionFileDiff } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
 import { useSetHideWhitespace } from "@/lib/settings/hide-whitespace";
+import { useSettings } from "@/lib/settings/queries";
 import { useContainerWidth } from "@/lib/use-container-width";
 import { cn } from "@/lib/utils";
 import { AgentNarration } from "./AgentNarration";
+import { ColumnLayoutMark, type StepLayout } from "./use-column-layout-anchor";
 
 type GlyphIcon = ComponentType<{ className?: string }>;
 
@@ -232,6 +235,12 @@ function InlineDiff({
   // narrower than a diff pane at any window size — measure it so split never
   // renders below two legible columns.
   const [measureRef, paneWidth] = useContainerWidth<HTMLDivElement>();
+  const forceUnified = paneWidth !== null && paneWidth < SPLIT_MIN_CONTAINER_PX;
+  // What the box draws, for the session column's anchor; an unmeasured box
+  // reports "pending", so its first measurement is never a switch.
+  const mode = useSettings().data?.diffViewMode;
+  const layout: StepLayout =
+    paneWidth === null ? "pending" : drawnLayout(forceUnified, mode);
   // The measured box is also the line anchor's scroller. One identity-stable
   // ref serves both, so a re-render never detaches the width observer, and a
   // detached scroller is never readable.
@@ -302,8 +311,8 @@ function InlineDiff({
   // The host wraps the scroller rather than being it: a tabIndex on the
   // scroller would take the keyboard tab stop Chromium gives a scroller with no
   // focusable content. The notices sit above it, so they never scroll away.
-  // `data-transcript-diff` marks the box whose height a layout switch changes,
-  // which the session column's anchor keeps its place around.
+  // `data-transcript-diff` marks a step box the session column's anchor keeps
+  // its place around.
   const shell = (content: ReactNode, note?: ReactNode) => (
     <div
       ref={hostRef}
@@ -404,14 +413,20 @@ function InlineDiff({
         </button>
       </InlineNote>
     ) : undefined;
+  // Only the rows change height on a switch, so only this arm reports a
+  // layout; the mark sits beside the diff's lazy boundary, so a suspended
+  // chunk never hides it.
   return shell(
-    <GitDiffView
-      filePath={filePath}
-      text={data.text}
-      repoPath={repoPath}
-      forceUnified={paneWidth !== null && paneWidth < SPLIT_MIN_CONTAINER_PX}
-      scrollerRef={scrollerRef}
-    />,
+    <>
+      <ColumnLayoutMark layout={layout} />
+      <GitDiffView
+        filePath={filePath}
+        text={data.text}
+        repoPath={repoPath}
+        forceUnified={forceUnified}
+        scrollerRef={scrollerRef}
+      />
+    </>,
     note,
   );
 }

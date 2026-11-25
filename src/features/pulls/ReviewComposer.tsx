@@ -44,6 +44,9 @@ export interface ReviewComposerProps {
   onClose: () => void;
   /** Set while the painted diff is an older head's: both submit paths hold with its reason. */
   headPending?: HeadPendingKind | null;
+  /** The diff's rows on screen are not yet the live text's (`LineWidget`'s
+   *  `rowsBehind`): held as a loading head, since `fileSection` already is. */
+  rowsBehind?: boolean;
 }
 
 /**
@@ -68,6 +71,7 @@ export function ReviewComposer({
   lens,
   onClose,
   headPending = null,
+  rowsBehind = false,
 }: ReviewComposerProps) {
   const [body, setBody] = useState("");
   const [pending, setPending] = useState(false);
@@ -106,10 +110,9 @@ export function ReviewComposer({
   })();
   const offPatchReason =
     offPatch === null ? null : OFF_PATCH_REVIEW_REASON[offPatch];
+  const held = headPending ?? (rowsBehind ? "loading" : null);
   const heldReason =
-    headPending === null
-      ? null
-      : HEAD_PENDING_REVIEW_REASON[headPending](PR_NOUN[provider]);
+    held === null ? null : HEAD_PENDING_REVIEW_REASON[held](PR_NOUN[provider]);
 
   // Suggestions replace NEW-side code, so an old-side anchor can't be suggested
   // on. Bitbucket suggestions are single-line only. Otherwise we need the current

@@ -210,6 +210,35 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
   }
   return { ...real, DiffSurface: DiffContent, DiffContent };
 });
+// While `hold` is set, every deferred value in src keeps the value it last
+// returned, so a test can act in the frames between an urgent render and its
+// deferred commit. Inert otherwise; `release` lets the held values catch up.
+const lag = vi.hoisted(() => ({
+  hold: false,
+  listeners: new Set<() => void>(),
+}));
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  const subscribe = (listener: () => void) => {
+    lag.listeners.add(listener);
+    return () => {
+      lag.listeners.delete(listener);
+    };
+  };
+  const holding = () => lag.hold;
+  function useDeferredValue<T>(value: T, initialValue?: T): T {
+    const hold = actual.useSyncExternalStore(subscribe, holding);
+    const last = actual.useRef(value);
+    if (!hold) last.current = value;
+    return actual.useDeferredValue(last.current, initialValue as T);
+  }
+  return { ...actual, useDeferredValue };
+});
+const releaseLag = () =>
+  act(() => {
+    lag.hold = false;
+    for (const listener of lag.listeners) listener();
+  });
 vi.mock("@/features/pulls/ResolveRemotePrView", async (importOriginal) => ({
   ...(await importOriginal<
     typeof import("@/features/pulls/ResolveRemotePrView")
@@ -340,6 +369,7 @@ beforeEach(() => {
   head = SHA;
   diffs = [];
   text = undefined;
+  lag.hold = false;
   seeded.drafts = undefined;
   wire.answer = undefined;
   wire.realPane = false;
@@ -588,6 +618,10 @@ describe("over the real diff (AC-A10's D13 case, AC-A11)", () => {
 
   async function openComposer(user: ReturnType<typeof userEvent.setup>) {
     await openFilesTab(user);
+    return composeOnLine2(user);
+  }
+
+  async function composeOnLine2(user: ReturnType<typeof userEvent.setup>) {
     // Content mode is up (its gap rows offer to expand), so the rows are final.
     await waitFor(
       () =>
@@ -642,6 +676,50 @@ describe("over the real diff (AC-A10's D13 case, AC-A11)", () => {
         await waitFor(() => expect(box.isConnected).toBe(false));
       }
     }, 30_000);
+
+  it("holds both submits while the rows on screen are the older text's, until the deferred paint", async () => {
+    const pushedNew = OLD.replace("line 2\n", "line 2, pushed\n");
+    const answer = wire.answer;
+    wire.answer = (cmd, args) =>
+      cmd === "forge_file_at_sha" && args.sha === SHA8
+        ? bytes(pushedNew)
+        : answer?.(cmd, args);
+    const user = userEvent.setup();
+    const client = mount();
+    const box = await openComposer(user);
+    lag.hold = true;
+    diffs.push(async () => PUSHED);
+    await moveHead(client, SHA8);
+    // The new head's diff is this pull request's own answer: no older-head
+    // placeholder holds the composer any more.
+    await waitFor(() =>
+      expect(
+        client.getQueryState(["repo", REPO, "pr", "origin", 7, "diff", SHA8])
+          ?.status,
+      ).toBe("success"),
+    );
+    await settleWrites();
+    // The rows under the composer are still the older text's.
+    expect(box.isConnected).toBe(true);
+    expect(document.body.textContent).toContain("line two");
+    expect(document.body.textContent).not.toContain("line 2, pushed");
+    expectHeld(HEAD_PENDING_REVIEW_REASON.loading(NOUN));
+    await user.click(single());
+    await settleWrites();
+    expect(forgePrThreadCreate).not.toHaveBeenCalled();
+    await releaseLag();
+    // The push changed this file's section, so the new rows drop the composer;
+    // one opened on them posts.
+    await waitFor(() => expect(box.isConnected).toBe(false), {
+      timeout: 10_000,
+    });
+    const again = await composeOnLine2(user);
+    expect(again).toHaveValue("kept");
+    expect(document.body.textContent).toContain("line 2, pushed");
+    expectLifted();
+    await user.click(single());
+    await waitFor(() => expect(forgePrThreadCreate).toHaveBeenCalledTimes(1));
+  }, 30_000);
 
   it("AC-A11 failed: the pane's notice offers Retry, which re-reads the new head and lifts the hold", async () => {
     const user = userEvent.setup();

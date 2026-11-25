@@ -51,7 +51,7 @@ import {
 } from "./pr-writes";
 import {
   markMergeLanded,
-  prBaseDivergencePrefix,
+  prBaseDivergenceKey,
   prDetailsOptions,
   prReviewThreadsKey,
 } from "./prs";
@@ -760,7 +760,7 @@ export function usePrUpdateBranch(repo: string) {
     onSettled: (_d, _e, args) => {
       const keys: QueryKey[] = [
         ...prUpdateBranchKeys(repo, args.number, args.lens),
-        prBaseDivergencePrefix(repo, args.number),
+        prBaseDivergenceKey(repo, args.number, args.lens),
       ];
       return void Promise.all(
         keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })),

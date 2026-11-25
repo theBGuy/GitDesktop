@@ -123,8 +123,9 @@ describe("the whitespace probe (AC-H2)", () => {
     }
     host(editors.composer);
     expect(whitespaceComposerOpen()).toBe(true);
-    host(`<li data-whitespace-row>${editors.commentEdit}</li>`);
-    expect(whitespaceComposerOpen()).toBe(true);
+    // A listed comment's edit holds nothing: its row is pinned to the list.
+    host(`<li>${editors.commentEdit}</li>`);
+    expect(whitespaceComposerOpen()).toBe(false);
   });
 
   it("ignores the same editors in a layout anchor or outside any anchor", () => {
@@ -607,7 +608,7 @@ describe("the PR commit view under the mode (a commit this clone lacks)", () => 
       " end\n row 13\n row 14\n",
   };
 
-  it("holds a -w view that would move a listed comment inline while its edit is open, then lands it (rule 7)", async () => {
+  it("lands a -w view at once while a listed edit is open, the edit kept in its pinned row (rule 7)", async () => {
     const BODY = "On a line the forge patch skips";
     vi.mocked(forgeCommitComments).mockResolvedValue([
       { ...comment(24, BODY), viewerDidAuthor: true },
@@ -625,7 +626,6 @@ describe("the PR commit view under the mode (a commit this clone lacks)", () => 
     await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
     const editor = await screen.findByRole("textbox", { name: "Edit comment" });
     await user.type(editor, " and more");
-    expect(editor.closest("[data-whitespace-row]")).not.toBeNull();
     // Written straight into the settings cache: no probe ran.
     act(() =>
       lastClient?.setQueryData(settingsKeys.settings, {
@@ -636,18 +636,78 @@ describe("the PR commit view under the mode (a commit this clone lacks)", () => 
     await waitFor(() =>
       expect(gitDiffBytesIgnoringWhitespace).toHaveBeenCalledTimes(1),
     );
+    // Nothing waits on the edit: the -w view draws line 24 at once, and the
+    // pinned row keeps the comment and its text out of the pane.
+    await waitFor(() => expect(newLine(24)).not.toBeNull());
     await settle();
-    // The -w view waits: line 24 stays undrawn and the edit keeps its text.
-    expect(newLine(24)).toBeNull();
     expect(
       screen.getByRole<HTMLTextAreaElement>("textbox", {
         name: "Edit comment",
       }).value,
     ).toBe(`${BODY} and more`);
+    expect(document.querySelector("[data-diff-anchor]")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(newLine(24)).not.toBeNull());
+    await waitFor(() =>
+      expect(
+        screen.getByText(BODY).closest("[data-diff-anchor]"),
+      ).not.toBeNull(),
+    );
     expect(screen.getAllByText(BODY)).toHaveLength(1);
     expect(screen.getByText(BODY).closest("[data-diff-anchor]")).not.toBeNull();
+  }, 30_000);
+
+  it("keeps a listed comment's open edit in its pinned row when the setting turns off by another route (rule 7)", async () => {
+    const BODY = "On a re-indented line";
+    vi.mocked(forgeCommitComments).mockResolvedValue([
+      { ...comment(4, BODY), viewerDidAuthor: true },
+    ]);
+    const user = userEvent.setup();
+    mountCommit({ hide: true });
+    expect(
+      await screen.findByText(HIDDEN_NOTE, undefined, { timeout: 10_000 }),
+    ).toBeTruthy();
+    await user.click(
+      await screen.findByRole("button", { name: "Comment actions" }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    const editor = await screen.findByRole("textbox", { name: "Edit comment" });
+    await user.type(editor, " and more");
+    // A settings re-read carrying another window's write: no probe ran.
+    act(() =>
+      lastClient?.setQueryData(settingsKeys.settings, {
+        ...DEFAULT_SETTINGS,
+        diffHideWhitespace: false,
+      }),
+    );
+    // The gear reads the flip, so every observer has seen it.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", {
+          name: "Diff options, whitespace changes hidden",
+        }),
+      ).toBeNull(),
+    );
+    // The forge rows land at once; the pinned row keeps the edit, with no
+    // note, and the pane draws no copy of it.
+    await waitFor(() => expect(newLine(2)).not.toBeNull());
+    await settle();
+    expect(
+      screen.getByRole<HTMLTextAreaElement>("textbox", {
+        name: "Edit comment",
+      }).value,
+    ).toBe(`${BODY} and more`);
+    expect(screen.queryByText(HIDDEN_NOTE)).toBeNull();
+    expect(document.querySelector("[data-diff-anchor]")).toBeNull();
+    // Closing the edit moves the comment inline.
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(
+        screen.getByText(BODY).closest("[data-diff-anchor]"),
+      ).not.toBeNull(),
+    );
+    expect(screen.getAllByText(BODY)).toHaveLength(1);
+    expect(screen.getByText(BODY).closest("[data-diff-anchor]")).not.toBeNull();
+    expect(screen.queryByText(HIDDEN_NOTE)).toBeNull();
   }, 30_000);
 
   it("holds the commit composer on a line only the -w text draws, and posts a patch line's forge position (AC-C4)", async () => {
@@ -740,6 +800,66 @@ describe("the PR commit view under the mode (a commit this clone lacks)", () => 
     expect(document.querySelector('[class*="clip-path:inset(50%)"]')).toBe(
       null,
     );
+  }, 30_000);
+
+  it("judges the list by the file the pane paints while the next one prepares behind it", async () => {
+    const F_BODY = "On line 14 of f";
+    const G_BODY = "On line 14 of g";
+    vi.mocked(forgeCommitComments).mockResolvedValue([
+      comment(14, F_BODY),
+      { ...comment(14, G_BODY), id: "g14", path: "g.zig" },
+    ]);
+    const user = userEvent.setup();
+    mountCommit({
+      hide: false,
+      fixture: {
+        forge: FORGE_TEXT + FORGE_TEXT.replaceAll("f.txt", "g.zig"),
+        old: OLD,
+        next: NEW,
+        hunks: WS_HUNKS,
+      },
+    });
+    await waitFor(() => expect(newLine(14)).not.toBeNull(), {
+      timeout: 10_000,
+    });
+    await settle();
+    const inline = (body: string) =>
+      screen.getByText(body).closest("[data-diff-anchor]") !== null;
+    expect(screen.getAllByText(F_BODY)).toHaveLength(1);
+    expect(inline(F_BODY)).toBe(true);
+    expect(screen.getAllByText(G_BODY)).toHaveLength(1);
+    expect(inline(G_BODY)).toBe(false);
+    let release: (ok: boolean) => void = () => undefined;
+    grammar.hold = new Promise<boolean>((resolve) => {
+      release = resolve;
+    });
+    onTestFinished(() => {
+      grammar.hold = undefined;
+    });
+    await user.click(
+      document.querySelector<HTMLElement>('[data-path="g.zig"]') as HTMLElement,
+    );
+    await settle();
+    // g.zig's rows wait for their grammar, so f.txt stays painted.
+    expect(
+      document.querySelector('[class*="clip-path:inset(50%)"]'),
+    ).not.toBeNull();
+    // Each comment shows once: f's inline in the painted rows, g's listed.
+    expect(screen.getAllByText(F_BODY)).toHaveLength(1);
+    expect(inline(F_BODY)).toBe(true);
+    expect(screen.getAllByText(G_BODY)).toHaveLength(1);
+    expect(inline(G_BODY)).toBe(false);
+    await act(async () => release(false));
+    await waitFor(() =>
+      expect(document.querySelector('[class*="clip-path:inset(50%)"]')).toBe(
+        null,
+      ),
+    );
+    await settle();
+    expect(screen.getAllByText(G_BODY)).toHaveLength(1);
+    expect(inline(G_BODY)).toBe(true);
+    expect(screen.getAllByText(F_BODY)).toHaveLength(1);
+    expect(inline(F_BODY)).toBe(false);
   }, 30_000);
 
   // A whitespace-only commit: the forge section re-indents f's body, and its

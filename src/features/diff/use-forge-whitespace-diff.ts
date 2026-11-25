@@ -4,7 +4,6 @@
 // ./DiffSurface, so PR hosts stay off the diff chunk.
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
-import { decodeBase64Utf8 } from "@/lib/git/api";
 import { prWhitespaceHunksOptions } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
 import { useHideWhitespace } from "@/lib/settings/hide-whitespace";
@@ -17,6 +16,7 @@ import {
 import {
   proveForgeSides,
   reduceForgeWhitespace,
+  sidesOverBudget,
   WHITESPACE_INITIAL,
   type WhitespaceInputs,
   type WhitespaceRevs,
@@ -48,53 +48,29 @@ const EDITOR_MARKS = [
   "data-diff-editor",
 ];
 
-/** A comment edit open in a commit-comments row a `-w` view may drop: the
- *  whitespace probe's arm, read document-wide since the rows sit outside the
- *  slot's root (an edit open in a hidden tab holds too). */
-const LISTED_EDIT = "[data-whitespace-row] [data-thread-editing]";
-
-/** The marks `LISTED_EDIT` reads, as its observer filter. */
-const LISTED_EDIT_MARKS = ["data-whitespace-row", "data-thread-editing"];
-
-/** Whether an editor is open under `root`, or in a listed comment row, kept
- *  live by observers. */
+/** Whether an editor is open under `root`, kept live by an observer. A
+ *  listed comment's edit holds nothing: its row is pinned to the list. */
 function useEditorOpen(root: HTMLElement | null): boolean {
   const subscribe = useCallback(
     (onChange: () => void) => {
-      const observers = [new MutationObserver(onChange)];
-      observers[0].observe(document.body, {
+      if (root === null) return () => undefined;
+      const observer = new MutationObserver(onChange);
+      observer.observe(root, {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: LISTED_EDIT_MARKS,
+        attributeFilter: EDITOR_MARKS,
       });
-      if (root !== null) {
-        const observer = new MutationObserver(onChange);
-        observer.observe(root, {
-          childList: true,
-          subtree: true,
-          attributes: true,
-          attributeFilter: EDITOR_MARKS,
-        });
-        observers.push(observer);
-      }
-      return () => {
-        for (const observer of observers) observer.disconnect();
-      };
+      return () => observer.disconnect();
     },
     [root],
   );
   const snapshot = useCallback(
-    () =>
-      (root !== null && diffEditorOpen(root)) ||
-      document.querySelector(LISTED_EDIT) !== null,
+    () => root !== null && diffEditorOpen(root),
     [root],
   );
   return useSyncExternalStore(subscribe, snapshot);
 }
-
-const decoded = (b64: string | null | undefined) =>
-  b64 ? decodeBase64Utf8(b64) : "";
 
 /**
  * The view a forge-patch slot draws under the app-wide whitespace setting:
@@ -169,18 +145,26 @@ export function useForgeWhitespaceDiff(args: {
   };
   const readsKey = ready === null ? null : whitespaceReadsKey(reads);
   const sides = whitespaceSides(oldSide, newSide);
-  const sidesReady = sides !== null;
+  // Sizes settle the budget first: a side over it lands on the size note
+  // without being decoded or line-matched on the UI thread.
+  const inBudget = !sidesOverBudget(
+    oldSide,
+    newSide,
+    FORGE_CONTENT_BUDGET_BYTES,
+  );
   const plainText = plain?.text ?? "";
-  const oldB64 = sides?.old;
-  const newB64 = sides?.new;
-  const oldText = useMemo(() => decoded(oldB64), [oldB64]);
-  const newText = useMemo(() => decoded(newB64), [newB64]);
+  const oldB64 = inBudget ? sides?.old : undefined;
+  const newB64 = inBudget ? sides?.new : undefined;
+  // The proof decodes the payloads itself: it reads their raw bytes too.
   const proof = useMemo(
     () =>
-      active && readsKey !== null && sidesReady
-        ? proveForgeSides(readsKey, plainText, oldText, newText)
+      active &&
+      readsKey !== null &&
+      oldB64 !== undefined &&
+      newB64 !== undefined
+        ? proveForgeSides(readsKey, plainText, oldB64, newB64)
         : null,
-    [active, readsKey, sidesReady, plainText, oldText, newText],
+    [active, readsKey, plainText, oldB64, newB64],
   );
   const base: Omit<WhitespaceInputs, "hunks"> = {
     identity: JSON.stringify([repo ?? "", entity, path]),

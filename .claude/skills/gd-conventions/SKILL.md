@@ -698,7 +698,12 @@ reference).
   (only a focused press moves focus to the first revealed hunk). The agent
   session column keeps its place across a switch through `useColumnLayoutAnchor`
   (`src/features/sessions/use-column-layout-anchor.ts`), which anchors on the
-  open step diffs (`data-transcript-diff`) around the column's top edge.
+  open step diffs (`data-transcript-diff`) around the column's top edge. It keeps
+  no anchor between switches: each step box renders a `ColumnLayoutMark` (context
+  from the hook) whose `getSnapshotBeforeUpdate` reads the column in the commit
+  that changes the box's drawn layout (`drawnLayout`,
+  `src/features/diff/drawn-layout.ts`, shared with DiffSurface), and the
+  column's layout cleanup reads it at hide time; a restore places only that read.
 - A file rail's filter rides `DetailRail`'s `filter` prop
   (`src/components/detail-rail.tsx`), built only by `useFileListFilter`
   (`src/components/use-file-list-filter.ts`), and renders its field in the
@@ -1400,16 +1405,16 @@ one grep away on the named symbol. Grows via Conventions-sync.
   composer, so any writer of `diffHideWhitespace` or `diffViewMode` checks the
   shared probe first (`whitespaceComposerOpen` / `lineComposerOpen`,
   `src/features/diff/whitespace-mode.ts`); that test's writer roster fails a
-  new unguarded writer. The probe also counts an open Thread edit
-  (`data-thread-editing` on the Thread's root) inside a row a flip may drop
-  (`data-whitespace-row`, CommitComments' hidden list), so a new host whose
-  rows a flip replaces marks them the same way. The two forge-patch hosts (a
-  pull request's Files pane and commit drill-in) take the mode through
+  new unguarded writer. A listed comment's open edit is no probe arm: its row
+  is pinned to the list (see *Commit comment placement*). The two forge-patch
+  hosts (a pull request's Files pane and commit drill-in) take the mode through
   `useForgeWhitespaceDiff` (`src/features/diff/use-forge-whitespace-diff.ts`):
   a proven `-w` diff of the two file versions, stamped with the same marks,
-  never `readViewDiff`. Their anchor and position math reads the forge section,
-  and the probe counts an in-anchor editor only under
-  `[data-diff-anchor="whitespace"]`.
+  never `readViewDiff`. The composer's anchor and position math reads the forge
+  section, and the probe counts an in-anchor editor only under
+  `[data-diff-anchor="whitespace"]`. The setting is a request: only the view
+  producers and the toggle controls read `useHideWhitespace` (the test's
+  reader roster), and whatever describes the screen reads the painted report.
 - **Queries package boundary** — import the git query layer through the
   `@/lib/git/queries` barrel; `queries/internal.ts` is package-private. Modules
   inside the package may import it but never re-export it, since `export *`
@@ -1774,7 +1779,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (`src/features/diff/hunk-match.ts`) decides whether content mode builds,
   and the build upgrades in place. The diff panes' whole-file reads (content
   mode, image diffs) go through `src/features/diff/content-source.ts`, never
-  `useFileAtRev` directly; Markdown preview stays a local read. An editor that
+  `useFileAtRev` directly; Markdown preview stays a local read. A size gate
+  that judges such a read without decoding it takes its byte count from
+  `base64Bytes` (`forge-whitespace.ts`), never a local length formula. An editor that
   can open inside a diff row is counted by `DIFF_EDITOR_SELECTOR`
   (`src/features/diff/whitespace-mode.ts`), the one predicate behind
   `lineComposerOpen()` and the upgrade hold; a new one marks its open state with
@@ -1785,9 +1792,37 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `placeholderOf`, so a host tells an older head of the same pull request from
   another record's diff. `refreshOpenPr` (`queries/prs.ts`) is the one re-read
   that orders the details before the head-keyed children, which it addresses
-  by the exact key of the head the details then name, never by prefix. A forge
-  write anchored by LINE holds its submit while the painted diff is an older
-  head's (`headPending` on `ReviewComposer`), the editor staying mounted.
+  by the exact key of the head the details then name, never by prefix. The
+  inline line composer holds its submits while the painted diff is an older
+  head's (`headPending` on `ReviewComposer`, its only consumer), the editor
+  staying mounted; Submit review's line-anchored drafts are not held.
+- **Commit comment placement** — a resolved comment is inline exactly while
+  its anchor row is mounted in the visible slot, else listed: never both,
+  and never neither while the host's list is mounted (the PR commit view
+  unmounts its list while its patch is pending or failed;
+  `src/features/diff/painted-view.ts`). Each diff pane in a file slot
+  publishes one painted report of what is MOUNTED (`patch`, the text its rows
+  build from, its `-w` and truncation marks, `cut`, and the anchor rows a
+  layout effect registered, ref-counted); no report means nothing is inline.
+  A host reads its visible slot's report through `usePaintedView(slots)`
+  (`file-slot.tsx`), never `useHideWhitespace` or a patch's text, and
+  `placeComments` lists everything unmounted plus the pinned. Every note is
+  decided in painted-view.ts: the ordered controls that draw the line (Raw,
+  Show diff anyway, Show full diff, derived from the cut, the patch's longest
+  line and the cap, never an enumerated product), `unplaced`, or
+  `whitespace`, a candidate `confirmWhitespace` checks against a
+  whitespace-shown read. The pane's side is a second computation the host
+  keeps in step: each slot anchors every resolved comment on its path but the
+  pinned ones (`useCommitLineAnchors`), resolving lines through `commentLine`
+  over the same sections the list passes, from the same comment read the list
+  holds. Anchors mount only on a build of the path they were built for (their
+  keys carry no path). An open list edit pins its row (`useCommentPins`,
+  Thread's `onEditingChange`, reported from a layout effect's setup, never a
+  cleanup an `<Activity>` hide runs), so no row change unmounts the edit and
+  no control holds for it. A pending cut (no notes) has one producer,
+  DiffContent: while its rows haven't reported, a read failed with nothing to
+  show, or the host says the paint is another commit's (`paintsOtherCommit`;
+  History derives it from the same expression that gates its anchors).
 
 ## Rust / Tauri conventions
 

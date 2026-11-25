@@ -12,7 +12,12 @@ import { relative } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { installSrcHooks } from "./lib/src-import-hooks.mjs";
-import { maskNonCode, matchBrace, sourceFiles } from "./lib/ts-mask.mjs";
+import {
+  literalStrings,
+  maskNonCode,
+  matchBrace,
+  sourceFiles,
+} from "./lib/ts-mask.mjs";
 
 const hooks = installSrcHooks();
 after(() => hooks.deregister());
@@ -1446,13 +1451,12 @@ test("the editor observer watches exactly the selector's attributes", () => {
 
 const PROBE_ARMS = [
   '[data-diff-line-widget="whitespace"]',
-  "[data-whitespace-row] [data-thread-editing]",
   '[data-diff-anchor="whitespace"] [data-thread-editing]',
   '[data-diff-anchor="whitespace"] [data-diff-editor]',
 ];
 
 /** `whitespaceComposerOpen` queries ONE single-quoted literal in its own body,
- *  holding exactly the four arms: no concatenation, template or helper. */
+ *  holding exactly the three arms: no concatenation, template or helper. */
 function pinProbeLiteral(text) {
   const body = bodyOf(text, "export function whitespaceComposerOpen(", false);
   const m = body.match(
@@ -1470,7 +1474,7 @@ function pinProbeLiteral(text) {
     throw new Error(`the probe's arms: ${arms.join(" | ")}`);
 }
 
-test("the whitespace probe reads one literal naming its four arms", () => {
+test("the whitespace probe reads one literal naming its three arms", () => {
   const text = source(MODE_FILE);
   pinProbeLiteral(text);
   const literal = text.match(/document\.querySelector\(\s*('[^']*')/)[1];
@@ -1555,82 +1559,156 @@ test("the forge whitespace hook observes exactly the selector's attributes", () 
   );
 });
 
-/** The hook's listed-row hold queries one of the whitespace probe's arms,
- *  document-wide, and its body observer's filter lists exactly the
- *  attributes that arm reads, once each, as plain literals. */
-function pinListedEditMarks(hook, modeText) {
-  once(hook, "const LISTED_EDIT = ");
-  const decl = hook.match(/^const LISTED_EDIT = "([^"\\`$]*)";$/m);
-  if (!decl) throw new Error("LISTED_EDIT must be ONE plain string literal");
-  const selector = decl[1];
-  if (!PROBE_ARMS.includes(selector) || !modeText.includes(selector))
-    throw new Error(`LISTED_EDIT is not a whitespace probe arm: ${selector}`);
-  const wanted = new Set(
-    [...selector.matchAll(/\[([a-z][a-z-]*)\]/g)].map((m) => m[1]),
-  );
-  if (wanted.size === 0) throw new Error("LISTED_EDIT names no attribute");
-  once(hook, "const LISTED_EDIT_MARKS = [");
-  const marks = hook.match(
-    /^const LISTED_EDIT_MARKS = \[((?:\s*"[a-z][a-z-]*",?)+)\s*\];$/m,
-  );
-  if (!marks)
-    throw new Error("LISTED_EDIT_MARKS must be ONE array of plain literals");
-  const listed = [...marks[1].matchAll(/"([a-z-]+)"/g)].map((m) => m[1]);
-  if (new Set(listed).size !== listed.length)
-    throw new Error("LISTED_EDIT_MARKS lists a mark twice");
-  const missing = [...wanted].filter((m) => !listed.includes(m));
-  const extra = listed.filter((m) => !wanted.has(m));
-  if (missing.length > 0 || extra.length > 0)
-    throw new Error(`marks vs LISTED_EDIT: missing ${missing}; extra ${extra}`);
-  once(hook, "attributeFilter: LISTED_EDIT_MARKS,");
-  once(hook, ".observe(document.body, {");
-  once(hook, "document.querySelector(LISTED_EDIT)");
+// --- R1: the setting is a request, never a description ----------------------
+
+// TRIPWIRE: only the view producers and the toggle controls read Hide
+// whitespace. What describes or gates what is on screen (the commit comment
+// list and its notes) reads the pane's painted report (painted-view.ts).
+const SETTING_READERS = [
+  SURFACE,
+  VIEWER,
+  FORGE_WS_HOOK,
+  "src/features/pulls/PrCommitDetail.tsx",
+  "src/features/sessions/WorktreeChangesView.tsx",
+  "src/lib/git/queries/compare.ts",
+  "src/lib/git/queries/history.ts",
+  "src/lib/git/queries/stashes.ts",
+  "src/lib/git/queries/workingtree.ts",
+];
+// The hook's own module names both. The settings shape, its heal and the
+// Settings form (which keeps it out of the draft) name the FIELD only: a
+// hook name there still makes the file a reader.
+const SETTING_HOOK_HOME = "src/lib/settings/hide-whitespace.ts";
+const FIELD_PLUMBING = [
+  "src/lib/settings/api.ts",
+  "src/lib/settings/heal.ts",
+  "src/features/settings/settings-form.ts",
+];
+const NAMES_HOOK = /(?<![\w$])useHideWhitespace(?![\w$])/;
+const NAMES_FIELD = /(?<![\w$])diffHideWhitespace(?![\w$])/;
+// The field is also named by a whole string literal of its exact text (a
+// bracket read, a quoted key, an `in` check, a literal type); comments never
+// count. Out of sight: a computed key (`s[k]`) and an escaped spelling of the
+// name (literals are compared as written); spell the field plainly.
+function settingNames(rel, text) {
+  const masked = maskNonCode(text, rel.endsWith(".tsx"));
+  return {
+    hook: NAMES_HOOK.test(masked),
+    field:
+      NAMES_FIELD.test(masked) ||
+      literalStrings(text, masked).includes("diffHideWhitespace"),
+  };
 }
 
-test("the forge whitespace hook's listed-row hold observes exactly what it queries", () => {
-  const hook = source(FORGE_WS_HOOK);
-  const modeText = source(MODE_FILE);
-  pinListedEditMarks(hook, modeText);
-  const on = (t) => pinListedEditMarks(t, modeText);
-  const list = '["data-whitespace-row", "data-thread-editing"]';
-  red(on, swap(hook, list, '["data-whitespace-row"]'), "a mark dropped");
-  red(
-    on,
-    swap(hook, list, '["data-whitespace-row", "data-thread-editing", "x-y"]'),
-    "a mark added",
+/** The files naming `useHideWhitespace` or the `diffHideWhitespace` field in
+ *  code (an import, a call, a member or bracket read) are exactly the roster:
+ *  the hook's module is exempt, and the field plumbing for the field only. A
+ *  plumbing row that no longer names what it is exempt for is stale. */
+function pinSettingReaders(files) {
+  const home = settingNames(
+    SETTING_HOOK_HOME,
+    files.get(SETTING_HOOK_HOME) ?? "",
   );
-  red(
-    on,
-    swap(
-      hook,
-      '"[data-whitespace-row] [data-thread-editing]"',
-      '"[data-whitespace-row] [data-diff-editor]"',
-    ),
-    "a selector that is not a probe arm",
+  if (!home.hook && !home.field)
+    throw new Error(`${SETTING_HOOK_HOME}: a stale settings plumbing row`);
+  for (const rel of FIELD_PLUMBING)
+    if (!settingNames(rel, files.get(rel) ?? "").field)
+      throw new Error(`${rel}: a stale settings plumbing row`);
+  const readers = [];
+  for (const [rel, text] of files) {
+    if (rel === SETTING_HOOK_HOME) continue;
+    const { hook, field } = settingNames(rel, text);
+    if (hook || (field && !FIELD_PLUMBING.includes(rel))) readers.push(rel);
+  }
+  assert.deepEqual(
+    readers.sort(),
+    [...SETTING_READERS].sort(),
+    "files reading the Hide whitespace setting",
   );
-  red(
-    on,
-    swap(
-      hook,
-      "attributeFilter: LISTED_EDIT_MARKS,",
-      "attributeFilter: EDITOR_MARKS,",
-    ),
-    "the body observer given another filter",
+}
+
+test("only view producers and controls read the Hide whitespace setting", () => {
+  const files = srcFiles();
+  pinSettingReaders(files);
+  const comments = "src/features/pulls/CommitComments.tsx";
+  const reading = new Map(files);
+  reading.set(
+    comments,
+    `${files.get(comments)}\nconst hidden = () => useHideWhitespace();\n`,
   );
-  red(
-    on,
-    swap(hook, ".observe(document.body, {", ".observe(root, {"),
-    "the listed rows observed under the root only",
+  red(pinSettingReaders, reading, "the comment list reads the setting");
+  const member = new Map(files);
+  member.set(
+    comments,
+    `${files.get(comments)}\nconst hidden = (s: AppSettings) => s.diffHideWhitespace;\n`,
   );
-  red(
-    on,
-    swap(
-      hook,
-      "document.querySelector(LISTED_EDIT)",
-      "document.querySelector(DIFF_EDITOR_SELECTOR)",
-    ),
-    "the listed-row selector never queried",
+  red(pinSettingReaders, member, "the comment list reads the setting's field");
+  for (const q of [`"`, `'`, "`"]) {
+    const bracket = new Map(files);
+    bracket.set(
+      comments,
+      `${files.get(comments)}\nconst h = (s: AppSettings) => s[${q}diffHideWhitespace${q}];\n`,
+    );
+    red(pinSettingReaders, bracket, `a bracket read with ${q} quotes`);
+  }
+  for (const [text, what] of [
+    [
+      `const pick = (s: AppSettings) => { const { "diffHideWhitespace": h } = s; return h; };`,
+      "a quoted destructuring key",
+    ],
+    [`const has = (s: object) => "diffHideWhitespace" in s;`, "an in check"],
+  ]) {
+    const literal = new Map(files);
+    literal.set(comments, `${files.get(comments)}\n${text}\n`);
+    red(pinSettingReaders, literal, what);
+  }
+  for (const text of [
+    `// const h = (s: AppSettings) => s["diffHideWhitespace"];`,
+    `const note = "x diffHideWhitespace y";`,
+  ]) {
+    const inert = new Map(files);
+    inert.set(comments, `${files.get(comments)}\n${text}\n`);
+    pinSettingReaders(inert);
+  }
+  const plumbingHook = new Map(files);
+  const form = "src/features/settings/settings-form.ts";
+  plumbingHook.set(
+    form,
+    `${files.get(form)}\nimport { useHideWhitespace } from "@/lib/settings/hide-whitespace";\nconst hidden = () => useHideWhitespace();\n`,
   );
+  red(pinSettingReaders, plumbingHook, "the Settings form calls the hook");
+  const dropped = new Map(files);
+  const history = "src/lib/git/queries/history.ts";
+  dropped.set(
+    history,
+    files.get(history).replaceAll("useHideWhitespace", "useOtherSetting"),
+  );
+  red(pinSettingReaders, dropped, "a roster file that no longer reads it");
+  const stale = new Map(files);
+  stale.set(
+    form,
+    files.get(form).replaceAll("diffHideWhitespace", "diffOther"),
+  );
+  red(pinSettingReaders, stale, "a plumbing row that no longer names it");
+});
+
+// An open list edit pins its row (painted-view.ts `placeComments`), so no
+// control, probe or view holds on one: the listed-row hold's mark is gone.
+function pinNoListedHold(files) {
+  for (const [rel, text] of files)
+    if (text.includes("data-whitespace-row"))
+      throw new Error(`${rel} names the listed-row hold's mark`);
+}
+
+test("no control, probe or view holds on a listed comment's edit", () => {
+  const files = srcFiles();
+  pinNoListedHold(files);
+  const back = new Map(files);
+  back.set(
+    FORGE_WS_HOOK,
+    `${files.get(FORGE_WS_HOOK)}\nconst LISTED = "[data-whitespace-row] [data-thread-editing]";\n`,
+  );
+  red(pinNoListedHold, back, "a listed-row hold selector re-added");
 });
 
 // --- the forge whitespace read: one caller each ----------------------------

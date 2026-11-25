@@ -126,6 +126,8 @@ async function settle() {
   await act(async () => undefined);
 }
 
+const NO_PINS: ReadonlySet<string> = new Set();
+
 function renderCommitComments() {
   render(
     wrap(
@@ -135,8 +137,8 @@ function renderCommitComments() {
         canComment
         remoteLabel="origin"
         diffSections={splitUnifiedDiff(PATCH)}
-        selectedPath="x"
-        selectedBinary={false}
+        painted={null}
+        pins={{ pinned: NO_PINS, pin: () => undefined }}
         lens="origin"
       />,
     ),
@@ -294,6 +296,7 @@ function Anchors({
     splitUnifiedDiff(PATCH),
     "x",
     refs,
+    NO_PINS,
   );
   return (
     <div>

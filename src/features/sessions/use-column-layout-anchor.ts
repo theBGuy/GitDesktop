@@ -1,9 +1,17 @@
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { Component, createContext, useLayoutEffect, useState } from "react";
 import { RESTORE_BOUND_MS } from "@/features/diff/diff-rows";
-import { useSettings } from "@/lib/settings/queries";
+import type { AppSettings } from "@/lib/settings/api";
 
-/** The step diff boxes a Unified/Split switch can change the height of. */
+/** The step diff boxes the column anchors on; a Unified/Split switch changes
+ *  the height of only those that draw diff rows. */
 const BOX_SELECTOR = "[data-transcript-diff]";
+
+/** Whether the column sits at its bottom, where streamed output keeps it. */
+export function atColumnBottom(scroller: HTMLElement): boolean {
+  return (
+    scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48
+  );
+}
 
 // Inputs that hand the column back to scrolling: the twin of DiffSurface's
 // ANCHOR_RELEASE_INPUTS (not exported, so the session column never imports the
@@ -63,6 +71,15 @@ export function columnScrollTop(
   return box.top + Math.min(Math.max(depth, 0), height);
 }
 
+/** What a step box draws, as its mark reports it: "pending" until the box's
+ *  first measurement, so that measurement is never a switch. */
+export type StepLayout = "pending" | AppSettings["diffViewMode"];
+
+/** Whether a box that showed `was` draws another layout as `now`. */
+function switchesLayout(was: StepLayout, now: StepLayout): boolean {
+  return was !== "pending" && now !== "pending" && was !== now;
+}
+
 interface HeldAnchor {
   el: Element;
   edge: ColumnAnchor["edge"];
@@ -70,13 +87,39 @@ interface HeldAnchor {
   height: number;
 }
 
-interface ColumnAnchorRuntime {
-  anchor: HeldAnchor | null;
-  /** Set by a restore until the next input anywhere or RESTORE_BOUND_MS: the
-   *  placed anchor is not re-sampled, and a scroll or a box resize puts it
-   *  back. Never ended by a scrollTop compare. */
-  frozen: { place: () => void; release: () => void } | null;
+/** The column at the last instant it showed the reader the outgoing layout. */
+interface ColumnShot {
+  /** Kept with the read: a re-show restores before React re-attaches refs. */
+  scroller: HTMLElement;
+  pinned: boolean;
+  /** The anchor a hold kept the column on, while its box is still there. */
+  held: HeldAnchor | null;
+  scrollTop: number;
+  /** A restore to the bottom over content still this tall moves nothing: what
+   *  the reader saw did not change. */
+  scrollHeight: number;
+  boxes: readonly (ColumnBox & { el: Element })[];
 }
+
+/** A placed anchor (null: the column's bottom) and the release of its hold. */
+interface Hold {
+  anchor: HeldAnchor | null;
+  release: () => void;
+}
+
+/** One session column's place keeper, driven by its step boxes' marks. */
+export interface ColumnLayoutAnchor {
+  /** Reads the column before a switch changes the DOM: the first call in a
+   *  commit reads for every box, and a column with no height reads nothing. */
+  capture(): void;
+  /** Puts the read place back (the bottom while pinned) and holds it. */
+  restore(): void;
+  /** Ends a hold, for a scroll the host makes itself. */
+  release(): void;
+}
+
+export const ColumnLayoutAnchorContext =
+  createContext<ColumnLayoutAnchor | null>(null);
 
 function boxOf(scroller: HTMLElement, el: Element): ColumnBox {
   const origin = scroller.getBoundingClientRect().top - scroller.scrollTop;
@@ -84,13 +127,13 @@ function boxOf(scroller: HTMLElement, el: Element): ColumnBox {
   return { top: rect.top - origin, bottom: rect.bottom - origin };
 }
 
-function readAnchor(scroller: HTMLElement): HeldAnchor | null {
-  const els = [...scroller.querySelectorAll(BOX_SELECTOR)];
-  const picked = pickColumnAnchor(
-    els.map((el) => boxOf(scroller, el)),
-    scroller.scrollTop,
-  );
-  const el = picked === null ? undefined : els[picked.index];
+/** The anchor `shot` names among its boxes still in the column, at the
+ *  geometry the reader saw (a removed box can't hold the place). */
+function anchorOf(shot: ColumnShot): HeldAnchor | null {
+  if (shot.held?.el.isConnected) return shot.held;
+  const boxes = shot.boxes.filter((box) => box.el.isConnected);
+  const picked = pickColumnAnchor(boxes, shot.scrollTop);
+  const el = picked === null ? undefined : boxes[picked.index]?.el;
   if (picked === null || el === undefined) return null;
   return {
     el,
@@ -100,16 +143,24 @@ function readAnchor(scroller: HTMLElement): HeldAnchor | null {
   };
 }
 
-/** Places `anchor` (or, with none, the column's bottom) now and holds it there,
- *  returning the release. */
+/** Places `anchor` (or, with none, the column's bottom from the first moment
+ *  its content is not `height` tall) now and holds it there until
+ *  RESTORE_BOUND_MS or the next input anywhere, then calls `done` once. Never
+ *  ended by a scrollTop compare. Returns the release. */
 function holdColumn(
-  rt: ColumnAnchorRuntime,
   scroller: HTMLElement,
   anchor: HeldAnchor | null,
+  height: number,
+  boxes: Iterable<Element>,
+  done: () => void,
 ): () => void {
-  rt.frozen?.release();
+  // Once the content differs from `height`, every later place pins: content
+  // that regrows to that height has still moved the bottom since the capture.
+  let moved = false;
   const place = () => {
     if (anchor === null) {
+      if (!moved && scroller.scrollHeight === height) return;
+      moved = true;
       const bottom = scroller.scrollHeight - scroller.clientHeight;
       if (Math.abs(bottom - scroller.scrollTop) > 1)
         scroller.scrollTop = scroller.scrollHeight;
@@ -122,114 +173,166 @@ function holdColumn(
   // Rows landing in a box after the switch re-lay it with no scroll event, so
   // a box or content resize re-places; boxes opened during the hold join it.
   const resized = new ResizeObserver(place);
-  const watch = () => {
+  const watch = (els: Iterable<Element>) => {
     resized.disconnect();
     for (const child of scroller.children) resized.observe(child);
-    for (const box of scroller.querySelectorAll(BOX_SELECTOR))
-      resized.observe(box);
+    for (const box of els) resized.observe(box);
   };
-  const swapped = new MutationObserver(watch);
+  const swapped = new MutationObserver(() =>
+    watch(scroller.querySelectorAll(BOX_SELECTOR)),
+  );
   const timer = setTimeout(release, RESTORE_BOUND_MS);
+  let holding = true;
   function release() {
+    if (!holding) return;
+    holding = false;
     clearTimeout(timer);
     resized.disconnect();
     swapped.disconnect();
+    scroller.removeEventListener("scroll", place);
     for (const type of RELEASE_INPUTS)
       document.removeEventListener(type, release, true);
-    if (rt.frozen?.release === release) rt.frozen = null;
+    done();
   }
   place();
-  watch();
+  watch(boxes);
   swapped.observe(scroller, { childList: true, subtree: true });
+  scroller.addEventListener("scroll", place, { passive: true });
   for (const type of RELEASE_INPUTS)
     document.addEventListener(type, release, { capture: true, passive: true });
-  rt.anchor = anchor;
-  rt.frozen = { place, release };
   return release;
 }
 
-/** Keeps the session column's place across a Unified/Split switch of the
- *  setting: only open step diffs change height, so the column holds the last
- *  open step box at or above its top edge (`pickColumnAnchor`), or its bottom
- *  while `stickRef` pins it there. Scrolling and a step box resize sample the
- *  anchor; the switch restores it, also on an `<Activity>` re-show after a
- *  switch made while hidden. */
+function createColumnAnchor(
+  scrollerRef: { readonly current: HTMLElement | null },
+  jumpingRef: { readonly current: boolean },
+): ColumnLayoutAnchor & { discard: () => void } {
+  // No place is kept between switches: each restore reads the shot its own
+  // commit (or the hide that preceded it) took.
+  let shot: ColumnShot | null = null;
+  let hold: Hold | null = null;
+  const release = () => hold?.release();
+  return {
+    capture() {
+      const scroller = scrollerRef.current;
+      if (shot !== null || scroller === null || scroller.clientHeight === 0)
+        return;
+      // A hold already placed the reader's place: a capture during it keeps
+      // that place, so a second switch inside the hold round-trips.
+      const held =
+        hold !== null && (hold.anchor === null || hold.anchor.el.isConnected)
+          ? hold
+          : null;
+      shot = {
+        scroller,
+        pinned:
+          held === null
+            ? atColumnBottom(scroller) || jumpingRef.current
+            : held.anchor === null,
+        held: held?.anchor ?? null,
+        scrollTop: scroller.scrollTop,
+        scrollHeight: scroller.scrollHeight,
+        boxes: Array.from(scroller.querySelectorAll(BOX_SELECTOR), (el) => ({
+          el,
+          ...boxOf(scroller, el),
+        })),
+      };
+    },
+    restore() {
+      const taken = shot;
+      shot = null;
+      if (taken === null || !taken.scroller.isConnected) return;
+      const { scroller } = taken;
+      const anchor = taken.pinned ? null : anchorOf(taken);
+      hold?.release();
+      if (!taken.pinned && anchor === null) return;
+      const boxes = taken.boxes
+        .filter((box) => box.el.isConnected)
+        .map((box) => box.el);
+      let next: Hold | null = null;
+      const end = holdColumn(
+        scroller,
+        anchor,
+        taken.scrollHeight,
+        boxes,
+        () => {
+          if (hold === next) hold = null;
+        },
+      );
+      next = { anchor, release: end };
+      hold = next;
+    },
+    release,
+    discard() {
+      shot = null;
+    },
+  };
+}
+
+/** A step box's report of the layout it draws; renders nothing. The commit
+ *  that changes it reads the column before any DOM change (React runs every
+ *  snapshot ahead of the mutation phase) and restores after it. Snapshots
+ *  skip a hidden subtree and the commit that reveals it, so a re-show compares
+ *  the layout the box last showed and restores from the read taken at the
+ *  hide. */
+export class ColumnLayoutMark extends Component<
+  { layout: StepLayout },
+  object,
+  boolean
+> {
+  static contextType = ColumnLayoutAnchorContext;
+  declare context: ColumnLayoutAnchor | null;
+  /** What the box drew when the column last showed it. */
+  private shown: StepLayout | null = null;
+
+  componentDidMount() {
+    const was = this.shown;
+    this.shown = this.props.layout;
+    if (was !== null && switchesLayout(was, this.props.layout))
+      this.context?.restore();
+  }
+
+  getSnapshotBeforeUpdate() {
+    const switched =
+      this.shown !== null && switchesLayout(this.shown, this.props.layout);
+    if (switched) this.context?.capture();
+    return switched;
+  }
+
+  componentDidUpdate(_props: unknown, _state: unknown, switched?: boolean) {
+    this.shown = this.props.layout;
+    if (switched === true) this.context?.restore();
+  }
+
+  render() {
+    return null;
+  }
+}
+
+/** Keeps the session column's place across a Unified/Split switch of what its
+ *  step diffs draw (the setting, a step's width crossing Split's floor, or an
+ *  `<Activity>` re-show after a switch made while hidden): only open step
+ *  diffs change height, so the column holds the last open step box at or
+ *  above its top edge (`pickColumnAnchor`), or its bottom while it sits there
+ *  or `jumpingRef` animates it there. Each step box renders a
+ *  `ColumnLayoutMark` under `ColumnLayoutAnchorContext` carrying the returned
+ *  value (a box drawing no diff rows renders none); a first measurement or a
+ *  step opening or closing never restores. */
 export function useColumnLayoutAnchor(
   scrollerRef: { readonly current: HTMLElement | null },
-  stickRef: { readonly current: boolean },
-): void {
-  const mode = useSettings().data?.diffViewMode ?? "unified";
-  const runtime = useRef<ColumnAnchorRuntime>({ anchor: null, frozen: null });
-  const appliedRef = useRef(mode);
-  useEffect(() => {
-    const scroller = scrollerRef.current;
-    if (!scroller) return;
-    const rt = runtime.current;
-    let frame = 0;
-    let watchFrame = 0;
-    // A hidden column has no height, so it reads no anchor.
-    const read = () => {
-      if (rt.frozen !== null || scroller.clientHeight === 0) return;
-      rt.anchor = readAnchor(scroller);
-    };
-    // Only the scroll frame's own run clears its handle, so cleanup still
-    // cancels a frame pending when a resize read the anchor.
-    const sample = () => {
-      frame = 0;
-      read();
-    };
-    const onScroll = () => {
-      if (rt.frozen !== null) {
-        rt.frozen.place();
-        return;
-      }
-      if (frame === 0) frame = requestAnimationFrame(sample);
-    };
-    // A step opened, closed or re-built without a scroll moves the anchor.
-    const resized = new ResizeObserver(read);
-    const observed = new Set<Element>();
-    const watch = () => {
-      watchFrame = 0;
-      const boxes = new Set(scroller.querySelectorAll(BOX_SELECTOR));
-      for (const box of observed)
-        if (!boxes.has(box)) {
-          resized.unobserve(box);
-          observed.delete(box);
-        }
-      for (const box of boxes)
-        if (!observed.has(box)) {
-          resized.observe(box);
-          observed.add(box);
-        }
-    };
-    // One box query per frame however many mutations land in it (each
-    // streamed delta is one): a box added in that frame is observed at the
-    // frame, and a ResizeObserver reports a box's size on its first observation.
-    const swapped = new MutationObserver(() => {
-      if (watchFrame === 0) watchFrame = requestAnimationFrame(watch);
-    });
-    watch();
-    swapped.observe(scroller, { childList: true, subtree: true });
-    scroller.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      scroller.removeEventListener("scroll", onScroll);
-      cancelAnimationFrame(frame);
-      cancelAnimationFrame(watchFrame);
-      swapped.disconnect();
-      resized.disconnect();
-    };
-  }, [scrollerRef]);
-  // Its cleanup is the release, so the next switch, a hide and an unmount each
-  // end a hold. The applied mode survives a hide, so a re-show restores only
-  // when the setting moved while hidden.
+  jumpingRef: { readonly current: boolean },
+): ColumnLayoutAnchor {
+  const [column] = useState(() => createColumnAnchor(scrollerRef, jumpingRef));
+  // The setup runs after the marks' own work in the commit that shows the
+  // column, so it drops a hide-time read no mark restored from. The cleanup
+  // runs on a hide before React applies display:none (the column still shows
+  // the reader's place), and ends a hold on a hide or unmount.
   useLayoutEffect(() => {
-    const applied = appliedRef.current;
-    appliedRef.current = mode;
-    const scroller = scrollerRef.current;
-    if (applied === mode || !scroller) return;
-    const rt = runtime.current;
-    if (stickRef.current) return holdColumn(rt, scroller, null);
-    if (rt.anchor === null) return;
-    return holdColumn(rt, scroller, rt.anchor);
-  }, [mode, scrollerRef, stickRef]);
+    column.discard();
+    return () => {
+      column.capture();
+      column.release();
+    };
+  }, [column]);
+  return column;
 }

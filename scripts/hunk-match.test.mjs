@@ -4,9 +4,13 @@
 // straight into src/ under Node's type stripping, so the module's runtime
 // imports stay relative .ts ones; this suite needs no install.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { hunksMatchContent } from "../src/features/diff/hunk-match.ts";
+import {
+  hunksMatchContent,
+  stripGitWhitespace,
+} from "../src/features/diff/hunk-match.ts";
 
 const lines = (from, to, tag = "") =>
   Array.from({ length: to - from + 1 }, (_, i) => `line ${from + i}${tag}\n`).join("");
@@ -206,6 +210,16 @@ test("the BOM rule: a byte-order mark on line 1 reads as absent, on either input
   assert.equal(hunksMatchContent(ctx, "a\nb\n", "a\nc\n"), true);
   const second = `@@ -1,2 +1,2 @@\n a\n-${BOM}b\n+c\n`;
   assert.equal(hunksMatchContent(second, "a\nb\n", "a\nc\n"), false);
+  // keepBom: the texts hold the mark as their bytes do, so line 1 compares as
+  // written, in a hunk and in a gap.
+  const KEEP = { keepBom: true };
+  assert.equal(hunksMatchContent(first, "a\nb\n", "A\nb\n", KEEP), false);
+  assert.equal(hunksMatchContent(first, `${BOM}a\nb\n`, `${BOM}A\nb\n`, KEEP), true);
+  assert.equal(hunksMatchContent(ctx, "a\nb\n", "a\nc\n", KEEP), false);
+  const late = "@@ -2 +2 @@\n-b\n+c\n";
+  assert.equal(hunksMatchContent(late, `${BOM}a\nb\n`, "a\nc\n"), true);
+  assert.equal(hunksMatchContent(late, `${BOM}a\nb\n`, "a\nc\n", KEEP), false);
+  assert.equal(hunksMatchContent(late, `${BOM}a\nb\n`, `${BOM}a\nc\n`, KEEP), true);
 });
 
 test("the EOF rule: a hunk starting past either file's end is refused, one starting at it is not", () => {
@@ -370,6 +384,78 @@ test("ignoreWhitespace: false for every non-whitespace mismatch", () => {
     assert.equal(hunksMatchContent(diff, oldText, newText, WS), false, name);
 });
 
+// The characters -w skips, probed the same way (git 2.51.1, no global or
+// system config): "x\nab\n" against "X\na<c>b\n", where line 2 is context or
+// a change, and a nine-line pair whose line 9 sits in a gap past the first
+// hunk's context. Space, tab and an interior CR leave line 2 context and the
+// gap alone:
+//   " "  -> "@@ -1,2 +1,2 @@\n-x\n+X\n a b\n"
+//   "\t" -> "@@ -1,2 +1,2 @@\n-x\n+X\n a\tb\n"
+//   "\r" -> "@@ -1,2 +1,2 @@\n-x\n+X\n a\rb\n"
+//   gap, each of the three -> "@@ -1,4 +1,4 @@\n-x\n+X\n 2\n 3\n 4\n"
+// \v, \f and U+00A0 make line 2 a change and give the gap a hunk of its own:
+//   "\v" -> "@@ -1,2 +1,2 @@\n-x\n-ab\n+X\n+a\u000bb\n"
+//   gap  -> "@@ -1,4 +1,4 @@\n-x\n+X\n 2\n 3\n 4\n@@ -6,4 +6,4 @@ x\n 6\n 7\n 8\n-ab\n+a\u000bb\n"
+const GAP_BODY = "2\n3\n4\n5\n6\n7\n8\n";
+const GAP_HUNK = "@@ -1,4 +1,4 @@\n-x\n+X\n 2\n 3\n 4\n";
+
+test("ignoreWhitespace skips space, tab and CR only, as -w does", () => {
+  for (const [name, ch] of [
+    ["space", " "],
+    ["tab", "\t"],
+    ["interior CR", "\r"],
+  ]) {
+    const ctx = `@@ -1,2 +1,2 @@\n-x\n+X\n a${ch}b\n`;
+    assert.equal(
+      hunksMatchContent(ctx, "x\nab\n", `X\na${ch}b\n`, WS),
+      true,
+      `context: ${name}`,
+    );
+    assert.equal(
+      hunksMatchContent(GAP_HUNK, `x\n${GAP_BODY}ab\n`, `X\n${GAP_BODY}a${ch}b\n`, WS),
+      true,
+      `gap: ${name}`,
+    );
+  }
+  for (const [name, ch] of [
+    ["\\v", "\v"],
+    ["\\f", "\f"],
+    ["U+00A0", "\u00a0"],
+  ]) {
+    const oldText = "x\nab\n";
+    const newText = `X\na${ch}b\n`;
+    // The real -w text draws the line as a change.
+    const real = `@@ -1,2 +1,2 @@\n-x\n-ab\n+X\n+a${ch}b\n`;
+    assert.equal(hunksMatchContent(real, oldText, newText, WS), true, `real: ${name}`);
+    // The text -w would print if it skipped the character is refused.
+    const asIfSkipped = `@@ -1,2 +1,2 @@\n-x\n+X\n a${ch}b\n`;
+    assert.equal(
+      hunksMatchContent(asIfSkipped, oldText, newText, WS),
+      false,
+      `context: ${name}`,
+    );
+    assert.equal(
+      hunksMatchContent(GAP_HUNK, `x\n${GAP_BODY}ab\n`, `X\n${GAP_BODY}a${ch}b\n`, WS),
+      false,
+      `gap: ${name}`,
+    );
+  }
+});
+
+// A last line holding only a CR, with no final LF ("a\n\r" against an empty
+// file), probed the same way; plain and -w print the same text:
+//   "@@ -0,0 +1,2 @@\n+a\n+\r\n\\ No newline at end of file\n"
+test("a last line holding a lone CR is a line, in exact and -w mode", () => {
+  const diff = "@@ -0,0 +1,2 @@\n+a\n+\r\n\\ No newline at end of file\n";
+  assert.equal(hunksMatchContent(diff, "", "a\n\r"), true, "exact");
+  assert.equal(hunksMatchContent(diff, "", "a\n\r", WS), true, "ws");
+  // Without the line, or with a final newline after it, the text is refused.
+  for (const newText of ["a\n", "a\n\r\n"]) {
+    assert.equal(hunksMatchContent(diff, "", newText), false, JSON.stringify(newText));
+    assert.equal(hunksMatchContent(diff, "", newText, WS), false, JSON.stringify(newText));
+  }
+});
+
 test("ignoreWhitespace absent or false is exact mode", () => {
   const [diff, oldText, newText] = CAPTURED.reindentEdit;
   assert.equal(hunksMatchContent(diff, oldText, newText, {}), false);
@@ -378,4 +464,17 @@ test("ignoreWhitespace absent or false is exact mode", () => {
     false,
   );
   assert.equal(hunksMatchContent(EDIT, OLD, NEW, WS), true);
+});
+
+// The -w set is spelled once, in hunk-match.ts: forge-whitespace.ts spells no
+// copy of its own that could drift from it.
+test("stripGitWhitespace is the one spelling of -w's set", () => {
+  assert.equal(stripGitWhitespace(" a\tb\rc \u00a0\v\f"), "abc\u00a0\v\f");
+  assert.equal(stripGitWhitespace("a b"), stripGitWhitespace("a b"), "stateless");
+  const src = (f) =>
+    readFileSync(new URL(`../src/features/diff/${f}`, import.meta.url), "utf8");
+  const setLiteral = /\[ \\t\\r\]/g;
+  assert.equal(src("hunk-match.ts").match(setLiteral)?.length, 1, "hunk-match.ts");
+  const forge = src("forge-whitespace.ts");
+  assert.equal(forge.match(setLiteral), null, "forge-whitespace.ts spells no set");
 });

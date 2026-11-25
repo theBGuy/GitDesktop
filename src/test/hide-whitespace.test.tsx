@@ -2164,16 +2164,15 @@ describe("the in-diff editor probe", () => {
         node.remove();
       }
     }
-    const row = document.createElement("div");
-    row.setAttribute("data-whitespace-row", "");
+    // A listed comment's edit sits in no anchor row: its row is pinned to the
+    // list, so no flip waits on it.
     const editing = document.createElement("div");
     editing.setAttribute("data-thread-editing", "");
-    row.append(editing);
-    document.body.append(row);
+    document.body.append(editing);
     try {
-      expect(whitespaceComposerOpen()).toBe(true);
+      expect(whitespaceComposerOpen()).toBe(false);
     } finally {
-      row.remove();
+      editing.remove();
     }
   });
 });

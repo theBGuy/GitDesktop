@@ -4,6 +4,7 @@ import {
   onlineManager,
   QueryClient,
   QueryClientProvider,
+  QueryObserver,
   useQuery,
 } from "@tanstack/react-query";
 import {
@@ -115,6 +116,14 @@ function newClient() {
   return { client, wrapper };
 }
 
+/** An open view's details observer, so a press re-reads them (over fresh
+ *  seeded data, subscribing reads nothing). */
+const observeDetails = (client: QueryClient) =>
+  new QueryObserver(client, {
+    ...prDetailsOptions(REPO, 7, "origin"),
+    staleTime: Number.POSITIVE_INFINITY,
+  }).subscribe(() => undefined);
+
 beforeEach(() => {
   vi.clearAllMocks();
   head = H1;
@@ -170,6 +179,8 @@ describe("refreshOpenPr's key set (AC-RF1)", () => {
     prDiffOptions(REPO, 8, "origin", H1).queryKey,
     prDetailsOptions(REPO, 7, "upstream").queryKey,
     prDiffOptions(REPO, 7, "upstream", H1).queryKey,
+    // The other lens's divergence read at the same number.
+    [...prBaseDivergencePrefix(REPO, 7), "upstream"],
     ["repo", REPO, "prs", "origin", "open"],
     ["repo", REPO, "local-prs"],
   ];
@@ -179,6 +190,7 @@ describe("refreshOpenPr's key set (AC-RF1)", () => {
   it("re-reads every forge child, the details and the divergence sibling; skips the rest", async () => {
     const { client } = newClient();
     client.setQueryData(D, details(7, H1));
+    observeDetails(client);
     for (const key of [...YES, ...NO]) client.setQueryData(key, "seeded");
     const ownDiff = prDiffOptions(REPO, 7, "origin", H1).queryKey;
     const ownRevs = prContentRevsOptions(REPO, 7, "origin", H1).queryKey;
@@ -190,7 +202,7 @@ describe("refreshOpenPr's key set (AC-RF1)", () => {
     for (const key of [ownDiff, ownRevs, ...otherHead])
       client.setQueryData(key, "seeded");
     await refreshOpenPr(client, REPO, "origin", 7);
-    expect(invalidated(client, D)).toBe(true);
+    expect(forgePrView).toHaveBeenCalledTimes(1);
     for (const key of [...YES, ownDiff, ownRevs])
       expect([key, invalidated(client, key)]).toEqual([key, true]);
     for (const key of [...NO, ...otherHead])
@@ -199,7 +211,9 @@ describe("refreshOpenPr's key set (AC-RF1)", () => {
 
   it("with details naming no head, re-reads the null diff and no revs", async () => {
     const { client } = newClient();
+    head = "";
     client.setQueryData(D, details(7, ""));
+    observeDetails(client);
     const nullDiff = prDiffOptions(REPO, 7, "origin", null).queryKey;
     const revs = prContentRevsOptions(REPO, 7, "origin", H1).queryKey;
     client.setQueryData(nullDiff, "seeded");
@@ -271,13 +285,35 @@ describe("refreshOpenPr's order and count (AC-RF2)", () => {
     expect(view.result.current.diff.data).toBe(textOf(H1));
   });
 
-  it("a failed details read re-reads the diff of the head it last named", async () => {
-    const { client } = await mountOpen();
+  it("a failed details read leaves the head-keyed reads alone, though the forge moved", async () => {
+    const { client, view } = await mountOpen();
+    const diffKeyH1 = prDiffOptions(REPO, 7, "origin", H1).queryKey;
+    const revsKeyH1 = prContentRevsOptions(REPO, 7, "origin", H1).queryKey;
+    head = H2;
     detailsFail = true;
     await act(() => refreshOpenPr(client, REPO, "origin", 7));
-    await waitFor(() => expect(diffCalls()).toBe(1));
     await sleep(30);
-    expect(diffCalls()).toBe(1);
+    expect(client.getQueryState(D)?.status).toBe("error");
+    expect(forgePrDiff).not.toHaveBeenCalled();
+    expect(forgePrContentRevs).not.toHaveBeenCalled();
+    expect(client.getQueryState(diffKeyH1)?.isInvalidated).toBe(false);
+    expect(client.getQueryState(revsKeyH1)?.isInvalidated).toBe(false);
+    // H2's text never lands under H1 as H1's own answer.
+    expect(client.getQueryData(diffKeyH1)).toBe(textOf(H1));
+    expect(view.result.current.diff.placeholderOf).toBe("none");
+  });
+
+  it("details that answer after a failed press name the head, and one read follows it", async () => {
+    const { client, view } = await mountOpen();
+    head = H2;
+    detailsFail = true;
+    await act(() => refreshOpenPr(client, REPO, "origin", 7));
+    detailsFail = false;
+    await act(() => refreshOpenPr(client, REPO, "origin", 7));
+    await waitFor(() => expect(view.result.current.diff.data).toBe(textOf(H2)));
+    await sleep(30);
+    expect(forgePrDiff).toHaveBeenCalledTimes(1);
+    expect(revsHeads()).toEqual([H2]);
   });
 
   it("details with no data at all: no diff read", async () => {
@@ -312,6 +348,7 @@ describe("refreshOpenPr never cancels (AC-RF5)", () => {
   it("a cold ensureQueryData load in flight across a press resolves with its text", async () => {
     const { client } = newClient();
     client.setQueryData(D, details(7, H1));
+    observeDetails(client);
     let release: (text: string) => void = () => undefined;
     vi.mocked(forgePrDiff).mockImplementationOnce(
       () =>

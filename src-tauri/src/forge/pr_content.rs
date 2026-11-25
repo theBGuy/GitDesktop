@@ -3,6 +3,9 @@
 //! provider arm is a private fn; a command validates, dispatches, and awaits one arm.
 //! Also the local `git diff -w` of two file versions those reads returned.
 
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
 use base64::Engine;
 use serde_json::Value;
 
@@ -27,8 +30,19 @@ const FORGE_FILE_MAX_BYTES: u64 = 20_000_000;
 /// content budget; this keeps the command safe from any caller.
 const WHITESPACE_SIDE_MAX_BYTES: usize = 1_000_000;
 
-/// Never `gd-review-`: the app sweeps that prefix out of the temp dir at startup.
-const WHITESPACE_DIFF_PREFIX: &str = "gd-pr-ws-diff-";
+/// The folder under the app's per-user cache dir that holds every whitespace diff's
+/// private run dir.
+const WHITESPACE_DIFF_ROOT: &str = "pr-ws-diff";
+
+/// The run-dir root, set once at startup from the app's per-user cache dir.
+static WHITESPACE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The root is set only at startup, so this holds for the whole session.
+const WHITESPACE_ROOT_UNSET: &str =
+    "The whitespace diff isn't available because GitDesktop couldn't open its cache folder.";
+
+/// A run dir idle this long outlived its run (a failed close) and is swept.
+const WHITESPACE_RUN_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,21 +140,69 @@ pub struct WhitespaceHunks {
     pub is_binary: bool,
 }
 
+/// Stores `<cache_dir>/pr-ws-diff` in `cell`; a second call keeps the first root.
+fn init_whitespace_root_in(cell: &std::sync::OnceLock<PathBuf>, cache_dir: &Path) {
+    let root = cache_dir.join(WHITESPACE_DIFF_ROOT);
+    let root = std::path::absolute(&root).unwrap_or(root);
+    let _ = cell.set(root);
+}
+
+/// Called from the app's setup with the per-user cache dir, beside the image-staging root.
+pub(crate) fn init_whitespace_root(cache_dir: &Path) {
+    init_whitespace_root_in(&WHITESPACE_ROOT, cache_dir);
+}
+
+/// Never a shared-dir fallback: an unset root refuses, and the frontend shows the forge diff.
+fn whitespace_root_in(cell: &std::sync::OnceLock<PathBuf>) -> AppResult<PathBuf> {
+    cell.get()
+        .cloned()
+        .ok_or_else(|| AppError::Command(WHITESPACE_ROOT_UNSET.to_string()))
+}
+
 /// `git diff -w` of two file versions the frontend already holds, as base64; None = no
-/// file at that side, diffed as an empty one. A local run over private temp files, with
-/// the user's git config applied, so line endings and blank context lines vary.
+/// file at that side, diffed as an empty one. A local run over private files in the app's
+/// cache dir, with the user's git config applied, so line endings and blank context lines
+/// vary.
 #[tauri::command]
 pub async fn git_diff_bytes_ignoring_whitespace(
     old_base64: Option<String>,
     new_base64: Option<String>,
 ) -> AppResult<WhitespaceHunks> {
     let (old, new) = whitespace_sides(old_base64.as_deref(), new_base64.as_deref())?;
+    let root = whitespace_root_in(&WHITESPACE_ROOT)?;
+    sweep_stale_runs_once(root.clone()).await;
+    whitespace_diff_in(root, old, new).await
+}
+
+/// The `-w` diff of two decoded sides, run in a fresh run dir under `root`.
+async fn whitespace_diff_in(
+    root: PathBuf,
+    old: Vec<u8>,
+    new: Vec<u8>,
+) -> AppResult<WhitespaceHunks> {
     let args = with_ignore_whitespace(
         &["diff", "--no-ext-diff", "--no-index", "--no-color"],
         Some(true),
     );
-    let stdout = diff_written_pair(WHITESPACE_DIFF_PREFIX, &args, old, new).await?;
+    let stdout = diff_written_pair(root, &args, old, new).await?;
     Ok(whitespace_hunks(&stdout))
+}
+
+/// Once per process, off the async runtime, before its first run: removes run dirs a
+/// failed close left behind. The sweep never reads through a linked or foreign root.
+async fn sweep_stale_runs_once(root: PathBuf) {
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    if SWEPT.is_completed() {
+        return;
+    }
+    let _ = tokio::task::spawn_blocking(move || {
+        SWEPT.call_once(|| sweep_stale_runs(&root, SystemTime::now()));
+    })
+    .await;
+}
+
+fn sweep_stale_runs(root: &Path, now: SystemTime) {
+    crate::attachments::sweep_stale_in(root, now, WHITESPACE_RUN_STALE_AFTER);
 }
 
 // ── Validation and shared pieces ─────────────────────────────────────────────
@@ -159,33 +221,119 @@ fn whitespace_side(side: Option<&str>, name: &str) -> AppResult<Vec<u8>> {
     let Some(encoded) = side else {
         return Ok(Vec::new());
     };
+    let over = || {
+        AppError::InvalidArgument(format!(
+            "the {name} side is over {WHITESPACE_SIDE_MAX_BYTES} bytes"
+        ))
+    };
+    // The estimate counts a partial last quad as three bytes; any valid last quad
+    // decodes to at least one, so past the cap by more than two is over before decoding.
+    if base64::decoded_len_estimate(encoded.len()).saturating_sub(2) > WHITESPACE_SIDE_MAX_BYTES {
+        return Err(over());
+    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|e| AppError::InvalidArgument(format!("the {name} side is not base64: {e}")))?;
     if bytes.len() > WHITESPACE_SIDE_MAX_BYTES {
-        return Err(AppError::InvalidArgument(format!(
-            "the {name} side is over {WHITESPACE_SIDE_MAX_BYTES} bytes"
-        )));
+        return Err(over());
     }
     Ok(bytes)
 }
 
-/// `--no-index` exits 1 when the files differ; any other code is a failure, the -1 of a
-/// git killed by a signal included (its stdout may be cut short).
-fn no_index_diff_exit_ok(code: i32) -> bool {
-    matches!(code, 0 | 1)
+/// `--no-index` exits 1 when the files differ, and also when it can't read one (an
+/// `error:` on stderr, nothing on stdout), so an exit 1 counts only with a diff line
+/// printed. Any other code is a failure, the -1 of a git killed by a signal included.
+fn no_index_diff_ok(code: i32, stdout: &[u8]) -> bool {
+    match code {
+        0 => true,
+        1 => stdout.split(|&b| b == b'\n').any(|line| {
+            line.starts_with(b"diff --git ")
+                || line.starts_with(b"@@ ")
+                || line.starts_with(b"Binary files ")
+        }),
+        _ => false,
+    }
 }
 
-/// Runs `args` then `-- <old> <new>` over the two buffers written into a fresh private
-/// temp dir, which is closed on every path.
+/// A fresh run dir in `root`, named 32 lowercase hex (the shape the stale sweep
+/// removes). `root` (and its parent) is created when missing, the root owner-only, and
+/// refused unless it is a real directory only this user can enter: a linked or foreign
+/// root would let someone else read or swap the files git diffs.
+fn private_run_dir(root: &Path) -> std::io::Result<tempfile::TempDir> {
+    if let Some(parent) = root.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    let folder = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut folder = std::fs::DirBuilder::new();
+        folder.mode(0o700);
+        folder
+    };
+    #[cfg(not(unix))]
+    let folder = std::fs::DirBuilder::new();
+    match folder.create(root) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    // On Windows this verifies only a real, unlinked directory: the root lives in the
+    // per-user app cache dir, whose profile ACL admits no other ordinary account (the
+    // attachments root's model), and the run dir and its files inherit that ACL.
+    if !crate::attachments::root_is_private(root)? {
+        return Err(std::io::Error::other(format!(
+            "the whitespace diff folder isn't private: {}",
+            root.display()
+        )));
+    }
+    let name = uuid::Uuid::new_v4().simple().to_string();
+    let mut run = tempfile::Builder::new();
+    run.prefix(&name).rand_bytes(0);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        run.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    run.tempdir_in(root)
+}
+
+/// A path as git's `&str` argv takes it: a lossy spelling would name another file.
+fn utf8_arg(path: &Path) -> AppResult<&str> {
+    path.to_str().ok_or_else(|| {
+        AppError::Io(std::io::Error::other(format!(
+            "the temp path isn't UTF-8: {}",
+            path.display()
+        )))
+    })
+}
+
+/// Runs `args` then `-- <old> <new>`.
+async fn no_index_diff(args: &[&str], old: &Path, new: &Path) -> AppResult<Vec<u8>> {
+    let mut argv = args.to_vec();
+    argv.extend(["--", utf8_arg(old)?, utf8_arg(new)?]);
+    let out = run_git_raw(None, &argv, DEFAULT_TIMEOUT).await?;
+    if !no_index_diff_ok(out.code, &out.stdout) {
+        let text = out.full_failure_text();
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: if text.is_empty() {
+                "git diff printed no diff".into()
+            } else {
+                text
+            },
+        });
+    }
+    Ok(out.stdout)
+}
+
+/// [`no_index_diff`] over the two buffers written into a fresh run dir in `root`, which
+/// is closed on every path; a dir that fails to close is left to the stale sweep.
 async fn diff_written_pair(
-    prefix: &str,
+    root: PathBuf,
     args: &[&str],
     old: Vec<u8>,
     new: Vec<u8>,
 ) -> AppResult<Vec<u8>> {
-    let prefix = prefix.to_owned();
-    let dir = tokio::task::spawn_blocking(move || crate::agent_sandbox::private_temp_dir(&prefix))
+    let dir = tokio::task::spawn_blocking(move || private_run_dir(&root))
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
         .map_err(AppError::Io)?;
@@ -198,21 +346,14 @@ async fn diff_written_pair(
         tokio::fs::write(&new_path, &new)
             .await
             .map_err(AppError::Io)?;
-        let old_arg = old_path.to_string_lossy();
-        let new_arg = new_path.to_string_lossy();
-        let mut argv = args.to_vec();
-        argv.extend(["--", &*old_arg, &*new_arg]);
-        let out = run_git_raw(None, &argv, DEFAULT_TIMEOUT).await?;
-        if !no_index_diff_exit_ok(out.code) {
-            return Err(AppError::Git {
-                code: out.code,
-                stderr: out.full_failure_text(),
-            });
-        }
-        Ok(out.stdout)
+        no_index_diff(args, &old_path, &new_path).await
     }
     .await;
-    let _ = tokio::task::spawn_blocking(move || dir.close()).await;
+    match tokio::task::spawn_blocking(move || dir.close()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("gitdesktop: whitespace diff temp dir not removed: {e}"),
+        Err(e) => eprintln!("gitdesktop: whitespace diff temp dir cleanup failed: {e}"),
+    }
     result
 }
 
@@ -2332,15 +2473,40 @@ mod tests {
         Some(base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 
+    /// The command's path past its root lookup, over a throwaway root: tests never touch
+    /// the app's real cache dir.
     async fn ws_diff(old: Option<&[u8]>, new: Option<&[u8]>) -> WhitespaceHunks {
-        git_diff_bytes_ignoring_whitespace(old.and_then(b64), new.and_then(b64))
+        let base = tempfile::tempdir().unwrap();
+        let (old, new) =
+            whitespace_sides(old.and_then(b64).as_deref(), new.and_then(b64).as_deref()).unwrap();
+        whitespace_diff_in(base.path().join(WHITESPACE_DIFF_ROOT), old, new)
             .await
             .unwrap()
     }
 
+    #[test]
+    fn the_root_is_the_cache_dirs_folder_and_an_unset_one_refuses() {
+        let cell = std::sync::OnceLock::new();
+        let refused = whitespace_root_in(&cell);
+        assert!(
+            matches!(&refused, Err(AppError::Command(m)) if m == WHITESPACE_ROOT_UNSET),
+            "{refused:?}"
+        );
+        let base = tempfile::tempdir().unwrap();
+        init_whitespace_root_in(&cell, &base.path().join("cache"));
+        init_whitespace_root_in(&cell, &base.path().join("other"));
+        let root = whitespace_root_in(&cell).unwrap();
+        assert!(root.is_absolute());
+        assert_eq!(root, base.path().join("cache").join("pr-ws-diff"));
+        // The first run creates the missing cache dir and the root inside it.
+        private_run_dir(&root).unwrap().close().unwrap();
+        assert_eq!(entries(base.path()), ["cache"]);
+        assert_eq!(entries(&root), Vec::<String>::new());
+    }
+
     /// The header git prints (temp paths included) never reaches `hunks`.
     fn assert_hunks_only(hunks: &str) {
-        assert!(!hunks.contains(WHITESPACE_DIFF_PREFIX), "{hunks}");
+        assert!(!hunks.contains(WHITESPACE_DIFF_ROOT), "{hunks}");
         for line in hunks.lines() {
             assert!(
                 !line.starts_with("diff --git")
@@ -2373,13 +2539,24 @@ mod tests {
         format!("gd-pr-ws-test-{}-{name}-", std::process::id())
     }
 
-    fn leftovers(prefix: &str) -> Vec<String> {
-        std::fs::read_dir(std::env::temp_dir())
-            .unwrap()
+    /// The names directly under `dir`, sorted; a missing dir holds none.
+    fn entries(dir: &Path) -> Vec<String> {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = read
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with(prefix))
-            .collect()
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn dir_link(target: &Path, link: &Path) {
+        #[cfg(windows)]
+        crate::test_junction::make_junction(link, target);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
     }
 
     #[tokio::test]
@@ -2459,16 +2636,18 @@ mod tests {
     async fn the_same_pair_without_ignore_whitespace_has_hunks() {
         let (old, new) = (b"fn a() {\n  body();\n}\n", b"fn a() {\n    body();\n}\n");
         // The product's `-w` run leaves nothing behind on success.
-        let prefix = test_prefix("plain");
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("runs");
         let ignoring = with_ignore_whitespace(
             &["diff", "--no-ext-diff", "--no-index", "--no-color"],
             Some(true),
         );
-        let stdout = diff_written_pair(&prefix, &ignoring, old.to_vec(), new.to_vec())
+        let stdout = diff_written_pair(root.clone(), &ignoring, old.to_vec(), new.to_vec())
             .await
             .unwrap();
         assert_eq!(whitespace_hunks(&stdout).hunks, "");
-        assert_eq!(leftovers(&prefix), Vec::<String>::new());
+        assert!(root.is_dir());
+        assert_eq!(entries(&root), Vec::<String>::new());
 
         let dir = crate::agent_sandbox::private_temp_dir(&test_prefix("plain-run")).unwrap();
         std::fs::write(dir.path().join("old"), old).unwrap();
@@ -2486,17 +2665,102 @@ mod tests {
     }
 
     #[test]
-    fn a_no_index_diff_passes_only_its_two_exit_codes() {
+    fn a_no_index_diff_passes_exit_0_and_an_exit_1_that_printed_a_diff() {
+        let hunk = b"@@ -1 +1 @@\n-a\n+b\n";
         for (code, ok) in [(0, true), (1, true), (2, false), (128, false), (-1, false)] {
-            assert_eq!(no_index_diff_exit_ok(code), ok, "exit {code}");
+            assert_eq!(no_index_diff_ok(code, hunk), ok, "exit {code}");
         }
+        // Exit 0 passes whatever it printed (an identical or whitespace-only pair).
+        assert!(no_index_diff_ok(0, b""));
+        for printed in [
+            &b"diff --git a/old b/new\nold mode 100644\nnew mode 100755\n"[..],
+            b"diff --git a/old b/new\r\nBinary files a/old and b/new differ\r\n",
+            b"Binary files a/old and b/new differ\n",
+        ] {
+            assert!(no_index_diff_ok(1, printed), "{printed:?}");
+        }
+        // Git's exit 1 for an input it couldn't read prints no diff line.
+        for printed in [
+            &b""[..],
+            b"\n",
+            b"warning: in the working copy of 'old', LF will be replaced by CRLF\n",
+            b"x @@ -1 +1 @@\n",
+        ] {
+            assert!(!no_index_diff_ok(1, printed), "{printed:?}");
+        }
+    }
+
+    /// Measured, git 2.51.1: `--no-index` over an unreadable input exits 1 with an empty
+    /// stdout and `error: Could not access '<path>'`, the code a real difference exits with.
+    #[tokio::test]
+    async fn an_input_git_cannot_read_is_an_error_never_whitespace_only() {
+        let base = tempfile::tempdir().unwrap();
+        let present = base.path().join("old");
+        std::fs::write(&present, b"a\n").unwrap();
+        let missing = base.path().join("new");
+        let args = with_ignore_whitespace(
+            &["diff", "--no-ext-diff", "--no-index", "--no-color"],
+            Some(true),
+        );
+        for (old, new) in [(&present, &missing), (&missing, &present)] {
+            let failed = no_index_diff(&args, old, new).await;
+            assert!(
+                matches!(&failed, Err(AppError::Git { code: 1, stderr }) if stderr.contains("Could not access")),
+                "{failed:?}"
+            );
+        }
+        // The same run over two readable files still answers.
+        std::fs::write(&missing, b"b\n").unwrap();
+        let stdout = no_index_diff(&args, &present, &missing).await.unwrap();
+        assert_eq!(whitespace_hunks(&stdout).hunks, "@@ -1 +1 @@\n-a\n+b\n");
+        std::fs::write(&missing, b"  a\n").unwrap();
+        let stdout = no_index_diff(&args, &present, &missing).await.unwrap();
+        assert_eq!(whitespace_hunks(&stdout).hunks, "");
+    }
+
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused_never_spelled_lossily() {
+        #[cfg(windows)]
+        let odd = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[u16::from(b'a'), 0xD800])
+        };
+        #[cfg(unix)]
+        let odd = {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::OsStr::from_bytes(b"a\xff").to_os_string()
+        };
+        let failed = utf8_arg(Path::new(&odd));
+        assert!(
+            matches!(&failed, Err(AppError::Io(e)) if e.to_string().starts_with("the temp path isn't UTF-8")),
+            "{failed:?}"
+        );
+        assert_eq!(utf8_arg(Path::new("a/b")).unwrap(), "a/b");
+    }
+
+    /// The estimate refuses a side too long to fit before any decode: a string that is not
+    /// base64 at all reports "over", not "not base64".
+    #[test]
+    fn an_over_cap_side_is_refused_before_it_is_decoded() {
+        let cap = WHITESPACE_SIDE_MAX_BYTES;
+        // The shortest length whose every valid decoding is past the cap, and one shorter.
+        let over = cap.div_ceil(3) * 4 + 1;
+        assert_eq!(base64::decoded_len_estimate(over) - 2, cap + 3);
+        assert_eq!(base64::decoded_len_estimate(over - 1) - 2, cap);
+        let refused = |len: usize| match whitespace_side(Some(&"!".repeat(len)), "old") {
+            Err(AppError::InvalidArgument(message)) => message,
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        };
+        assert_eq!(refused(over), format!("the old side is over {cap} bytes"));
+        assert!(refused(over - 1).starts_with("the old side is not base64"));
     }
 
     #[tokio::test]
     async fn the_temp_dir_is_gone_after_a_git_failure() {
-        let prefix = test_prefix("failed");
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("runs");
         let failed = diff_written_pair(
-            &prefix,
+            root.clone(),
             &["diff", "--no-ext-diff", "--no-index", "--no-such-option"],
             b"a\n".to_vec(),
             b"b\n".to_vec(),
@@ -2506,7 +2770,54 @@ mod tests {
             matches!(failed, Err(AppError::Git { code, .. }) if code > 1),
             "{failed:?}"
         );
-        assert_eq!(leftovers(&prefix), Vec::<String>::new());
+        assert_eq!(entries(&root), Vec::<String>::new());
+    }
+
+    /// A run dir that outlived its run is swept past the limit; anything not run-shaped
+    /// is never touched.
+    #[test]
+    fn the_sweep_removes_a_stale_run_dir_and_keeps_a_fresh_one() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("runs");
+        let run = private_run_dir(&root).unwrap().keep();
+        std::fs::write(run.join("old"), b"a\n").unwrap();
+        let name = run.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(crate::attachments::is_session_id(&name), "{name}");
+        std::fs::create_dir(root.join("not-a-run")).unwrap();
+        std::fs::write(root.join("loose.txt"), b"x").unwrap();
+
+        let fresh = SystemTime::now() + WHITESPACE_RUN_STALE_AFTER / 2;
+        sweep_stale_runs(&root, fresh);
+        assert_eq!(entries(&root), [name.as_str(), "loose.txt", "not-a-run"]);
+        let stale = SystemTime::now() + WHITESPACE_RUN_STALE_AFTER * 2;
+        sweep_stale_runs(&root, stale);
+        assert_eq!(entries(&root), ["loose.txt", "not-a-run"]);
+    }
+
+    /// A linked root is refused before any run dir is made in its target, and the sweep
+    /// never deletes through it.
+    #[test]
+    fn a_linked_or_non_directory_root_is_never_used() {
+        let base = tempfile::tempdir().unwrap();
+        let target = base.path().join("target");
+        let stale_run = target.join("0123456789abcdef0123456789abcdef");
+        std::fs::create_dir_all(&stale_run).unwrap();
+        let root = base.path().join("runs");
+        dir_link(&target, &root);
+        let refused = private_run_dir(&root).unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .starts_with("the whitespace diff folder isn't private"),
+            "{refused}"
+        );
+        sweep_stale_runs(&root, SystemTime::now() + WHITESPACE_RUN_STALE_AFTER * 2);
+        assert_eq!(entries(&target), ["0123456789abcdef0123456789abcdef"]);
+
+        let file = base.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(private_run_dir(&file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"x");
     }
 
     #[test]

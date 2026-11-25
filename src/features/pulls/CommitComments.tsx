@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -20,13 +21,15 @@ import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialo
 import { sectionReadNotice } from "@/features/conversations/remote-section-state";
 import { Thread } from "@/features/conversations/Thread";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
-import {
-  capDiffText,
-  DIFF_LINE_CAP,
-  DIFF_MEGA_LINE_CHARS,
-  longestLineLength,
-} from "@/features/diff/cap-diff";
 import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
+import {
+  confirmWhitespace,
+  type DrawStep,
+  type ListedReason,
+  type PaintedView,
+  placeComments,
+  shownRead,
+} from "@/features/diff/painted-view";
 import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import {
   SHOW_WHITESPACE_LABEL,
@@ -63,16 +66,23 @@ import {
   COMMENT_POST_PENDING_REASON,
   pendingWriteReason,
 } from "@/lib/offline-writes";
-import {
-  useHideWhitespace,
-  useSetHideWhitespace,
-} from "@/lib/settings/hide-whitespace";
+import { useSetHideWhitespace } from "@/lib/settings/hide-whitespace";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { cn } from "@/lib/utils";
 
 export type DiffSections = ReturnType<typeof splitUnifiedDiff>;
+
+/** The pane's height cap. `scrolling`: the host's column scrolls, so a 16rem
+ *  floor keeps a list line plus the composer inside the pane on a short window
+ *  and the column reaches them. `fixed`: a column that doesn't scroll keeps
+ *  45%, since a floor there would squeeze the diff above toward nothing. */
+const PANE_CAP = {
+  fixed: { className: "max-h-[45%]", css: "45%" },
+  scrolling: { className: "max-h-[max(45%,16rem)]", css: "max(45%, 16rem)" },
+} as const;
 
 /** Whether a repo's commit-comment surface can light up at all: a ready forge
  *  whose provider takes commit comments. The on-remote verdict is read, and
@@ -121,6 +131,21 @@ export function positionFromLine(
   if (!section || line == null || line < 1) return null;
   const at = patchPositions(section).indexOf(line);
   return at === -1 ? null : at + 1;
+}
+
+/**
+ * A line-anchored comment's new-side line: its own `line`, else its
+ * `position` walked against its file's section in `sections` (undefined while
+ * no patch is in hand). The pane's anchors and the list both resolve through
+ * here, so a host that hands them the same `sections` resolves each comment
+ * once: inline and listed can never both claim it.
+ */
+export function commentLine(
+  c: CommitCommentOut,
+  sections: DiffSections | undefined,
+): number | null {
+  if (c.path == null) return null;
+  return c.line ?? lineFromPosition(sections?.get(c.path), c.position);
 }
 
 const HUNK_COUNTS = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
@@ -179,6 +204,34 @@ function patchPositions(section: string): (number | null)[] {
   return at;
 }
 
+/** The listed comments whose editor is open (`placeComments`' `pinned`). A
+ *  host keeps one set for its pane and its list: the pane's anchors leave
+ *  these out and the list keeps them, so no row change in the pane unmounts
+ *  an open edit. */
+export interface CommentPins {
+  pinned: ReadonlySet<string>;
+  /** Stable; a row's Thread calls it as its editor opens and closes. */
+  pin: (id: string, open: boolean) => void;
+}
+
+const NO_PINS: ReadonlySet<string> = new Set();
+
+export function useCommentPins(): CommentPins {
+  const [pinned, setPinned] = useState(NO_PINS);
+  const pin = useCallback(
+    (id: string, open: boolean) =>
+      setPinned((prev) => {
+        if (prev.has(id) === open) return prev;
+        const next = new Set(prev);
+        if (open) next.add(id);
+        else next.delete(id);
+        return next;
+      }),
+    [],
+  );
+  return { pinned, pin };
+}
+
 /**
  * The new-side line numbers a unified diff text can draw, counted as
  * {@link lineFromPosition} counts them. Each hunk is bounded by its header's
@@ -213,31 +266,32 @@ export function newSideLines(text: string): Set<number> {
   return out;
 }
 
-/** A truncated read's text minus its last line, which the cut may have split. */
-function withoutLastLine(text: string): string {
-  const body = text.endsWith("\n") ? text.slice(0, -1) : text;
-  return body.slice(0, body.lastIndexOf("\n") + 1);
-}
-
-/** The new-side lines the pane draws by default from a whitespace-shown read:
- *  line-capped, none for a binary or generated-looking file. */
-function linesShownByDefault(plain: FileDiff | undefined): Set<number> {
-  if (
-    plain === undefined ||
-    plain.isBinary ||
-    longestLineLength(plain.text) > DIFF_MEGA_LINE_CHARS
-  )
-    return new Set();
-  const text = plain.isTruncated ? withoutLastLine(plain.text) : plain.text;
-  return newSideLines(capDiffText(text, DIFF_LINE_CAP).text);
-}
-
-/** The note a listed comment on the open file carries. */
-type HiddenReason = "unplaced" | "whitespace";
-const HIDDEN_REASON_COPY: Record<HiddenReason, string> = {
+/** The note a listed comment on the open file carries when no pane control
+ *  draws it. */
+const HIDDEN_REASON_COPY: Record<"unplaced" | "whitespace", string> = {
   unplaced: " · couldn't place in this diff",
   whitespace: " · on a line hidden by Hide whitespace",
 };
+
+/** Each draw step's control, and how it reads as the first step. */
+const STEP_COPY: Record<DrawStep, { control: string; first: string }> = {
+  raw: { control: "Raw", first: "in" },
+  "show-diff-anyway": { control: "Show diff anyway", first: "after" },
+  "show-full-diff": { control: "Show full diff", first: "after" },
+};
+
+/** A listed comment's note: the pane's own controls that draw it inline, in
+ *  the order they take, when any do. */
+function reasonNote(reason: ListedReason): string {
+  if (typeof reason === "string") return HIDDEN_REASON_COPY[reason];
+  return ` · inline ${reason
+    .map((step, i) =>
+      i === 0
+        ? `${STEP_COPY[step].first} ${STEP_COPY[step].control}`
+        : `then ${STEP_COPY[step].control}`,
+    )
+    .join(", ")}`;
+}
 
 /** How long a Show whitespace press waits for its thread to draw inline,
  *  counted from the press: a flip that never renders its shown mode (rolled
@@ -245,7 +299,7 @@ const HIDDEN_REASON_COPY: Record<HiddenReason, string> = {
 const LANDING_TIMEOUT_MS = 2000;
 
 /** Watches anywhere for what `whitespaceComposerOpen` reads: a line composer
- *  mounting or unmounting, and the marks on composer wrappers, row wrappers and
+ *  mounting or unmounting, and the marks on composer wrappers, anchor rows and
  *  Thread roots changing. The probe is a DOM query, and none of those changes
  *  this component's React state. */
 function subscribeBodyMutations(onChange: () => void): () => void {
@@ -256,7 +310,6 @@ function subscribeBodyMutations(onChange: () => void): () => void {
     attributes: true,
     attributeFilter: [
       "data-diff-line-widget",
-      "data-whitespace-row",
       "data-thread-editing",
       "data-diff-anchor",
       "data-diff-editor",
@@ -271,17 +324,18 @@ const notHeld = () => false;
  * The inline diff anchors for a commit's line-anchored comments on ONE file:
  * every comment on `path` that resolves to a new-side line, grouped by that line
  * into a single stacked {@link DiffLineAnchor} (DiffSurface keeps one entry per
- * line/side, so same-line comments MUST be pre-grouped). A comment's line is its
- * own `line` when present, else recovered from `position` via
- * {@link lineFromPosition}; unresolvable comments are dropped here and surface in
- * {@link CommitComments}' labelled group instead. A ranged comment gets a small
- * mono range chip.
+ * line/side, so same-line comments MUST be pre-grouped). A comment's line comes
+ * from {@link commentLine} over `sections`, which must be the ones the host's
+ * list resolves against; unresolvable comments are dropped here and surface in
+ * {@link CommitComments}' labelled group instead, and so are the `pinned`
+ * ones (see {@link CommentPins}). A ranged comment gets a small mono range chip.
  */
 export function useCommitLineAnchors(
   comments: CommitCommentOut[] | undefined,
   sections: DiffSections | undefined,
   path: string | null,
-  refs?: MarkdownRefs,
+  refs: MarkdownRefs | undefined,
+  pinned: ReadonlySet<string>,
 ): DiffLineAnchor[] {
   // Held by field, not by object: `useMentionCandidates` rebuilds `refs` every
   // render, and DiffSurface keys its widgets on anchor identity — an object dep
@@ -302,8 +356,8 @@ export function useCommitLineAnchors(
     const bodyHosted = hostedImagesFor(refRepoPath, ghHost);
     const byLine = new Map<number, CommitCommentOut[]>();
     for (const c of comments ?? []) {
-      if (c.path !== path) continue;
-      const line = c.line ?? lineFromPosition(sections?.get(path), c.position);
+      if (c.path !== path || pinned.has(c.id)) continue;
+      const line = commentLine(c, sections);
       if (line == null) continue;
       const bucket = byLine.get(line);
       if (bucket) bucket.push(c);
@@ -339,7 +393,16 @@ export function useCommitLineAnchors(
         </div>
       ),
     }));
-  }, [comments, sections, path, refProvider, refRepoPath, refLens, ghHost]);
+  }, [
+    comments,
+    sections,
+    path,
+    refProvider,
+    refRepoPath,
+    refLens,
+    ghHost,
+    pinned,
+  ]);
 }
 
 /** Map a flat commit comment onto the {@link Thread} prop shape — commit
@@ -367,13 +430,15 @@ function toThread(c: CommitCommentOut): PrThreadOut {
 /**
  * The comment surface for a single commit: whole-commit comments as a flat thread
  * list, line-anchored comments grouped by `path:line`, and a whole-commit composer.
- * Inline rendering in the diff pane needs BOTH the selected file and a resolved
- * new-side line: selected-file comments that miss lead the group below, marked
- * couldn't-place once `diffReady` says the file's patch was actually walked, and
- * every other anchored comment follows under its path — so none is silently dropped.
+ * A comment is inline exactly while the pane's painted report (`painted`) names
+ * its anchor row mounted; every other anchored comment is listed, the painted
+ * file's first with a note naming what draws it, so while this list is
+ * mounted none is dropped or shown twice (a host that unmounts it, as the PR
+ * commit view does while its patch is pending or failed, shows neither).
  *
- * It owns its pane sizing: a bottom pane capped at 45% of its flex-column parent,
- * so a caller drops it in as a sibling rather than wrapping it.
+ * It owns its pane sizing: a bottom pane capped at 45% of its flex-column parent
+ * (with a 16rem floor under `hostScrolls`), so a caller drops it in as a
+ * sibling rather than wrapping it.
  */
 export function CommitComments({
   repoPath,
@@ -381,29 +446,30 @@ export function CommitComments({
   canComment,
   remoteLabel,
   diffSections,
-  selectedPath,
-  selectedBinary = false,
+  painted,
+  pins,
   onSelectFile,
   lens,
   stale = false,
   held = false,
   enabled = true,
   diffReady = true,
-  drawnDiff,
   whitespaceShownDiff,
+  hostScrolls = false,
 }: {
   repoPath: string;
   sha: string;
   canComment: boolean;
   remoteLabel: string;
-  /** Per-file diff sections, so line-anchored comments can resolve their line. */
+  /** Per-file diff sections, so line-anchored comments can resolve their line:
+   *  the same ones the pane's anchors resolve against (`commentLine`). */
   diffSections?: DiffSections;
-  /** The file currently open in the diff pane — its resolvable anchored comments
-   *  render inline there, so they're excluded from the labelled group below. */
-  selectedPath?: string | null;
-  /** The selected file renders through the binary arm, which draws no line
-   *  anchors, so its anchored comments stay in the labelled group. */
-  selectedBinary?: boolean;
+  /** The pane's painted report, relayed by the host (`usePaintedView`); null
+   *  while nothing reports, which lists every comment with no note. Its
+   *  anchors must come from this same comment read, minus `pins`. */
+  painted: PaintedView | null;
+  /** The host's pins (`useCommentPins`), shared with its pane's anchors. */
+  pins: CommentPins;
   /** Selects a file in the sidebar; makes each group's path label a button that
    *  jumps to that file's diff. Absent = the label is plain text. */
   onSelectFile?: (path: string) => void;
@@ -425,15 +491,13 @@ export function CommitComments({
    *  line unresolvable, so the couldn't-place marker is withheld rather than blaming
    *  the comment for a missing patch. */
   diffReady?: boolean;
-  /** The diff the selected file's pane draws, on a host that draws the local
-   *  commit view diff (which follows Hide whitespace): its settled read for
-   *  exactly `sha` + `selectedPath`, or null while that isn't known. Omitted =
-   *  the pane draws `diffSections`' section. */
-  drawnDiff?: FileDiff | null;
-  /** The selected file's whitespace-shown diff, on a host that already holds
+  /** The painted file's whitespace-shown diff, on a host that already holds
    *  it (a forge patch's section): replaces the local read, which fails for a
    *  commit this clone lacks. Omitted = read it locally. */
   whitespaceShownDiff?: FileDiff;
+  /** The host's flex column scrolls (the PR commit view), so the pane's cap
+   *  takes its 16rem floor. Omitted = the 45% cap alone. */
+  hostScrolls?: boolean;
 }) {
   const comments = useCommitComments(
     repoPath,
@@ -521,122 +585,70 @@ export function CommitComments({
     }
   });
 
-  // What the selected file's pane draws, or null when that isn't known. A `-w`
-  // read while the setting is already off is a flip in flight: the pane stops
-  // painting it then, so it judges nothing.
-  const hide = useHideWhitespace();
-  const drawn = (() => {
-    if (drawnDiff === undefined) {
-      const section = selectedPath
-        ? diffSections?.get(selectedPath)
-        : undefined;
-      return diffReady && section !== undefined
-        ? { text: section, fromHost: false, whitespaceHidden: false }
-        : null;
-    }
-    if (drawnDiff === null || (drawnDiff.whitespaceHidden === true && !hide))
-      return null;
-    return {
-      text: drawnDiff.text,
-      fromHost: true,
-      // A truncated read can't prove a line missing for whitespace's sake.
-      whitespaceHidden:
-        drawnDiff.whitespaceHidden === true && drawnDiff.isTruncated !== true,
-    };
-  })();
-  const drawnText = drawn?.text;
-  const drawnLines = useMemo(
-    () => (drawnText === undefined ? null : newSideLines(drawnText)),
-    [drawnText],
-  );
-  const whitespaceCanExplain =
-    drawn !== null && drawn.fromHost && drawn.whitespaceHidden;
-
-  // Anchored comments NOT visible inline: one renders inline only when it's on the
-  // selected file, resolves to a new-side line the pane draws (any resolved line
-  // while that's unknown), and the file isn't drawn by the
-  // binary arm (which draws no lines). Everything else surfaces below
-  // under its `path:line` label, with the resolved line when we have one. Until
-  // `diffReady`, no patch-derived line counts as resolved — its inline anchor doesn't
-  // exist yet, so excluding the comment here would hide it. A server-provided `line`
-  // never depends on the patch and stays resolved throughout.
-  // Selected-file entries lead the group: they're retained only when their line
-  // didn't resolve or the binary arm drew the file, and under a cross-file label
-  // they read as another file's comment.
-  const orderedHidden = useMemo(() => {
-    const retained = anchored
-      .map((c) => {
-        const path = c.path as string;
-        const line =
-          c.line ??
-          (diffReady
-            ? lineFromPosition(diffSections?.get(path), c.position)
-            : null);
-        return { comment: c, path, line, startLine: c.startLine };
-      })
-      .filter(
-        ({ path, line }) =>
-          !(
-            path === selectedPath &&
-            line != null &&
-            !selectedBinary &&
-            (drawnLines === null || drawnLines.has(line))
-          ),
-      );
-    return [
-      ...retained.filter(({ path }) => path === selectedPath),
-      ...retained.filter(({ path }) => path !== selectedPath),
-    ];
-  }, [
-    anchored,
-    diffSections,
-    selectedPath,
-    selectedBinary,
+  // The painted file and where its comments go: inline exactly while their
+  // anchor row is mounted, else listed with a note (`placeComments`). Until
+  // `diffReady`, no patch-derived line counts as resolved; a server-provided
+  // `line` never depends on the patch. The painted file's rows lead the list,
+  // since under a cross-file label they read as another file's comment.
+  const selectedPath = painted?.path ?? null;
+  const resolved = anchored.map((c) => ({
+    comment: c,
+    path: c.path as string,
+    line: commentLine(c, diffReady ? diffSections : undefined),
+    startLine: c.startLine,
+  }));
+  const placement = placeComments(
+    resolved.flatMap(({ comment, path, line }) =>
+      path === selectedPath
+        ? [{ id: comment.id, side: "new" as const, line }]
+        : [],
+    ),
+    painted,
+    pins.pinned,
     diffReady,
-    drawnLines,
-  ]);
+  );
+  const listedReason = new Map(
+    placement.listed.map(({ comment, reason }) => [comment.id, reason]),
+  );
+  const ownRows = resolved.filter(
+    (r) => r.path === selectedPath && listedReason.has(r.comment.id),
+  );
 
-  // The whitespace-shown read is positive evidence a listed line is hidden by
-  // the mode; read only while a listed comment could be one.
-  const needsPlain =
-    whitespaceCanExplain &&
-    !selectedBinary &&
-    orderedHidden.some(
-      ({ path, line }) => path === selectedPath && line != null,
-    );
+  // A `whitespace` reason is the report's candidate; the whitespace-shown read
+  // confirms the line is there, read only while a listed row could be one.
+  const needsPlain = ownRows.some(
+    (r) => listedReason.get(r.comment.id) === "whitespace",
+  );
   const plainDiff = useCommitFilePlainDiff(
     repoPath,
     sha,
-    selectedPath ?? null,
+    selectedPath,
     needsPlain && whitespaceShownDiff === undefined,
   );
   const plainData = whitespaceShownDiff ?? plainDiff.data;
   const plainFailed = whitespaceShownDiff === undefined && plainDiff.isError;
-  const shownLines = useMemo(() => linesShownByDefault(plainData), [plainData]);
-  // The note on a listed comment of the open file; null = no note yet.
-  // A resolved line here is one the drawn diff lacks, so it needs no forge patch.
-  const reasonFor = (line: number | null): HiddenReason | null => {
-    if (line == null || selectedBinary) return diffReady ? "unplaced" : null;
-    if (!whitespaceCanExplain) return "unplaced";
-    if (plainData !== undefined)
-      return shownLines.has(line) ? "whitespace" : "unplaced";
-    return plainFailed ? "unplaced" : null;
-  };
-  const rows = orderedHidden.map((r) => ({
-    ...r,
-    reason: r.path === selectedPath ? reasonFor(r.line) : null,
-  }));
+  const plainRead = useMemo(
+    () => shownRead(plainData, plainFailed),
+    [plainData, plainFailed],
+  );
+  const rows = [
+    ...ownRows.map((r) => ({
+      ...r,
+      // The note on a listed comment of the painted file; null = no note yet.
+      reason: confirmWhitespace(
+        listedReason.get(r.comment.id) ?? null,
+        r.line,
+        plainRead,
+      ),
+    })),
+    ...resolved
+      .filter((r) => r.path !== selectedPath)
+      .map((r) => ({ ...r, reason: null })),
+  ];
   const showsWhitespaceRow =
     enabled &&
     comments.data !== undefined &&
     rows.some((r) => r.reason === "whitespace");
-  // On a host whose diff follows the setting (the one passing `drawnDiff`),
-  // any selected-file row with a resolved line may leave on a flip, so an edit
-  // open in one holds it. Turning the setting off leaves the `-w` read in hand
-  // judging nothing until the shown read lands; turning it on draws a `-w` read
-  // whose hunks git can align over lines no shown hunk covers, or past a
-  // truncated shown read's cut. Null is that host before its read settles.
-  const flipDropsRows = drawnDiff !== undefined && !selectedBinary;
 
   // Live while a Show whitespace button is mounted: a composer can open or
   // close under a button that stays.
@@ -677,9 +689,11 @@ export function CommitComments({
     setHideWhitespace(false);
   }
 
-  // Lands focus on the thread once the whitespace-shown diff draws it. Any
-  // commit or file change drops the landing, re-checked when the node appears,
-  // since a mutation callback can run before this effect re-keys.
+  // Lands focus on the thread once the whitespace-shown diff draws it: it
+  // waits while the pane still paints a `-w` build. Any commit or file change
+  // drops the landing, re-checked when the node appears, since a mutation
+  // callback can run before this effect re-keys.
+  const paintedHidden = painted?.whitespaceHidden === true;
   useEffect(() => {
     const armed = landing.current;
     if (armed === null) return;
@@ -690,7 +704,7 @@ export function CommitComments({
       landing.current = null;
       return;
     }
-    if (hide) return;
+    if (paintedHidden) return;
     const remaining = armed.deadline - performance.now();
     if (remaining <= 0) {
       landing.current = null;
@@ -737,14 +751,14 @@ export function CommitComments({
       if (landing.current === armed) landing.current = null;
       observer.disconnect();
     }, remaining);
-    // A re-key (the mode flipping back, a commit or file change) ends this
-    // landing; a later flip by another route must not land it.
+    // A re-key (a `-w` build painted again, a commit or file change) ends
+    // this landing; a later flip by another route must not land it.
     return () => {
       observer.disconnect();
       clearTimeout(timer);
       if (landing.current === armed) landing.current = null;
     };
-  }, [hide, commitIdentity, selectedPath]);
+  }, [paintedHidden, commitIdentity, selectedPath]);
   useEffect(
     () => () => {
       landing.current = null;
@@ -834,18 +848,16 @@ export function CommitComments({
   // component keeps this surface's per-commit drafts alive across it.
   if (!enabled) return null;
 
+  const cap = PANE_CAP[hostScrolls ? "scrolling" : "fixed"];
   return (
     <div
       ref={paneRef}
-      // The 16rem arm keeps a line of the list plus the composer inside the
-      // pane on a short window, where 45% is less than the composer alone;
-      // the host's scroll region then reaches it.
-      className="flex max-h-[max(45%,16rem)] min-h-0 shrink-0 flex-col border-t"
+      className={cn("flex min-h-0 shrink-0 flex-col border-t", cap.className)}
       // Capped like `max-h`, live, so a window shrink mid-load can't let the
       // floor outgrow the pane's cap.
       style={
         listLoading && loadingFloor !== null
-          ? { minHeight: `min(${loadingFloor}px, max(45%, 16rem))` }
+          ? { minHeight: `min(${loadingFloor}px, ${cap.css})` }
           : undefined
       }
     >
@@ -904,8 +916,7 @@ export function CommitComments({
                     // The open file never offers a jump (it's already shown), and
                     // carries a note only once its reason is known (`reason`).
                     const ownFile = path === selectedPath;
-                    const note =
-                      reason === null ? null : HIDDEN_REASON_COPY[reason];
+                    const note = reason === null ? null : reasonNote(reason);
                     const labelId = `${labelIdBase}-${i}`;
                     const labelNode = (() => {
                       switch (true) {
@@ -984,21 +995,12 @@ export function CommitComments({
                       }
                     })();
                     return (
-                      // A row the flip may drop marks itself, so its open editor
-                      // holds the flip (`whitespaceComposerOpen`).
-                      <div
-                        key={c.id}
-                        className="space-y-1"
-                        data-whitespace-row={
-                          (flipDropsRows &&
-                            path === selectedPath &&
-                            line != null) ||
-                          undefined
-                        }
-                      >
+                      <div key={c.id} className="space-y-1">
                         {labelNode}
                         <Thread
                           thread={toThread(c)}
+                          // An open edit pins its row to this list.
+                          onEditingChange={(open) => pins.pin(c.id, open)}
                           onSaveEdit={
                             c.viewerDidAuthor && !writesHeld
                               ? (next) => void saveEdit(c.id, next)

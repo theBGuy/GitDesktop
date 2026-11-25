@@ -45,8 +45,13 @@ beforeEach(() => {
   } as unknown as ForgeStatus);
 });
 
+const NO_PINS = { pinned: new Set<string>(), pin: () => undefined };
+
+/** The pane's report for x: the binary arm mounts no anchor row, the text
+ *  arm mounts line 1's. */
 function renderPane(patch: string) {
   const sections = splitUnifiedDiff(patch);
+  const section = sections.get("x") ?? "";
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -58,8 +63,15 @@ function renderPane(patch: string) {
         canComment={false}
         remoteLabel="origin"
         diffSections={sections}
-        selectedPath="x"
-        selectedBinary={sectionIsBinary(sections.get("x") ?? "")}
+        painted={{
+          path: "x",
+          patch: section,
+          whitespaceHidden: false,
+          truncated: false,
+          cut: null,
+          anchors: sectionIsBinary(section) ? [] : ["new:1"],
+        }}
+        pins={NO_PINS}
         lens="origin"
       />
     </QueryClientProvider>,

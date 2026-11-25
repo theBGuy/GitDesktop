@@ -144,11 +144,17 @@ pub fn run() {
                     git::compare::sweep_stale_persistent_review_worktrees();
                 });
                 // Remove image-staging sessions a day idle. Startup only, never at exit:
-                // a second instance's drafts may still point at their folders. The root
-                // is the per-user cache dir; unresolved, staging refuses instead.
+                // a second instance's drafts may still point at their folders. Its root and
+                // the whitespace diff's live in the per-user cache dir; unresolved, both
+                // refuse instead.
                 match tauri::Manager::path(app).app_cache_dir() {
-                    Ok(cache) => attachments::init_root(&cache),
-                    Err(e) => eprintln!("gitdesktop: image staging unavailable: {e}"),
+                    Ok(cache) => {
+                        attachments::init_root(&cache);
+                        forge::pr_content::init_whitespace_root(&cache);
+                    }
+                    Err(e) => {
+                        eprintln!("gitdesktop: image staging and whitespace diffs unavailable: {e}")
+                    }
                 }
                 tauri::async_runtime::spawn_blocking(attachments::sweep_stale_sessions);
                 // Capture the login shell's PATH for children spawned through

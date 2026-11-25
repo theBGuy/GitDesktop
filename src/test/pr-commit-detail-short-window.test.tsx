@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { PrCommitDetail } from "@/features/pulls/PrCommitDetail";
+import { TabPanel } from "@/features/repository/TabPanel";
 import {
   forgeCommitComments,
   forgeCommitFirstParent,
@@ -48,10 +49,14 @@ const commit: PrCommitOut = {
   author: "Ada",
   messageBody: "",
 };
+/** A subject that wraps to many lines in a narrow pane. */
+const LONG_SUBJECT = Array.from({ length: 40 }, (_, i) => `word${i}`).join(" ");
 const ALL_ON = new Proxy({}, { get: () => true });
 const classes = (el: Element | null | undefined) =>
   (el?.getAttribute("class") ?? "").split(/\s+/);
 
+// The comments pane's 16rem floor is this host's opt-in (its column scrolls);
+// History keeps the plain 45% cap (commit-comments-pane-cap.test.tsx).
 // jsdom lays nothing out, so this pins the class chain a real Chromium
 // measured: on a 600 px window the composer's Comment button sat under the PR
 // footer, and the comments list shrank below its own padding.
@@ -121,6 +126,133 @@ describe("the PR commit view on a short window", () => {
     expect(classes(list)).toEqual(
       expect.arrayContaining(["min-h-10", "overflow-y-auto"]),
     );
+    client.clear();
+  }, 30_000);
+
+  it("caps a long subject at two lines that scroll, the whole subject kept and keyboard-reachable", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
+    vi.mocked(forgeStatus).mockResolvedValue({
+      provider: "github",
+      installed: true,
+      authenticated: true,
+      repo: "octo/repo",
+      host: "github.com",
+      login: "octo",
+      capabilities: ALL_ON,
+      implemented: ALL_ON,
+    } as unknown as ForgeStatus);
+    vi.mocked(gitObjectsPresent).mockResolvedValue(false);
+    vi.mocked(forgeCommitFirstParent).mockResolvedValue(null);
+    vi.mocked(forgePrCommitDiff).mockResolvedValue(
+      "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1,2 @@\n one\n+two\n",
+    );
+    vi.mocked(forgeCommitComments).mockResolvedValue([]);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    client.setQueryData(settingsKeys.settings, DEFAULT_SETTINGS);
+    render(
+      <QueryClientProvider client={client}>
+        <PrCommitDetail
+          repoPath="/repo"
+          number={7}
+          commit={{ ...commit, headline: LONG_SUBJECT }}
+          onBack={() => undefined}
+          canCommentCommits={false}
+          remoteLabel="GitHub"
+          lens="origin"
+        />
+      </QueryClientProvider>,
+    );
+    const heading = screen.getByRole("heading", { level: 2 });
+    expect(heading).toHaveTextContent(LONG_SUBJECT);
+    // Two text-sm lines, then it scrolls, so the header above the diff and
+    // comments column stays bounded however long the subject runs.
+    expect(classes(heading)).toEqual(
+      expect.arrayContaining([
+        "max-h-10",
+        "overflow-y-auto",
+        "text-sm",
+        "break-words",
+      ]),
+    );
+    expect(heading).toHaveAttribute("tabindex", "0");
+    // It sits in the header, outside the diff-and-comments scroller.
+    expect(heading.closest("header")).not.toBeNull();
+    expect(heading.closest("main")).toBeNull();
+    client.clear();
+  }, 30_000);
+
+  it("opens the next commit with its subject and message scrolled to the top", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
+    vi.mocked(forgeStatus).mockResolvedValue({
+      provider: "github",
+      installed: true,
+      authenticated: true,
+      repo: "octo/repo",
+      host: "github.com",
+      login: "octo",
+      capabilities: ALL_ON,
+      implemented: ALL_ON,
+    } as unknown as ForgeStatus);
+    vi.mocked(gitObjectsPresent).mockResolvedValue(false);
+    vi.mocked(forgeCommitFirstParent).mockResolvedValue(null);
+    vi.mocked(forgePrCommitDiff).mockResolvedValue(
+      "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1,2 @@\n one\n+two\n",
+    );
+    vi.mocked(forgeCommitComments).mockResolvedValue([]);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    client.setQueryData(settingsKeys.settings, DEFAULT_SETTINGS);
+    const body = LONG_SUBJECT.replaceAll(" ", "\n");
+    // Inside a repository tab's panel, which a tab switch hides and shows.
+    const view = (c: PrCommitOut, active = true) => (
+      <QueryClientProvider client={client}>
+        <TabPanel active={active}>
+          <PrCommitDetail
+            repoPath="/repo"
+            number={7}
+            commit={c}
+            onBack={() => undefined}
+            canCommentCommits={false}
+            remoteLabel="GitHub"
+            lens="origin"
+          />
+        </TabPanel>
+      </QueryClientProvider>
+    );
+    const first = { ...commit, headline: LONG_SUBJECT, messageBody: body };
+    const { rerender } = render(view(first));
+    const scrollers = () => {
+      const heading = screen.getByRole("heading", { level: 2 });
+      const message = heading.parentElement?.querySelector("pre");
+      expect(message).toHaveTextContent(body.split("\n")[0]);
+      return [heading, message as HTMLElement];
+    };
+    // A keyboard user reading the subject: focus stays on it across the switch.
+    const [subject] = scrollers();
+    act(() => subject.focus());
+    expect(document.activeElement).toBe(subject);
+    // jsdom lays nothing out, so each scroller carries its own scroll offset,
+    // which only the view's reset returns to 0.
+    for (const el of scrollers())
+      Object.defineProperty(el, "scrollTop", { value: 120, writable: true });
+    const next = { ...first, oid: "0123456789".repeat(4) };
+    rerender(view(next));
+    for (const el of scrollers()) expect(el.scrollTop).toBe(0);
+    expect(document.activeElement).toBe(
+      screen.getByRole("heading", { level: 2 }),
+    );
+    // Back to the same commit after a tab switch: the scroll it was left at.
+    const shown = scrollers();
+    for (const el of shown) el.scrollTop = 30;
+    rerender(view(next, false));
+    await act(async () => undefined);
+    rerender(view(next, true));
+    await act(async () => undefined);
+    expect(scrollers()).toEqual(shown);
+    expect(shown.map((el) => el.scrollTop)).toEqual([30, 30]);
     client.clear();
   }, 30_000);
 });

@@ -15,7 +15,21 @@
 //   expression keyword (the masker's own rule). A tag with no closer throws.
 // - Class tokens: the string literals of a tag's top-level `className`; a
 //   variant-prefixed token is not read; a token is CONDITIONAL when its
-//   `className={…}` expression holds `?`, `&&` or `||`.
+//   literal sits in an operand holding `?:`, `&&`, `||` or `??` at any
+//   bracket level, or inside an object literal (a `cn({…})` map); a plain
+//   argument beside a conditional one is unconditional.
+// - Resolution (`twResolve`): within the groups the guard reads (display,
+//   sr, position, overflow, overflow-y, flex-direction, min-h, h, size; the
+//   value sets of tailwind-merge 3.7.0, checked against the installed package
+//   when node_modules exists), a value one `cn(…)`/`twMerge(…)` call builds
+//   (`cn` imported from src/lib/utils) keeps a group's LAST member and drops
+//   the earlier ones (a conditional later member makes them conditional);
+//   any other class string (a literal, a template, a non-merging call), and
+//   a pair both kept by the merge that set one property (size and h,
+//   overflow and overflow-y), leaves the stylesheet's order to decide, so
+//   each of a differing pair is conditional; an important `!` member beats a
+//   plain one either way. Property: a relief token counts only when no other
+//   token can override it on the box.
 // - Component roots: a column-0 `export function`, `export default function`,
 //   `function`, `export const Name =` or `const Name =` (async, generic and
 //   typed forms included) with a capitalized name. Its roots are the
@@ -26,23 +40,35 @@
 //   (recursive, cycle-guarded); a same-file definition wins, then the one the
 //   file's import names (`@/` or relative; a package import resolves to
 //   none), else every exported definition of that name.
-// - A mount's own tokens reach a root only when that root reads `className`
-//   (its `className={…}` names the identifier, or the tag takes a spread);
-//   elsewhere they are not read at all. A component with no root found is
-//   read by its mount's tokens alone.
+// - A root's className is its LAST writer in attribute order: an explicit
+//   `className` (its own tokens, plus the mount's at the place its `{…}`
+//   names `className` or `props.className`, conditional in a conditional
+//   operand, then resolved as above), or a spread, which may carry the
+//   mount's className and so replaces every earlier writer with the mount's
+//   tokens whenever the mount passes one, unless it spreads the rest of a
+//   parameter pattern that took `className` out. A component with no root
+//   found is read by its mount's tokens alone.
 // - RIGID: a class set holds `h-full` or `size-full` (conditional counts) and
-//   no unconditional `min-h-0`, `overflow(-y)-auto|scroll|hidden`, `absolute`
-//   or `fixed`.
+//   no unconditional `min-h-0`, `overflow(-y)-auto|scroll|hidden`, `absolute`,
+//   `fixed`, `sr-only` or `hidden` (read after resolution, so a merged later
+//   display member drops `hidden` and an unmerged one makes it conditional).
 // - Transparent nodes, climbed through for parents and expanded for roots and
 //   siblings: fragments, `Fragment`, `React.Fragment`, `Suspense`, `Activity`,
 //   names ending `Context`, `Provider` or `ErrorBoundary`, and a lowercase tag
-//   with an unconditional `contents`.
+//   with an unconditional `contents` in its resolved class set (`!` markers
+//   stripped; read with no mount, as RIGID reads it: a merged later display
+//   member drops it, an unmerged one makes it conditional).
 // - Siblings: the other child slots of the first non-transparent ancestor (one
 //   direct child tag, or one top-level `{…}` child expression whose alternates
 //   are one slot). A slot counts when it can paint in flow: a tag with a class
-//   set free of an unconditional `absolute`, `fixed`, `sr-only` or `hidden`; a
-//   tag-free expression that is not blank, a bare identifier bound once in the
-//   file to JSX being read as that JSX. A self-closing `<span … />` with no
+//   set free of an unconditional `absolute`, `fixed`, `sr-only` or `hidden`;
+//   non-blank JSX text; an expression with one VALUE ARM that counts. Arms:
+//   both results of `?:`, every operand of `||` and `??`, the last operand
+//   of `&&`, recursively, parens trimmed. An arm holding JSX counts by its
+//   tags; a tag-free arm counts unless blank or a literal that paints nothing
+//   (`null`, `undefined`, `true`, `false`, a white-space-only string), a bare
+//   identifier bound once in the file to JSX being read as that JSX. A
+//   self-closing `<span … />` with no
 //   spread, no `style`, a `className` absent or one string literal, and every
 //   token on the closed non-box list (NON_BOX) doesn't count; a parent's
 //   `space-y-*` makes every child count.
@@ -54,23 +80,39 @@
 // row with no finding fails, and so do zero files, zero component roots, zero
 // rigid nodes, an unreadable file, a tag that never closes and a `className`
 // value running past its tag.
-// Out of sight: classes from constants, props, template strings or spreads;
-// variant-prefixed classes; a component that lays `children` out in an inner
-// column (only its root is read); a root returned any other way (`memo` /
-// `forwardRef` call forms); a component reached through `lazy()` (the
-// DiffSurfaceLazy wrappers) or the scan can't resolve, whose mount classes
-// are taken as its box's; a parentless tag handed to a helper the component
-// returns (`return shell(<X />)`), read as a root whatever the helper wraps
-// it in; a root that receives `className` under
-// another prop name, or forwards it through a local (`const base = cn(…,
-// className)`), read as "not read", which drops a mount's `h-full` (one live
-// instance, src/features/actions/status.tsx, an icon); a rigid tag bound to a
-// local and placed by name (read where it is written); whether an unfollowed
-// container really is a column; a block (non-flex) parent of definite height;
-// a `gap-*` the column adds around an empty span; a conditional or variant
-// `contents`; a `{items.map(…)}` expression is one slot, so repeated rigid
-// items never count as siblings of each other; whether the content can
-// actually outgrow the space.
+// OUT OF SIGHT, closed list (each shape is deliberately unmodelled; a new
+// one joins this list or the model, never neither):
+//  1. Classes from constants, props, a template's `${…}` values or a spread's
+//     object (only string literals in the expression are read).
+//  2. Variant-prefixed classes (`md:min-h-0`), and how a variant member
+//     overrides a base one at that breakpoint or state.
+//  3. tailwind-merge groups the guard doesn't read, a custom merge config,
+//     and conflicts the merge leaves to the stylesheet across groups it
+//     doesn't read (`max-h-*` against `h-full`, `inset-*`, `basis-*`).
+//  4. A component that lays `children` out in an inner column (only its root
+//     is read).
+//  5. A root returned any other way (`memo` / `forwardRef` call forms), or
+//     reached through `lazy()` (the DiffSurfaceLazy wrappers) or a name the
+//     scan can't resolve: its mount classes are taken as its box's.
+//  6. A parentless tag handed to a helper the component returns
+//     (`return shell(<X />)`), read as a root whatever the helper wraps it in.
+//  7. A root that receives `className` under another prop name, forwards it
+//     through a local (`const base = cn(…, className)`) or reads it off an
+//     object not named `props`: read as "not read", which drops a mount's
+//     `h-full` (one live instance, src/features/actions/status.tsx, an icon).
+//  8. A rest taken out in the body (`const { className, ...rest } = props`),
+//     read as carrying the mount's className, which drops the root's tokens.
+//  9. A rigid tag bound to a local and placed by name (read where written).
+// 10. Whether an unfollowed container really is a column; a block (non-flex)
+//     parent of definite height; a `gap-*` the column adds around an empty
+//     span; a conditional or variant `contents`, and a root's `contents` that
+//     its mount's className overrides.
+// 11. A `{items.map(…)}` (any arm holding JSX that isn't one element) is read
+//     by its tags alone, so a string a callback or call returns beside JSX
+//     (`render("x", <A />)`) is not counted, and repeated rigid items never
+//     count as siblings of each other.
+// 12. The left operand of `&&`, which renders when it is `0` or `NaN`.
+// 13. Whether the content can actually outgrow the space.
 import assert from "node:assert/strict";
 import { posix } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -83,7 +125,6 @@ import {
   EXPR_OPENERS,
   hasSpread,
   lineOf,
-  literalText,
   loadCorpus,
   maskNonCode,
   matchBrace,
@@ -103,6 +144,10 @@ const FILL = /^(?:h-full|size-full)$/;
 const RELIEF =
   /^(?:min-h-0|overflow-(?:y-)?(?:auto|scroll|hidden)|absolute|fixed)$/;
 const OUT_OF_FLOW = /^(?:absolute|fixed|sr-only|hidden)$/;
+/** A child expression that paints nothing in a flex column: React renders
+ *  these literals as nothing, and a flex container drops white-space-only
+ *  text. */
+const NON_RENDERING = /^(?:null|undefined|false|true|(["'`])\s*\1)$/;
 const CONTROL = new Set(["if", "for", "while", "switch", "catch", "with"]);
 const BLOCK_WORDS = new Set(["else", "try", "finally", "do"]);
 
@@ -133,10 +178,97 @@ function readToken(tok) {
   return tok.replace(/^!|!$/g, "");
 }
 
+/** tailwind-merge 3.7.0's default class groups (`getDefaultConfig`) holding a
+ *  utility this guard reads, each with every value the group accepts; the
+ *  agreement test below re-checks them against the installed package. */
+const isNum = (v) => v !== "" && !Number.isNaN(Number(v));
+const SIZING = (v) =>
+  /^\d+(?:\.\d+)?\/\d+(?:\.\d+)?$/.test(v) ||
+  /^(?:auto|full|dvw|dvh|lvw|lvh|svw|svh|min|max|fit|px)$/.test(v) ||
+  isNum(v) ||
+  /^\[.+\]$/.test(v) ||
+  /^\(.+\)$/.test(v);
+const OVERFLOW = /^(?:auto|hidden|clip|visible|scroll)$/;
+const TW_GROUPS = [
+  [
+    "display",
+    (u) =>
+      /^(?:block|inline-block|inline|flex|inline-flex|table|inline-table|table-caption|table-cell|table-column|table-column-group|table-footer-group|table-header-group|table-row-group|table-row|flow-root|grid|inline-grid|contents|list-item|hidden)$/.test(
+        u,
+      ),
+  ],
+  ["sr", (u) => u === "sr-only" || u === "not-sr-only"],
+  ["position", (u) => /^(?:static|fixed|absolute|relative|sticky)$/.test(u)],
+  ["overflow-y", (u) => /^overflow-y-/.test(u) && OVERFLOW.test(u.slice(11))],
+  ["overflow", (u) => /^overflow-/.test(u) && OVERFLOW.test(u.slice(9))],
+  [
+    "flex-direction",
+    (u) => /^flex-(?:row|row-reverse|col|col-reverse)$/.test(u),
+  ],
+  [
+    "min-h",
+    (u) =>
+      u.startsWith("min-h-") &&
+      (/^(?:screen|lh|none)$/.test(u.slice(6)) || SIZING(u.slice(6))),
+  ],
+  [
+    "h",
+    (u) =>
+      u.startsWith("h-") &&
+      (/^(?:screen|lh)$/.test(u.slice(2)) || SIZING(u.slice(2))),
+  ],
+  ["size", (u) => u.startsWith("size-") && SIZING(u.slice(5))],
+];
+/** The groups a later member of a group also removes (`conflictingClassGroups`,
+ *  read groups only). */
+const TW_CONFLICTS = { overflow: ["overflow-y"], size: ["h"] };
+
+const twGroup = (tok) => {
+  const u = readToken(tok);
+  return u ? TW_GROUPS.find(([, test]) => test(u))?.[0] : undefined;
+};
+
+/** The tokens of one box after its class string resolves, `merged` when
+ *  tailwind-merge built it (`cn`). Merged, a later member of a token's group
+ *  (or of a group that removes it) drops it, or makes it conditional when
+ *  that member is conditional. Unmerged, or where both survive the merge but
+ *  set one property, the stylesheet's order decides, so each of a differing
+ *  pair becomes conditional. An important (`!`) member beats a plain one in
+ *  any order. */
+function twResolve(tokens, merged) {
+  const info = tokens.map((t) => ({
+    g: twGroup(t.tok),
+    imp: /^!|!$/.test(t.tok),
+    u: readToken(t.tok),
+  }));
+  const removes = (b, a) => b.g === a.g || TW_CONFLICTS[b.g]?.includes(a.g);
+  const out = [];
+  tokens.forEach((t, i) => {
+    const a = info[i];
+    let cond = t.cond;
+    let dropped = false;
+    info.forEach((b, j) => {
+      if (j === i || !a.g || !b.g || !(removes(b, a) || removes(a, b))) return;
+      if (b.imp !== a.imp ? b.imp : merged && j > i && removes(b, a)) {
+        if (tokens[j].cond) cond = true;
+        else dropped = true;
+      } else if (b.imp !== a.imp) {
+        return;
+      } else if (!(merged && j < i && removes(a, b)) && b.u !== a.u) {
+        cond = true;
+      }
+    });
+    if (!dropped) out.push(cond === t.cond ? t : { ...t, cond });
+  });
+  return out;
+}
+
 const anyRead = (set, re, uncond = false) =>
   set.some((t) => (!uncond || !t.cond) && re.test(readToken(t.tok)));
-const isRigid = (set) => anyRead(set, FILL) && !anyRead(set, RELIEF, true);
 const inFlow = (set) => !anyRead(set, OUT_OF_FLOW, true);
+// A box out of flow takes no space in the column, so it can't overflow it.
+const isRigid = (set) =>
+  anyRead(set, FILL) && !anyRead(set, RELIEF, true) && inFlow(set);
 const isColumn = (set) =>
   anyRead(set, /^(?:inline-)?flex$/) && anyRead(set, /^flex-col(?:-reverse)?$/);
 
@@ -289,6 +421,12 @@ function parseJsx(text, masked) {
         child.parent = node;
         node.slots.push({ kind: "tag", node: child });
         j = child.end;
+      } else if (/\S/.test(text[j])) {
+        // JSX text is blanked in the mask, so a run is read from the raw text.
+        let k = j;
+        while (k < masked.length && masked[k] !== "{" && masked[k] !== "<") k++;
+        node.slots.push({ kind: "text", start: j, end: k, trees: [] });
+        j = k;
       } else j++;
     }
   }
@@ -297,32 +435,159 @@ function parseJsx(text, masked) {
   return { nodes, trees };
 }
 
+/** A className expression that merges the caller's: `className` or
+ *  `props.className`, never another object's member. */
+const FORWARDS = /(?:(?<![\w$.])|(?<=(?<![\w$.])props\.))className(?![\w$])/;
+
+/** Each string literal and template text segment in masked's [from, to), with
+ *  its offset: `literalStrings` (ts-mask) with positions kept. */
+function literalSpans(text, masked, from, to) {
+  const out = [];
+  const braces = [];
+  const template = (start) => {
+    let k = start;
+    while (
+      k < to &&
+      masked[k] !== "`" &&
+      !(masked[k] === "$" && masked[k + 1] === "{")
+    )
+      k++;
+    if (k >= to) throw new ScanError("a template literal runs past its range");
+    out.push({ s: text.slice(start, k), at: start });
+    if (masked[k] === "`") return k + 1;
+    braces.push(0);
+    return k + 2;
+  };
+  let i = from;
+  while (i < to) {
+    const c = masked[i];
+    if (c === '"' || c === "'") {
+      const j = masked.indexOf(c, i + 1);
+      if (j < 0 || j >= to) throw new ScanError("a string runs past its range");
+      out.push({ s: text.slice(i + 1, j), at: i });
+      i = j + 1;
+    } else if (c === "`") {
+      i = template(i + 1);
+    } else if (braces.length > 0 && c === "{") {
+      braces[braces.length - 1]++;
+      i++;
+    } else if (braces.length > 0 && c === "}") {
+      if (braces[braces.length - 1] === 0) {
+        braces.pop();
+        i = template(i + 1);
+      } else {
+        braces[braces.length - 1]--;
+        i++;
+      }
+    } else i++;
+  }
+  return out;
+}
+
+/** Whether a `?`, `&&`, `||` or `??` sits at depth 0 of the comma-separated
+ *  operand of the group content [from, to) that holds offset `at`. */
+function operandConditional(masked, from, to, at) {
+  let depth = 0;
+  let hit = false;
+  for (let i = from; i < to; i++) {
+    const c = masked[i];
+    if (OPEN.has(c)) depth++;
+    else if (CLOSE.has(c)) depth--;
+    else if (depth !== 0) continue;
+    else if (c === ",") {
+      if (i > at) break;
+      hit = false;
+    } else if (
+      (c === "?" && masked[i + 1] !== ".") ||
+      (c === "&" && masked[i + 1] === "&") ||
+      (c === "|" && masked[i + 1] === "|")
+    ) {
+      hit = true;
+    }
+  }
+  return hit;
+}
+
+/** Whether the literal at `at` in the className expression [from, to) is
+ *  conditional: inside an object literal (a `cn({…})` map), or in an operand
+ *  holding `?:`, `&&`, `||` or `??` at any enclosing bracket level. A plain
+ *  argument beside a conditional one stays unconditional. */
+function conditionalAt(masked, from, to, at) {
+  const opens = [];
+  for (let i = from; i < at; i++) {
+    if (OPEN.has(masked[i])) opens.push(i);
+    else if (CLOSE.has(masked[i])) opens.pop();
+  }
+  if (opens.some((o) => masked[o] === "{" && masked[o - 1] !== "$")) {
+    return true;
+  }
+  const groups = [
+    [from, to],
+    ...opens.map((o) => [o + 1, matchBrace(masked, o)]),
+  ];
+  return groups.some(([gs, ge]) => operandConditional(masked, gs, ge, at));
+}
+
+/** The opening tag [from, end)'s top-level `{...x}` attributes, as className
+ *  writers: offset, and the spread name when it is a bare identifier. */
+function spreadsAt(masked, from, end) {
+  const out = [];
+  let depth = 0;
+  for (let i = from; i < end; i++) {
+    if (masked[i] === "}") depth--;
+    else if (masked[i] === "{") {
+      if (depth === 0 && /^\{\s*\.\.\./.test(masked.slice(i, end))) {
+        const name = /^\{\s*\.\.\.\s*([\w$]+)\s*\}/.exec(masked.slice(i, end));
+        out.push({ at: i, spread: true, name: name ? name[1] : null });
+      }
+      depth++;
+    }
+  }
+  return out;
+}
+
 /** The tag's `className` reading: tokens (with their conditional flag),
- *  whether it is absent or one plain string literal, whether the root reads a
- *  mount's `className`, and its spread / `style`. */
+ *  whether it is absent or one plain string literal, its className writers in
+ *  attribute order, and its spread / `style`. */
 function classInfo(f, node) {
   if (node.cls) return node.cls;
   const { text, masked } = f;
   const [s, e] = node.open;
   const tokens = [];
+  const writers = [];
   let values = 0;
   let literal = true;
-  let reads = false;
   const re = /\sclassName\s*=\s*/g;
   re.lastIndex = s;
   for (let m = re.exec(masked); m && m.index < e; m = re.exec(masked)) {
     if (!topLevel(masked, s, m.index)) continue;
     const v = m.index + m[0].length;
     let end = -1;
-    let cond = false;
+    let spans = [];
+    let forwards = null;
+    let merge = false;
     if (masked[v] === '"' || masked[v] === "'") {
       end = masked.indexOf(masked[v], v + 1) + 1;
+      if (end > v && end <= e) {
+        spans = [{ s: text.slice(v + 1, end - 1), cond: false, at: v }];
+      }
     } else if (masked[v] === "{") {
       end = matchBrace(masked, v) + 1;
       const expr = masked.slice(v, end);
-      cond = /\?|&&|\|\|/.test(expr);
       literal = false;
-      if (/(?<![\w$.])className(?![\w$])/.test(expr)) reads = true;
+      if (end > v && end <= e) {
+        const fw = FORWARDS.exec(expr);
+        if (fw) {
+          const at = v + fw.index;
+          forwards = { at, cond: conditionalAt(masked, v + 1, end - 1, at) };
+        }
+        merge = mergesClasses(f, masked, v, end);
+        spans = literalSpans(text, masked, v + 1, end - 1).map((x) => ({
+          s: x.s,
+          cond: conditionalAt(masked, v + 1, end - 1, x.at),
+          at: x.at,
+        }));
+      }
     }
     if (end <= v || end > e) {
       throw new ScanError(
@@ -330,22 +595,73 @@ function classInfo(f, node) {
       );
     }
     values++;
-    for (const tok of literalText(text, masked, v, end).split(/\s+/)) {
-      if (tok) tokens.push({ tok, cond });
+    const own = [];
+    for (const { s: lit, cond, at } of spans) {
+      for (const tok of lit.split(/\s+/)) if (tok) own.push({ tok, cond, at });
     }
+    tokens.push(...own);
+    writers.push({ at: m.index, tokens: own, forwards, merge });
   }
   const spread = hasSpread(masked, s, e);
+  writers.push(...spreadsAt(masked, s, e));
+  writers.sort((a, b) => a.at - b.at);
   const style = [...masked.slice(s, e).matchAll(/\sstyle\s*=/g)].some((m) =>
     topLevel(masked, s, s + m.index),
   );
   node.cls = {
     tokens,
     literal: values === 0 || (values === 1 && literal),
-    reads: reads || spread,
+    writers,
     spread,
     style,
   };
   return node.cls;
+}
+
+/** Whether the `{…}` value at [v, end) is one call to tailwind-merge: `cn`
+ *  imported from src/lib/utils, or `twMerge` from the package. */
+function mergesClasses(f, masked, v, end) {
+  const call = /^\{\s*([\w$]+)\s*\(/.exec(masked.slice(v, end));
+  if (!call) return false;
+  const close = matchBrace(masked, v + call[0].length - 1);
+  if (close < 0 || masked.slice(close + 1, end - 1).trim() !== "") return false;
+  const imp = f.imports.get(call[1]);
+  if (!imp) return false;
+  if (imp.from === "tailwind-merge") return imp.name === "twMerge";
+  const target = imp.from.startsWith("@/")
+    ? `src/${imp.from.slice(2)}`
+    : posix.normalize(posix.join(posix.dirname(f.rel), imp.from));
+  return imp.name === "cn" && target === "src/lib/utils";
+}
+
+/** The className the tag's LAST writer gives its box, `mount` being the
+ *  caller's tokens (null: the caller passes none). An explicit `className`
+ *  writes its own tokens, plus the caller's where its `{…}` names them
+ *  (conditional when that name sits in a conditional operand), resolved by
+ *  `twResolve`; a spread may carry the caller's className, so whenever the
+ *  caller passes one it replaces every earlier writer, unless it spreads
+ *  `rest`, the props pattern's rest after it took `className` out. Null when
+ *  nothing writes. */
+function effectiveClass(info, mount, rest = null) {
+  let eff = null;
+  for (const w of info.writers) {
+    if (!w.spread) {
+      let toks = w.tokens;
+      if (w.forwards && mount) {
+        const at = w.forwards.at;
+        const caller = w.forwards.cond
+          ? mount.map((t) => ({ ...t, cond: true }))
+          : mount;
+        toks = [
+          ...toks.filter((t) => t.at < at),
+          ...caller,
+          ...toks.filter((t) => t.at > at),
+        ];
+      }
+      eff = twResolve(toks, w.merge);
+    } else if (mount && !(rest && w.name === rest)) eff = mount;
+  }
+  return eff;
 }
 
 function transparent(f, node) {
@@ -360,9 +676,14 @@ function transparent(f, node) {
   ) {
     return true;
   }
+  // Read on the resolved set, so a later display member that a merge keeps
+  // (or the stylesheet may apply) leaves the tag a box; read bare, so an
+  // important marker on either end still counts.
   return (
     /^[a-z]/.test(n) &&
-    classInfo(f, node).tokens.some((t) => !t.cond && t.tok === "contents")
+    (effectiveClass(classInfo(f, node), null) ?? []).some(
+      (t) => !t.cond && readToken(t.tok) === "contents",
+    )
   );
 }
 
@@ -446,11 +767,13 @@ function componentsOf(f) {
     const name = m[2] ?? m[3];
     let k = m.index + m[0].length - 1;
     let body;
+    let params = "";
     if (m[2]) {
       if (masked[k] === "<") k = skipWs(masked, skipAngles(masked, k));
       if (masked[k] !== "(") continue;
       const pc = matchBrace(masked, k);
       if (pc < 0) throw new ScanError(`${name}: unreadable parameters`);
+      params = masked.slice(k + 1, pc);
       let b = pc + 1;
       while (b < masked.length && masked[b] !== "{" && masked[b] !== ";") b++;
       if (masked[b] !== "{") continue;
@@ -466,6 +789,7 @@ function componentsOf(f) {
       if (masked[a] === "(") {
         const pc = matchBrace(masked, a);
         if (pc < 0) throw new ScanError(`${name}: unreadable parameters`);
+        params = masked.slice(a + 1, pc);
         a = skipWs(masked, pc + 1);
         if (masked[a] === ":") a = masked.indexOf("=>", a);
       } else {
@@ -516,9 +840,36 @@ function componentsOf(f) {
       exported: Boolean(m[1]) || exported.has(name),
       isDefault: /default/.test(m[1] ?? ""),
       roots,
+      restWithoutClass: restWithoutClass(params),
     });
   }
   return out;
+}
+
+/** The rest binding of a props pattern that takes `className` out
+ *  (`{ className, ...rest }`), or null: spreading that rest can't hand the
+ *  root the caller's className. */
+function restWithoutClass(params) {
+  const open = params.indexOf("{");
+  if (open < 0 || params.slice(0, open).trim() !== "") return null;
+  const close = matchBrace(params, open);
+  if (close < 0) return null;
+  let rest = null;
+  let named = false;
+  let depth = 0;
+  let from = open + 1;
+  for (let i = open + 1; i <= close; i++) {
+    const c = params[i];
+    if (i === close || (c === "," && depth === 0)) {
+      const entry = params.slice(from, i).trim();
+      const r = /^\.\.\.\s*([\w$]+)$/.exec(entry);
+      if (r) rest = r[1];
+      else if (/^className(?![\w$])/.test(entry)) named = true;
+      from = i + 1;
+    } else if (OPEN.has(c)) depth++;
+    else if (CLOSE.has(c)) depth--;
+  }
+  return named ? rest : null;
 }
 
 /** `const|let x = (<…>)` bindings, read in place of a bare `{x}` child. */
@@ -605,9 +956,10 @@ function index(files) {
       try {
         const masked = maskNonCode(text, true);
         f = { rel, text, masked, ...parseJsx(text, masked) };
+        // Read before the roots: a root's class reading asks who `cn` is.
+        f.imports = importsOf(text, masked);
         f.comps = new Map(componentsOf(f).map((c) => [c.name, c]));
         f.bindings = bindingsOf(f);
-        f.imports = importsOf(text, masked);
       } catch (err) {
         if (err instanceof ScanError) {
           throw new ScanError(`${rel}: ${err.message}`);
@@ -629,11 +981,13 @@ function index(files) {
 }
 
 /** The class sets a tag can lay out with: one per root of its component,
- *  `mount` being the tokens a mount hands a root that reads `className`. */
+ *  `mount` being the className tokens its caller passes (null: none) to the
+ *  root of `stack`'s last component. */
 function classSets(ix, f, node, mount = null, stack = []) {
-  const info = classInfo(f, node);
-  const own = mount && info.reads ? [...mount, ...info.tokens] : info.tokens;
-  if (/^[a-z]/.test(node.name) || transparent(f, node)) return [own];
+  const rest = stack.at(-1)?.restWithoutClass ?? null;
+  const own = effectiveClass(classInfo(f, node), mount, rest);
+  const set = own ?? [];
+  if (/^[a-z]/.test(node.name) || transparent(f, node)) return [set];
   const comps = resolveComps(ix, f, node.name);
   const sets = [];
   for (const c of comps) {
@@ -642,19 +996,83 @@ function classSets(ix, f, node, mount = null, stack = []) {
       sets.push(...classSets(ix, c.file, r, own, [...stack, c]));
     }
   }
-  return sets.length ? sets : [own];
+  return sets.length ? sets : [set];
 }
 
-/** Whether a slot can paint in flow beside a rigid node. */
+/** The value arms of the expression [from, to) of `masked`: both results of a
+ *  `?:`, every operand of `||` / `??`, the last operand of `&&`, recursively,
+ *  wrapping parens trimmed. `trees` (JSX inside the range) are skipped whole,
+ *  so their own `?`, `:` and `&&` never split an arm. */
+function valueArms(masked, from, to, trees) {
+  let s = skipWs(masked, from);
+  let e = to;
+  const trimEnd = () => {
+    while (e > s && /\s/.test(masked[e - 1])) e--;
+  };
+  trimEnd();
+  while (masked[s] === "(" && matchBrace(masked, s) === e - 1) {
+    s = skipWs(masked, s + 1);
+    e--;
+    trimEnd();
+  }
+  const ors = [];
+  let and = -1;
+  let q = -1;
+  let colon = -1;
+  let pending = 0;
+  for (let i = s, depth = 0; i < e; i++) {
+    const tree = trees.find((t) => t.start === i);
+    if (tree) {
+      i = tree.end - 1;
+      continue;
+    }
+    const c = masked[i];
+    const two = masked.slice(i, i + 2);
+    if (OPEN.has(c)) depth++;
+    else if (CLOSE.has(c)) depth--;
+    else if (depth !== 0) continue;
+    else if (two === "??" || two === "||" || two === "&&") {
+      if (q < 0 && two === "&&") and = i;
+      else if (q < 0) ors.push(i);
+      i++;
+    } else if (c === "?" && masked[i + 1] !== ".") {
+      if (q < 0) q = i;
+      pending++;
+    } else if (c === ":" && q >= 0 && --pending === 0) {
+      colon = i;
+      break;
+    }
+  }
+  const arms = (a, b) => valueArms(masked, a, b, trees);
+  if (q >= 0 && colon > q)
+    return [...arms(q + 1, colon), ...arms(colon + 1, e)];
+  if (q >= 0) return [[s, e]];
+  if (ors.length) {
+    const cuts = [s - 2, ...ors];
+    return cuts.flatMap((c, k) => arms(c + 2, cuts[k + 1] ?? e));
+  }
+  if (and >= 0) return arms(and + 2, e);
+  return [[s, e]];
+}
+
+/** Whether a slot can paint in flow beside a rigid node. An expression slot
+ *  counts when one of its value arms does: an arm holding JSX by its tags, a
+ *  tag-free arm unless blank or a literal that renders nothing, an identifier
+ *  bound to JSX as that JSX. */
 function slotCounts(ix, f, slot, ctx) {
+  if (slot.kind === "text") return true;
   if (slot.kind === "tag") return tagCounts(ix, f, slot.node, ctx);
-  if (slot.trees.length)
-    return slot.trees.some((t) => tagCounts(ix, f, t, ctx));
-  const src = f.masked.slice(slot.start + 1, slot.end - 1);
-  if (!src.trim()) return false;
-  const id = /^\s*([\w$]+)\s*$/.exec(src);
-  const bound = id && f.bindings.get(id[1]);
-  return bound ? bound.some((t) => tagCounts(ix, f, t, ctx)) : true;
+  const arms = valueArms(f.masked, slot.start + 1, slot.end - 1, slot.trees);
+  return arms.some(([s, e]) => {
+    const trees = slot.trees.filter((t) => t.start >= s && t.end <= e);
+    if (trees.length) return trees.some((t) => tagCounts(ix, f, t, ctx));
+    const src = f.masked.slice(s, e);
+    if (!src.trim()) return false;
+    if (NON_RENDERING.test(f.text.slice(s, e).trim())) return false;
+    const id = /^\s*([\w$]+)\s*$/.exec(src);
+    const bound = id && f.bindings.get(id[1]);
+    return bound ? bound.some((t) => tagCounts(ix, f, t, ctx)) : true;
+  });
 }
 
 function emptySpan(f, node) {
@@ -1106,9 +1524,140 @@ test("F8: Suspense, Activity and Context wrappers are climbed through", () => {
 test("F9: relief or h-full inside a conditional cn( reads both ways", () => {
   fails(host('<div className={cn("h-full", open && "min-h-0")}>b</div>'));
   fails(host('<div className={cn("p-2", open && "h-full")}>b</div>'));
-  // The whole expression is conditional, so its relief reads conditional too.
-  fails(host('<div className={cn("h-full min-h-0", open && "p-2")}>b</div>'));
+  fails(host('<div className={cn(open && "h-full")}>b</div>'));
+  fails(host('<div className={open ? "h-full min-h-0" : "h-full"}>b</div>'));
+  fails(host('<div className={cn("h-full", { "min-h-0": open })}>b</div>'));
+  fails(
+    host('<div className={cn("h-full", open ? cn("min-h-0") : "")}>b</div>'),
+  );
+  // Only a conditional operand's literals are conditional: a plain argument
+  // beside one keeps its relief.
+  passes(
+    host('<div className={cn("h-full min-h-0", open && "border")}>b</div>'),
+  );
   passes(host('<div className={cn("h-full min-h-0")}>b</div>'));
+  passes(
+    host('<div className={`h-full min-h-0 ${open ? "p-2" : ""}`}>b</div>'),
+  );
+});
+
+test("F15: non-blank JSX text beside an h-full child counts; blank text doesn't", () => {
+  const rigid = '<div className="h-full">body</div>';
+  const solo = (sib) =>
+    host(`${sib}\n      ${rigid}`).replace(
+      '      <header className="border-b">title</header>\n',
+      "",
+    );
+  fails(solo("Loading"), 5);
+  fails(solo("&nbsp;"), 5);
+  fails(
+    host(`${rigid}\n      tail text`).replace(
+      '      <header className="border-b">title</header>\n',
+      "",
+    ),
+    4,
+  );
+  passes(solo(""));
+  passes(solo("{' '}"));
+});
+
+test("F16: a spread forwards the caller's className only when nothing overrides it", () => {
+  const pane = (attrs) =>
+    `function Pane(props: { className?: string }) {\n  return <div ${attrs}>pane</div>;\n}`;
+  fails(
+    host('<Pane className="min-h-0" />', pane('{...props} className="h-full"')),
+  );
+  passes(
+    host('<Pane className="min-h-0" />', pane('className="h-full" {...props}')),
+  );
+  passes(
+    host(
+      '<Pane className="min-h-0" />',
+      pane('{...props} className={cn("h-full", props.className)}'),
+    ),
+  );
+  fails(
+    host(
+      '<Pane className="min-h-0" />',
+      pane('{...props} className={cn("h-full", other.className)}'),
+    ),
+  );
+});
+
+test("F18: only the root's last className writer counts", () => {
+  // Cells: the caller passes min-h-0 to a root writing h-full, h-full to one
+  // writing min-h-0, or nothing to one writing h-full. A spread replaces what
+  // came before whenever the caller passes a className, except the rest of a
+  // props pattern that took `className` out.
+  const P = "{ className?: string }";
+  const forms = {
+    "explicit before spread": ["props", 'className="R" {...props}', "pff"],
+    "spread before explicit": ["props", '{...props} className="R"', "fpf"],
+    "explicit merging the caller": [
+      "{ className }",
+      'className={cn("R", className)}',
+      "ppf",
+    ],
+    "props.className": ["props", 'className={cn("R", props.className)}', "ppf"],
+    "two spreads, a spread last": [
+      "props",
+      'className="R" {...extra} {...props}',
+      "pff",
+    ],
+    "two spreads, explicit last": [
+      "props",
+      '{...extra} {...props} className="R"',
+      "fpf",
+    ],
+    "the rest without className": [
+      "{ className, ...rest }",
+      'className="R" {...rest}',
+      "fpf",
+    ],
+    "a rest that keeps className": [
+      "{ style, ...rest }",
+      'className="R" {...rest}',
+      "pff",
+    ],
+    "merging, then the rest": [
+      "{ className, ...rest }",
+      'className={cn("R", className)} {...rest}',
+      "ppf",
+    ],
+    "merging props.className, then props": [
+      "props",
+      'className={cn("R", props.className)} {...props}',
+      "pff",
+    ],
+  };
+  const cells = [
+    ['<Pane className="min-h-0" />', "h-full"],
+    ['<Pane className="h-full" />', "min-h-0"],
+    ["<Pane />", "h-full"],
+  ];
+  for (const [form, [param, attrs, verdicts]] of Object.entries(forms)) {
+    cells.forEach(([mount, root], i) => {
+      const pane = `function Pane(${param}: ${P}) {\n  return <div ${attrs.replace('"R"', `"${root}"`)}>pane</div>;\n}`;
+      const text = host(mount, pane);
+      const got = check(text);
+      const want = verdicts[i] === "f" ? 1 : 0;
+      assert.equal(got.length, want, `${form} / ${mount}\n${got.join("\n")}`);
+      if (want) assert.match(got[0], new RegExp(`^${REL}:5: `));
+    });
+  }
+});
+
+test("F17: a child expression that renders nothing is no sibling", () => {
+  const solo = (sib) =>
+    host(`${sib}\n      <div className="h-full">body</div>`).replace(
+      '      <header className="border-b">title</header>\n',
+      "",
+    );
+  for (const sib of ["{null}", "{ undefined }", "{false}", "{true}", '{""}']) {
+    passes(solo(sib));
+  }
+  fails(solo('{"text"}'), 5);
+  fails(solo("{label}"), 5);
 });
 
 test("F10: a variant-only flex-col parent, attribute trees and generics pass", () => {
@@ -1234,5 +1783,220 @@ test("F14: a const arrow whose parameter list never closes fails closed", () => 
   throwsArm(
     () => check('const Pane = ((props) => <div className="h-full" />;\n'),
     /Pane: unreadable parameters/,
+  );
+});
+
+const CN = 'import { cn } from "@/lib/utils";\n';
+/** A Host mounting `<Pane className=…>` beside its header, Pane's root
+ *  writing `rootClass`; cn imported from src/lib/utils. */
+const paneMount = (mount, rootClass, param = "{ className }") =>
+  CN +
+  host(
+    `<Pane className="${mount}" />`,
+    `function Pane(${param}: { className?: string }) {\n  return <div className={${rootClass}}>pane</div>;\n}`,
+  );
+
+test("F19: a merged className keeps each read group's last member", () => {
+  const root = 'cn("h-full min-h-0", className)';
+  // The caller's min-height replaces the root's min-h-0.
+  for (const mount of ["min-h-full", "min-h-screen", "min-h-[40px]", "min-h-4"])
+    fails(paneMount(mount, root), 6);
+  fails(paneMount("!min-h-full", root), 6);
+  passes(paneMount("min-h-0", root));
+  passes(paneMount("p-2 md:min-h-full", root));
+  // The root's own min-h-0 comes last and wins.
+  passes(paneMount("min-h-full", 'cn(className, "h-full min-h-0")'));
+  // A conditional caller may replace it, and its own relief is conditional.
+  fails(paneMount("min-h-full", 'cn("h-full min-h-0", open && className)'), 6);
+  fails(paneMount("min-h-0", 'cn("h-full", open && className)'), 6);
+  passes(paneMount("min-h-0", 'cn("h-full", className)'));
+  // The other relief groups: overflow and position.
+  fails(
+    paneMount("overflow-visible", 'cn("h-full overflow-auto", className)'),
+    6,
+  );
+  fails(
+    paneMount("overflow-visible", 'cn("h-full overflow-y-auto", className)'),
+    6,
+  );
+  fails(paneMount("relative", 'cn("h-full absolute", className)'), 6);
+  // The fill group: a caller's height replaces h-full, so nothing is rigid.
+  passes(paneMount("h-auto", 'cn("h-full", className)'));
+  fails(paneMount("size-full", 'cn("h-4", className)'), 6);
+  // Unmerged, the stylesheet's order decides: neither min-height counts.
+  fails(paneMount("min-h-full", "`h-full min-h-0 ${className}`"), 6);
+  fails(CN + host('<div className="h-full min-h-0 min-h-full">b</div>'), 6);
+  fails(paneMount("min-h-full", 'clsx("h-full min-h-0", className)'), 6);
+  fails(
+    paneMount("min-h-full", 'cn("h-full min-h-0", className)').replace(CN, ""),
+    5,
+  );
+  // One merged value with no caller.
+  passes(CN + host('<div className={cn("min-h-full h-full min-h-0")}>b</div>'));
+  fails(
+    CN +
+      host(
+        '<div className={cn("h-full min-h-0", open && "min-h-full")}>b</div>',
+      ),
+    6,
+  );
+});
+
+test("F20: each value arm of a child expression is a slot alternative", () => {
+  const solo = (sib) =>
+    host(`${sib}\n      <div className="h-full">body</div>`).replace(
+      '      <header className="border-b">title</header>\n',
+      "",
+    );
+  const abs = '<span className="absolute" />';
+  for (const sib of [
+    `{busy ? "Loading" : ${abs}}`,
+    `{busy ? ${abs} : "Loading"}`,
+    `{busy ? ${abs} : \`\${n} left\`}`,
+    '{busy && "Loading"}',
+    `{a ? ${abs} : b ? "Loading" : null}`,
+    `{(busy) ? (${abs}) : (label)}`,
+    "{busy ? <>Loading</> : null}",
+    '{label ?? <span className="sr-only">x</span>}',
+    `{error || ${abs}}`,
+    `{a && b ? null : c || "x"}`,
+  ]) {
+    fails(solo(sib), 5);
+  }
+  for (const sib of [
+    `{busy ? null : ${abs}}`,
+    `{busy ? "" : ${abs}}`,
+    '{busy && <span className="sr-only">x</span>}',
+    `{count && ${abs}}`,
+    `{a ? ${abs} : b ? null : undefined}`,
+    '{a ? <svg xlink:href="#x" className="absolute" /> : null}',
+  ]) {
+    passes(solo(sib));
+  }
+});
+
+test("F21: an h-full box that is itself out of flow is not rigid", () => {
+  // Unconditionally hidden or out of flow, it takes no space in the column.
+  passes(host('<div className="hidden h-full" />'));
+  passes(host('<div className="h-full hidden">b</div>'));
+  passes(host('<div className="sr-only h-full">b</div>'));
+  passes(CN + host('<div className={cn("flex h-full", "hidden")}>b</div>'));
+  passes(paneMount("hidden", 'cn("flex h-full", className)'));
+  // A conditional, variant or overridden `hidden` leaves it rigid.
+  fails(host('<div className={open ? "hidden h-full" : "h-full"}>b</div>'));
+  fails(
+    CN + host('<div className={cn("h-full", open && "hidden")}>b</div>'),
+    6,
+  );
+  fails(CN + host('<div className={cn("hidden h-full", "flex")}>b</div>'), 6);
+  fails(host('<div className="hidden flex h-full">b</div>'));
+  fails(host('<div className="md:hidden h-full">b</div>'));
+  fails(paneMount("flex", 'cn("hidden h-full", className)'), 6);
+});
+
+test("F22: contents is read after resolution, as a box's other classes are", () => {
+  // A merged later display member drops `contents`: the tag is a box again.
+  fails(
+    CN + host('<div className={cn("contents", "block h-full")}>b</div>'),
+    6,
+  );
+  fails(paneMount("block h-full", 'cn("contents", className)'), 6);
+  // Unmerged, the stylesheet decides, so the tag may be a box.
+  fails(host('<div className="contents block h-full">b</div>'));
+  // A merged LAST `contents` still has no box: its children are climbed to.
+  fails(
+    CN +
+      host(
+        '<div className={cn("block", "contents")}><Pane /></div>',
+        FORMS.function,
+      ),
+    6,
+  );
+  passes(
+    CN + host('<div className={cn("block h-full", "contents")}><span /></div>'),
+  );
+});
+
+for (const tok of ["contents!", "!contents"]) {
+  test(`F23: an important contents (${tok}) is still no box`, () => {
+    const wrapper = `<div className="${tok}"><div className="h-full" /></div>`;
+    fails(host(wrapper));
+    passes(
+      host(wrapper).replace(
+        '      <header className="border-b">title</header>\n',
+        "",
+      ),
+    );
+  });
+}
+
+/** The installed tailwind-merge, or null where node_modules is absent (the
+ *  guards job runs this file without it). */
+const TW_MERGE = await import("tailwind-merge")
+  .then((m) => m.twMerge)
+  .catch(() => null);
+
+test("the modelled groups agree with the installed tailwind-merge", {
+  skip: TW_MERGE ? false : "tailwind-merge is not installed",
+}, () => {
+  const probes = [
+    ...["block", "flex", "inline-flex", "grid", "hidden", "contents"],
+    ...["sr-only", "not-sr-only", "absolute", "relative", "fixed", "sticky"],
+    ...[
+      "overflow-auto",
+      "overflow-hidden",
+      "overflow-visible",
+      "overflow-clip",
+    ],
+    ...["overflow-y-auto", "overflow-y-scroll", "overflow-y-visible"],
+    ...[
+      "overflow-x-auto",
+      "flex-col",
+      "flex-row",
+      "flex-col-reverse",
+      "flex-1",
+    ],
+    ...["min-h-0", "min-h-full", "min-h-screen", "min-h-none", "min-h-lh"],
+    ...["min-h-[10px]", "min-h-(--x)", "min-h-4", "min-h-0.5", "min-h-1/2"],
+    ...["min-h-dvh", "min-h-fit", "min-h-px", "h-full", "h-auto", "h-4"],
+    ...["h-px", "h-[3px]", "h-(--h)", "h-screen", "h-1/2", "h-fit", "h-lh"],
+    ...["h-svh", "size-full", "size-4", "size-auto", "w-full", "max-h-full"],
+    ...["h-foo", "min-h-foo", "overflow-foo", "md:min-h-full", "md:h-full"],
+  ];
+  const grouped = probes.filter((p) => twGroup(p));
+  assert.ok(grouped.length > 40, `${grouped.length} grouped probes`);
+  const misses = [];
+  for (const x of probes) {
+    for (const y of probes) {
+      if (x === y) continue;
+      const kept = new Set(TW_MERGE(`${x} ${y}`).split(" "));
+      const mine = new Set(
+        twResolve(
+          [
+            { tok: x, cond: false },
+            { tok: y, cond: false },
+          ],
+          true,
+        ).map((t) => t.tok),
+      );
+      for (const t of [x, y]) {
+        if (twGroup(t) && kept.has(t) !== mine.has(t))
+          misses.push(`${x} ${y}: ${t}`);
+      }
+    }
+  }
+  assert.deepEqual(misses, []);
+  // tailwind-merge keeps both members across importance; the stylesheet's
+  // `!important` decides, which the model applies.
+  assert.equal(TW_MERGE("min-h-0 !min-h-full"), "min-h-0 !min-h-full");
+  assert.deepEqual(
+    twResolve(
+      [
+        { tok: "min-h-0", cond: false },
+        { tok: "!min-h-full", cond: false },
+      ],
+      true,
+    ).map((t) => t.tok),
+    ["!min-h-full"],
   );
 });

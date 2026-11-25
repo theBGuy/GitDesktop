@@ -484,8 +484,12 @@ function overlayLandedMerge(
   return lagsLandedMerge(details) ? { ...details, state: "MERGED" } : details;
 }
 
-/** A pull request's diff, filed under the head its details named. The forge
- *  serves its current head, so `head` files the answer and never asks for it. */
+/** A pull request's diff, filed under the head its details named when the
+ *  read started. A push racing the read can file the newer head's text here:
+ *  content mode (`hunksMatchContent`) and the whitespace proof
+ *  (`proveForgeSides`) decline it, yet it paints hunk-only (or under the
+ *  mismatch note) with its composer live, a line comment posting against the
+ *  head the forge resolves then, until the next details read re-keys it. */
 export const prDiffOptions = (
   repo: string,
   number: number,
@@ -599,14 +603,15 @@ export function usePrMergeability(
   };
 }
 
-/** The divergence key's repo+PR prefix, deliberately lens-free so one invalidation
- *  covers both lenses. A SIBLING of the PR subtree rather than a child, so
- *  `["repo", repo, "pr", …]` does not prefix-cover it — update-branch has to name it. */
+/** The divergence key's repo+PR segments; `prBaseDivergenceKey` adds the lens.
+ *  A SIBLING of the PR subtree rather than a child, so `["repo", repo, "pr", …]`
+ *  does not prefix-cover it: a write names the full key, since the other lens's
+ *  PR at the same number is a different pull request. */
 export const prBaseDivergencePrefix = (repo: string, number: number) =>
   ["repo", repo, "pr-base-divergence", number] as const;
 
 /** The full key `usePrBaseDivergence` reads — the prefix plus its lens axis. */
-const prBaseDivergenceKey = (
+export const prBaseDivergenceKey = (
   repo: string,
   number: number,
   lens: RemoteLens | undefined,
@@ -1319,7 +1324,9 @@ export const OPEN_PR_HEAD_KEYED: ReadonlySet<string> = new Set([
  *  cold load's waiter (an AI run awaiting the diff). The head-keyed reads wait
  *  for the details, then address that head's exact keys: the diff observer is
  *  still on the previous head's key until it re-renders, so a prefix would
- *  refetch it and file the new head's text under the old head. */
+ *  refetch it and file the new head's text under the old head. Only a details
+ *  answer this press landed names a head: a failed or parked read's retained
+ *  data may predate a push, and the next answer re-keys. */
 export async function refreshOpenPr(
   queryClient: QueryClient,
   repo: string,
@@ -1327,6 +1334,7 @@ export async function refreshOpenPr(
   number: number,
 ): Promise<void> {
   const details = prDetailsOptions(repo, number, lens).queryKey;
+  const landedBefore = queryClient.getQueryState(details)?.dataUpdateCount ?? 0;
   const settled = queryClient
     .invalidateQueries({ queryKey: details, exact: true })
     .catch(() => undefined);
@@ -1346,11 +1354,12 @@ export async function refreshOpenPr(
     })
     .catch(() => undefined);
   queryClient
-    .invalidateQueries({ queryKey: prBaseDivergencePrefix(repo, number) })
+    .invalidateQueries({ queryKey: prBaseDivergenceKey(repo, number, lens) })
     .catch(() => undefined);
   await settled;
-  // Parked offline: no head was named, and the reconnect's refetch names it.
-  if (queryClient.getQueryState(details)?.fetchStatus === "paused") return;
+  const after = queryClient.getQueryState(details);
+  if (after?.status !== "success" || after.dataUpdateCount === landedBefore)
+    return;
   const pr = queryClient.getQueryData(details);
   if (pr === undefined) return;
   const head = prHeadSha(pr) ?? null;

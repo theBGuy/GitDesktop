@@ -8,6 +8,7 @@ import {
   useFileFilterStore,
   useFileListFilter,
 } from "@/components/use-file-list-filter";
+import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
 import { PrCommitDetail } from "@/features/pulls/PrCommitDetail";
 import { PrFilesPane } from "@/features/pulls/RemotePrViewParts";
 import {
@@ -22,7 +23,7 @@ import {
   gitObjectsPresent,
   type PrContentRevs,
 } from "@/lib/git/api";
-import type { CommitCommentOut, ForgeStatus } from "@/lib/git/types";
+import type { CommitCommentOut, FileDiff, ForgeStatus } from "@/lib/git/types";
 import { loadSettings, saveSettingsMerged } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { stubCanvas } from "./canvas-stub";
@@ -55,13 +56,14 @@ const panes = vi.hoisted(() => ({
 }));
 interface PaneProps {
   filePath: string;
-  data?: { oldPath?: string; text: string };
+  data?: FileDiff;
+  isPending?: boolean;
   contentRevs?: { oldRev?: string | null; newRev?: string | null };
   imageRevs?: { old: string | null; new: string | null };
   forgePatch?: { source: unknown; scope?: string };
   previewRev?: string;
   typechangeAnchors?: boolean;
-  lineAnchors?: { side: string; line: number }[];
+  lineAnchors?: DiffLineAnchor[];
 }
 vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
   const real =
@@ -69,14 +71,25 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
   const { useReportPaneSettled } = await import(
     "@/features/diff/diff-pane-hold"
   );
+  const { patchLines } = await import("@/lib/git/diff-split");
+  const { useStandInReport } = await import("./painted-stand-in");
   function DiffContent(props: PaneProps) {
     panes.props.set(props.filePath, props);
     if (!panes.real) return <StandIn {...props} />;
     const Real = real.DiffContent as unknown as (p: PaneProps) => ReactNode;
     return <Real {...props} />;
   }
+  /** Mounts the anchor rows of the lines its patch draws, a typechange's text
+   *  half included; a plain binary file draws none. */
   function StandIn(props: PaneProps) {
     useReportPaneSettled(true);
+    const lines = patchLines(props.data?.text ?? "");
+    useStandInReport(
+      props.filePath,
+      props.data,
+      props.isPending === true,
+      (props.lineAnchors ?? []).filter((a) => lines[a.side].has(a.line)),
+    );
     return (
       <div
         data-open-file={props.filePath}
@@ -683,7 +696,7 @@ describe("PR commit drill-in: whole-file reads at the first parent", () => {
     );
   });
 
-  it("draws inline only the comments on lines the patch draws", async () => {
+  it("hands the pane every resolved comment and lists the ones no row mounts", async () => {
     presence = async () => true;
     vi.mocked(forgeCommitComments).mockResolvedValue([
       comment({ id: "in", body: "on the change", path: "a.ts", line: 1 }),
@@ -695,9 +708,9 @@ describe("PR commit drill-in: whole-file reads at the first parent", () => {
         document
           .querySelector("[data-open-file]")
           ?.getAttribute("data-anchor-lines"),
-      ).toBe("new:1"),
+      ).toBe("new:1,new:20"),
     );
-    // The gap-line comment stays in the list below, once.
+    // The gap-line comment, whose row the pane never mounted, is listed once.
     expect(await screen.findAllByText("on a gap line")).toHaveLength(1);
     expect(screen.queryByText("on the change")).toBeNull();
   });

@@ -5,14 +5,23 @@ import { diffLines } from "../../lib/git/diff-split.ts";
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
-/** The characters `git diff -w` skips when it compares two lines. */
-const GIT_WHITESPACE = /[ \t\r\n\v\f]/g;
+/** The characters `git diff -w` skips when it compares two lines: space, tab
+ *  and CR. It keeps \v, \f and U+00A0 (git 2.51.1, probed), and a split line
+ *  holds no \n. */
+const GIT_WHITESPACE = /[ \t\r]/g;
+
+/** `line` without the characters `-w` skips: the one spelling of that set.
+ *  The regex stays private, since a shared `/g` regex carries `lastIndex`
+ *  state across `.test()` calls. */
+export function stripGitWhitespace(line: string): string {
+  return line.replace(GIT_WHITESPACE, "");
+}
 
 /** Every comparison in this file goes through here, so a looser comparison is
  *  one swap. `ws`: equal once every character `-w` skips is removed. */
 function sameLine(a: string, b: string, ws: boolean): boolean {
   if (a === b) return true;
-  return ws && a.replace(GIT_WHITESPACE, "") === b.replace(GIT_WHITESPACE, "");
+  return ws && stripGitWhitespace(a) === stripGitWhitespace(b);
 }
 
 /** A line without the one trailing `\r` a CRLF file carries. */
@@ -21,21 +30,24 @@ function bare(line: string): string {
 }
 
 /** The byte-order mark a first line may open with: the whole-file decoder
- *  strips it and a patch keeps it, so on line 1 it reads as absent. */
+ *  strips it and a patch keeps it, so on line 1 it reads as absent unless the
+ *  caller's texts keep it (`keepBom`). */
 const BOM = String.fromCharCode(0xfeff);
 
 /** `line` as compared at file index `at`. */
-function atIndex(line: string, at: number): string {
-  return at === 0 && line.startsWith(BOM) ? line.slice(1) : line;
+function atIndex(line: string, at: number, keepBom: boolean): string {
+  return !keepBom && at === 0 && line.startsWith(BOM) ? line.slice(1) : line;
 }
 
 /** A file's lines; a final newline ends the last line rather than starting an
- *  empty one, and an empty file has none. */
-function fileLines(text: string): string[] {
+ *  empty one, and an empty file has none. Only a raw final newline ends it: a
+ *  last line holding a lone CR is a line. */
+function fileLines(text: string, keepBom: boolean): string[] {
   if (text === "") return [];
-  const lines = text.split("\n").map(bare);
-  if (lines[lines.length - 1] === "") lines.pop();
-  if (lines.length > 0) lines[0] = atIndex(lines[0], 0);
+  const raw = text.split("\n");
+  if (text.endsWith("\n")) raw.pop();
+  const lines = raw.map(bare);
+  if (lines.length > 0) lines[0] = atIndex(lines[0], 0, keepBom);
   return lines;
 }
 
@@ -73,9 +85,10 @@ function matches(
   oldText: string,
   newText: string,
   ws: boolean,
+  keepBom: boolean,
 ): boolean {
-  const oldLines = fileLines(oldText);
-  const newLines = fileLines(newText);
+  const oldLines = fileLines(oldText, keepBom);
+  const newLines = fileLines(newText, keepBom);
   // Where the last hunk ended on each side: the lines between two hunks, and
   // after the last, are the ones content mode draws from the files alone.
   let oldEnd = 0;
@@ -130,7 +143,8 @@ function matches(
       const body = line.slice(1);
       if (kind === " " || kind === "-") {
         if (oldLeft <= 0 || oldAt >= oldLines.length) return false;
-        if (!sameLine(oldLines[oldAt], atIndex(body, oldAt), ws)) return false;
+        if (!sameLine(oldLines[oldAt], atIndex(body, oldAt, keepBom), ws))
+          return false;
         oldAt++;
         oldLeft--;
         oldShown = oldAt === oldLines.length;
@@ -138,7 +152,8 @@ function matches(
       }
       if (kind === " " || kind === "+") {
         if (newLeft <= 0 || newAt >= newLines.length) return false;
-        if (!sameLine(newLines[newAt], atIndex(body, newAt), ws)) return false;
+        if (!sameLine(newLines[newAt], atIndex(body, newAt, keepBom), ws))
+          return false;
         newAt++;
         newLeft--;
         newShown = newAt === newLines.length;
@@ -228,12 +243,15 @@ function matches(
  *  old offset, its context and `+` lines the new file's at its new offset, and
  *  the lines outside all hunks are the same on both sides.
  *  `ignoreWhitespace`: `diffText` is a `git diff -w` of the two, so lines
- *  compare as `-w` compares them and final newlines don't count. */
+ *  compare as `-w` compares them and final newlines don't count.
+ *  `keepBom`: the texts keep a leading byte-order mark as their bytes hold
+ *  it, so line 1 compares as written and a mark the patch adds or removes
+ *  must be there. */
 export function hunksMatchContent(
   diffText: string,
   oldText: string,
   newText: string,
-  opts?: { ignoreWhitespace?: boolean },
+  opts?: { ignoreWhitespace?: boolean; keepBom?: boolean },
 ): boolean {
   if (
     typeof diffText !== "string" ||
@@ -242,7 +260,13 @@ export function hunksMatchContent(
   )
     return false;
   try {
-    return matches(diffText, oldText, newText, opts?.ignoreWhitespace === true);
+    return matches(
+      diffText,
+      oldText,
+      newText,
+      opts?.ignoreWhitespace === true,
+      opts?.keepBom === true,
+    );
   } catch {
     return false;
   }
