@@ -691,9 +691,23 @@ reference).
   viewer; never a local copy (`scripts/staging-scroll-keep.test.mjs` pins the
   staging viewer's import). A scrolling diff host keeps its top line across a
   split/unified switch through `useModeLineAnchor` (`DiffSurface.tsx`), passing
-  its scroller ref, the effective mode, the path and the built diff; an expand of
-  the same diff (Show full diff) calls the hook's `keepLine` before it flips, so
-  the line read before the press is restored after the browser re-lays the rows.
+  its scroller ref, the effective mode, the path and the built diff, and
+  rendering the `mark` it returns inside the arm that mounts its rows: a
+  `SnapshotMark` (`src/features/diff/snapshot-mark.tsx`) whose
+  `getSnapshotBeforeUpdate` reads the pane's top line in the commit that
+  switches the layout, before any DOM change, so the restore never rides the
+  frame-deferred scroll sample; the hook's layout cleanup takes the same read at
+  hide time. An expand of the same diff (Show full diff) calls the hook's
+  `keepLine` before it flips, so the line read before the press is restored
+  after the browser re-lays the rows. A host that changes the layout above the
+  rows in a commit of its own (the image panes) takes the hook's keeper: it
+  renders a `SnapshotMark` on its own trigger calling the keeper's `read`, and
+  calls `restore` in its layout effect. Every library view (`<DiffView>`,
+  `<DiffViewWithMultiSelect>`) is keyed on its retained source's `getId()`: the
+  library clears the on-screen clone during render when it sees a new source, so
+  an unkeyed view repaints light when React discards that render.
+  `scripts/diff-view-host-key.test.mjs` pins the keys, the marks and the keeper
+  sites.
   One gap remains: the staging viewer's Show full diff doesn't keep the line
   (only a focused press moves focus to the first revealed hunk). The agent
   session column keeps its place across a switch through `useColumnLayoutAnchor`
@@ -1773,6 +1787,16 @@ one grep away on the named symbol. Grows via Conventions-sync.
   Select does not skip a disabled item on arrow keys). A new picker joins the set
   that `git grep -E "EFFORT_LEVELS|EFFORT_LEVEL_LABELS|REVIEW_EFFORTS" -- src`
   closes.
+- **In-diff editor keep** — an editor that can open in a diff row (the line
+  composer, and in an anchor row a comment edit, a thread Reply or a pending
+  draft's edit) keeps its text through `useKeptDraft`
+  (`src/features/diff/editor-keep.tsx`). A rebuild of the rows restores it on
+  the same line when that line and its two neighbours still read the same;
+  otherwise that file's earlier rows stay drawn until it closes, and while
+  those rows show an older text the line composers (`ReviewComposer`,
+  `CommitLineComposer`) hold their submits with `DIFF_ROWS_HELD_REASON`. An
+  editor that marks itself for `DIFF_EDITOR_SELECTOR` without adopting the
+  hook is held, never dropped.
 - **Forge-patch diff hosts** — a host whose diff text comes from a forge (a
   pull request's Files pane and commit drill-in) passes `forgePatch` beside
   its `contentRevs` / `imageRevs`: the hunk-match guard

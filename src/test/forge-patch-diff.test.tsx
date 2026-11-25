@@ -17,6 +17,7 @@ import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { IMAGE_CAPTION_REASON } from "@/components/markdown/markdown-images";
+import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
 import {
   contentSourceKey,
   FORGE_CONTENT_BUDGET_BYTES,
@@ -1150,38 +1151,45 @@ describe("a PR host's image panes across a pair change", () => {
     expect(figures(pane)[0]).not.toBe(first);
   });
 
-  it.each([
-    ["rejects", false],
-    ["is paused", true],
-  ])(
-    "shows a new pair's read that %s as failed, with Retry, never the kept image",
-    async (_, offline) => {
-      const { pane } = await onScreen({
-        ...pairOf(NEW_SHA),
-        data: png(PNG_TEXT),
-      });
-      vi.mocked(forgeFileAtSha).mockImplementation(async () => {
-        throw new Error("read failed");
-      });
-      if (offline) onlineManager.setOnline(false);
-      try {
-        pane.update({ ...pairOf(NEW2_SHA), data: png(PNG_TEXT) });
-        // A rejected read is retried once, a second later, before it fails.
-        expect(
-          await screen.findByText(IMAGE_CAPTION_REASON.readFailed, undefined, {
-            timeout: 5_000,
-          }),
-        ).toBeInTheDocument();
-        expect(
-          screen.getByRole("button", { name: "Retry" }),
-        ).toBeInTheDocument();
-        expect(srcOf(pane, "New")).toBeUndefined();
-      } finally {
-        onlineManager.setOnline(true);
-      }
-    },
-    10_000,
-  );
+  it("shows a new pair's read that rejects as failed, with Retry, never the kept image", async () => {
+    const { pane } = await onScreen({
+      ...pairOf(NEW_SHA),
+      data: png(PNG_TEXT),
+    });
+    vi.mocked(forgeFileAtSha).mockImplementation(async () => {
+      throw new Error("read failed");
+    });
+    pane.update({ ...pairOf(NEW2_SHA), data: png(PNG_TEXT) });
+    // A rejected read is retried once, a second later, before it fails.
+    expect(
+      await screen.findByText(IMAGE_CAPTION_REASON.readFailed, undefined, {
+        timeout: 5_000,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(srcOf(pane, "New")).toBeUndefined();
+  }, 10_000);
+
+  it("shows a new pair's paused read as offline, with no Retry, never the kept image", async () => {
+    const { pane } = await onScreen({
+      ...pairOf(NEW_SHA),
+      data: png(PNG_TEXT),
+    });
+    vi.mocked(forgeFileAtSha).mockImplementation(async () => {
+      throw new Error("read failed");
+    });
+    onlineManager.setOnline(false);
+    try {
+      pane.update({ ...pairOf(NEW2_SHA), data: png(PNG_TEXT) });
+      expect(
+        await screen.findByText(offlinePendingMessage("this image")),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+      expect(srcOf(pane, "New")).toBeUndefined();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
 
   it("shows a new pair's failed side at once while the other side's first read keeps its kept image", async () => {
     const OLD2_SHA = "d".repeat(40);
@@ -1259,10 +1267,12 @@ describe("a binary-to-link typechange on an image path", () => {
 });
 
 describe("an image pair's forge reads that can't run", () => {
-  function renderPanes(oldRev: string) {
-    const client = new QueryClient({
+  function renderPanes(
+    oldRev: string,
+    client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
-    });
+    }),
+  ) {
     return render(
       <QueryClientProvider client={client}>
         <ImagePanes
@@ -1318,16 +1328,83 @@ describe("an image pair's forge reads that can't run", () => {
     expect(view.container.querySelector("figure")).toBeNull();
   });
 
-  it("shows a paused read as failed, with Retry", async () => {
+  it("shows a paused read as offline, with no Retry, and loads it on reconnect", async () => {
     onlineManager.setOnline(false);
     try {
       vi.mocked(forgeFileAtSha).mockResolvedValue(bytes("png"));
       const view = renderPanes(OLD_SHA);
       expect(
-        await screen.findAllByText(IMAGE_CAPTION_REASON.readFailed),
+        await screen.findAllByText(offlinePendingMessage("this image")),
       ).toHaveLength(2);
       expect(view.container.querySelector('[aria-busy="true"]')).toBeNull();
-      expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(2);
+      expect(screen.queryAllByRole("button", { name: "Retry" })).toHaveLength(
+        0,
+      );
+      act(() => onlineManager.setOnline(true));
+      await waitFor(() =>
+        expect(view.container.querySelectorAll("img")).toHaveLength(2),
+      );
+      expect(
+        screen.queryByText(offlinePendingMessage("this image")),
+      ).toBeNull();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
+
+  it("keeps focus off <body> when a Retry pressed offline parks its read", async () => {
+    vi.mocked(forgeFileAtSha).mockRejectedValue(new Error("read failed"));
+    renderPanes(OLD_SHA);
+    // A rejected read is retried once, a second later, before it fails.
+    const [retry] = await screen.findAllByRole(
+      "button",
+      { name: "Retry" },
+      { timeout: 5_000 },
+    );
+    retry.focus();
+    onlineManager.setOnline(false);
+    try {
+      fireEvent.click(retry);
+      expect(
+        await screen.findByText(offlinePendingMessage("this image")),
+      ).toBeInTheDocument();
+      expect(retry.isConnected).toBe(false);
+      expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
+      expect(document.activeElement).not.toBe(document.body);
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  }, 10_000);
+
+  it("keeps a loaded side's image through a refresh parked offline", async () => {
+    vi.mocked(forgeFileAtSha).mockResolvedValue(bytes("png"));
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const view = renderPanes(OLD_SHA, client);
+    await waitFor(() =>
+      expect(view.container.querySelectorAll("img")).toHaveLength(2),
+    );
+    const images = [...view.container.querySelectorAll("img")];
+    onlineManager.setOnline(false);
+    try {
+      // A refetch parked offline never settles, so it is not awaited.
+      act(() => {
+        void client.invalidateQueries();
+      });
+      await act(async () => undefined);
+      expect(
+        client
+          .getQueryCache()
+          .getAll()
+          .map((q) => q.state.fetchStatus),
+      ).toEqual(["paused", "paused"]);
+      const after = [...view.container.querySelectorAll("img")];
+      expect(after).toHaveLength(2);
+      for (const [i, img] of after.entries()) expect(img).toBe(images[i]);
+      expect(
+        screen.queryByText(offlinePendingMessage("this image")),
+      ).toBeNull();
     } finally {
       onlineManager.setOnline(true);
     }

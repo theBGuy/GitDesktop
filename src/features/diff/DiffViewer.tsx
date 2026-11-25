@@ -2441,6 +2441,7 @@ function StagingDiffView({
     syntaxMap,
     customLanguages,
   });
+  const themeRef = useLatestRef<"light" | "dark">(isDark ? "dark" : "light");
   // The diff as displayed, built from the DISPLAY text (the full text still
   // backs every stage/unstage/discard patch; see WorkingTreeDiff). Null while
   // the build is held, so arriving reads never restructure an intermediate
@@ -2456,6 +2457,7 @@ function StagingDiffView({
       displayText,
       { syntaxMap, customLanguages },
       content ?? undefined,
+      themeRef,
     );
     // Rows prebuilt for both layouts, as the library's own mount effect builds
     // them: its view remounts on every rebuild, and rows built only in that
@@ -2475,6 +2477,7 @@ function StagingDiffView({
     holdingBuild,
     holdForGrammar,
     grammarState,
+    themeRef,
   ]);
   const diffFile = useRetained(builtDiffFile, !holdingBuild);
   const shownHighlighter = useRetained(workerHighlighter, !holdingBuild);
@@ -2869,7 +2872,12 @@ function StagingDiffView({
     container.style.minHeight = hold ? `${heightRef.current}px` : "";
   }, [rowsPending, displayHunks]);
   // After the hold, so the restore measures the rows at their final height.
-  useModeLineAnchor(scrollPaneRef, viewMode, deferredPath, diffFile);
+  const { mark } = useModeLineAnchor(
+    scrollPaneRef,
+    viewMode,
+    deferredPath,
+    diffFile,
+  );
   // Once the hold releases and the refreshed hunks have hosts, focus moves to
   // the Stage/Unstage of the hunk now at the press's index (or the last hunk);
   // `landHunkFocus` decides whether it moves at all. Past a capped diff's
@@ -3110,7 +3118,12 @@ function StagingDiffView({
           )}
         </HunkHeaderBar>
       )}
+      {mark}
+      {/* Keyed per build: the library clears its on-screen clone during render
+          when the source changes, so a view React keeps across a discarded
+          render would repaint in the light theme. */}
       <DiffView<HunkHeaderData>
+        key={diffFile.getId()}
         diffFile={diffFile}
         // Worker ASTs land as a highlighter PROP, not a rebuild: the view's
         // effect applies them to its own clone, so expansion state survives.

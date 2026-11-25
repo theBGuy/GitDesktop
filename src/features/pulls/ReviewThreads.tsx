@@ -22,6 +22,7 @@ import { DegradedListNotice } from "@/features/conversations/ConversationListPan
 import { reviewCommentsNotice } from "@/features/conversations/remote-section-state";
 import { Thread } from "@/features/conversations/Thread";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
+import { useKeptDraft, useKeptOpen } from "@/features/diff/editor-keep";
 import type { PendingThreadWrites } from "@/lib/git/queries";
 import type {
   ApplyLinesResult,
@@ -60,8 +61,12 @@ interface ThreadCallbacks {
   /** Present when the viewer may resolve/unresolve; flips the thread state. */
   onResolve?: (threadId: string, resolved: boolean) => Promise<void>;
   /** Present when the viewer may edit their own thread comments; saves the new
-   *  body. Wired to a Thread's edit control only for a comment the viewer wrote. */
-  onEditComment?: (commentId: string, body: string) => void;
+   *  body. Wired to a Thread's edit control only for a comment the viewer wrote;
+   *  resolves whether the edit saved, as Thread's `onSaveEdit` does. */
+  onEditComment?: (
+    commentId: string,
+    body: string,
+  ) => boolean | Promise<boolean>;
   /** Present when the viewer may delete their own thread comments; opens the
    *  delete confirmation. Wired only for a comment the viewer wrote. */
   onDeleteComment?: (commentId: string) => void;
@@ -578,8 +583,20 @@ export function ReviewThreadCard({
    *  only surfaces whose forge autolinks the completed reference pass one. */
   mentions?: MentionSource;
 } & ThreadCallbacks) {
-  const [replying, setReplying] = useState(false);
-  const [replyBody, setReplyBody] = useState("");
+  // A reply open in a diff row comes back, with its text, when the rows
+  // remount around it; it is kept only while its box shows.
+  const replyKeptId = `reply:${thread.id}`;
+  const reopenedReply = useKeptOpen(replyKeptId);
+  // Only a box that claims its record on mount reopens: one that can't would
+  // open empty later, its text already dropped.
+  const [replying, setReplying] = useState(
+    reopenedReply && expanded && onReply !== undefined,
+  );
+  const replyKept = useKeptDraft(
+    expanded && onReply !== undefined && replying ? replyKeptId : null,
+  );
+  const replyBody = replyKept.text;
+  const setReplyBody = replyKept.setText;
   const [replyPending, setReplyPending] = useState(false);
   const [resolvePending, setResolvePending] = useState(false);
   // A write this card started OR one still in the cache from an earlier mount.
@@ -639,16 +656,19 @@ export function ReviewThreadCard({
     if (replyHeldReason !== null) return;
     if (!onReply || !replyBody.trim() || replyBusy) return;
     setReplyPending(true);
+    replyKept.setBusy(true);
     try {
       await onReply(thread.id, replyBody.trim());
       // Clear only after the reply lands — a failure keeps the draft so the
       // user doesn't lose what they typed.
+      replyKept.forget();
       setReplyBody("");
       setReplying(false);
     } catch (e) {
       toastError(e);
     } finally {
       setReplyPending(false);
+      replyKept.setBusy(false);
     }
   }
 
@@ -878,6 +898,7 @@ export function ReviewThreadCard({
                     disabled={replyPending}
                     reason={replyBusyReason}
                     onClick={() => {
+                      replyKept.forget();
                       setReplying(false);
                       setReplyBody("");
                     }}

@@ -217,6 +217,18 @@ let top = 0;
  *  measurement): Split fits unless a test narrows it. */
 let paneWidth = 1000;
 
+/** How far a turn's entrance slide paints its boxes below their layout: the
+ *  painted view (getBoundingClientRect) moves, the offsets don't. */
+let slide = 0;
+
+/** The `Column` harness's shape for the next mount: whether its scroller is
+ *  positioned (`relative`), and its turn stand-in, an offset parent between
+ *  the boxes and the column when `positioned`, at content `y` with a `border`. */
+let harness: {
+  relative?: boolean;
+  turn?: { positioned?: boolean; y?: number; border?: number };
+} = {};
+
 /** The wiring test's column: each step box sits after GAP px of narration,
  *  as tall as the diff view inside it says. */
 const GAP = 300;
@@ -240,6 +252,8 @@ beforeEach(() => {
   seen.listeners.clear();
   top = 0;
   paneWidth = 1000;
+  slide = 0;
+  harness = {};
   observers = [];
   vi.mocked(loadSettings).mockImplementation(async () => DEFAULT_SETTINGS);
 });
@@ -250,24 +264,76 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-/** Lays boxes out by content coordinates against the column's scrollTop:
- *  `data-y`/`data-h` where set, else the transcript model above. Frames are
+/** An element's border box in the column's content coordinates: `data-y`/
+ *  `data-h` where set, else the transcript model above; null: unmodelled. */
+function layoutBox(el: HTMLElement): ColumnBox | null {
+  const y = el.dataset.y;
+  if (y !== undefined)
+    return { top: Number(y), bottom: Number(y) + Number(el.dataset.h ?? 0) };
+  if (el.hasAttribute("data-transcript-diff")) return transcriptBox(el);
+  return null;
+}
+
+const POSITIONED = ["relative", "absolute", "sticky", "fixed"];
+
+/** The nearest ancestor positioned by class, or marked as one (a transformed
+ *  turn); the body past them all, as in a browser. */
+function offsetParentOf(el: HTMLElement): HTMLElement | null {
+  if (!el.isConnected || el === document.body) return null;
+  for (let p = el.parentElement; p !== null; p = p.parentElement) {
+    const { classList } = p;
+    if (
+      p.hasAttribute("data-offset-parent") ||
+      POSITIONED.some((c) => classList.contains(c))
+    )
+      return p;
+  }
+  return document.body;
+}
+
+const borderOf = (el: Element) => Number(el.getAttribute("data-border") ?? 0);
+function clientTop(this: Element) {
+  return borderOf(this);
+}
+
+/** One layout, two readers. Layout: `offsetParent`/`offsetTop`/
+ *  `offsetHeight`/`clientTop`, from the model above (unmodelled elements
+ *  read 0). Paint: `getBoundingClientRect`, the layout against the column's
+ *  scrollTop plus the slide of a box inside the turn stand-in. Frames are
  *  requested but never run: nothing here waits on one. */
 function stubLayout() {
   vi.stubGlobal("ResizeObserver", FakeResizeObserver);
   vi.spyOn(window, "requestAnimationFrame").mockImplementation(() => 1);
   vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+  vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockImplementation(
+    function (this: HTMLElement) {
+      return offsetParentOf(this);
+    },
+  );
+  vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(
+    function (this: HTMLElement) {
+      const box = layoutBox(this);
+      const parent = offsetParentOf(this);
+      if (box === null || parent === null) return 0;
+      return box.top - (layoutBox(parent)?.top ?? 0) - borderOf(parent);
+    },
+  );
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(
+    function (this: HTMLElement) {
+      const box = layoutBox(this);
+      return box === null ? 0 : box.bottom - box.top;
+    },
+  );
+  vi.spyOn(Element.prototype, "clientTop", "get").mockImplementation(clientTop);
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
     function (this: HTMLElement) {
-      const y = this.dataset.y;
-      if (y !== undefined)
+      const box = layoutBox(this);
+      if (box !== null) {
+        const moved = this.closest("[data-turn]") === null ? 0 : slide;
         return {
-          top: Number(y) - top,
-          bottom: Number(y) - top + Number(this.dataset.h),
+          top: box.top - top + moved,
+          bottom: box.bottom - top + moved,
         } as DOMRect;
-      if (this.hasAttribute("data-transcript-diff")) {
-        const box = transcriptBox(this);
-        return { top: box.top - top, bottom: box.bottom - top } as DOMRect;
       }
       if (this.matches(".max-h-96.overflow-auto"))
         return { top: 0, bottom: 0, width: paneWidth } as DOMRect;
@@ -504,14 +570,31 @@ function Column({
   }, []);
   const column = useColumnLayoutAnchor(ref, jumping);
   const mode = useSettings().data?.diffViewMode ?? "unified";
+  const { relative = true, turn = {} } = harness;
   return (
-    <div ref={attach} data-testid="column">
+    <div
+      ref={attach}
+      data-testid="column"
+      className={relative ? "relative" : undefined}
+    >
       <ColumnLayoutAnchorContext value={column}>
-        {layout[mode].map((b, i) => (
-          <div key={b.k ?? i} data-transcript-diff="" data-y={b.y} data-h={b.h}>
-            <ColumnLayoutMark layout={markOf(b.w, mode)} />
-          </div>
-        ))}
+        <div
+          data-turn=""
+          data-offset-parent={turn.positioned ? "" : undefined}
+          data-y={turn.y}
+          data-border={turn.border}
+        >
+          {layout[mode].map((b, i) => (
+            <div
+              key={b.k ?? i}
+              data-transcript-diff=""
+              data-y={b.y}
+              data-h={b.h}
+            >
+              <ColumnLayoutMark layout={markOf(b.w, mode)} />
+            </div>
+          ))}
+        </div>
       </ColumnLayoutAnchorContext>
     </div>
   );
@@ -734,6 +817,57 @@ describe("useColumnLayoutAnchor", () => {
     flipTo(client, "split");
     expect(query).toHaveBeenCalledTimes(1);
     expect(top).toBe(750);
+  });
+});
+
+// A turn's entrance slide paints its boxes 4px low for its first 150ms (on a
+// re-show too); the anchor reads layout, which no transform moves.
+describe("useColumnLayoutAnchor: the boxes as laid out, not as painted", () => {
+  it.each([
+    ["is not", false],
+    ["is", true],
+  ])(
+    "restores on re-show while a turn's entrance slide still moves its boxes (the turn %s an offset parent)",
+    (_name, positioned) => {
+      harness = { turn: { positioned } };
+      const { client, scrollTo, show } = mountColumn();
+      scrollTo(900);
+      show(LAYOUT, true);
+      flipTo(client, "split");
+      slide = 4;
+      show(LAYOUT);
+      expect(top).toBe(750);
+    },
+  );
+
+  it("keeps the place across a switch made while a turn slides in", () => {
+    const { client, scrollTo } = mountColumn();
+    scrollTo(900);
+    slide = 4;
+    flipTo(client, "split");
+    expect(top).toBe(750);
+  });
+
+  it("sums the offsets through a positioned box between a step and the column", () => {
+    harness = { turn: { positioned: true, y: 120, border: 2 } };
+    const { client, scrollTo } = mountColumn();
+    scrollTo(900);
+    flipTo(client, "split");
+    expect(top).toBe(750);
+  });
+
+  it("moves and holds nothing when the column is not its boxes' offset parent", () => {
+    harness = { relative: false };
+    const { client, column, scrollTo } = mountColumn();
+    scrollTo(900);
+    flipTo(client, "split");
+    expect(top).toBe(900);
+    expectNoHold(column);
+    // The bottom pin reads no box: Split's 2800px column at its bottom
+    // follows Unified's 3000px one.
+    scrollTo(2400);
+    flipTo(client, "unified");
+    expect(top).toBe(3000);
   });
 });
 

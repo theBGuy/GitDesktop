@@ -23,6 +23,11 @@ import { Thread } from "@/features/conversations/Thread";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
 import {
+  LINE_COMPOSER_KEEP_ID,
+  useDiffRowsHeld,
+  useKeptDraft,
+} from "@/features/diff/editor-keep";
+import {
   confirmWhitespace,
   type DrawStep,
   type ListedReason,
@@ -32,6 +37,7 @@ import {
 } from "@/features/diff/painted-view";
 import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import {
+  DIFF_ROWS_HELD_REASON,
   SHOW_WHITESPACE_LABEL,
   WHITESPACE_COMPOSER_HELD,
   whitespaceComposerOpen,
@@ -821,15 +827,18 @@ export function CommitComments({
     }
   }
 
-  async function saveEdit(commentId: string, next: string) {
+  // Resolves whether the edit saved: Thread keeps its editor open on `false`.
+  async function saveEdit(commentId: string, next: string): Promise<boolean> {
     // The comment id is the previous commit's while the write addresses `sha`,
     // so a mismatched pair would edit against a commit that never showed it.
-    if (writesHeld) return;
+    if (writesHeld) return false;
     try {
       await editComment.mutateAsync({ sha, commentId, body: next });
       toast.success("Comment updated");
+      return true;
     } catch (e) {
       toastError(e);
+      return false;
     }
   }
 
@@ -885,7 +894,7 @@ export function CommitComments({
                 thread={toThread(c)}
                 onSaveEdit={
                   c.viewerDidAuthor && !writesHeld
-                    ? (next) => void saveEdit(c.id, next)
+                    ? (next) => saveEdit(c.id, next)
                     : undefined
                 }
                 // Withholding the handler only drops the menu entry; an editor
@@ -1005,7 +1014,7 @@ export function CommitComments({
                           onEditingChange={(open) => pins.pin(c.id, open)}
                           onSaveEdit={
                             c.viewerDidAuthor && !writesHeld
-                              ? (next) => void saveEdit(c.id, next)
+                              ? (next) => saveEdit(c.id, next)
                               : undefined
                           }
                           editHeld={writesHeld}
@@ -1121,7 +1130,15 @@ export function CommitLineComposer({
 }) {
   const createLineComment = useCreateCommitComment(repoPath, lens);
   const mentions = useMentionCandidates({ repoPath, lens, provider });
-  const [body, setBody] = useState("");
+  // Kept by the diff's line widget, so a remount of its rows reopens the
+  // composer with this text; a restored one takes focus only if it had it.
+  const {
+    text: body,
+    setText: setBody,
+    restored,
+    forget,
+  } = useKeptDraft(LINE_COMPOSER_KEEP_ID);
+  const rowsHeld = useDiffRowsHeld();
 
   // The multi-line range, normalized: [from, line] with from <= line.
   const rangeFrom = fromLine !== undefined && fromLine < line ? fromLine : line;
@@ -1143,6 +1160,8 @@ export function CommitLineComposer({
     provider === "gitlab" && isRange && drawn !== null && !drawn.has(rangeFrom);
   const disabledReason = (() => {
     switch (true) {
+      case rowsHeld:
+        return DIFF_ROWS_HELD_REASON;
       case side === "old":
         return "Commit comments anchor to the new side — pick a line on the right.";
       case offPatch:
@@ -1177,6 +1196,7 @@ export function CommitLineComposer({
       })
       .then(() => toast.success("Comment added"))
       .catch((e) => toastError(e));
+    forget();
     onClose();
   }
 
@@ -1211,7 +1231,7 @@ export function CommitLineComposer({
             onClose();
           }
         }}
-        autoFocus
+        autoFocus={!restored}
         rows={3}
         textareaClassName="max-h-48 min-h-16 resize-y"
         mentions={mentions}

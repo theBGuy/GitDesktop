@@ -4113,26 +4113,37 @@ export function RemotePrView({
   // list filters these out to avoid a duplicate pending+completed chip. GitHub never
   // overlaps (its completed reviewers have already left `pr.reviewers`).
   const completedLogins = new Set(completedReviewers.map((c) => c.login));
-  async function saveCommentEdit(commentId: string, body: string) {
+  // Resolves whether the edit saved: Thread keeps its editor open on `false`.
+  async function saveCommentEdit(
+    commentId: string,
+    body: string,
+  ): Promise<boolean> {
     // The comment id is the rendered PR's while the write addresses `number` —
     // GitLab routes by both, so a mismatched pair edits nothing it showed.
-    if (detailsStale) return;
+    if (detailsStale) return false;
     try {
       await editComment.mutateAsync({ number, commentId, body });
       toast.success("Comment updated");
+      return true;
     } catch (e) {
       onError(e);
+      return false;
     }
   }
 
-  async function saveThreadCommentEdit(commentId: string, body: string) {
+  async function saveThreadCommentEdit(
+    commentId: string,
+    body: string,
+  ): Promise<boolean> {
     // Same pairing as saveCommentEdit, on the review-thread side.
-    if (detailsStale) return;
+    if (detailsStale) return false;
     try {
       await editReviewComment.mutateAsync({ number, commentId, body });
       toast.success("Comment updated");
+      return true;
     } catch (e) {
       onError(e);
+      return false;
     }
   }
 

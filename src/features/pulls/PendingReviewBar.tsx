@@ -5,6 +5,7 @@ import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CommentEditor } from "@/features/conversations/CommentEditor";
+import { useKeptDraft, useKeptOpen } from "@/features/diff/editor-keep";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
   pendingWriteMatching,
@@ -50,8 +51,14 @@ export function DraftCommentCard({
   number: number;
   draft: ReviewDraft;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [body, setBody] = useState(draft.body);
+  // An edit open in a diff row comes back, with its text, when the rows
+  // remount around it.
+  const keptId = `draft:${draft.id}`;
+  const reopened = useKeptOpen(keptId);
+  const [editing, setEditing] = useState(reopened);
+  const kept = useKeptDraft(editing ? keptId : null);
+  const body = kept.text;
+  const setBody = kept.setText;
   const [confirmDelete, setConfirmDelete] = useState(false);
   const updateDraft = useUpdateReviewDraft(repoPath, lens, number);
   const removeDraft = useRemoveReviewDraft(repoPath, lens, number);
@@ -73,11 +80,15 @@ export function DraftCommentCard({
   // too, so a catch of our own would double-report.
   async function saveEdit() {
     if (!canSave) return;
+    kept.setBusy(true);
     try {
       await updateDraft.mutateAsync({ id: draft.id, body: next });
+      kept.forget();
       setEditing(false);
     } catch {
       // Reported at hook level (see above).
+    } finally {
+      kept.setBusy(false);
     }
   }
 
@@ -131,8 +142,12 @@ export function DraftCommentCard({
         <CommentEditor
           value={body}
           onChange={setBody}
+          autoFocus={!kept.restored}
           onSubmit={() => void saveEdit()}
-          onCancel={() => setEditing(false)}
+          onCancel={() => {
+            kept.forget();
+            setEditing(false);
+          }}
           canSubmit={canSave}
           pending={updateDraft.isPending}
           ariaLabel="Edit pending comment"

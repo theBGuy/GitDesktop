@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { copyText } from "@/lib/clipboard";
 import { CommentEditor } from "./CommentEditor";
+import { useEditorCloseLanding } from "./Thread";
 import type { MentionSource } from "./useMentionCandidates";
 
 /**
@@ -50,9 +51,14 @@ export function LocalComment({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [expanded, setExpanded] = useState(false);
+  const landing = useEditorCloseLanding(editing);
+  function closeEditor() {
+    landing.arm();
+    setEditing(false);
+  }
   const hidden = comment.hidden ?? false;
   return (
-    <div className="group space-y-1">
+    <div ref={landing.rootRef} className="group space-y-1">
       <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
         {comment.author && (
           <>
@@ -73,6 +79,7 @@ export function LocalComment({
             <span className="flex-1" />
             <DropdownMenu>
               <DropdownMenuTrigger
+                ref={landing.triggerRef}
                 render={
                   <Button
                     variant="ghost"
@@ -124,9 +131,9 @@ export function LocalComment({
           canSubmit={!!draft.trim() && draft.trim() !== comment.body.trim()}
           onSubmit={() => {
             onSaveEdit(draft.trim());
-            setEditing(false);
+            closeEditor();
           }}
-          onCancel={() => setEditing(false)}
+          onCancel={closeEditor}
           textareaClassName="max-h-48 min-h-16 resize-y"
           mentions={mentions}
         />

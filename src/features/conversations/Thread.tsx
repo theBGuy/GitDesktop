@@ -1,6 +1,6 @@
 import { DotsThreeIcon, LockIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { type ReactNode, useLayoutEffect, useState } from "react";
+import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Markdown } from "@/components/markdown/markdown";
 import { hostedImagesFor } from "@/components/markdown/markdown-images";
@@ -17,8 +17,10 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useKeptDraft, useKeptOpen } from "@/features/diff/editor-keep";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
+import { focusIsLost } from "@/lib/focus-lost";
 import type { MinimizeReason } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import { useActiveForgeGhHost, useActiveGhHost } from "@/lib/git/host";
@@ -91,6 +93,44 @@ export function AuthorAvatar({
   );
 }
 
+// Restates src/lib/focus-lost.ts's fallback: jsdom has no checkVisibility.
+function isRendered(el: Element): boolean {
+  if (typeof el.checkVisibility === "function") return el.checkVisibility();
+  for (let node: Element | null = el; node !== null; node = node.parentElement)
+    if (getComputedStyle(node).display === "none") return false;
+  return true;
+}
+
+function mayTakeFocus(root: HTMLElement | null): boolean {
+  if (root === null || !root.isConnected || !isRendered(root)) return false;
+  return root.contains(document.activeElement) || focusIsLost();
+}
+
+/** Lands focus on a comment's "Comment actions" trigger as its inline editor
+ *  closes. `arm()` before the close reads the focus at that moment: it takes
+ *  focus only from inside the comment or from nowhere, and never while the
+ *  comment is hidden, since a save can settle after the user moved on or while
+ *  its tab is hidden. The landing rides the commit that remounts the trigger,
+ *  re-checking first. */
+export function useEditorCloseLanding(editing: boolean) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const armed = useRef(false);
+  useLayoutEffect(() => {
+    const land = armed.current;
+    armed.current = false;
+    if (!editing && land && mayTakeFocus(rootRef.current))
+      triggerRef.current?.focus();
+  }, [editing]);
+  return {
+    rootRef,
+    triggerRef,
+    arm: () => {
+      armed.current = mayTakeFocus(rootRef.current);
+    },
+  };
+}
+
 export function Thread({
   thread,
   onQuote,
@@ -122,16 +162,18 @@ export function Thread({
    *  file-anchored threads. Absent = copies `thread.body`, byte-identical to
    *  before. */
   copyMarkdown?: string;
-  /** Present when the viewer may edit this comment; saves the new body. */
-  onSaveEdit?: (body: string) => void;
+  /** Present when the viewer may edit this comment; saves the new body and
+   *  resolves whether it saved. The editor stays open, frozen, until it settles,
+   *  and `false` keeps it open with the draft. */
+  onSaveEdit?: (body: string) => boolean | Promise<boolean>;
   /** Holds an ALREADY-OPEN editor's Save without claiming a write is running —
    *  withholding `onSaveEdit` only removes the menu's Edit entry, so an editor
    *  opened before the caller went stale would otherwise save into nothing and
    *  close, discarding the text. */
   editHeld?: boolean;
-  /** Why the forge won't take an edit of this comment (null = it will): the
-   *  Edit row stays shown but disabled, and an open editor keeps its text while
-   *  its Save holds with this reason. */
+  /** Why the forge won't take an edit or a delete of this comment (null = it
+   *  will): the Edit and Delete rows stay shown but disabled, and an open editor
+   *  keeps its text while its Save holds with this reason. */
   editHeldReason?: string | null;
   /** Present when the viewer may delete this comment. */
   onDelete?: () => void;
@@ -167,19 +209,61 @@ export function Thread({
    *  thread that unmounts with it open is told nothing. */
   onEditingChange?: (editing: boolean) => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  // An edit open in a diff row comes back, with its text, when the rows
+  // remount around it.
+  const keptId = `edit:${thread.id}`;
+  const reopened = useKeptOpen(keptId);
+  const [editing, setEditing] = useState(reopened);
   const editingChange = useLatestRef(onEditingChange);
   useLayoutEffect(() => {
     editingChange.current?.(editing);
   }, [editing]);
-  const [draft, setDraft] = useState("");
+  const kept = useKeptDraft(editing ? keptId : null);
+  const draft = kept.text;
+  const setDraft = kept.setText;
   const [expanded, setExpanded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // The ref gates a second submit fired before the `saving` render lands.
+  const savingRef = useRef(false);
+  const landing = useEditorCloseLanding(editing);
+  function closeEditor() {
+    landing.arm();
+    setEditing(false);
+  }
+  async function save() {
+    // Returns BEFORE closing: a held save keeps the draft on screen rather than
+    // swallow it.
+    if (editHeld || editHeldReason !== null || savingRef.current) return;
+    if (!onSaveEdit) return;
+    savingRef.current = true;
+    setSaving(true);
+    kept.setBusy(true);
+    let saved = false;
+    try {
+      saved = await onSaveEdit(draft.trim());
+    } catch {
+      // A saver that rejects saved nothing: the editor keeps the draft.
+      saved = false;
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+      kept.setBusy(false);
+    }
+    if (saved) {
+      kept.forget();
+      closeEditor();
+    }
+  }
   const minimized = thread.isMinimized;
   const disabledSuffix = disabledReason ? ` — ${disabledReason}` : "";
   return (
     // The open-editor mark is what the whitespace probe (whitespace-mode.ts)
     // finds under a host whose rows a whitespace flip replaces.
-    <div className="group space-y-1" data-thread-editing={editing || undefined}>
+    <div
+      ref={landing.rootRef}
+      className="group space-y-1"
+      data-thread-editing={editing || undefined}
+    >
       <p className="flex items-center gap-2 text-xs">
         <AuthorAvatar
           login={thread.author}
@@ -207,6 +291,7 @@ export function Thread({
             <span className="flex-1" />
             <DropdownMenu>
               <DropdownMenuTrigger
+                ref={landing.triggerRef}
                 render={
                   <Button
                     variant="ghost"
@@ -283,8 +368,14 @@ export function Thread({
                   </DropdownMenuSub>
                 )}
                 {onDelete && (
-                  <DropdownMenuItem variant="destructive" onClick={onDelete}>
+                  <DropdownMenuItem
+                    variant="destructive"
+                    disabled={editHeldReason !== null}
+                    className={MENU_HELD_ROW_CLASS}
+                    onClick={onDelete}
+                  >
                     Delete
+                    {editHeldReason !== null && ` — ${editHeldReason}`}
                   </DropdownMenuItem>
                 )}
               </DropdownMenuContent>
@@ -313,20 +404,20 @@ export function Thread({
             ariaLabel="Edit comment"
             value={draft}
             onChange={setDraft}
+            autoFocus={!kept.restored}
             canSubmit={
               !!draft.trim() &&
               draft.trim() !== thread.body.trim() &&
               !editHeld &&
               editHeldReason === null
             }
-            onSubmit={() => {
-              // Return BEFORE closing: a held save must keep the draft on screen
-              // rather than swallow it.
-              if (editHeld || editHeldReason !== null) return;
-              onSaveEdit?.(draft.trim());
-              setEditing(false);
+            pending={saving}
+            onSubmit={() => void save()}
+            onCancel={() => {
+              if (savingRef.current) return;
+              kept.forget();
+              closeEditor();
             }}
-            onCancel={() => setEditing(false)}
             textareaClassName="max-h-48 min-h-16 resize-y font-mono"
             mentions={mentions}
             hostedImages={hostedImagesFor(

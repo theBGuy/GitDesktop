@@ -139,6 +139,12 @@ import {
 } from "./diff-rows";
 import { drawnLayout } from "./drawn-layout";
 import {
+  createEditorKeep,
+  DiffRowsHeldContext,
+  KeptRow,
+  useEditorKeepVersion,
+} from "./editor-keep";
+import {
   changesSince,
   contentBuildGate,
   contentReadsKey,
@@ -173,6 +179,7 @@ import {
   SYNTAX_LINE_CAP,
   shikiDiffHighlighter,
 } from "./shiki-highlighter";
+import { type LineKeeper, SnapshotMark } from "./snapshot-mark";
 import { SPLIT_MIN_CONTAINER_PX } from "./split-threshold";
 import { ensureCustomLanguages } from "./syntax";
 import { type StagingSide, UNDECODABLE_NOTE_COPY } from "./undecodable-note";
@@ -182,6 +189,7 @@ import {
 } from "./use-hidden-trigger-focus";
 import { useWorkerHighlight, type WorkerAsts } from "./use-worker-highlight";
 import {
+  DIFF_EDITOR_SELECTOR,
   diffEditorOpen,
   LAYOUT_COMPOSER_HELD,
   lineComposerOpen,
@@ -207,6 +215,10 @@ export interface DiffLineAnchor {
   /** 1-based line number in that side's file. */
   line: number;
   render: () => ReactNode;
+  /** The ids of the editors this row can host (`reply:<thread id>`,
+   *  `edit:<comment id>`, `draft:<draft id>`): an editor open in it is put
+   *  back after a remount of the rows only when the row still lists its id. */
+  ids?: readonly string[];
 }
 
 /**
@@ -482,7 +494,7 @@ export function GitDiffView({
   whitespaceHidden?: boolean;
   /** Filled with the call that keeps the top visible line across a layout
    *  change above the rows in `scrollerRef` (see `useModeLineAnchor`). */
-  lineKeeper?: { current: (() => void) | null };
+  lineKeeper?: { current: LineKeeper | null };
   /** Takes what the rows draw and mount, on mount and on each change, and
    *  nothing drawn when they unmount (DiffContent's report). */
   onRows?: (rows: RowsReport) => void;
@@ -603,6 +615,7 @@ export function createDiffFile(
   // files (correct comment/string state) and maps tokens onto the diff lines —
   // and switches to collapsible full-file context instead of a bare hunk.
   content?: { old: string | null; new: string | null },
+  theme?: { readonly current: "light" | "dark" },
 ): DiffFile | null {
   if (!text.trim()) return null;
   try {
@@ -640,6 +653,9 @@ export function createDiffFile(
       hunks: [withBlankContextSpaces(text)],
     };
     const file = DiffFile.createInstance(data);
+    // Read through a ref at build time: the view re-themes its clone on a
+    // toggle, while a build dependency would rebuild and drop expanded context.
+    if (theme) file.initTheme(theme.current);
     file.initRaw();
     // Gate on the char budget for the engine this diff routes to (~8× apart —
     // see the constants), counting both whole files in content mode since this
@@ -1075,6 +1091,9 @@ export function useShikiRouting({
 interface LineAnchorRuntime {
   /** The reading position a switch or an expand restores. */
   anchor: LineAnchor | null;
+  /** The scrollTop `anchor` was read or placed at, so the keeper can tell a
+   *  scroll since that read from a layout that moved under it. */
+  readAt: number | null;
   /** The rows sampling bisects, walked once per build: a new build or any
    *  child mutation under the scroller drops the list. */
   rows: ArrayLike<Element> | null;
@@ -1110,8 +1129,11 @@ function freezeLineAnchor(
   split: boolean,
 ) {
   releaseLineAnchor(rt);
+  // Every re-place stamps `readAt`, so the keeper never takes a scrollTop the
+  // freeze wrote for a scroll and re-reads a layout that moved since.
   const place = () => {
     placeLineAnchor(scroller, anchor, split);
+    rt.readAt = scroller.scrollTop;
   };
   // A layout can re-lay its rows after the restore (wrapped rows settling to
   // their height) with no scroll event, so a content resize re-places too. The
@@ -1136,7 +1158,19 @@ function freezeLineAnchor(
   for (const type of ANCHOR_RELEASE_INPUTS)
     document.addEventListener(type, release, { capture: true, passive: true });
   rt.anchor = anchor;
+  rt.readAt = scroller.scrollTop;
   rt.frozen = { place, release };
+}
+
+/** Reads the pane's top line from its DOM as it stands, unless a restore owns
+ *  the anchor (a wait in flight, a placed line still frozen). A read that finds
+ *  no rendered row (a hidden subtree, a rowless arm) keeps the anchor it had. */
+function readTopLine(rt: LineAnchorRuntime, scroller: HTMLElement) {
+  if (rt.armed !== null || rt.frozen !== null) return;
+  const anchor = captureLineAnchor(scroller);
+  if (anchor === null) return;
+  rt.anchor = anchor;
+  rt.readAt = scroller.scrollTop;
 }
 
 /** Puts the anchored line back at its offset when its row is rendered;
@@ -1229,22 +1263,25 @@ function restoreLineAnchor(
  *  flipped the effective mode (the toggle, the setting, the narrow-pane
  *  override), and across an expand of the same diff: the layouts lay out at
  *  different heights and an expand replaces every row, so a kept scrollTop
- *  shows another line. Scrolling samples the anchor; a switch snapshots it, as
- *  does the returned `keepLine` called just before an expand, and the next
- *  layout or build restores it with an absolute scrollTop. No scroller, no
- *  restore. `content` is the built diff on screen: any other new build under
- *  the same path and mode re-reads the anchor from its rows. */
+ *  shows another line. Scrolling samples the anchor; the returned `mark`,
+ *  rendered once in the arm that mounts the rows, reads it in the commit that
+ *  switches, before any DOM change, and a hide reads it too, as does the
+ *  returned `keepLine` called just before an expand; the next layout or build
+ *  restores it with an absolute scrollTop. No scroller, no restore. `content`
+ *  is the built diff on screen: any other new build under the same path and
+ *  mode re-reads the anchor from its rows. */
 export function useModeLineAnchor(
   scrollerRef: { readonly current: HTMLElement | null } | undefined,
   mode: string,
   file: string,
   content: unknown,
-  // Filled with a call that puts the reader's line back after a layout change
+  // Filled with the calls that keep the reader's line through a layout change
   // above the rows that no scroll or build reports (image panes over the diff).
-  keeper?: { current: (() => void) | null },
-): () => void {
+  keeper?: { current: LineKeeper | null },
+): { keepLine: () => void; mark: ReactNode } {
   const runtime = useRef<LineAnchorRuntime>({
     anchor: null,
+    readAt: null,
     rows: null,
     armed: null,
     frozen: null,
@@ -1254,9 +1291,15 @@ export function useModeLineAnchor(
   // when the mode changed while hidden; a new file drops the anchor.
   const appliedRef = useRef({ mode, file });
   const contentRef = useRef({ content, mode, file });
+  // An ancestor host's scroller ref detaches before a descendant's layout
+  // cleanup on an <Activity> hide and attaches after its layout effects on the
+  // re-show (the tree is un-hidden by then), so the hide-time read and the
+  // re-show's restore fall back to the scroller last seen.
+  const seenScroller = useRef<HTMLElement | null>(null);
   useEffect(() => {
     const scroller = scrollerRef?.current;
     if (!scroller) return;
+    seenScroller.current = scroller;
     const rt = runtime.current;
     let frame = 0;
     const sample = () => {
@@ -1264,6 +1307,7 @@ export function useModeLineAnchor(
       if (rt.armed !== null || rt.frozen !== null) return;
       rt.rows ??= anchorRows(scroller);
       rt.anchor = captureLineAnchor(scroller, rt.rows);
+      rt.readAt = scroller.scrollTop;
     };
     const onScroll = () => {
       if (rt.frozen !== null) {
@@ -1286,6 +1330,16 @@ export function useModeLineAnchor(
       releaseLineAnchor(rt);
     };
   }, [scrollerRef]);
+  // A hide runs this cleanup while the rows are still laid out, so a switch
+  // made while hidden restores the line the pane showed then. Declared ahead
+  // of the mode edge, whose cleanup disarms: a wait in flight keeps its anchor.
+  useLayoutEffect(() => {
+    const rt = runtime.current;
+    return () => {
+      const scroller = scrollerRef?.current ?? seenScroller.current;
+      if (scroller) readTopLine(rt, scroller);
+    };
+  }, [scrollerRef]);
   // Its cleanup is the disarm, so the next mode or file edge, a hide and an
   // unmount each end a wait.
   useLayoutEffect(() => {
@@ -1299,7 +1353,10 @@ export function useModeLineAnchor(
       return;
     }
     const anchor = rt.anchor;
-    const scroller = scrollerRef?.current;
+    const seen = seenScroller.current?.isConnected
+      ? seenScroller.current
+      : null;
+    const scroller = scrollerRef?.current ?? seen;
     if (applied.mode === mode || anchor === null || !scroller) return;
     return restoreLineAnchor(
       rt,
@@ -1337,30 +1394,48 @@ export function useModeLineAnchor(
     releaseLineAnchor(rt);
     rt.rows = anchorRows(scroller);
     rt.anchor = captureLineAnchor(scroller, rt.rows);
+    rt.readAt = scroller.scrollTop;
   }, [content, mode, file, scrollerRef]);
-  // The anchor read before that change is the last one scrolling or a build
-  // took, so it restores exactly as a switch does; a wait already armed owns it.
+  // `read` runs before the change's DOM mutations, but only after a scroll
+  // since the last read: with none, the anchor is still the reader's line,
+  // while the DOM may already have moved (an image box grows when it decodes,
+  // ahead of the commit its load causes). `restore` puts the anchor back
+  // exactly as a switch does; a wait already armed owns it.
   useLayoutEffect(() => {
     if (keeper === undefined) return;
-    keeper.current = () => {
-      const rt = runtime.current;
-      const scroller = scrollerRef?.current;
-      if (!scroller || rt.anchor === null || rt.armed !== null) return;
-      restoreLineAnchor(
-        rt,
-        scroller,
-        rt.anchor,
-        appliedRef.current,
-        () => appliedRef.current,
-      );
+    keeper.current = {
+      read() {
+        const rt = runtime.current;
+        const scroller = scrollerRef?.current;
+        if (!scroller) return;
+        if (rt.anchor !== null && rt.readAt === scroller.scrollTop) return;
+        readTopLine(rt, scroller);
+      },
+      restore() {
+        const rt = runtime.current;
+        const scroller = scrollerRef?.current;
+        if (!scroller || rt.anchor === null || rt.armed !== null) return;
+        restoreLineAnchor(
+          rt,
+          scroller,
+          rt.anchor,
+          appliedRef.current,
+          () => appliedRef.current,
+        );
+      },
     };
     return () => {
       keeper.current = null;
     };
   }, [keeper, scrollerRef]);
+  // The switch's read, in the commit that changes `mode`.
+  const readMode = useCallback(() => {
+    const scroller = scrollerRef?.current;
+    if (scroller) readTopLine(runtime.current, scroller);
+  }, [scrollerRef]);
   // Called just before an expand of the diff on screen: reads the line the
   // pane shows now, which the expanded build restores.
-  return useCallback(() => {
+  const keepLine = useCallback(() => {
     const rt = runtime.current;
     const scroller = scrollerRef?.current;
     if (!scroller) return;
@@ -1369,6 +1444,7 @@ export function useModeLineAnchor(
       content: contentRef.current.content,
     };
   }, [scrollerRef]);
+  return { keepLine, mark: <SnapshotMark on={mode} read={readMode} /> };
 }
 
 /** The per-side line -> render() maps the vendored DiffView consumes. */
@@ -1405,6 +1481,7 @@ function sameBuildInputs(a: DiffBuildInputs, b: DiffBuildInputs): boolean {
 function useDiffBuild(
   inputs: DiffBuildInputs,
   gated: boolean,
+  theme: { readonly current: "light" | "dark" },
 ): DiffFile | null {
   const [last, setLast] = useState<{
     inputs: DiffBuildInputs;
@@ -1417,6 +1494,7 @@ function useDiffBuild(
     inputs.text,
     inputs,
     inputs.content ?? undefined,
+    theme,
   );
   // Rows prebuilt for both layouts, as the library's own mount effect builds
   // them: its view remounts on every rebuild (Show full diff among them), and
@@ -1437,9 +1515,9 @@ const DIFF_EDITOR_MARKS = [
   "data-diff-editor",
 ];
 
-/** Whether an editor is open inside the diff under `root`, kept live by an
+/** How many editors are open inside the diff under `root`, kept live by an
  *  observer over it: opening one changes no state this diff renders from. */
-function useDiffEditorOpen(root: HTMLElement | null): boolean {
+function useDiffEditorCount(root: HTMLElement | null): number {
   const subscribe = useCallback(
     (onChange: () => void) => {
       if (root === null) return () => undefined;
@@ -1455,10 +1533,20 @@ function useDiffEditorOpen(root: HTMLElement | null): boolean {
     [root],
   );
   const snapshot = useCallback(
-    () => root !== null && diffEditorOpen(root),
+    () =>
+      root === null ? 0 : root.querySelectorAll(DIFF_EDITOR_SELECTOR).length,
     [root],
   );
   return useSyncExternalStore(subscribe, snapshot);
+}
+
+// A build's id never holds it and comes first, so a key names one pair.
+const VIEW_KEY_SEPARATOR = String.fromCharCode(0xffff);
+
+/** The library view's key: a new build, or the same build after a record
+ *  move that found an editor open, mounts a fresh view. */
+function viewKey(generation: number, diffFile: DiffFile): string {
+  return `${diffFile.getId()}${VIEW_KEY_SEPARATOR}${generation}`;
 }
 
 function RenderedDiff({
@@ -1493,11 +1581,12 @@ function RenderedDiff({
   forgePatch?: ForgePatch;
   dataIsPlaceholder?: boolean;
   whitespaceHidden?: boolean;
-  lineKeeper?: { current: (() => void) | null };
+  lineKeeper?: { current: LineKeeper | null };
   onRows?: (rows: RowsReport) => void;
 }) {
   const settings = useSettings();
   const isDark = useIsDark();
+  const themeRef = useLatestRef<"light" | "dark">(isDark ? "dark" : "light");
   // The narrow-pane override renders unified without ever writing the setting,
   // so widening the pane restores the user's split preference on its own.
   const viewMode = drawnLayout(forceUnified, settings.data?.diffViewMode);
@@ -1559,7 +1648,8 @@ function RenderedDiff({
   // This diff's root, observed for an open editor on a host that can hold one
   // (see `observesRoot`): it holds Show full diff, and a forge patch's upgrade.
   const [diffRoot, setDiffRoot] = useState<HTMLDivElement | null>(null);
-  const editorOpen = useDiffEditorOpen(diffRoot);
+  const openEditors = useDiffEditorCount(diffRoot);
+  const editorOpen = openEditors > 0;
   const {
     content,
     pending: contentPending,
@@ -1649,19 +1739,124 @@ function RenderedDiff({
       customLanguages,
     },
     blocked || contentPending || holdForGrammar || contentHold,
+    themeRef,
   );
-  // Through a refresh's hold, the build already on screen, with the worker
-  // highlighting painted on it (the worker answers nothing while held).
-  const diffFile = useRetained(builtDiffFile, !contentHold);
-  const shownHighlighter = useRetained(workerHighlighter, !contentHold);
+  // The texts of the editors open in these rows, kept across a remount of
+  // them. Above the per-build view key, so a remount never takes it along.
+  const [keep] = useState(createEditorKeep);
+  const keepVersion = useEditorKeepVersion(keep);
+  // The record the rows' text belongs to, deferred with that text: the host's
+  // scope, else the revisions its content reads, else none (a new build is
+  // then always another record).
+  const deferredRevs = useDeferredValue(
+    contentRevs === undefined
+      ? undefined
+      : `${contentRevs.oldRev}\0${contentRevs.newRev}`,
+  );
+  const keepScope = deferredScope ?? deferredRevs;
+  const record =
+    keepScope === undefined ? null : `${deferredPath}\0${keepScope}`;
+  // The rows on screen: their build, layout, anchors and record. A new one
+  // goes through when no editor is open in them, when every open editor goes
+  // back on its line in it, or when it is another record's; otherwise the
+  // rows on screen stay until the editors close.
+  const [mounted, setMounted] = useState({
+    file: builtDiffFile,
+    path: deferredPath,
+    layout: viewMode,
+    anchors: deferredAnchors,
+    record,
+  });
+  // A build gated behind the mega-line opt-in, a grammar or a first content
+  // read is no candidate yet for the same record: the rows on screen stay
+  // while an editor is open in them.
+  const gated = blocked || contentPending || holdForGrammar;
+  const sameRecord = record === mounted.record && deferredPath === mounted.path;
+  const incoming =
+    contentHold || (gated && sameRecord) ? mounted.file : builtDiffFile;
+  const fileMoved = incoming !== mounted.file;
+  // Two records whose file diff reads the same share one build, so a record
+  // move is a change of its own. Rows a refresh holds or a placeholder paints
+  // stay the earlier record's, and only a host-named scope moves one: revs
+  // landing, lost or moved to a new head are the same record.
+  const recordKept = contentHold || deferredPlaceholder;
+  const recordMoved =
+    !recordKept &&
+    deferredScope !== undefined &&
+    mounted.record !== null &&
+    record !== mounted.record;
+  const changed =
+    fileMoved ||
+    recordMoved ||
+    viewMode !== mounted.layout ||
+    deferredAnchors !== mounted.anchors;
+  const recordChanged =
+    recordMoved ||
+    (fileMoved &&
+      (incoming === null || record === null || record !== mounted.record));
+  const fits =
+    !changed ||
+    recordChanged ||
+    keep.placed(keepVersion, {
+      openEditors,
+      file: fileMoved ? incoming : null,
+      shown,
+      anchors: deferredAnchors ?? [],
+      widgetEnabled: lineWidget?.enabled ?? false,
+    });
+  // A held build's release takes a commit of its own (the step below), so
+  // the line read off the held rows is the one the new build restores.
+  const [heldFor, setHeldFor] = useState<DiffFile | null>(null);
+  const releasing = fits && fileMoved && heldFor !== null;
+  const waiting =
+    gated &&
+    sameRecord &&
+    mounted.file !== null &&
+    keep.editing(keepVersion, openEditors);
+  const rowsHold = !fits || releasing || waiting;
+  if (!fits && fileMoved && heldFor !== incoming) setHeldFor(incoming);
+  if (!changed && heldFor !== null) setHeldFor(null);
+  // A record move with an editor open remounts the library view, so a widget
+  // it holds never carries to the next record; with none open the rows stay.
+  const [viewGen, setViewGen] = useState(0);
+  if (
+    changed &&
+    !rowsHold &&
+    recordMoved &&
+    keep.editing(keepVersion, openEditors)
+  )
+    setViewGen(viewGen + 1);
+  if (changed && !rowsHold)
+    setMounted({
+      file: incoming,
+      path: deferredPath,
+      layout: viewMode,
+      anchors: deferredAnchors,
+      record: recordKept ? mounted.record : record,
+    });
+  const shownRecord = mounted.record;
+  // Through a refresh's hold and a rows hold, the build already on screen,
+  // with the worker highlighting painted on it (the worker answers nothing
+  // while held).
+  const retain = !contentHold && !rowsHold;
+  const diffFile = useRetained(builtDiffFile, retain);
+  const shownHighlighter = useRetained(workerHighlighter, retain);
   // What the rows on screen draw, and the text they were built from, retained
   // with their build.
   const paintedShown = useRetained(
     builtDiffFile === null ? null : drawnNow,
-    !contentHold,
+    retain,
   );
   const paintedText = paintedShown?.text ?? null;
+  // The cap footer counts what the rows on screen hid: a held build's own.
+  const shownHidden = useRetained(hidden, !rowsHold);
+  const shownShortened = useRetained(shortened, !rowsHold);
   const rowsBehind = paintedText !== text;
+  // Held rows that draw an earlier text than the newest build's: the one
+  // cause that holds the line composers' submits (a held layout or anchors
+  // set still draws the same text).
+  const rowsHeld =
+    rowsHold && paintedShown !== null && paintedShown.text !== drawnNow.text;
 
   // The anchor rows this diff has mounted, whatever build they belong to.
   const [anchorRegistry] = useState(createAnchorRegistry);
@@ -1673,8 +1868,13 @@ function RenderedDiff({
   // the anchors handed beside its own diff. The path gate is kept: a deferred
   // frame still showing another file drops that file's anchors, as before.
   const anchorsFitRows = deferredPath === filePath;
-  const extendData = useMemo(() => {
-    if (!anchorsFitRows || !deferredAnchors || deferredAnchors.length === 0)
+  const liveExtendData = useMemo(() => {
+    if (
+      !anchorsFitRows ||
+      !deferredAnchors ||
+      deferredAnchors.length === 0 ||
+      diffFile === null
+    )
       return undefined;
     const oldFile: AnchorExtendData = {};
     const newFile: AnchorExtendData = {};
@@ -1684,16 +1884,33 @@ function RenderedDiff({
       target[String(a.line)] = {
         data: {
           render: () => (
-            <>
+            <KeptRow
+              keep={keep}
+              kind="anchor"
+              side={a.side}
+              line={a.line}
+              file={diffFile}
+              record={shownRecord}
+            >
               <AnchorMount registry={anchorRegistry} anchor={anchor} />
               {a.render()}
-            </>
+            </KeptRow>
           ),
         },
       };
     }
     return { oldFile, newFile };
-  }, [anchorsFitRows, deferredAnchors, anchorRegistry]);
+  }, [
+    anchorsFitRows,
+    deferredAnchors,
+    anchorRegistry,
+    keep,
+    diffFile,
+    shownRecord,
+  ]);
+  // A held row keeps the render it had when the hold began: a same-numbered
+  // live anchor may be another thread.
+  const extendData = useRetained(liveExtendData, !rowsHold);
 
   // --- Drag-range survival across the "+" click (vendored-library workaround) ---
   // DiffViewWithMultiSelect honors a stored multi-select range ONLY when the
@@ -1872,8 +2089,11 @@ function RenderedDiff({
     [clickInRange, capturedDragRange],
   );
 
+  // The layout the rows on screen draw: a Split/Unified swap waits with the
+  // rest of `mounted` for the editors open in them.
+  const drawn = mounted.layout;
   const diffViewMode =
-    viewMode === "split" ? DiffModeEnum.Split : DiffModeEnum.Unified;
+    drawn === "split" ? DiffModeEnum.Split : DiffModeEnum.Unified;
   // A card renders inside the diff table; give it a neutral, non-mono container
   // so it doesn't inherit the code cell's font/background.
   // Valued like the composer wrapper, so the editor probes (whitespace-mode.ts)
@@ -1905,7 +2125,7 @@ function RenderedDiff({
       side: SplitSide;
       onClose: () => void;
     }) => {
-      if (!lineWidget) return null;
+      if (!lineWidget || diffFile === null) return null;
       const resolved = resolveWidgetRange(
         lineNumber,
         fromLineNumber,
@@ -1932,30 +2152,70 @@ function RenderedDiff({
           data-diff-line-widget={rebuildsOnWhitespace ? "whitespace" : "layout"}
           className="m-2 rounded-none border bg-popover p-3 font-sans text-xs text-popover-foreground shadow-md"
         >
-          <LineWidgetBody
-            render={(rowsBehind) =>
-              lineWidget.render({
-                side: resolved.side,
-                line: resolved.to,
-                fromLine: overrode ? resolved.from : undefined,
-                rowsBehind,
-                onClose: () => {
-                  // Clear our captured range, the active override, and the
-                  // highlight when the widget closes so the next press starts
-                  // clean (a previously-ranged line then opens single-line).
-                  dragRangeRef.current = null;
-                  changeRangeRef.current = null;
-                  activeOverrideRef.current = null;
-                  syncPreselect(null);
-                  onClose();
-                },
-              })
-            }
-          />
+          <KeptRow
+            keep={keep}
+            kind="widget"
+            side={sideTag(side)}
+            line={lineNumber}
+            file={diffFile}
+            record={shownRecord}
+            span={resolved}
+          >
+            <LineWidgetBody
+              render={(rowsBehind) =>
+                lineWidget.render({
+                  side: resolved.side,
+                  line: resolved.to,
+                  fromLine: overrode ? resolved.from : undefined,
+                  rowsBehind,
+                  onClose: () => {
+                    // Clear our captured range, the active override, and the
+                    // highlight when the widget closes so the next press starts
+                    // clean (a previously-ranged line then opens single-line).
+                    dragRangeRef.current = null;
+                    changeRangeRef.current = null;
+                    activeOverrideRef.current = null;
+                    syncPreselect(null);
+                    onClose();
+                  },
+                })
+              }
+            />
+          </KeptRow>
         </div>
       );
     },
-    [lineWidget, resolveWidgetRange, syncPreselect, rebuildsOnWhitespace],
+    [
+      lineWidget,
+      resolveWidgetRange,
+      syncPreselect,
+      rebuildsOnWhitespace,
+      keep,
+      diffFile,
+      shownRecord,
+    ],
+  );
+  // Each new view hands over its widget store (a remount of the rows makes a
+  // new one): a kept line composer reopens on its line, and the highlight is
+  // re-asserted, since the new view draws none. Hand-over records no editor
+  // re-claimed by then are gone.
+  const widgetOn = useLatestRef(lineWidget?.enabled ?? false);
+  const onCreateUseWidgetHook = useCallback(
+    (hook: {
+      getReadonlyState: () => {
+        setWidget: (widget: { side?: SplitSide; lineNumber?: number }) => void;
+      };
+    }) => {
+      preselectSigRef.current = "";
+      const kept = keep.widgetRecord();
+      if (kept !== null && widgetOn.current)
+        hook.getReadonlyState().setWidget({
+          side: kept.side === "old" ? SplitSide.old : SplitSide.new,
+          lineNumber: kept.line,
+        });
+      setTimeout(keep.dropHandOver, 0);
+    },
+    [keep],
   );
 
   // Inside a diff-pane slot, settle waits for THIS diffFile's first row: the
@@ -1996,6 +2256,7 @@ function RenderedDiff({
     whitespaceHidden: deferredWhitespaceHidden,
   };
   const reported = ((): Omit<RowsReport, "anchors"> => {
+    if (waiting) return paintedShown ?? { ...unbuilt, cut: null };
     if (blocked) return drawnNow;
     if (contentPending || holdForGrammar || holdBlank)
       return { ...unbuilt, cut: "pending" };
@@ -2031,8 +2292,10 @@ function RenderedDiff({
     [],
   );
   // The blocked placeholder is final; the pending arm below renders nothing.
+  // Rows held while no candidate has built are as settled as they were.
   useReportPaneSettled(
-    blocked ||
+    waiting ||
+      blocked ||
       (!contentPending &&
         !holdForGrammar &&
         !holdBlank &&
@@ -2096,13 +2359,18 @@ function RenderedDiff({
       landHunkFocus(held, diffLandingRef.current ?? revealLanding?.current);
     committedPath.current = deferredPath;
   });
-  const keepLine = useModeLineAnchor(
+  const { keepLine, mark } = useModeLineAnchor(
     scrollerRef,
-    viewMode,
+    drawn,
     deferredPath,
     diffFile,
     lineKeeper,
   );
+  // A view that mounts onto a source built under the other theme (the arm
+  // swap below keeps the build) first-commits the theme its source carries.
+  useLayoutEffect(() => {
+    diffFile?.initTheme(isDark ? "dark" : "light");
+  }, [diffFile, isDark]);
   // A forge-patch upgrade lands in a step of its own, declared after the hook
   // above: the line read here from the hunk-only rows is the one the content
   // build restores. An editor open in this diff would lose its text with the
@@ -2132,11 +2400,43 @@ function RenderedDiff({
     )
       root.focus({ preventScroll: true });
   }, [diffFile, interactive]);
+  // A held build's release: the line read here off the held rows is the one
+  // the new build restores, and focus that sat in them, or was lost as the
+  // editor holding them closed, lands on the diff's own group.
+  useLayoutEffect(() => {
+    if (!releasing) return;
+    const root = diffLandingRef.current;
+    const active = document.activeElement;
+    upgradeHadFocus.current =
+      root !== null &&
+      active !== root &&
+      (active === null ||
+        active === document.body ||
+        !active.isConnected ||
+        root.contains(active));
+    keepLine();
+    setHeldFor(null);
+  }, [releasing, keepLine]);
+  // A commit that replaced the rows: the keep judges its releases, and focus
+  // that was in a row it took away lands on the diff's own group.
+  const landInteractive = useLatestRef(interactive);
+  useLayoutEffect(() => {
+    const focusLeft = keep.rowsReplaced(diffFile, drawn, shownRecord);
+    const root = diffLandingRef.current;
+    const active = document.activeElement;
+    if (
+      focusLeft &&
+      root !== null &&
+      landInteractive.current &&
+      (active === null || active === document.body || !active.isConnected)
+    )
+      root.focus({ preventScroll: true });
+  }, [keep, diffFile, drawn, shownRecord]);
 
   // A generated/minified file (one enormous line) would freeze the renderer:
   // placeholder + one-click opt-in. FIRST, so a blocked mega file never flashes
-  // null while an irrelevant grammar loads.
-  if (blocked) {
+  // null while an irrelevant grammar loads. Held rows stay up instead.
+  if (blocked && !waiting) {
     return (
       <DiffPlaceholder
         message="Looks like a generated or minified file"
@@ -2157,7 +2457,7 @@ function RenderedDiff({
   // placeholder so loading never reads as "No changes to show". Over budget
   // `holdForGrammar` is never true — the interim hljs paint isn't delayed for a
   // grammar only the worker needs.
-  if (contentPending || holdForGrammar || holdBlank) return null;
+  if (!waiting && (contentPending || holdForGrammar || holdBlank)) return null;
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
   return (
     // The Show full landing: a named group, so focus that lands here stays in
@@ -2170,15 +2470,52 @@ function RenderedDiff({
       className="outline-none"
     >
       {inSlot && <span ref={rowsProbeRef} hidden />}
-      {lineWidget?.enabled ? (
-        // Line-comment mode: the multi-select variant adds clickable line numbers
-        // and drag-to-select, opening the composer below the line. Opt-in only.
-        <PaintedRowsBehindContext value={rowsBehind}>
-          <DiffViewWithMultiSelect<{ render: () => ReactNode }>
-            ref={multiSelectRef}
+      {mark}
+      {/* Keyed per build: the library clears its on-screen clone during render
+          when the source changes, so a view React keeps across a discarded
+          render would repaint in the light theme. And per record: a widget it
+          holds open never carries to another record's rows of the same text. */}
+      <DiffRowsHeldContext value={rowsHeld}>
+        {lineWidget?.enabled ? (
+          // Line-comment mode: the multi-select variant adds clickable line numbers
+          // and drag-to-select, opening the composer below the line. Opt-in only.
+          <PaintedRowsBehindContext value={rowsBehind}>
+            <DiffViewWithMultiSelect<{ render: () => ReactNode }>
+              key={viewKey(viewGen, diffFile)}
+              ref={multiSelectRef}
+              diffFile={diffFile}
+              // Worker ASTs land as a highlighter PROP, not a rebuild: the view's
+              // effect applies them to its own clone, so expansion state survives.
+              registerHighlighter={shownHighlighter}
+              diffViewMode={diffViewMode}
+              diffViewTheme={isDark ? "dark" : "light"}
+              diffViewHighlight
+              diffViewWrap
+              diffViewFontSize={12}
+              extendData={extendData}
+              renderExtendLine={renderExtendLine}
+              // Makes line-number cells clickable (flows through to the inner
+              // DiffView), which is what opens the widget slot.
+              diffViewAddWidget
+              enableMultiSelect
+              // Track the drag range ourselves so a "+" press on ANY line of it opens
+              // a range composer. The library's own max-line fast path never fires:
+              // "+" mousedown starts a native single-line selection in an ANCESTOR
+              // listener (before React's synthetic handlers), wiping the stored
+              // multiResult; the React onMouseDown then opens the widget and calls
+              // clearSelection, so mouseup fires no onSelectionComplete. The widget
+              // renders during the mousedown flush, BEFORE mouseup — so our captured
+              // range still holds at render time and overrides the single-line report.
+              onMultiSelectComplete={onMultiSelectComplete}
+              onMultiSelectChange={onMultiSelectChange}
+              renderWidgetLine={renderWidgetLine}
+              onCreateUseWidgetHook={onCreateUseWidgetHook}
+            />
+          </PaintedRowsBehindContext>
+        ) : (
+          <DiffView<{ render: () => ReactNode }>
+            key={viewKey(viewGen, diffFile)}
             diffFile={diffFile}
-            // Worker ASTs land as a highlighter PROP, not a rebuild: the view's
-            // effect applies them to its own clone, so expansion state survives.
             registerHighlighter={shownHighlighter}
             diffViewMode={diffViewMode}
             diffViewTheme={isDark ? "dark" : "light"}
@@ -2187,39 +2524,13 @@ function RenderedDiff({
             diffViewFontSize={12}
             extendData={extendData}
             renderExtendLine={renderExtendLine}
-            // Makes line-number cells clickable (flows through to the inner
-            // DiffView), which is what opens the widget slot.
-            diffViewAddWidget
-            enableMultiSelect
-            // Track the drag range ourselves so a "+" press on ANY line of it opens
-            // a range composer. The library's own max-line fast path never fires:
-            // "+" mousedown starts a native single-line selection in an ANCESTOR
-            // listener (before React's synthetic handlers), wiping the stored
-            // multiResult; the React onMouseDown then opens the widget and calls
-            // clearSelection, so mouseup fires no onSelectionComplete. The widget
-            // renders during the mousedown flush, BEFORE mouseup — so our captured
-            // range still holds at render time and overrides the single-line report.
-            onMultiSelectComplete={onMultiSelectComplete}
-            onMultiSelectChange={onMultiSelectChange}
-            renderWidgetLine={renderWidgetLine}
+            onCreateUseWidgetHook={onCreateUseWidgetHook}
           />
-        </PaintedRowsBehindContext>
-      ) : (
-        <DiffView<{ render: () => ReactNode }>
-          diffFile={diffFile}
-          registerHighlighter={shownHighlighter}
-          diffViewMode={diffViewMode}
-          diffViewTheme={isDark ? "dark" : "light"}
-          diffViewHighlight
-          diffViewWrap
-          diffViewFontSize={12}
-          extendData={extendData}
-          renderExtendLine={renderExtendLine}
-        />
-      )}
+        )}
+      </DiffRowsHeldContext>
       <DiffCapFooter
-        hidden={hidden}
-        shortened={shortened}
+        hidden={shownHidden}
+        shortened={shownShortened}
         onShowFull={() => {
           keepLine();
           setShowFull(true);
@@ -2949,7 +3260,7 @@ export function DiffContent({
     forgePatch === undefined ? undefined : { source: imageOn?.source ?? null };
   // SVG panes above the rows change the layout with no scroll or build, so
   // they hand the line back through the diff's own anchor.
-  const lineKeeper = useRef<(() => void) | null>(null);
+  const lineKeeper = useRef<LineKeeper | null>(null);
   const keeper = forgePatch === undefined ? undefined : lineKeeper;
   // Panes leaving from above rows that stay can't run an effect of their own,
   // so their presence edge hands the line back here.
@@ -2961,7 +3272,7 @@ export function DiffContent({
     filePath.toLowerCase().endsWith(".svg");
   // biome-ignore lint/correctness/useExhaustiveDependencies: it runs once per presence edge, which `svgPanes` names
   useLayoutEffect(() => {
-    lineKeeper.current?.();
+    lineKeeper.current?.restore();
   }, [svgPanes]);
 
   // ~200px of unshrinkable text, so it shows only where the pane has the room;
@@ -3463,6 +3774,11 @@ export function DiffContent({
             />
           </>
         )}
+        {/* Reads the reader's line before the SVG panes' presence edge lands. */}
+        <SnapshotMark
+          on={String(svgPanes)}
+          read={() => lineKeeper.current?.read()}
+        />
       </div>
     </Fragment>,
     notice,

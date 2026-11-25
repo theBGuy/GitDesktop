@@ -1102,16 +1102,22 @@ export function RemoteIssueView({
     toast.success(`Reopened #${number}`);
   }
 
-  function saveCommentEdit(commentId: string, body: string) {
+  // Resolves whether the edit saved: Thread keeps its editor open on `false`.
+  async function saveCommentEdit(
+    commentId: string,
+    body: string,
+  ): Promise<boolean> {
     // The comment id is the rendered issue's while the write addresses `number`
     // — GitLab routes by both, so a mismatched pair 404s.
-    if (detailsStale) return;
-    // Detached: Thread closes its inline editor on submit, so there is nothing
-    // left for an await to hold open.
-    void editComment
-      .mutateAsync({ number, commentId, body })
-      .then(() => toast.success("Comment updated"))
-      .catch(onError);
+    if (detailsStale) return false;
+    try {
+      await editComment.mutateAsync({ number, commentId, body });
+      toast.success("Comment updated");
+      return true;
+    } catch (e) {
+      onError(e);
+      return false;
+    }
   }
 
   // Both take a comment id off the RENDERED issue, which through a switch is the

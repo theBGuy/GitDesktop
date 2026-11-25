@@ -1,11 +1,16 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import type { MarkdownHostedImages } from "@/components/markdown/markdown";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
+import { focusIsLost } from "@/lib/focus-lost";
 import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import {
+  ARIA_DISABLED_CLASS,
+  heldButtonRender,
+} from "@/lib/use-disabled-reason";
 import type { MentionSource } from "./useMentionCandidates";
 
 /**
@@ -28,6 +33,7 @@ export function CommentEditor({
   textareaClassName,
   mentions,
   hostedImages,
+  autoFocus = true,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -35,8 +41,9 @@ export function CommentEditor({
   onCancel: () => void;
   /** Whether the draft is savable — the caller derives it (empty / unchanged). */
   canSubmit: boolean;
-  /** A save is in flight: freezes the editor and both buttons. Mutation-driven
-   *  callers pass it; fire-and-forget ones leave it unset. */
+  /** A save is in flight: freezes the editor and both buttons, which stay
+   *  focusable. Mutation-driven callers pass it; fire-and-forget ones leave it
+   *  unset. */
   pending?: boolean;
   ariaLabel?: string;
   textareaClassName?: string;
@@ -45,6 +52,9 @@ export function CommentEditor({
   mentions?: MentionSource;
   /** Preview's hosted-image source; see `MarkdownEditor`. */
   hostedImages?: MarkdownHostedImages;
+  /** Focus the field on mount. Off for an editor a diff remounted with its
+   *  text, which takes focus back only if it had it. */
+  autoFocus?: boolean;
 }) {
   const editorRef = useRef<MarkdownEditorHandle>(null);
 
@@ -52,12 +62,35 @@ export function CommentEditor({
   // returns focus to its trigger as it closes, landing AFTER the textarea mounts
   // and stealing it.
   useEffect(() => {
+    if (!autoFocus) return;
     const raf = requestAnimationFrame(() => editorRef.current?.focus());
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [autoFocus]);
+
+  // Focus never falls to <body> across a save: the freeze disables the field
+  // and toolbar, so focus on one moves to the held Save, and a save that ends
+  // with the editor still open hands it back to the field, caret at the end.
+  // Both read the focus at that commit, so focus the user moved out stays.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const saveRef = useRef<HTMLButtonElement>(null);
+  const wasPending = useRef(false);
+  useLayoutEffect(() => {
+    const was = wasPending.current;
+    wasPending.current = !!pending;
+    const root = rootRef.current;
+    const active = document.activeElement;
+    const inside = root !== null && active !== null && root.contains(active);
+    if (pending && !was) {
+      if (inside && active?.matches(":disabled")) saveRef.current?.focus();
+    } else if (!pending && was && (inside || focusIsLost())) {
+      editorRef.current?.focus();
+      const field = root?.querySelector("textarea");
+      field?.setSelectionRange(field.value.length, field.value.length);
+    }
+  }, [pending]);
 
   return (
-    <div className="space-y-2">
+    <div ref={rootRef} className="space-y-2" aria-busy={pending || undefined}>
       <MarkdownEditor
         ref={editorRef}
         aria-label={ariaLabel}
@@ -80,15 +113,27 @@ export function CommentEditor({
       />
       <div className="flex items-center gap-2">
         <Button
+          ref={saveRef}
           size="xs"
           variant="outline"
           disabled={!canSubmit || pending}
+          focusableWhenDisabled={!!pending}
+          render={heldButtonRender(!!pending)}
+          className={ARIA_DISABLED_CLASS}
           onClick={onSubmit}
           title={SUBMIT_HINT}
         >
           Save
         </Button>
-        <Button size="xs" variant="ghost" disabled={pending} onClick={onCancel}>
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={pending}
+          focusableWhenDisabled={!!pending}
+          render={heldButtonRender(!!pending)}
+          className={ARIA_DISABLED_CLASS}
+          onClick={onCancel}
+        >
           Cancel
         </Button>
       </div>

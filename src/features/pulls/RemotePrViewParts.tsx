@@ -23,6 +23,7 @@ import {
   type DiffLineAnchor,
   type LineWidget,
 } from "@/features/diff/DiffSurfaceLazy";
+import { useKeptIds } from "@/features/diff/editor-keep";
 import {
   FileSlots,
   keyedPaneView,
@@ -74,8 +75,12 @@ interface DiffThreadWiring {
   onReply?: (threadId: string, body: string) => Promise<void>;
   onResolve?: (threadId: string, resolved: boolean) => Promise<void>;
   /** Present when the viewer may edit their own thread comments; saves the new
-   *  body. Wired to a Thread's edit control only for a comment the viewer wrote. */
-  onEditComment?: (commentId: string, body: string) => void;
+   *  body. Wired to a Thread's edit control only for a comment the viewer wrote;
+   *  resolves whether the edit saved, as Thread's `onSaveEdit` does. */
+  onEditComment?: (
+    commentId: string,
+    body: string,
+  ) => boolean | Promise<boolean>;
   /** Present when the viewer may delete their own thread comments; opens the
    *  delete confirmation. Wired only for a comment the viewer wrote. */
   onDeleteComment?: (commentId: string) => void;
@@ -109,7 +114,7 @@ interface DiffThreadWiring {
  * expanded state (unresolved default-open, resolved default-closed) so each
  * card collapses independently, mirroring the Conversation block's defaults.
  */
-function DiffThreadAnchor({
+export function DiffThreadAnchor({
   threads,
   onQuote,
   onReply,
@@ -124,7 +129,20 @@ function DiffThreadAnchor({
   fileDiffLookup,
   mentions,
 }: { threads: ReviewThreadOut[] } & DiffThreadWiring) {
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // A thread whose Reply or comment edit was open in this row before its rows
+  // remounted mounts expanded, resolved or not, so that editor comes back.
+  const keptIds = useKeptIds();
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(
+      threads
+        .filter(
+          (t) =>
+            keptIds.includes(`reply:${t.id}`) ||
+            t.comments.some((c) => keptIds.includes(`edit:${c.id}`)),
+        )
+        .map((t) => [t.id, true]),
+    ),
+  );
   const isExpanded = (t: ReviewThreadOut) => expanded[t.id] ?? !t.isResolved;
   return (
     <div className="flex flex-col gap-2">
@@ -566,6 +584,13 @@ function PrFileDiffSlot({
       return {
         side: side as "old" | "new",
         line: Number(line),
+        ids: [
+          ...threadGroup.flatMap((t) => [
+            `reply:${t.id}`,
+            ...t.comments.map((c) => `edit:${c.id}`),
+          ]),
+          ...draftGroup.map((d) => `draft:${d.id}`),
+        ],
         render: () => (
           <div className="flex flex-col gap-2">
             {threadGroup.length > 0 && (

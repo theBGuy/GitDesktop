@@ -482,7 +482,7 @@ describe("a Files-tab review thread's comment menu", () => {
     expect(forgePrDeleteReviewComment).toHaveBeenCalledWith(REPO, 7, "N_own");
   });
 
-  it("C3-1: an archived pull request holds Edit with its reason, as the Conversation tab does", async () => {
+  it("C3-1: an archived pull request holds Edit and Delete with its reason, as the Conversation tab does", async () => {
     wire.editHeldReason = PR_ARCHIVED_READONLY_MESSAGE;
     const user = userEvent.setup();
     mount();
@@ -492,8 +492,10 @@ describe("a Files-tab review thread's comment menu", () => {
       name: `Edit — ${PR_ARCHIVED_READONLY_MESSAGE}`,
       disabled: "true",
     });
-    // Files doesn't hold Delete on an archive either (a recorded residual).
-    expect(rows).toContainEqual({ name: "Delete", disabled: null });
+    expect(rows).toContainEqual({
+      name: `Delete — ${PR_ARCHIVED_READONLY_MESSAGE}`,
+      disabled: "true",
+    });
   });
 
   it("C3-8: a confirmed Delete returns focus to the control focused before the menu opened", async () => {

@@ -35,7 +35,7 @@ it("keeps reporting an open editor across a hide and show, and reports its close
       <TabPanel active={active}>
         <Thread
           thread={thread}
-          onSaveEdit={() => undefined}
+          onSaveEdit={() => true}
           onEditingChange={onEditingChange}
         />
       </TabPanel>
