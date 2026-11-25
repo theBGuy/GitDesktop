@@ -252,9 +252,9 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const [hooksOpen, setHooksOpen] = useState(false);
   // null = closed; the mode doubles as the open flag so the palette's add action
   // can land on the form even while the manager is already open.
-  const [submodulesMode, setSubmodulesMode] = useState<"list" | "add" | null>(
-    null,
-  );
+  const [submodulesMode, setSubmodulesMode] = useState<
+    "list" | "add" | "choose" | null
+  >(null);
   const [worktreesOpen, setWorktreesOpen] = useState(false);
   const [forkOpen, setForkOpen] = useState(false);
   const [forkIntent, setForkIntent] = useState<"contribute" | "own">(
@@ -628,6 +628,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   useHotkeyAction("git-hooks", () => setHooksOpen(true));
   useHotkeyAction("submodules", () => setSubmodulesMode("list"));
   useHotkeyAction("add-submodule", () => setSubmodulesMode("add"));
+  useHotkeyAction("choose-submodule-commit", () => setSubmodulesMode("choose"));
   useHotkeyAction("worktrees", () => setWorktreesOpen(true));
   useHotkeyAction(
     "star-repository",

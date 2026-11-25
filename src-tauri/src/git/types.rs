@@ -377,18 +377,26 @@ pub struct Submodule {
     pub sha: String,
     /// `git describe` of the checked-out commit, when available.
     pub describe: String,
-    /// "ok" | "uninitialized" | "modified" | "conflict".
+    /// "ok" | "uninitialized" | "modified" | "conflict" | "unreadable".
     pub status: String,
+    /// Why git couldn't read this submodule; Some exactly when `status` is
+    /// "unreadable", whose `sha` is the index's gitlink and `describe` "".
+    pub unreadable_reason: Option<String>,
 }
 
-/// What `git_submodule_remove` actually did. A dirty-worktree refusal is DATA,
-/// not an error, so the caller can offer the force retry without parsing stderr.
+/// What `git_submodule_remove` actually did. A dirty-worktree or unreadable
+/// refusal is DATA, not an error, so the caller can offer the force retry without
+/// parsing stderr.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmoduleRemoveOutcome {
     /// The submodule worktree had local changes and `force` was off: NOTHING was
     /// mutated.
     pub refused_dirty: bool,
+    /// Git couldn't read the submodule or its status and `force` was off: NOTHING
+    /// was mutated. The clause completes "Git couldn't read <path>: <clause>", with
+    /// no trailing period.
+    pub refused_unreadable: Option<String>,
     pub module_data_deleted: bool,
     /// Deletion was requested and failed; the removal itself is still staged.
     pub module_data_error: Option<String>,

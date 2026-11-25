@@ -371,10 +371,9 @@ pub async fn run_git_raw_input_bytes(
 }
 
 /// [`run_git_raw`] with extra environment pairs set on the git process, after the
-/// runner's own. Only the history rewrite's rebase start and continue use it, to pin
-/// GIT_SEQUENCE_EDITOR and GIT_EDITOR: env vars outrank any `-c` editor config. git
-/// exports both to every exec line and hook the rebase runs; only GIT_EDITOR=true
-/// makes an editor launch there a no-op.
+/// runner's own. A rebase pins GIT_SEQUENCE_EDITOR and GIT_EDITOR here because env
+/// vars outrank any `-c` editor config; git exports both to every exec line and hook
+/// the rebase runs, so only GIT_EDITOR=true makes an editor launch there a no-op.
 pub(crate) async fn run_git_raw_env(
     repo_path: Option<&str>,
     args: &[&str],

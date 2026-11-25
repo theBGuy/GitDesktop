@@ -640,6 +640,11 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
+      "Pin a submodule to any commit: pick it from a branch or tag's history and it is checked out and staged together",
+  },
+  {
+    group: "Repository & workspace",
+    label:
       "Changed submodules say what changed in the Changes list, with the commits and uncommitted files listed in place of a diff",
   },
   {

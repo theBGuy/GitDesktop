@@ -10,8 +10,10 @@ export interface Submodule {
   branch: string | null;
   sha: string;
   describe: string;
-  /** "ok" | "uninitialized" | "modified" | "conflict" */
+  /** "ok" | "uninitialized" | "modified" | "conflict" | "unreadable" */
   status: string;
+  /** Why git can't read it: non-null exactly when `status` is "unreadable". */
+  unreadableReason: string | null;
 }
 
 /** What a submodule removal actually did. Every field matters to the user: the
@@ -19,6 +21,10 @@ export interface Submodule {
 export interface SubmoduleRemoveOutcome {
   /** The submodule has local changes and nothing was mutated — retry with force. */
   refusedDirty: boolean;
+  /** Git couldn't read the submodule or its status and nothing was mutated —
+   *  its local changes can't be checked, so a retry with force is confirmed
+   *  first. The clause completes "Git couldn't read <path>: <clause>". */
+  refusedUnreadable: string | null;
   moduleDataDeleted: boolean;
   /** Deleting the cached `.git/modules` data failed; the removal itself is still
    *  staged, so this is a disclosure rather than an error. */
@@ -135,3 +141,151 @@ export type SubmoduleAcceptCheckout =
 export type SubmoduleAcceptOutcome =
   | { kind: "staged"; sha: string; checkout: SubmoduleAcceptCheckout }
   | { kind: "changed" };
+
+/** A commit on a submodule ref. `onRemote` null = not measured, never "unpushed". */
+export interface SubmoduleRefCommit {
+  sha: string;
+  subject: string;
+  author: string;
+  authoredAt: string;
+  onRemote: boolean | null;
+}
+
+/** One page of a ref's history inside a submodule; a `checkout` other than "ok"
+ *  means no git ran inside the folder and `commits` is empty. */
+export interface SubmoduleCommitPage {
+  checkout: SubmoduleCheckout;
+  reason: string | null;
+  commits: SubmoduleRefCommit[];
+  hasMore: boolean;
+  shallow: boolean | null;
+  /** The commit id `rev` resolved to for this page; later pages pass it as
+   *  their `rev`, so a ref that moves between pages never skips commits. */
+  tip: string | null;
+}
+
+/** `rev` is the full ref name the commit list reads; `name` is what rows show. */
+export interface SubmoduleRef {
+  rev: string;
+  name: string;
+  sha: string;
+}
+
+/** A submodule's refs and the two commits the picker frames: `pointer` (the
+ *  parent index's gitlink) and `head` (what the submodule has checked out). */
+export interface SubmoduleRefs {
+  checkout: SubmoduleCheckout;
+  reason: string | null;
+  pointer: string | null;
+  head: string | null;
+  branch: string | null;
+  detached: boolean;
+  shallow: boolean | null;
+  defaultRev: string | null;
+  branches: SubmoduleRef[];
+  remoteBranches: SubmoduleRef[];
+  tags: SubmoduleRef[];
+  truncated: boolean;
+  brokenRefs: number;
+}
+
+export type SubmodulePickMove = "checkOut" | "alreadyThere";
+
+/** `wouldOverwrite` is tracked local changes only; untracked and ignored files in
+ *  the checkout's way have their own kinds, and when several apply, tracked wins
+ *  over untracked over ignored. `submoduleMidOperation`'s `reason` names the
+ *  operation ("a merge", "unresolved conflicts", …), or is null when unknown. */
+export type SubmodulePickBlock =
+  | "notInitialized"
+  | "unusable"
+  | "noPointer"
+  | "midOperation"
+  | "submoduleMidOperation"
+  | "notFetched"
+  | "notFound"
+  | "ambiguous"
+  | "notACommit"
+  | "detachedOrphan"
+  | "detachedUnverified"
+  | "wouldOverwrite"
+  | "untrackedInTheWay"
+  | "ignoredInTheWay"
+  | "checkFailed";
+
+/** Advisory: the setter re-measures everything and can answer differently. */
+export type SubmodulePickPlan =
+  | { kind: "ready"; checkout: SubmodulePickMove }
+  | { kind: "current" }
+  | {
+      kind: "blocked";
+      why: SubmodulePickBlock;
+      reason: string | null;
+      paths: string[];
+    };
+
+/** The candidate against the recorded commit (`rewind` moves the parent back). */
+export type SubmodulePickRelation =
+  | { kind: "unknown" }
+  | { kind: "same" }
+  | { kind: "forward"; ahead: number }
+  | { kind: "rewind"; behind: number }
+  | { kind: "diverged"; ahead: number; behind: number };
+
+/** `sha` is the resolved full id (on notFetched, the full id as typed, which the
+ *  submodule doesn't have), or null when the read stopped before resolving
+ *  the commit: notFound, ambiguous, notACommit, and every arm that blocks ahead
+ *  of resolution (notInitialized, unusable, noPointer, midOperation,
+ *  submoduleMidOperation, an early checkFailed). `sha` + `pointer` are the
+ *  setter's compare-and-swap token. */
+export interface SubmodulePickRead {
+  sha: string | null;
+  commit: SubmoduleRefCommit | null;
+  pointer: string | null;
+  plan: SubmodulePickPlan;
+  relation: SubmodulePickRelation;
+  shallow: boolean | null;
+}
+
+/** `shallow` is measured after the fetch; null when that read failed. */
+export interface SubmoduleFetchResult {
+  shallow: boolean | null;
+}
+
+export type SubmodulePickUnstaged =
+  | "pointerMoved"
+  | "stageFailed"
+  | "stageUnconfirmed";
+
+export type SubmodulePickOutcome =
+  | {
+      kind: "set";
+      sha: string;
+      checkout: SubmodulePickMove;
+      nestedLeft: number | null;
+    }
+  | { kind: "changed" }
+  | {
+      kind: "blocked";
+      why: SubmodulePickBlock;
+      reason: string | null;
+      paths: string[];
+    }
+  | { kind: "checkoutFailed"; reason: string }
+  | {
+      kind: "checkedOutNotStaged";
+      sha: string;
+      why: SubmodulePickUnstaged;
+      reason: string | null;
+    }
+  /** The checkout landed, then the submodule's HEAD no longer read `sha`.
+   *  `pointer` is the staged gitlink read back (null = none recorded); `head`
+   *  is HEAD read back (null = the folder no longer holds that checkout, or HEAD
+   *  names no commit). Neither null means unreadable. */
+  | {
+      kind: "movedAfter";
+      sha: string;
+      pointer: string | null;
+      head: string | null;
+    }
+  /** The checkout landed, but its state couldn't be read back. */
+  | { kind: "readBackFailed"; sha: string; reason: string };

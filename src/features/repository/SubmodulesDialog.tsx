@@ -4,11 +4,13 @@ import {
   DotsThreeVerticalIcon,
   FolderOpenIcon,
   GitBranchIcon,
+  GitCommitIcon,
   LinkIcon,
   PlusIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
-import type { ComponentProps } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import type { ComponentProps, Ref } from "react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -32,9 +34,19 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import { refreshFailed } from "@/features/conversations/remote-section-state";
 import { nameFromUrl } from "@/features/welcome/clone-utils";
 import { clipTitle } from "@/lib/clip-title";
+import { presentError } from "@/lib/error-summary";
+import { focusIsLost } from "@/lib/focus-lost";
 import {
+  isSubmodulePickPending,
+  rereadSubmodules,
+  submodulesReadRunning,
   useAddSubmodule,
   useRemoveSubmodule,
   useSetSubmoduleBranch,
@@ -48,7 +60,9 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
+import { ChooseSubmoduleCommit } from "./ChooseSubmoduleCommit";
 import { useOpenSubmoduleAsRepo } from "./useOpenSubmoduleAsRepo";
 
 /** "Modified" carries the warning tokens so it can't be mistaken for the
@@ -70,6 +84,11 @@ const STATUS: Record<
     className: "border-warning/40 bg-warning/10 text-warning",
   },
   conflict: { label: "Conflict", variant: "destructive" },
+  unreadable: {
+    label: "Unreadable",
+    variant: "outline",
+    className: "border-destructive/40 bg-destructive/10 text-destructive",
+  },
 };
 
 /** The `acting` value for the whole-repo actions — no submodule path is empty. */
@@ -83,11 +102,23 @@ const ADDING_REASON = "Adding the submodule…";
  *  record a branch, so both edits would fail in git. */
 const NO_ENTRY_REASON = "no .gitmodules entry";
 
+/** A submodule git can't read takes no action that runs git inside it; Remove
+ *  stays, and its refusal offers the forced removal. */
+const UNREADABLE_REASON = "Git can't read this submodule";
+const UNREADABLE_ITEM_REASON = "git can't read this submodule";
+
+type SubmodulesMode = "list" | "add" | "choose";
+
+/** The submodule the picker serves, with the repository it was chosen in. */
+type ChooseTarget = { repo: string; path: string };
+
 /**
- * The submodule manager: lists what the parent repo references, updates them to
- * the recorded commit or to their tracked branch's tip, adds and removes them,
- * edits URL and branch, and opens one as its own repository. Every mutation
- * stages its change for the user to commit.
+ * The submodule manager: lists what the parent repo references, updates each
+ * per its `update` setting (by default to the recorded commit) or, under that
+ * setting, from its tracked branch's tip, picks the exact commit one points
+ * at, adds and removes them, edits URL and branch, and opens one as its own
+ * repository. Every mutation but an update and the picker's fetches stages
+ * its change for the user to commit; those stage nothing.
  */
 export function SubmodulesDialog({
   repoPath,
@@ -101,21 +132,47 @@ export function SubmodulesDialog({
   onOpenChange: (open: boolean) => void;
   /** Every mode change, so the caller's `initialMode` tracks what's on screen —
    *  without it a re-request of the mode already asked for lands as a no-op. */
-  onModeChange: (mode: "list" | "add") => void;
-  /** Which body an open lands on — the palette's "Add submodule" opens the form. */
-  initialMode?: "list" | "add";
+  onModeChange: (mode: SubmodulesMode) => void;
+  /** Which body an open lands on — the palette's "Add submodule" opens the form;
+   *  "choose" with no submodule named picks the one initialized submodule, if
+   *  there is exactly one, and otherwise shows the list. */
+  initialMode?: SubmodulesMode;
 }) {
-  const [mode, setMode] = useState<"list" | "add">(initialMode);
+  const queryClient = useQueryClient();
+  const [mode, setMode] = useState<SubmodulesMode>(initialMode);
+  const [target, setTarget] = useState<ChooseTarget | null>(null);
+  // The row the list lands focus on after the picker leaves.
+  const [returnTo, setReturnTo] = useState<string | null>(null);
   // Owned here, not in the form: the flag has to outlive AddSubmodule so the Esc
   // arm below and the form's own exit affordances read one truth, including
   // across a close and reopen while the clone is still running.
   const add = useAddSubmodule(repoPath);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
+
+  // The picker's target clears on the closed -> open edge, during render: at
+  // close it would swap the body mid exit animation, and in the layout effect's
+  // open arm it would also fire when `changeMode` round-trips through
+  // `initialMode` and wipe the row just picked.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
+    if (open) {
+      setTarget(null);
+      setReturnTo(null);
+    }
+  }
 
   // Re-seed on every open, and when the caller re-requests a mode while already
   // open (the add action fired from the palette over an open list). Layout
-  // effect, so a reopen never paints one frame of the mode it closed on.
+  // effect, so a reopen never paints one frame of the mode it closed on. A
+  // request for another body drops the picker's target, so a later "choose"
+  // request resolves afresh; a "choose" round trip keeps the row just picked.
   useLayoutEffect(() => {
-    if (open) setMode(initialMode);
+    if (open) {
+      setMode(initialMode);
+      if (initialMode !== "choose") setTarget(null);
+    }
   }, [open, initialMode]);
 
   // Read `open` through a ref: an add whose clone outlives the close still runs
@@ -123,10 +180,79 @@ export function SubmodulesDialog({
   // then would set the caller's state and pop the closed dialog back open. The
   // stale local `mode` needs no repair; the re-seed above owns it on next open.
   const openRef = useLatestRef(open);
-  function changeMode(next: "list" | "add") {
+  function changeMode(next: SubmodulesMode) {
     if (!openRef.current) return;
     setMode(next);
     onModeChange(next);
+  }
+
+  // Swapping to the picker must never remove the focused element: Base UI's
+  // dialog answers that by re-focusing its popup a frame later, over the
+  // picker's entry focus. The popup survives the swap, so it holds focus across.
+  function parkFocus() {
+    const popup = popupRef.current;
+    const active = document.activeElement;
+    if (popup !== null && active !== popup && popup.contains(active))
+      popup.focus({ preventScroll: true });
+  }
+
+  function choose(path: string) {
+    if (!openRef.current) return;
+    parkFocus();
+    setTarget({ repo: repoPath, path });
+    changeMode("choose");
+  }
+
+  // Leaving drops the target, so no later body (the Add form) inherits it.
+  function leavePicker() {
+    if (!openRef.current) return;
+    setReturnTo(target?.path ?? null);
+    setTarget(null);
+    changeMode("list");
+  }
+
+  // A foreign target never renders (below); while the picker is the body, this
+  // drops it and lands on the list. Only while open: a switch while closed is
+  // dropped by the edge clear, and another body keeps its own state.
+  useLayoutEffect(() => {
+    if (
+      mode !== "choose" ||
+      target === null ||
+      target.repo === repoPath ||
+      !openRef.current
+    )
+      return;
+    setTarget(null);
+    setMode("list");
+    onModeChange("list");
+    if (focusIsLost()) closeRef.current?.focus({ preventScroll: true });
+  }, [mode, repoPath, target, onModeChange]);
+
+  const shown =
+    mode === "choose" && target !== null && target.repo === repoPath
+      ? target
+      : null;
+  // A palette request names no submodule: resolve it from the list read of the
+  // repository it was made in. A switch while it waits drops it for the list,
+  // never resolving it against the new repository's submodules.
+  const wantsResolve =
+    open && initialMode === "choose" && mode === "choose" && target === null;
+  const [requestRepo, setRequestRepo] = useState<string | null>(null);
+  if (wantsResolve && requestRepo === null) setRequestRepo(repoPath);
+  else if (!wantsResolve && requestRepo !== null) setRequestRepo(null);
+  const requestMoved =
+    wantsResolve && requestRepo !== null && requestRepo !== repoPath;
+  const resolving = wantsResolve && !requestMoved;
+  useLayoutEffect(() => {
+    if (!requestMoved) return;
+    changeMode("list");
+    if (focusIsLost()) closeRef.current?.focus({ preventScroll: true });
+  });
+  // While it waits, the user's first press or key in the list keeps the list:
+  // a late resolve would unmount the row menu or dialog that gesture opened.
+  // React's bubbling reaches here from the list's portaled popups too.
+  function keepList() {
+    if (resolving) changeMode("list");
   }
 
   const handleOpenChange: NonNullable<
@@ -146,47 +272,182 @@ export function SubmodulesDialog({
       changeMode("list");
       return;
     }
+    // The picker's twin, read from the cache at the event: the reactive read
+    // notifies a macrotask late. Mid-pick it closes like any other Esc.
+    if (
+      !next &&
+      shown !== null &&
+      details.reason === "escape-key" &&
+      !isSubmodulePickPending(queryClient, shown.repo, shown.path)
+    ) {
+      details.cancel();
+      leavePicker();
+      return;
+    }
     onOpenChange(next);
   };
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        {mode === "add" ? (
-          <AddSubmodule
-            add={add}
-            onCancel={() => changeMode("list")}
-            onAdded={() => changeMode("list")}
-          />
-        ) : (
-          <SubmoduleList
+      <DialogContent
+        ref={popupRef}
+        className="sm:max-w-lg"
+        onPointerDownCapture={keepList}
+        onKeyDownCapture={(e) => {
+          if (!e.repeat) keepList();
+        }}
+      >
+        {resolving && (
+          <ChooseResolver
+            key={repoPath}
             repoPath={repoPath}
-            onAdd={() => changeMode("add")}
-            onClose={() => onOpenChange(false)}
+            onResolve={(path) => {
+              if (path === null) changeMode("list");
+              else if (openRef.current) {
+                parkFocus();
+                setTarget({ repo: repoPath, path });
+              }
+            }}
           />
         )}
+        {(() => {
+          switch (true) {
+            case shown !== null:
+              return (
+                <ChooseSubmoduleCommit
+                  key={`${shown.repo}\n${shown.path}`}
+                  repoPath={repoPath}
+                  path={shown.path}
+                  title={<DialogTitle>Choose commit</DialogTitle>}
+                  isOpen={() => openRef.current}
+                  onBack={leavePicker}
+                  onDone={leavePicker}
+                />
+              );
+            case mode === "add":
+              return (
+                <AddSubmodule
+                  add={add}
+                  onCancel={() => changeMode("list")}
+                  onAdded={() => changeMode("list")}
+                />
+              );
+            default:
+              return (
+                <SubmoduleList
+                  repoPath={repoPath}
+                  open={open}
+                  closeRef={closeRef}
+                  returnTo={returnTo}
+                  onReturned={() => setReturnTo(null)}
+                  onAdd={() => changeMode("add")}
+                  onChoose={choose}
+                  onClose={() => onOpenChange(false)}
+                />
+              );
+          }
+        })()}
       </DialogContent>
     </Dialog>
   );
 }
 
+/** Picks the palette request's submodule: the one initialized submodule, or none
+ *  (the list). Cached rows naming exactly one resolve at once (the picker masks
+ *  its own stale verdicts); anything else waits for this mount's re-read to
+ *  settle, and a failed re-read resolves from whatever rows it kept. Latched: a
+ *  later refetch never moves it. */
+function ChooseResolver({
+  repoPath,
+  onResolve,
+}: {
+  repoPath: string;
+  onResolve: (path: string | null) => void;
+}) {
+  const subs = useSubmodules(repoPath);
+  const resolveRef = useLatestRef(onResolve);
+  const done = useRef(false);
+  // isFetchedAfterMount also counts an error update, so a failure settles too.
+  const settled = subs.isFetchedAfterMount && !subs.isFetching;
+  useLayoutEffect(() => {
+    if (done.current) return;
+    // Only a submodule git can read can take a commit.
+    const initialized = (subs.data ?? []).filter(
+      (s) => s.status !== "uninitialized" && s.status !== "unreadable",
+    );
+    if (initialized.length === 1) {
+      done.current = true;
+      resolveRef.current(initialized[0].path);
+      return;
+    }
+    if (!settled) return;
+    done.current = true;
+    resolveRef.current(null);
+  }, [subs.data, settled]);
+  return null;
+}
+
 /** List mode: every submodule as a row, its actions on an always-visible kebab. */
 function SubmoduleList({
   repoPath,
+  open,
+  closeRef,
+  returnTo,
+  onReturned,
   onAdd,
+  onChoose,
   onClose,
 }: {
   repoPath: string;
+  open: boolean;
+  closeRef: Ref<HTMLButtonElement>;
+  /** The submodule whose picker just closed: its row takes lost focus. */
+  returnTo: string | null;
+  onReturned: () => void;
   onAdd: () => void;
+  onChoose: (path: string) => void;
   onClose: () => void;
 }) {
   const subs = useSubmodules(repoPath);
+  const queryClient = useQueryClient();
+  // A reopen during the exit animation keeps this list mounted, so the mount
+  // re-read never runs: re-read on the open edge too, with a read started after
+  // it. Layout effects run before the mount read starts, so a read running here
+  // predates the edge; a fresh mount's open joins its own mount read.
+  const readBeforeEdge = useRef(false);
+  useLayoutEffect(() => {
+    readBeforeEdge.current =
+      open && submodulesReadRunning(queryClient, repoPath);
+  }, [open, queryClient, repoPath]);
+  useSeedOnOpen(open, () =>
+    rereadSubmodules(queryClient, repoPath, !readBeforeEdge.current),
+  );
   const update = useUpdateSubmodule(repoPath);
   const remove = useRemoveSubmodule(repoPath);
   const openSubmodule = useOpenSubmoduleAsRepo(repoPath);
   const list = subs.data ?? [];
+  // A failed read with no rows to keep says so, since a cached empty list never
+  // shows there are none; one over loaded rows keeps them under a notice.
+  const loadFailed =
+    subs.isError && (subs.data === undefined || subs.data.length === 0);
+  const { hostRef, retryRef } = useRetryFocusRescue(loadFailed);
 
   const [activeIndex, setActiveIndex] = useState(-1);
+
+  // Back from the picker: that submodule's row becomes the active one, and takes
+  // focus when the picker's unmount dropped it.
+  const returnedRef = useLatestRef(onReturned);
+  useLayoutEffect(() => {
+    if (returnTo === null || subs.data === undefined) return;
+    returnedRef.current();
+    const i = subs.data.findIndex((s) => s.path === returnTo);
+    if (i < 0) return;
+    setActiveIndex(i);
+    if (focusIsLost())
+      document
+        .querySelector<HTMLElement>(`[data-sub-row="${CSS.escape(returnTo)}"]`)
+        ?.focus({ preventScroll: true });
+  }, [returnTo, subs.data]);
   const [urlTarget, setUrlTarget] = useState<Submodule | null>(null);
   const [branchTarget, setBranchTarget] = useState<Submodule | null>(null);
   // Which row a mutation is running against, so the spinner rides the acting
@@ -199,6 +460,21 @@ function SubmoduleList({
   // stale value (keeping -1 = "nothing active yet") rather than highlight a row
   // that no longer exists.
   const safeActive = activeIndex >= list.length ? list.length - 1 : activeIndex;
+
+  const updateAllReason = ((): string | null => {
+    switch (true) {
+      case busy:
+        return BUSY_REASON;
+      case subs.isPending:
+        return "Loading submodules…";
+      case loadFailed:
+        return "Submodules couldn't be read";
+      case list.length === 0:
+        return "No submodules to update";
+      default:
+        return null;
+    }
+  })();
 
   const onKeyDown = listKeyboardNav<(typeof list)[number]>({
     items: list,
@@ -252,7 +528,11 @@ function SubmoduleList({
         force: false,
         deleteModuleData: first.checked,
       });
-      if (outcome.refusedDirty) {
+      // Nothing was mutated by either refusal — escalate rather than report a
+      // failure. An unreadable submodule is checked first: it is no evidence of
+      // local changes, so its copy never claims any.
+      const unreadable = outcome.refusedUnreadable;
+      if (unreadable !== null || outcome.refusedDirty) {
         if (
           refuseIfSwitched(
             removeIn,
@@ -261,15 +541,23 @@ function SubmoduleList({
           )
         )
           return;
-        // Nothing was mutated — escalate rather than report a failure. The
-        // refusal is one bool covering both a dirty worktree and a checkout
-        // that has moved off the recorded commit, so the copy names both.
-        const forced = await useConfirm.getState().ask({
-          title: `Remove ${s.path}?`,
-          body: `${s.path} has local changes or is at a different commit than this repository records. Discard that state and remove?`,
-          confirmLabel: "Discard and remove",
-          confirmVariant: "destructive",
-        });
+        // The dirty refusal is one bool covering both a dirty worktree and a
+        // checkout that has moved off the recorded commit, so its copy names both.
+        const forced = await useConfirm.getState().ask(
+          unreadable !== null
+            ? {
+                title: `Remove ${s.path}?`,
+                body: `Git couldn't read ${s.path}: ${unreadable.replace(/\.$/, "")}. Its local changes can't be checked, and removing it deletes everything in its folder.`,
+                confirmLabel: "Remove anyway",
+                confirmVariant: "destructive",
+              }
+            : {
+                title: `Remove ${s.path}?`,
+                body: `${s.path} has local changes or is at a different commit than this repository records. Discard that state and remove?`,
+                confirmLabel: "Discard and remove",
+                confirmVariant: "destructive",
+              },
+        );
         if (!forced || switchedAway()) return;
         outcome = await remove.mutateAsync({
           path: s.path,
@@ -311,16 +599,19 @@ function SubmoduleList({
       <DialogHeader>
         <DialogTitle>Submodules</DialogTitle>
         <DialogDescription>
-          Initialize and update the submodules this repository references to the
-          commit it records, or move one to the tip of the branch it tracks.
-          Updating fetches over the network; adding, removing, and editing stage
-          the change for you to commit.
+          Initialize and update the submodules this repository references.
+          Update follows each submodule's update setting (by default, a checkout
+          of the commit this repository records); Update to latest does the same
+          with the tip of the branch it tracks, or you can choose the exact
+          commit it points at. Updating fetches over the network; adding,
+          removing, editing and choosing a commit stage the change for you to
+          commit.
         </DialogDescription>
       </DialogHeader>
 
       {/* min-w-0: DialogContent is a grid; without it this item grows to fit a
           long URL instead of letting the rows truncate. */}
-      <div className="min-w-0 border">
+      <div ref={hostRef} tabIndex={-1} className="min-w-0 border outline-none">
         <div
           role="listbox"
           aria-label="Submodules"
@@ -342,6 +633,7 @@ function SubmoduleList({
                 onFocus={() => setActiveIndex(i)}
                 onUpdate={() => handleUpdate(s.path)}
                 onUpdateRemote={() => handleUpdate(s.path, true)}
+                onChooseCommit={() => onChoose(s.path)}
                 onEditUrl={() => setUrlTarget(s)}
                 onSetBranch={() => setBranchTarget(s)}
                 onOpenAsRepo={() => handleOpenAsRepo(s)}
@@ -350,9 +642,33 @@ function SubmoduleList({
             ))
           )}
         </div>
+        {loadFailed && (
+          <div className="space-y-2 p-3 text-[11px]">
+            <p>Couldn't read this repository's submodules.</p>
+            <p className="text-muted-foreground">
+              {presentError(subs.error).summary}
+            </p>
+            <Button
+              ref={retryRef}
+              variant="outline"
+              size="xs"
+              onClick={() => void subs.refetch()}
+            >
+              Retry
+            </Button>
+          </div>
+        )}
+        <DegradedListNotice
+          noun="submodules"
+          degraded={
+            !loadFailed && subs.data !== undefined && refreshFailed(subs)
+          }
+          onRetry={() => void subs.refetch()}
+          className="border-t px-3 py-1.5"
+        />
         {/* No border-t: with no rows above it there is nothing to separate, and
             the container's own border would double up against it. */}
-        {!subs.isPending && list.length === 0 && (
+        {!loadFailed && subs.data?.length === 0 && (
           <div className="space-y-2 p-3">
             <p className="text-[11px] text-muted-foreground">
               This repository has no submodules.
@@ -375,12 +691,12 @@ function SubmoduleList({
           <PlusIcon data-icon="inline-start" />
           Add submodule…
         </Button>
-        <Button variant="outline" onClick={onClose}>
+        <Button ref={closeRef} variant="outline" onClick={onClose}>
           Close
         </Button>
         <DisabledReasonButton
-          disabled={busy || list.length === 0}
-          reason={list.length === 0 ? "No submodules to update" : BUSY_REASON}
+          disabled={updateAllReason !== null}
+          reason={updateAllReason}
           onClick={() => handleUpdate()}
         >
           {acting === ALL && <Spinner data-icon="inline-start" />}
@@ -440,6 +756,7 @@ function SubmoduleRow({
   onFocus,
   onUpdate,
   onUpdateRemote,
+  onChooseCommit,
   onEditUrl,
   onSetBranch,
   onOpenAsRepo,
@@ -454,20 +771,53 @@ function SubmoduleRow({
   onFocus: () => void;
   onUpdate: () => void;
   onUpdateRemote: () => void;
+  onChooseCommit: () => void;
   onEditUrl: () => void;
   onSetBranch: () => void;
   onOpenAsRepo: () => void;
   onRemove: () => void;
 }) {
-  const { path, sha, describe, url, status } = submodule;
+  const { path, sha, describe, url, status, unreadableReason } = submodule;
   const meta = STATUS[status] ?? { label: status, variant: "outline" as const };
   const action = status === "uninitialized" ? "Initialize" : "Update";
   const uninitialized = status === "uninitialized";
+  const unreadable = status === "unreadable";
   // `describe` falls back to a bare sha prefix on untagged checkouts — showing
   // it beside the sha would read "553c207 · 553c207".
-  const detail = [sha.slice(0, 7), sha.startsWith(describe) ? "" : describe]
-    .filter(Boolean)
-    .join(" · ");
+  const second = ((): string => {
+    switch (true) {
+      case unreadable:
+        return unreadableReason
+          ? `Git can't read it: ${unreadableReason}`
+          : UNREADABLE_REASON;
+      case sha.startsWith(describe):
+        return "";
+      default:
+        return describe;
+    }
+  })();
+  const detail = [sha.slice(0, 7), second].filter(Boolean).join(" · ");
+  const rowReason = ((): string | null => {
+    switch (true) {
+      case busy:
+        return BUSY_REASON;
+      case unreadable:
+        return UNREADABLE_REASON;
+      default:
+        return null;
+    }
+  })();
+  // What Choose commit and Open as repository need: a checkout git can read.
+  const childReason = ((): string | undefined => {
+    switch (true) {
+      case uninitialized:
+        return "initialize this submodule first";
+      case unreadable:
+        return UNREADABLE_ITEM_REASON;
+      default:
+        return undefined;
+    }
+  })();
   // A disabled menu item can't carry a tooltip, so its reason rides the label.
   const itemLabel = (label: string, reason?: string) =>
     reason ? `${label} (${reason})` : label;
@@ -485,14 +835,14 @@ function SubmoduleRow({
         aria-selected={highlighted}
         // Not `disabled`: the row must stay focusable so arrow-key nav can move
         // through it while a mutation runs. onClick already refuses.
-        aria-disabled={busy || undefined}
+        aria-disabled={rowReason !== null || undefined}
         data-sub-row={path}
         onFocus={onFocus}
-        onClick={() => !busy && onUpdate()}
-        title={busy ? BUSY_REASON : `${action} ${path}`}
+        onClick={() => rowReason === null && onUpdate()}
+        title={rowReason ?? `${action} ${path}`}
         className={cn(
           "flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left",
-          busy && "cursor-default",
+          rowReason !== null && "cursor-default",
         )}
       >
         {/* The URL takes its own full-width line — sharing one with the commit
@@ -523,8 +873,8 @@ function SubmoduleRow({
       <DisabledReasonButton
         variant="outline"
         size="xs"
-        disabled={busy}
-        reason={BUSY_REASON}
+        disabled={rowReason !== null}
+        reason={rowReason}
         onClick={onUpdate}
       >
         {acting && <Spinner data-icon="inline-start" />}
@@ -549,9 +899,19 @@ function SubmoduleRow({
           <DotsThreeVerticalIcon />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-60">
-          <DropdownMenuItem onClick={onUpdateRemote}>
+          <DropdownMenuItem disabled={unreadable} onClick={onUpdateRemote}>
             <ArrowsClockwiseIcon />
-            Update to latest
+            {itemLabel(
+              "Update to latest",
+              unreadable ? UNREADABLE_ITEM_REASON : undefined,
+            )}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            disabled={childReason !== undefined}
+            onClick={onChooseCommit}
+          >
+            <GitCommitIcon />
+            {itemLabel("Choose commit…", childReason)}
           </DropdownMenuItem>
           <DropdownMenuItem disabled={!url} onClick={onEditUrl}>
             <LinkIcon />
@@ -561,12 +921,12 @@ function SubmoduleRow({
             <GitBranchIcon />
             {itemLabel("Set branch…", url ? undefined : NO_ENTRY_REASON)}
           </DropdownMenuItem>
-          <DropdownMenuItem disabled={uninitialized} onClick={onOpenAsRepo}>
+          <DropdownMenuItem
+            disabled={childReason !== undefined}
+            onClick={onOpenAsRepo}
+          >
             <FolderOpenIcon />
-            {itemLabel(
-              "Open as repository",
-              uninitialized ? "initialize this submodule first" : undefined,
-            )}
+            {itemLabel("Open as repository", childReason)}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" onClick={onRemove}>
@@ -856,8 +1216,9 @@ function SetSubmoduleBranchDialog({
         <DialogHeader>
           <DialogTitle>Set submodule branch</DialogTitle>
           <DialogDescription>
-            "Update to latest" moves {submodule?.path} to the tip of this
-            branch. Leave it empty to follow the remote's default branch.
+            "Update to latest" brings {submodule?.path} up to date with the tip
+            of this branch. Leave it empty to follow the remote's default
+            branch.
           </DialogDescription>
         </DialogHeader>
 

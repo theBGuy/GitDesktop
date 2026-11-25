@@ -4,8 +4,13 @@ import type {
   Submodule,
   SubmoduleAcceptOutcome,
   SubmoduleChanges,
+  SubmoduleCommitPage,
   SubmoduleConflict,
   SubmoduleConflictStages,
+  SubmoduleFetchResult,
+  SubmodulePickOutcome,
+  SubmodulePickRead,
+  SubmoduleRefs,
   SubmoduleRemoveOutcome,
 } from "../types";
 
@@ -52,9 +57,11 @@ export const gitAcceptSubmoduleConflictSide = (
 export const gitSubmodules = (repoPath: string) =>
   invoke<Submodule[]>("git_submodules", { repoPath });
 
-/** Init + update submodules to the recorded commit; `path` for one, else all.
- *  `remote` instead moves them to the tip of the branch they track (the remote's
- *  default branch when none is configured), leaving a bump staged in the parent. */
+/** Init + update submodules per each one's `update` setting (by default, a
+ *  checkout of the recorded commit); `path` for one, else all. `remote` instead
+ *  updates them, under the same setting, against the tip of the branch they
+ *  track (the remote's default branch when none is configured), leaving the
+ *  move unstaged in the parent for review. */
 export const gitSubmoduleUpdate = (
   repoPath: string,
   path?: string,
@@ -117,4 +124,69 @@ export const gitSubmoduleChanges = (
     path,
     staged,
     origPath: origPath ?? null,
+  });
+
+/** A submodule's branches, remote branches and tags, plus the commits the
+ *  parent records and the submodule has checked out. Read-only. */
+export const gitSubmoduleRefs = (repoPath: string, path: string) =>
+  invoke<SubmoduleRefs>("git_submodule_refs", { repoPath, path });
+
+/** One page of `rev`'s history inside the submodule; `search` filters by
+ *  message. Read-only. */
+export const gitSubmoduleCommits = (
+  repoPath: string,
+  path: string,
+  rev: string,
+  skip: number,
+  limit: number,
+  search: string | null,
+) =>
+  invoke<SubmoduleCommitPage>("git_submodule_commits", {
+    repoPath,
+    path,
+    rev,
+    skip,
+    limit,
+    search,
+  });
+
+/** What pointing the submodule at `sha` (4-64 hex, a prefix or a full id)
+ *  would do. Read-only and advisory: the setter measures again. */
+export const gitSubmodulePickPlan = (
+  repoPath: string,
+  path: string,
+  sha: string,
+) =>
+  invoke<SubmodulePickRead>("git_submodule_pick_plan", {
+    repoPath,
+    path,
+    sha,
+  });
+
+/** Checks `sha` out inside the submodule and, only when that lands, stages it
+ *  as the parent's pointer. `expectedIndexSha` is the plan read's `pointer`. */
+export const gitSubmoduleSetCommit = (
+  repoPath: string,
+  path: string,
+  sha: string,
+  expectedIndexSha: string,
+) =>
+  invoke<SubmodulePickOutcome>("git_submodule_set_commit", {
+    repoPath,
+    path,
+    sha,
+    expectedIndexSha,
+  });
+
+/** Fetches inside the submodule; `unshallow` also completes a shallow history,
+ *  as far as its remote has it. */
+export const gitSubmoduleFetch = (
+  repoPath: string,
+  path: string,
+  unshallow: boolean,
+) =>
+  invoke<SubmoduleFetchResult>("git_submodule_fetch", {
+    repoPath,
+    path,
+    unshallow,
   });

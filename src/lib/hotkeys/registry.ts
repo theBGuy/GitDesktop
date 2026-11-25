@@ -656,6 +656,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "choose-submodule-commit",
+    label: "Choose submodule commit…",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
     id: "worktrees",
     label: "Worktrees",
     category: "Repository",
