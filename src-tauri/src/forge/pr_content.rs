@@ -825,12 +825,12 @@ fn lock_memo(memo: &std::sync::Mutex<OverCapMemo>) -> std::sync::MutexGuard<'_, 
 #[derive(Debug, PartialEq)]
 enum CompareAnswer {
     Text(String),
-    /// Over the cap, refused as too large, or not found: the by-number read answers.
+    /// The by-number diff can still answer when the compare exceeds the cap or is refused.
     NotAddressable,
 }
 
-/// The compare diff's verdict. Only an exit-0 body over the cap is noted in `memo`: a
-/// 404 or 406 depends on the account or the forge, and costs no body.
+/// Only an exit-0 body over the cap is noted in `memo`. A refusal can depend on the
+/// account or the forge.
 fn gh_compare_outcome(
     result: AppResult<GhOutput>,
     memo: &mut OverCapMemo,
@@ -849,13 +849,8 @@ fn gh_compare_outcome(
         return Ok(CompareAnswer::Text(text));
     }
     match classify_gh_failure(&out.stderr) {
-        GhFailure::NotFound => Ok(CompareAnswer::NotAddressable),
-        GhFailure::Answered if crate::github::pr::is_diff_too_large(&out.stderr) => {
-            Ok(CompareAnswer::NotAddressable)
-        }
-        GhFailure::RateLimited | GhFailure::Transport | GhFailure::Answered => {
-            Err(AppError::Gh(gh_failure_reason(&out)))
-        }
+        GhFailure::NotFound | GhFailure::Answered => Ok(CompareAnswer::NotAddressable),
+        GhFailure::RateLimited | GhFailure::Transport => Err(AppError::Gh(gh_failure_reason(&out))),
     }
 }
 
@@ -887,8 +882,9 @@ fn gh_reread_proof(
     }
 }
 
-/// The compare diff by sha when [`gh_diff_at_from`] finds a base; without one, or over the
-/// cap, too large or not found, the by-number diff and a PR re-read. Other errors return.
+/// Use the by-number diff and re-read the PR when there is no compare base, the diff
+/// exceeds the cap, or GitHub refuses the compare. Rate limits and transport failures
+/// return their error.
 async fn github_diff_at(
     repo: &str,
     number: u64,
@@ -1960,14 +1956,33 @@ mod tests {
             CompareAnswer::NotAddressable
         );
         assert_eq!(grows.plan("o/r", SHA, SHA256), ComparePlan::Skip);
-        for stderr in [TOO_MANY_LINES, TOO_MANY_FILES, NOT_FOUND_STDERR] {
+        for stderr in [
+            TOO_MANY_LINES,
+            TOO_MANY_FILES,
+            NOT_FOUND_STDERR,
+            ANSWERED_STDERR,
+            "",
+        ] {
             assert_eq!(
                 compare(gh_output(1, "", stderr), &mut memo).unwrap(),
                 CompareAnswer::NotAddressable,
                 "{stderr}"
             );
         }
-        for stderr in [HELD_REST_STDERR, TRANSPORT_STDERR, ANSWERED_STDERR, ""] {
+        assert!(compare(Err(AppError::GhNotFound), &mut memo).is_err());
+    }
+
+    #[test]
+    fn an_answered_compare_refusal_reads_by_number() {
+        let mut memo = OverCapMemo::default();
+        let refusal = "gh: Resource not accessible by personal access token (HTTP 403)";
+        assert_eq!(
+            compare(gh_output(1, "", refusal), &mut memo).unwrap(),
+            CompareAnswer::NotAddressable
+        );
+        assert_eq!(memo.plan("o/r", SHA, SHA256), ComparePlan::Compare);
+
+        for stderr in [HELD_REST_STDERR, TRANSPORT_STDERR] {
             assert!(
                 matches!(
                     compare(gh_output(1, "", stderr), &mut memo),
@@ -1976,7 +1991,6 @@ mod tests {
                 "{stderr}"
             );
         }
-        assert!(compare(Err(AppError::GhNotFound), &mut memo).is_err());
     }
 
     #[test]
@@ -2238,8 +2252,6 @@ mod tests {
 
     #[tokio::test]
     async fn github_diff_from_a_read_base_keeps_the_fallback_and_the_failure() {
-        // Over the cap (through the real verdict, which notes it) or not found: the
-        // by-number diff, proven by the re-read as today.
         let mut memo = OverCapMemo::default();
         let over = "a".repeat(PR_DIFF_CAP + 1);
         let over_cap = gh_compare_outcome(gh_output(0, &over, ""), &mut memo, "o/r", SHA256, SHA);
@@ -2251,7 +2263,6 @@ mod tests {
             assert_eq!((run.reads, run.by_number), (2, true));
             assert_eq!(run.order, ["read", "compare", "by number", "read"]);
         }
-        // A failed compare is the answer, as with the caller's own base sha.
         let run = gh_diff_run(
             |_| gh_pr(Some(SHA), Some(SHA256)),
             "main",

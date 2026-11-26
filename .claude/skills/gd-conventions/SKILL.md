@@ -1829,11 +1829,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   falls back to the by-number diff, unproven. GitHub's diff read compares by
   sha from the target's base sha, or, when the record names none (a gh older
   than 2.63.0), from a pull request read naming the target's head and base
-  branch; a compare over the cap, refused as too large or not found, or a
-  pull request read naming anything else or unreadable, falls back to the
-  by-number diff. A by-number text carries no identity, so a replica
-  flipping back can still prove another head's text: GitHub's by-number
-  fallback and Bitbucket's fallback keep that exposure. GitHub's head proof,
+  branch. A compare over the cap or refused for any reason except a rate
+  limit or a transport failure falls back to the by-number diff. The same
+  fallback applies when the pull request is unreadable or names anything
+  else. A by-number text carries no identity, so a replica flipping back can
+  still prove another head's text. GitHub's by-number fallback and
+  Bitbucket's fallback keep that exposure. GitHub's head proof,
   and Bitbucket's after its fallback, is the
   diff read's own re-read; GitLab's is
   contradiction-only (`gl_head_read_proof`: `moved` or `unproven`, never
