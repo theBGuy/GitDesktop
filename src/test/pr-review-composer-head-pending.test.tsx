@@ -3,6 +3,8 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  HEAD_COLD_DIALOG_REASON,
+  HEAD_COLD_REVIEW_REASON,
   HEAD_PENDING_DIALOG_REASON,
   HEAD_PENDING_REVIEW_REASON,
   HEAD_UNPROVEN_REVIEW_REASON,
@@ -60,6 +62,7 @@ function composer(
   provider: "github" | "gitlab" | "bitbucket" = "gitlab",
   draftCount = 0,
   headUnproven = false,
+  headCold: HeadPendingKind | null = null,
 ) {
   const onClose = vi.fn();
   return {
@@ -79,6 +82,7 @@ function composer(
           lens="origin"
           onClose={onClose}
           headPending={headPending}
+          headCold={headCold}
           headUnproven={headUnproven}
         />
       </QueryClientProvider>
@@ -183,6 +187,8 @@ describe("the review composer over an unproven diff (AC-U1)", () => {
     expect(writes.thread).not.toHaveBeenCalled();
     expect(writes.draft).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
     rerender(composer(null, "github", 0, false).node);
     expect(editor()).toBe(box);
     expect(box).toHaveValue("kept");
@@ -191,10 +197,21 @@ describe("the review composer over an unproven diff (AC-U1)", () => {
     await user.click(screen.getByRole("button", { name: "Cancel" }));
   });
 
-  it("an older head's reason outranks the unproven one", () => {
-    render(composer("loading", "gitlab", 0, true).node);
-    expectHeld(HEAD_PENDING_REVIEW_REASON.loading("merge request"));
+  it("a new head's ended moved check over the older head's text holds with the failed reason", () => {
+    // What the view passes there: the older head's kind, never with the
+    // unproven flag (RemotePrView's `headPending` / `headUnproven`).
+    render(composer("failed", "github", 0, false).node);
+    expectHeld(HEAD_PENDING_REVIEW_REASON.failed("pull request"));
   });
+
+  it.each(["loading", "failed", "offline"] as const)(
+    "G6: a target with no own answer (%s) holds on the cold reason, which claims no update",
+    (kind) => {
+      render(composer(null, "github", 0, false, kind).node);
+      expectHeld(HEAD_COLD_REVIEW_REASON[kind]("pull request"));
+      expect(screen.queryByText(/was updated/)).toBeNull();
+    },
+  );
 });
 
 describe("the Submit review dialog's head hold reasons (AC-D*, AC-P*)", () => {
@@ -205,8 +222,21 @@ describe("the Submit review dialog's head hold reasons (AC-D*, AC-P*)", () => {
     [null, true, HEAD_UNPROVEN_REVIEW_REASON("pull request")],
     [null, false, null],
   ] as const)("%s / unproven %s", (pending, unproven, reason) => {
-    expect(submitReviewHeadHold(pending, unproven, "pull request")).toBe(
+    expect(submitReviewHeadHold(pending, null, unproven, "pull request")).toBe(
       reason,
+    );
+  });
+
+  // G6: the cold arm claims no update, and an update known outranks it.
+  it.each([
+    ["loading", HEAD_COLD_REVIEW_REASON.loading("pull request")],
+    ["offline", HEAD_COLD_REVIEW_REASON.offline("pull request")],
+    ["failed", HEAD_COLD_DIALOG_REASON.failed("pull request")],
+  ] as const)("cold %s", (cold, reason) => {
+    expect(submitReviewHeadHold(null, cold, true, "pull request")).toBe(reason);
+    expect(reason).not.toContain("was updated");
+    expect(submitReviewHeadHold("loading", cold, false, "pull request")).toBe(
+      HEAD_PENDING_DIALOG_REASON.loading("pull request"),
     );
   });
 

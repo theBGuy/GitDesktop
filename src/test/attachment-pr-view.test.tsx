@@ -21,6 +21,8 @@ import {
   forgeIssueView,
   forgePrApprovals,
   forgePrComment,
+  forgePrDiff,
+  forgePrDiffAt,
   forgePrEdit,
   forgePrRequestChanges,
   forgePrSetDraft,
@@ -57,6 +59,16 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgePrRequestChanges: vi.fn(async () => undefined),
   forgePrEdit: vi.fn(),
   forgePrSetDraft: vi.fn(async () => undefined),
+  // A by-number diff read fails unless a test answers it.
+  forgePrDiff: vi.fn(async (): Promise<string> => {
+    throw new Error("diff read failed");
+  }),
+  // The record names a full head, so the review holds stay off the diff: its
+  // by-target read answers proven.
+  forgePrDiffAt: vi.fn(async () => ({
+    diff: "",
+    headProof: "proven" as const,
+  })),
   gitBranches: vi.fn(),
 }));
 // The generator is observed at its hook; a test drives its draft callback.
@@ -139,7 +151,7 @@ function pr(): PrDetails {
     commentsTruncated: false,
     commitsUnknown: false,
     commitsTruncated: false,
-    headSha: null,
+    headSha: "0123456789abcdef0123456789abcdef01234567",
     filesUnknown: false,
     filesTruncated: false,
     reviewersUnknown: false,
@@ -1856,6 +1868,97 @@ describe("a stage in flight holds every post of the pull request draft", () => {
         "true",
       ),
     );
+  });
+});
+
+describe("a GitLab record naming no full head (P6b)", () => {
+  const UNCONFIRMED =
+    "GitDesktop couldn't confirm this diff is the merge request's latest. It checks again when the merge request refreshes.";
+
+  it("holds Request changes on the unconfirmed reason while its by-number diff read is failed", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      headSha: null,
+    }));
+    mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    // The diff read's module mock rejects by default, so it fails: the hold
+    // follows the target.
+    await waitFor(() =>
+      expect(button("Request changes")).toHaveAccessibleDescription(
+        UNCONFIRMED,
+      ),
+    );
+    expect(button("Request changes")).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(button("Request changes"));
+    await act(async () => undefined);
+    expect(forgePrRequestChanges).not.toHaveBeenCalled();
+  });
+
+  it("holds Request changes on the unconfirmed reason while another pull request's patch is the placeholder", async () => {
+    vi.mocked(forgePrView).mockImplementation(async (_r, n) =>
+      n === 8
+        ? ({
+            ...pr(),
+            id: "PR_8",
+            number: 8,
+            title: "Merge request eight",
+            url: "https://gitlab.com/owner/repo/-/merge_requests/8",
+            headSha: null,
+          } as PrDetails)
+        : pr(),
+    );
+    vi.mocked(forgePrDiffAt).mockImplementationOnce(async () => ({
+      diff: "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\n",
+      headProof: "proven",
+    }));
+    const held = deferred<string>();
+    vi.mocked(forgePrDiff).mockImplementationOnce(() => held.promise);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const view = (n: number) => (
+      <QueryClientProvider client={client}>
+        <RemotePrView repoPath={REPO} number={n} />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(view(7));
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(button("Request changes")).not.toHaveAttribute(
+        "aria-disabled",
+        "true",
+      ),
+    );
+    act(() => useUiStore.setState({ selectedPr: { kind: "remote", id: "8" } }));
+    rerender(view(8));
+    await screen.findByText("Merge request eight", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() =>
+      expect(vi.mocked(forgePrDiff).mock.calls.at(-1)?.[1]).toBe(8),
+    );
+    // Merge request 7's patch stands in while 8's own read is outstanding.
+    const diffs = client
+      .getQueryCache()
+      .findAll({ predicate: (q) => q.queryKey[5] === "diff" });
+    expect(diffs.find((q) => q.queryKey[4] === 7)?.state.data).toMatchObject({
+      text: expect.stringContaining("+new"),
+    });
+    expect(diffs.find((q) => q.queryKey[4] === 8)?.state.data).toBeUndefined();
+    await waitFor(() =>
+      expect(button("Request changes")).toHaveAccessibleDescription(
+        UNCONFIRMED,
+      ),
+    );
+    expect(button("Request changes")).toHaveAttribute("aria-disabled", "true");
+    await act(async () => held.resolve("diff --git a/g.txt b/g.txt\n"));
+    expect(button("Request changes")).toHaveAccessibleDescription(UNCONFIRMED);
   });
 });
 

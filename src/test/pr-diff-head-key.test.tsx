@@ -37,7 +37,7 @@ const target = <H extends string | null>(head: H) => ({
   baseRef: BASE,
   baseSha: null as string | null,
 });
-const read = (text: string): PrDiffRead => ({ text, headProven: true });
+const read = (text: string): PrDiffRead => ({ text, proof: "proven" });
 
 /** The head each pull request's details name now ("" = none). */
 let heads: Record<number, string> = {};
@@ -87,11 +87,18 @@ beforeEach(() => {
   vi.mocked(forgePrDiff).mockImplementation(async (_repo, number) =>
     textOf(number, heads[number]),
   );
-  // The proven by-target read, delegating to the by-number mock's text.
-  vi.mocked(forgePrDiffAt).mockImplementation(async (repo, number, lens) => ({
-    diff: await forgePrDiff(repo, number, lens),
-    headProof: "proven",
-  }));
+  // The proven by-target read answers for its own target: the by-number
+  // mock's text (and its overrides) while that is the live head's.
+  vi.mocked(forgePrDiffAt).mockImplementation(
+    async (repo, number, lens, at) => {
+      const live = heads[number];
+      const text = await forgePrDiff(repo, number, lens);
+      return {
+        diff: at.head === live ? text : textOf(number, at.head),
+        headProof: "proven",
+      };
+    },
+  );
 });
 
 afterEach(() => {
@@ -317,7 +324,7 @@ describe("the sweep of other heads' diff entries", () => {
       { wrapper },
     );
     await waitFor(() =>
-      expect(observer.result.current.data?.text).toBe(textOf(7, H2)),
+      expect(observer.result.current.data?.text).toBe(textOf(7, H1)),
     );
     await moveHead(client, 7, H0);
     await waitFor(() => expect(hook.result.current.data).toBe(textOf(7, H0)));

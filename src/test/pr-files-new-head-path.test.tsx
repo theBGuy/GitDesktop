@@ -383,7 +383,10 @@ describe("a file only the new head carries, before its diff lands", () => {
     diffs.push(() => Promise.reject(new Error("boom")));
     await push(client, ["src/a.ts", "src/b.ts"]);
     await user.click(await row("src/b.ts"));
-    await screen.findByText(FAILED, undefined, { timeout: 10_000 });
+    // The retained patch can't draw this file: the diff's own Retry shows.
+    await screen.findByText("Could not load this diff", undefined, {
+      timeout: 10_000,
+    });
     expect(screen.queryByText(EMPTY)).toBeNull();
     // A file the retained patch carries still shows it, under the notice.
     await user.click(await row("src/a.ts"));

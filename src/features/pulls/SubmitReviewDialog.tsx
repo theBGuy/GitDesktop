@@ -118,8 +118,11 @@ export function SubmitReviewDialog({
   prNoun: PrNoun;
   /** The origin|upstream lens the parent PR view resolved. */
   lens: RemoteLens;
-  /** Set while the diff on screen is an older head's or unproven: Submit holds
-   *  with this reason, and nothing else in the dialog does. */
+  /** Set while the diff on screen is an older head's, unproven, under a moved
+   *  answer's check, or not yet answered for this target at all
+   *  (`submitReviewHeadHold`, which also feeds the
+   *  direct Approve and Request changes): Submit holds with this reason, and
+   *  nothing else in the dialog does. */
   headHeldReason?: string | null;
 }) {
   const drafts = useReviewDrafts(repoPath, lens, number);

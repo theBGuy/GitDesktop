@@ -378,7 +378,8 @@ function pr(over: Partial<PrDetails> = {}): PrDetails {
     commentsTruncated: false,
     commitsUnknown: false,
     commitsTruncated: false,
-    headSha: null,
+    // A full head: a GitLab record naming none holds its review actions.
+    headSha: "0123456789abcdef0123456789abcdef01234567",
     filesUnknown: false,
     filesTruncated: false,
     reviewersUnknown: false,

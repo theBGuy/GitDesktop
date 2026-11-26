@@ -1811,6 +1811,24 @@ fn commit_author(c: &BbCommit) -> String {
 }
 
 /// The PR source embeds a short hash; only the newest commit's full oid is usable.
+/// Bitbucket walks commits newest-first: reversed to the neutral model's
+/// oldest-first order, so the last row is the newest, which a truncated walk
+/// still holds.
+fn bb_commits_oldest_first(newest_first: Vec<BbCommit>) -> Vec<PrCommitOut> {
+    let mut commits: Vec<PrCommitOut> = newest_first
+        .into_iter()
+        .map(|c| PrCommitOut {
+            headline: commit_headline(&c),
+            message_body: commit_body(&c),
+            author: commit_author(&c),
+            oid: c.hash,
+            date: c.date,
+        })
+        .collect();
+    commits.reverse();
+    commits
+}
+
 fn full_head_oid(commits: &[PrCommitOut]) -> Option<String> {
     commits
         .last()
@@ -1849,29 +1867,15 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     // Core PR — a hard error (the view can't render without it).
     let pr: BbPr = http::bb_get_json(&creds, &base, "pull request", BbOpKind::Read).await?;
 
-    // Bitbucket returns newest-first; reverse to the neutral model's oldest-first order.
-    let (mut commits, commits_unknown, commits_truncated) = read_or_unknown(
+    let (commits, commits_unknown, commits_truncated) = read_or_unknown(
         bb_paginate_with_truncation::<BbCommit>(
             &creds,
             format!("{base}/commits?pagelen=100"),
             "commits",
         )
         .await
-        .map(|(commits, more_pages)| {
-            let commits = commits
-                .into_iter()
-                .map(|c| PrCommitOut {
-                    headline: commit_headline(&c),
-                    message_body: commit_body(&c),
-                    author: commit_author(&c),
-                    oid: c.hash,
-                    date: c.date,
-                })
-                .collect();
-            (commits, more_pages)
-        }),
+        .map(|(commits, more_pages)| (bb_commits_oldest_first(commits), more_pages)),
     );
-    commits.reverse();
 
     // Follow diffstat next links up to BB_MAX_PAGES, retaining parsed pages on failure.
     let (diffstat, files_unknown, files_truncated) =
@@ -7922,6 +7926,30 @@ mod tests {
             full_head_oid(&[commit("a".repeat(40)), commit("b".repeat(12))]),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn a_truncated_newest_first_walk_still_names_the_newest_commit_as_head() {
+        // SYNTHETIC: a bounded walk with a next link left, newest first, as Bitbucket lists.
+        let hash = |n: usize| format!("{:040x}", 1000 - n);
+        let mut requested = 0;
+        let read = bb_walk_pages(format!("{BB_API_BASE}commits"), |_url| {
+            requested += 1;
+            let next = Some(format!("{BB_API_BASE}commits?page={}", requested + 1));
+            let page: BbPage<BbCommit> = serde_json::from_value(serde_json::json!({
+                "values": [{"hash": hash(requested), "message": "commit"}],
+                "next": next
+            }))
+            .unwrap();
+            async move { Ok(page) }
+        })
+        .await;
+        let (commits, unknown, truncated) = read_or_unknown(read);
+        assert_eq!((unknown, truncated), (true, true));
+        let commits = bb_commits_oldest_first(commits);
+        assert_eq!(commits.len(), BB_MAX_PAGES);
+        assert_eq!(full_head_oid(&commits), Some(hash(1)));
+        assert_eq!(commits[0].oid, hash(BB_MAX_PAGES));
     }
 
     #[tokio::test]

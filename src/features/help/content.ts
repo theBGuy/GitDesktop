@@ -2317,6 +2317,14 @@ long as the dialog stays open. **Submit review…** and **Discard pending review
 app's own review flow, not the unfinished GitHub review below) are also available from
 the command palette ({{kbd:command-palette}}).
 
+The dialog's **Submit**, and the pull request's own **Approve** and **Request changes**
+buttons, wait the same way while an update's new diff loads. Line comments and those
+three also wait while GitDesktop checks that the diff is the comparison the pull request
+names, a check that runs as the diff first loads, and when it can't confirm that, they
+say so and it checks again when the pull request refreshes. If that first load fails,
+**Retry** on the Files tab loads it again. Revoking your approval or your change
+request doesn't wait for these checks.
+
 An unfinished review of yours **on GitHub** (started on github.com or by another tool,
 never submitted) is different: the pull request shows a notice at the top, *You have an
 unfinished review on this pull request*, with **Finish on GitHub**, which opens the PR

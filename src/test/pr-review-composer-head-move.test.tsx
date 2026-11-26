@@ -15,6 +15,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  HEAD_COLD_DIALOG_REASON,
   HEAD_PENDING_DIALOG_REASON,
   HEAD_PENDING_REVIEW_REASON,
   HEAD_UNPROVEN_REVIEW_REASON,
@@ -26,6 +27,7 @@ import {
   forgePrApprovals,
   forgePrDiff,
   forgePrDiffAt,
+  forgePrHeadProof,
   forgePrReviewThreads,
   forgePrThreadCreate,
   forgePrThreadReply,
@@ -33,7 +35,11 @@ import {
   forgeStatus,
   gitFindRemotePrResolve,
 } from "@/lib/git/api";
-import { prDetailsOptions, prDiffOptions } from "@/lib/git/queries";
+import {
+  PR_DIFF_MOVED_RECHECK_MS,
+  prDetailsOptions,
+  prDiffOptions,
+} from "@/lib/git/queries";
 import type {
   ForgeStatus,
   PrDetails,
@@ -114,6 +120,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
       headProof: "proven" as const,
     }),
   ),
+  forgePrHeadProof: vi.fn(),
   forgePrThreadCreate: vi.fn(async () => ({})),
   forgePrThreadReply: vi.fn(async () => ({})),
   forgePrMergeMessageDefaults: vi.fn(async () => ({
@@ -409,6 +416,12 @@ beforeEach(() => {
   vi.mocked(saveSettingsMerged).mockResolvedValue(DEFAULT_SETTINGS);
   vi.mocked(forgeStatus).mockResolvedValue(GITLAB);
   vi.mocked(forgePrView).mockImplementation(async () => pr());
+  // GitLab's head read is contradiction-only: moved on a readable other head,
+  // else unproven, never proven, so only a proven /changes releases a hold.
+  vi.mocked(forgePrHeadProof).mockImplementation(async (r, n, l, at) => {
+    const named = (await forgePrView(r, n, l)).headSha?.toLowerCase();
+    return named && named !== at.head ? "moved" : "unproven";
+  });
   // The fixture's capabilities are all on, tasks included; their read fails.
   vi.mocked(forgeBbPrTasks).mockRejectedValue(new Error("tasks unavailable"));
   vi.mocked(forgePrDiff).mockImplementation(async () => {
@@ -481,6 +494,30 @@ const expectLifted = () => {
 };
 const settleWrites = () =>
   act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+/** The clocks a moved check runs on; React's scheduler stays on real ones. */
+const DRIVEN = [
+  "setTimeout",
+  "clearTimeout",
+  "setInterval",
+  "clearInterval",
+  "performance",
+] as const;
+/** `waitFor` on the driven clock: steps it until `check` passes, since RTL's
+ *  own polling timers are faked there and never fire. */
+async function until(
+  check: () => void,
+  { timeout = 1000 }: { timeout?: number } = {},
+) {
+  for (let spent = 0; ; spent += 5) {
+    try {
+      check();
+      return;
+    } catch (error) {
+      if (spent >= timeout) throw error;
+    }
+    await act(() => vi.advanceTimersByTimeAsync(5));
+  }
+}
 
 /** The details re-read naming `next`, with the next diff read held. */
 async function moveHead(client: QueryClient, next: string) {
@@ -834,12 +871,12 @@ describe("the head holds of every review submit, in the view (F3, F5)", () => {
     expect(button).toBeTruthy();
     return button as HTMLElement;
   };
-  /** The first details read answers; every re-read after it stays unanswered,
-   *  so no details fetch proves the diff. */
+  /** The first details read answers; every read after it fails, the diff
+   *  run's own head read included, so nothing proves the diff. */
   const holdDetailsRereads = () =>
     vi
       .mocked(forgePrView)
-      .mockImplementation(() => new Promise<PrDetails>(() => undefined))
+      .mockImplementation(() => Promise.reject(new Error("head read failed")))
       .mockImplementationOnce(async () => pr());
 
   it("(a) an unproven diff holds the composer's submits, Approve, Request changes and Submit review's Submit with its reason", async () => {
@@ -857,6 +894,52 @@ describe("the head holds of every review submit, in the view (F3, F5)", () => {
     );
     expectButtonHeld(requestChangesButton(), reason);
     expectButtonHeld(await dialogSubmit(user), reason);
+  }, 20_000);
+
+  it("E6/G6: a cold diff whose own head read is outstanding holds Approve, Request changes and Submit review's Submit on the cold loading reason", async () => {
+    const head = deferred<ReturnType<typeof pr>>();
+    vi.mocked(forgePrView)
+      .mockImplementationOnce(async () => pr())
+      .mockImplementationOnce(() => head.promise);
+    vi.mocked(forgePrDiffAt).mockImplementationOnce(unproven);
+    const user = userEvent.setup();
+    const client = mount();
+    await openConversation(user);
+    await waitFor(() => expect(forgePrView).toHaveBeenCalledTimes(2));
+    const reason = HEAD_COLD_DIALOG_REASON.loading(NOUN);
+    expect(document.body.textContent).not.toMatch(/was updated/);
+    await waitFor(() =>
+      expectButtonHeld(byTitle(`Approve this ${NOUN}`), reason),
+    );
+    expectButtonHeld(requestChangesButton(), reason);
+    expectButtonHeld(await dialogSubmit(user), reason);
+    await act(async () => head.resolve(pr()));
+    // GitLab's head read answers unproven at best, so it releases nothing: the
+    // hold stands until a /changes read proves the head.
+    await act(async () => {
+      await vi.mocked(forgePrHeadProof).mock.results[0]?.value;
+    });
+    const unprovenReason = HEAD_UNPROVEN_REVIEW_REASON(NOUN);
+    await waitFor(() =>
+      expectButtonHeld(byTitle(`Approve this ${NOUN}`), unprovenReason),
+    );
+    expectButtonHeld(requestChangesButton(), unprovenReason);
+    const proven = deferred<DiffAt>();
+    vi.mocked(forgePrDiffAt).mockImplementationOnce(() => proven.promise);
+    act(() => {
+      void client.invalidateQueries({ queryKey: diffKey(SHA), exact: true });
+    });
+    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(2));
+    expectButtonHeld(byTitle(`Approve this ${NOUN}`), unprovenReason);
+    await act(async () =>
+      proven.resolve({ diff: patch(files), headProof: "proven" }),
+    );
+    await waitFor(() =>
+      expect(byTitle(`Approve this ${NOUN}`)).not.toHaveAttribute(
+        "aria-disabled",
+        "true",
+      ),
+    );
   }, 20_000);
 
   it("(a) revoking an approval stays free under the hold", async () => {
@@ -916,13 +999,15 @@ describe("the head holds of every review submit, in the view (F3, F5)", () => {
     await openFilesTab(user);
     await user.type(await waitFor(composerBox), "kept");
     await waitFor(expectLifted);
-    const held = deferred<DiffAt>();
+    const early = deferred<DiffAt>();
+    const atDeadline = deferred<DiffAt>();
     vi.mocked(forgePrDiffAt)
       .mockImplementationOnce(async () => ({
         diff: patch(files),
         headProof: "moved",
       }))
-      .mockImplementationOnce(() => held.promise);
+      .mockImplementationOnce(() => early.promise)
+      .mockImplementationOnce(() => atDeadline.promise);
     await openConversation(user);
     await waitFor(() =>
       expect(requestChangesButton()).not.toHaveAttribute(
@@ -930,25 +1015,42 @@ describe("the head holds of every review submit, in the view (F3, F5)", () => {
         "true",
       ),
     );
-    act(() => {
-      void client.invalidateQueries({ queryKey: diffKey(SHA), exact: true });
-    });
-    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(3));
-    await waitFor(() =>
-      expectButtonHeld(
-        requestChangesButton(),
-        HEAD_PENDING_DIALOG_REASON.loading(NOUN),
-      ),
-    );
-    await act(async () =>
-      held.resolve({ diff: patch(files), headProof: "proven" }),
-    );
-    await waitFor(() =>
-      expect(requestChangesButton()).not.toHaveAttribute(
-        "aria-disabled",
-        "true",
-      ),
-    );
+    const loading = HEAD_PENDING_DIALOG_REASON.loading(NOUN);
+    vi.useFakeTimers({ toFake: [...DRIVEN] });
+    try {
+      act(() => {
+        void client.invalidateQueries({ queryKey: diffKey(SHA), exact: true });
+      });
+      // Read 2 answers moved; read 3 is its early re-check.
+      await until(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(3));
+      await until(() => expectButtonHeld(requestChangesButton(), loading));
+      await act(async () =>
+        early.resolve({ diff: patch(files), headProof: "proven" }),
+      );
+      // Started before the settle deadline, read 3's proven answer stays
+      // moved: the hold stands until the deadline's read.
+      await act(() =>
+        vi.advanceTimersByTimeAsync(PR_DIFF_MOVED_RECHECK_MS / 2),
+      );
+      expect(forgePrDiffAt).toHaveBeenCalledTimes(3);
+      expectButtonHeld(requestChangesButton(), loading);
+      await until(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(4), {
+        timeout: PR_DIFF_MOVED_RECHECK_MS,
+      });
+      expectButtonHeld(requestChangesButton(), loading);
+      // Read 4, at the deadline, is the one that releases it.
+      await act(async () =>
+        atDeadline.resolve({ diff: patch(files), headProof: "proven" }),
+      );
+      await until(() =>
+        expect(requestChangesButton()).not.toHaveAttribute(
+          "aria-disabled",
+          "true",
+        ),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   }, 20_000);
 
   it("(b) a moved answer under check holds as loading, and no reason points at a Retry", async () => {
@@ -957,26 +1059,50 @@ describe("the head holds of every review submit, in the view (F3, F5)", () => {
     await openFilesTab(user);
     await user.type(await waitFor(composerBox), "kept");
     await waitFor(expectLifted);
-    const held = deferred<DiffAt>();
+    const early = deferred<DiffAt>();
+    const atDeadline = deferred<DiffAt>();
     vi.mocked(forgePrDiffAt)
       .mockImplementationOnce(async () => ({
         diff: patch(files),
         headProof: "moved",
       }))
-      .mockImplementationOnce(() => held.promise);
-    act(() => {
-      void client.invalidateQueries({ queryKey: diffKey(SHA), exact: true });
-    });
-    await waitFor(() => expectHeld(HEAD_PENDING_REVIEW_REASON.loading(NOUN)));
-    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(3));
-    expect(document.body.textContent).not.toContain("Retry above the diff");
-    expect(document.body.textContent).not.toContain(
-      HEAD_PENDING_DIALOG_REASON.failed(NOUN),
-    );
-    await act(async () =>
-      held.resolve({ diff: patch(files), headProof: "proven" }),
-    );
-    await waitFor(expectLifted);
+      .mockImplementationOnce(() => early.promise)
+      .mockImplementationOnce(() => atDeadline.promise);
+    const loading = HEAD_PENDING_REVIEW_REASON.loading(NOUN);
+    vi.useFakeTimers({ toFake: [...DRIVEN] });
+    try {
+      act(() => {
+        void client.invalidateQueries({ queryKey: diffKey(SHA), exact: true });
+      });
+      await until(() => expectHeld(loading));
+      // Read 2 answers moved; read 3 is its early re-check.
+      await until(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(3));
+      expect(document.body.textContent).not.toContain("Retry above the diff");
+      expect(document.body.textContent).not.toContain(
+        HEAD_PENDING_DIALOG_REASON.failed(NOUN),
+      );
+      await act(async () =>
+        early.resolve({ diff: patch(files), headProof: "proven" }),
+      );
+      // Started before the settle deadline, read 3's proven answer stays
+      // moved: the hold stands until the deadline's read.
+      await act(() =>
+        vi.advanceTimersByTimeAsync(PR_DIFF_MOVED_RECHECK_MS / 2),
+      );
+      expect(forgePrDiffAt).toHaveBeenCalledTimes(3);
+      expectHeld(loading);
+      await until(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(4), {
+        timeout: PR_DIFF_MOVED_RECHECK_MS,
+      });
+      expectHeld(loading);
+      // Read 4, at the deadline, is the one that releases it.
+      await act(async () =>
+        atDeadline.resolve({ diff: patch(files), headProof: "proven" }),
+      );
+      await until(expectLifted);
+    } finally {
+      vi.useRealTimers();
+    }
   }, 20_000);
 
   it("(c) a base-branch change alone holds as loading in the composer and in Submit review", async () => {
@@ -1011,6 +1137,310 @@ describe("the head holds of every review submit, in the view (F3, F5)", () => {
       await dialogSubmit(user),
       HEAD_PENDING_DIALOG_REASON.loading(NOUN),
     );
+  }, 20_000);
+
+  it("N3: a cold moved check holds Approve, Request changes and Submit review's Submit through a failed re-check and its Retry's start", async () => {
+    const failed = () => Promise.reject(new Error("diff failed"));
+    // The first answer of the key is moved (no text of its own); the read's own
+    // retry policy re-runs the failed re-check once.
+    vi.mocked(forgePrDiffAt)
+      .mockImplementationOnce(async () => ({ diff: "", headProof: "moved" }))
+      .mockImplementationOnce(failed)
+      .mockImplementationOnce(failed);
+    const user = userEvent.setup();
+    const client = mount();
+    await openConversation(user);
+    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(3), {
+      timeout: 5_000,
+    });
+    const expectAllHeld = async (reason: string) => {
+      await waitFor(() =>
+        expectButtonHeld(byTitle(`Approve this ${NOUN}`), reason),
+      );
+      expectButtonHeld(requestChangesButton(), reason);
+      const submit = await dialogSubmit(user);
+      expectButtonHeld(submit, reason);
+      return submit;
+    };
+    await expectAllHeld(HEAD_PENDING_DIALOG_REASON.failed(NOUN));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // Retry's start: the pane's Retry is the read's own refetch.
+    const held = deferred<DiffAt>();
+    vi.mocked(forgePrDiffAt).mockImplementationOnce(() => held.promise);
+    act(() => {
+      void client.refetchQueries({ queryKey: diffKey(SHA), exact: true });
+    });
+    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(4));
+    const again = await expectAllHeld(HEAD_PENDING_DIALOG_REASON.loading(NOUN));
+    await act(async () =>
+      held.resolve({ diff: patch(files), headProof: "proven" }),
+    );
+    await waitFor(() =>
+      expect(again).not.toHaveAccessibleDescription(
+        HEAD_PENDING_DIALOG_REASON.loading(NOUN),
+      ),
+    );
+  }, 20_000);
+
+  const expectVerdictsHeld = async (
+    user: ReturnType<typeof userEvent.setup>,
+    reason: string,
+  ) => {
+    await waitFor(() =>
+      expectButtonHeld(byTitle(`Approve this ${NOUN}`), reason),
+    );
+    expectButtonHeld(requestChangesButton(), reason);
+    expectButtonHeld(await dialogSubmit(user), reason);
+    // A cold proof knows of no update.
+    expect(document.body.textContent).not.toMatch(/was updated/);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  };
+  const expectVerdictsFree = () =>
+    waitFor(() => {
+      expect(byTitle(`Approve this ${NOUN}`)).not.toHaveAttribute(
+        "aria-disabled",
+        "true",
+      );
+      expect(requestChangesButton()).not.toHaveAttribute(
+        "aria-disabled",
+        "true",
+      );
+    });
+
+  it("G6: a cold open whose first diff read is outstanding holds the verdicts on the cold loading reason", async () => {
+    const first = deferred<DiffAt>();
+    vi.mocked(forgePrDiffAt).mockImplementationOnce(() => first.promise);
+    const user = userEvent.setup();
+    mount();
+    await openConversation(user);
+    await expectVerdictsHeld(user, HEAD_COLD_DIALOG_REASON.loading(NOUN));
+    await act(async () =>
+      first.resolve({ diff: patch(files), headProof: "proven" }),
+    );
+    await expectVerdictsFree();
+  }, 20_000);
+
+  for (const [rows, list] of [
+    ["one file row", () => undefined],
+    [
+      "no file rows",
+      () => {
+        files = [];
+      },
+    ],
+    [
+      "an unknown file list",
+      () => {
+        files = [];
+        vi.mocked(forgePrView).mockImplementation(
+          async () => ({ ...pr(), filesUnknown: true }) as PrDetails,
+        );
+      },
+    ],
+  ] as const)
+    it(`G5/T17: a failed first diff read holds the verdicts on the cold failed reason until the Files tab's Retry proves it (${rows})`, async () => {
+      list();
+      const failed = () => Promise.reject(new Error("diff failed"));
+      // The read's own retry policy re-runs the failure once.
+      vi.mocked(forgePrDiffAt)
+        .mockImplementationOnce(failed)
+        .mockImplementationOnce(failed);
+      const user = userEvent.setup();
+      mount();
+      await openConversation(user);
+      await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(2), {
+        timeout: 5_000,
+      });
+      await expectVerdictsHeld(user, HEAD_COLD_DIALOG_REASON.failed(NOUN));
+      await user.click(screen.getByRole("button", { name: /^Files/ }));
+      // The diff's own notice, never another read's Retry (mergeability's is
+      // always on screen): one notice and one Retry for the one failure.
+      const notice = await screen.findByText("Could not load this diff");
+      expect(screen.getAllByText("Could not load this diff")).toHaveLength(1);
+      expect(
+        screen.queryByText("Could not load diff for this file"),
+      ).not.toBeInTheDocument();
+      const box = notice.parentElement as HTMLElement;
+      await user.click(within(box).getByRole("button", { name: "Retry" }));
+      await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(3));
+      await openConversation(user);
+      await expectVerdictsFree();
+    }, 20_000);
+
+  /** Paints the first head's patch, then fails the next head's read (twice:
+   *  the read's own retry) with `next` as that head's file list. */
+  async function failNextHead(
+    user: ReturnType<typeof userEvent.setup>,
+    next: string[],
+  ) {
+    const client = mount();
+    await openFilesTab(user);
+    await waitFor(
+      () =>
+        expect(
+          document.querySelector(
+            wire.realPane ? "span[data-line-new-num]" : "[data-diff-text]",
+          ),
+        ).not.toBeNull(),
+      { timeout: 10_000 },
+    );
+    const failed = () => Promise.reject(new Error("diff failed"));
+    diffs.push(failed, failed);
+    files = next;
+    await moveHead(client, SHA8);
+    await waitFor(() => expect(forgePrDiff).toHaveBeenCalledTimes(3), {
+      timeout: 5_000,
+    });
+    return client;
+  }
+
+  const diffRetry = async () =>
+    within(
+      (await screen.findByText("Could not load this diff"))
+        .parentElement as HTMLElement,
+    ).getByRole("button", { name: "Retry" });
+
+  it("R2: a failed new head whose older text can't draw the open file shows the diff's Retry", async () => {
+    const user = userEvent.setup();
+    await failNextHead(user, ["src/b.ts"]);
+    const retry = await diffRetry();
+    await user.click(retry);
+    await waitFor(() =>
+      expect(
+        document
+          .querySelector("[data-diff-text]")
+          ?.getAttribute("data-diff-text"),
+      ).toBe(patch(["src/b.ts"])),
+    );
+  }, 20_000);
+
+  it("R2: a failed new head whose older text draws the open file keeps that text", async () => {
+    const user = userEvent.setup();
+    await failNextHead(user, ["src/a.ts", "src/b.ts"]);
+    await waitFor(() =>
+      expect(
+        document
+          .querySelector("[data-diff-text]")
+          ?.getAttribute("data-diff-text"),
+      ).toContain("+new src/a.ts"),
+    );
+    expect(
+      screen.queryByText("Could not load this diff"),
+    ).not.toBeInTheDocument();
+  }, 20_000);
+
+  it("R3: a focused diff Retry that moves to the Files tab's own line keeps focus", async () => {
+    const user = userEvent.setup();
+    const client = await failNextHead(user, ["src/b.ts"]);
+    const retry = await diffRetry();
+    act(() => retry.focus());
+    expect(retry).toHaveFocus();
+    // A details-only refresh loses the file list; the diff stays failed.
+    vi.mocked(forgePrView).mockImplementation(
+      async () => ({ ...pr(), files: [], filesUnknown: true }) as PrDetails,
+    );
+    await act(() =>
+      client.refetchQueries({
+        queryKey: prDetailsOptions(REPO, 7, "origin").queryKey,
+        exact: true,
+      }),
+    );
+    await waitFor(() => expect(retry.isConnected).toBe(false));
+    const moved = await diffRetry();
+    expect(moved).not.toBe(retry);
+    expect(moved).toHaveFocus();
+  }, 20_000);
+
+  /** The real pane's own Retry above the older head's drawable `src/a.ts`:
+   *  the stand-in draws no notice, so these tests mount the real diff. */
+  async function paneRetryOverRetainedText(
+    user: ReturnType<typeof userEvent.setup>,
+  ) {
+    stubCanvas();
+    wire.realPane = true;
+    const client = await failNextHead(user, ["src/a.ts", "src/b.ts"]);
+    const retry = await screen.findByRole("button", {
+      name: "Retry loading this diff",
+    });
+    expect(
+      screen.queryByText("Could not load this diff"),
+    ).not.toBeInTheDocument();
+    return { client, retry };
+  }
+
+  /** A details-only refresh that loses the file list; the diff stays failed. */
+  const loseFileList = async (client: QueryClient) => {
+    vi.mocked(forgePrView).mockImplementation(
+      async () => ({ ...pr(), files: [], filesUnknown: true }) as PrDetails,
+    );
+    await act(() =>
+      client.refetchQueries({
+        queryKey: prDetailsOptions(REPO, 7, "origin").queryKey,
+        exact: true,
+      }),
+    );
+  };
+
+  it("Q4: a focused Retry above the retained patch hands focus to the Files tab's Retry when the list goes", async () => {
+    const user = userEvent.setup();
+    const { client, retry } = await paneRetryOverRetainedText(user);
+    act(() => retry.focus());
+    expect(retry).toHaveFocus();
+    await loseFileList(client);
+    await waitFor(() => expect(retry.isConnected).toBe(false));
+    expect(await diffRetry()).toHaveFocus();
+  }, 20_000);
+
+  it("Q4: focus outside the Files section stays where it is when the Files tab's Retry mounts", async () => {
+    const user = userEvent.setup();
+    const { client } = await paneRetryOverRetainedText(user);
+    const files = screen.getByRole("button", { name: /^Files/ });
+    act(() => files.focus());
+    await loseFileList(client);
+    await diffRetry();
+    expect(files).toHaveFocus();
+  }, 20_000);
+
+  it("G4: a switch to another pull request holds its verdicts on the cold reason while its own diff is outstanding", async () => {
+    vi.mocked(forgePrView).mockImplementation(
+      async (_r, n) =>
+        ({
+          ...pr(),
+          id: `PR_${n}`,
+          number: n,
+          title: `Merge request ${n}`,
+        }) as PrDetails,
+    );
+    const other = deferred<DiffAt>();
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    clients.push(client);
+    const view = (n: number) => (
+      <QueryClientProvider client={client}>
+        <RemotePrView repoPath={REPO} number={n} />
+      </QueryClientProvider>
+    );
+    const user = userEvent.setup();
+    const { rerender } = render(view(7));
+    await openConversation(user);
+    await expectVerdictsFree();
+    vi.mocked(forgePrDiffAt).mockImplementationOnce(() => other.promise);
+    act(() => useUiStore.setState({ selectedPr: { kind: "remote", id: "8" } }));
+    rerender(view(8));
+    await waitFor(() =>
+      expect(vi.mocked(forgePrDiffAt).mock.calls.at(-1)?.[1]).toBe(8),
+    );
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("Merge request 8"),
+    );
+    await expectVerdictsHeld(user, HEAD_COLD_DIALOG_REASON.loading(NOUN));
+    await act(async () =>
+      other.resolve({ diff: patch(files), headProof: "proven" }),
+    );
+    await expectVerdictsFree();
   }, 20_000);
 });
 
@@ -1073,12 +1503,68 @@ describe("the Conversation feed over a failing tasks read", () => {
     expect(tasksReads()).toBe(reads);
     // The same node: the section never remounted.
     expect(tasksRetry()).toBe(retry);
+    // The retry's answer is held: the feed keeps its node and paints no
+    // loading frame while the read is pending.
+    const section = document.getElementById("pr-tasks-section");
+    expect(section).not.toBeNull();
+    let fail: (e: Error) => void = () => undefined;
+    vi.mocked(forgeBbPrTasks).mockImplementationOnce(
+      () =>
+        new Promise<PrTask[]>((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
     await user.click(retry as HTMLElement);
-    await idle(500);
+    await idle(300);
+    expect(tasksReads()).toBe(reads + 1);
+    expect(feedLoading()).toBeNull();
+    expect(document.getElementById("pr-tasks-section")).toBe(section);
+    await act(async () => fail(new Error("tasks unavailable")));
+    await idle(300);
     expect(stop()).toBe(false);
     expect(tasksReads()).toBe(reads + 1);
     expect(screen.getByText("Couldn't load tasks.")).toBeInTheDocument();
     expect(feedLoading()).toBeNull();
+    expect(document.getElementById("pr-tasks-section")).toBe(section);
+  }, 20_000);
+
+  it("a review notification's reveal waits for a retried read, though the feed stays open", async () => {
+    const user = userEvent.setup();
+    mount();
+    await screen.findByText("Couldn't load tasks.");
+    let fail: (e: Error) => void = () => undefined;
+    vi.mocked(forgeBbPrTasks).mockImplementationOnce(
+      () =>
+        new Promise<PrTask[]>((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    await user.click(tasksRetry() as HTMLElement);
+    await idle(100);
+    act(() => useUiStore.setState({ pendingReviewId: "R1" }));
+    await idle(300);
+    expect(document.getElementById("pr-tasks-section")).not.toBeNull();
+    expect(useUiStore.getState().pendingReviewId).toBe("R1");
+    await act(async () => fail(new Error("tasks unavailable")));
+    await waitFor(() =>
+      expect(useUiStore.getState().pendingReviewId).toBeNull(),
+    );
+  }, 20_000);
+
+  it("reopening the pull request after a failed tasks read re-reads it once", async () => {
+    const client = mount();
+    await screen.findByText("Couldn't load tasks.");
+    await idle(300);
+    expect(tasksReads()).toBe(1);
+    cleanup();
+    render(
+      <QueryClientProvider client={client}>
+        <RemotePrView repoPath={REPO} number={7} />
+      </QueryClientProvider>,
+    );
+    await screen.findByText("Couldn't load tasks.");
+    await idle(500);
+    expect(tasksReads()).toBe(2);
   }, 20_000);
 
   it("a PR switch closes it: the next PR's feed waits for that PR's own reads", async () => {

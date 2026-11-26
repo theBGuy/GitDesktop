@@ -581,6 +581,14 @@ describe("the head hold (AC-D1, AC-R7)", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("Cancel closes the dialog while held", async () => {
+    const { user, onOpenChange } = renderDialog({ headHeldReason: HELD });
+    expect(submitButton()).toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(calls()).toBe(0);
+  });
+
   it("outranks a missing summary", async () => {
     const { user } = renderDialog({ headHeldReason: HELD });
     await user.click(screen.getByRole("radio", { name: /Request changes/ }));

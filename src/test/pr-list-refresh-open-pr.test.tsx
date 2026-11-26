@@ -24,6 +24,7 @@ import { PullRequestsPanel } from "@/features/pulls/PullRequestsPanel";
 import {
   forgePrContentRevs,
   forgePrDiff,
+  forgePrDiffAt,
   forgePrListPage,
   forgePrView,
   forgeStatus,
@@ -115,6 +116,7 @@ const H2 = "2".repeat(40);
 const D = prDetailsOptions(REPO, 7, "origin").queryKey;
 
 let head = H1;
+let baseRef = "main";
 let detailsFail = false;
 /** What the forge was asked, in order ("details" when its answer settles). */
 let log: string[] = [];
@@ -125,7 +127,7 @@ const details = (number: number, headSha: string): PrDetails =>
     number,
     state: "OPEN",
     headSha,
-    baseRefName: "main",
+    baseRefName: baseRef,
     commits: [],
   }) as unknown as PrDetails;
 
@@ -155,6 +157,7 @@ const observeDetails = (client: QueryClient) =>
 beforeEach(() => {
   vi.clearAllMocks();
   head = H1;
+  baseRef = "main";
   detailsFail = false;
   log = [];
   vi.mocked(forgePrView).mockImplementation(async (_repo, number) => {
@@ -166,6 +169,17 @@ beforeEach(() => {
     log.push("diff");
     return textOf(head);
   });
+  // The by-target read answers for its own target's head.
+  vi.mocked(forgePrDiffAt).mockImplementation(
+    async (repo, number, lens, at) => {
+      const live = head;
+      const text = await forgePrDiff(repo, number, lens);
+      return {
+        diff: at.head === live ? text : textOf(at.head),
+        headProof: "proven",
+      };
+    },
+  );
   vi.mocked(forgePrContentRevs).mockImplementation(
     async (_repo, _number, _lens, headSha) => {
       log.push("revs");
@@ -259,7 +273,7 @@ describe("refreshOpenPr's key set (AC-RF1)", () => {
       "origin",
       diffTarget(H1),
     ).queryKey;
-    client.setQueryData(nullDiff, { text: "seeded", headProven: true });
+    client.setQueryData(nullDiff, { text: "seeded", proof: "proven" });
     client.setQueryData(revs, { oldSha: H0, newSha: H1 });
     await refreshOpenPr(client, REPO, "origin", 7);
     expect(client.getQueryState(nullDiff)?.isInvalidated).toBe(true);
@@ -326,6 +340,44 @@ describe("refreshOpenPr's order and count (AC-RF2)", () => {
     await sleep(30);
     expect(diffCalls()).toBe(1);
     expect(revsHeads()).toEqual([H1]);
+    expect(log.indexOf("details")).toBeLessThan(log.indexOf("diff"));
+    expect(view.result.current.diff.data).toBe(textOf(H1));
+  });
+
+  it("base retargeted alone: the diff and revs reads address the new base's exact keys", async () => {
+    const { client, wrapper, view } = await mountOpen();
+    // A second observer keeps the old base's entry (the sweep spares it).
+    const old = renderHook(
+      () => useQuery(prDiffOptions(REPO, 7, "origin", diffTarget(H1))),
+      { wrapper },
+    );
+    await waitFor(() => expect(old.result.current.data?.text).toBe(textOf(H1)));
+    vi.mocked(forgePrDiffAt).mockClear();
+    baseRef = "release";
+    const retargeted = { head: H1, baseRef: "release", baseSha: null };
+    // Fresh entries at the new base's keys: a re-key alone serves them, so only the
+    // refresh's own re-read of those exact keys replaces them.
+    const newDiff = prDiffOptions(REPO, 7, "origin", retargeted).queryKey;
+    const newRevs = prContentRevsOptions(
+      REPO,
+      7,
+      "origin",
+      retargeted,
+    ).queryKey;
+    client.setQueryData(newDiff, { proof: "proven", text: "seeded" });
+    client.setQueryData(newRevs, { oldSha: "seeded", newSha: H1 } as never);
+    await act(() => refreshOpenPr(client, REPO, "origin", 7));
+    await waitFor(() => {
+      expect(client.getQueryData(newDiff)?.text).toBe(textOf(H1));
+      expect(client.getQueryData(newRevs)?.oldSha).toBe(H0);
+    });
+    await sleep(30);
+    expect(vi.mocked(forgePrDiffAt).mock.calls.map((c) => c[3])).toEqual([
+      retargeted,
+    ]);
+    expect(
+      vi.mocked(forgePrContentRevs).mock.calls.map((c) => c.slice(3)),
+    ).toEqual([[H1, "release", null]]);
     expect(log.indexOf("details")).toBeLessThan(log.indexOf("diff"));
     expect(view.result.current.diff.data).toBe(textOf(H1));
   });
@@ -413,8 +465,8 @@ describe("refreshOpenPr never cancels (AC-RF5)", () => {
     await refreshOpenPr(client, REPO, "origin", 7);
     release("cold text");
     await expect(load).resolves.toEqual({
+      proof: "proven",
       text: "cold text",
-      headProven: true,
     });
   });
 });

@@ -7348,7 +7348,8 @@ struct RawPr {
     /// event data to this head, where the commit list can stop short of it.
     #[serde(default, deserialize_with = "null_to_default")]
     head_ref_oid: String,
-    /// The base commit GitHub's diff refs name (not the live base tip).
+    /// The pull request's stored base commit (`baseRefOid`), not the live base tip;
+    /// empty from a gh older than 2.63.0, which reads the view without it.
     #[serde(default, deserialize_with = "null_to_default")]
     base_ref_oid: String,
     #[serde(default)]
@@ -7739,9 +7740,10 @@ pub struct PrDetails {
     /// Bitbucket's newest commit (its PR source hash is abbreviated);
     /// null when none could be read.
     pub head_sha: Option<String>,
-    /// The commit the forge's diff refs name as the base (GitHub's `baseRefOid`,
-    /// GitLab's `diff_refs.base_sha`), an identity for the diff read and never a
-    /// merge base to compute with; null where the forge names none (Bitbucket).
+    /// The pull request's stored base commit (GitHub's `baseRefOid`, GitLab's
+    /// `diff_refs.base_sha`), not the live base tip: an identity for the diff read and
+    /// never a merge base to compute with; null where the forge names none (Bitbucket,
+    /// or a gh older than 2.63.0).
     pub base_sha: Option<String>,
     pub additions: u32,
     pub deletions: u32,
@@ -8498,7 +8500,8 @@ pub async fn gh_pr_comments_view(
     })
 }
 
-/// Narrow fields avoid the full view's stack, check-run and merge-settings reads.
+/// The `gh pr view` argv over a caller's `--json` field list (a narrow list or
+/// the full view's).
 fn lean_pr_view_args<'a>(n: &'a str, slug: &'a str, fields: &'a str) -> [&'a str; 7] {
     ["pr", "view", n, "--repo", slug, "--json", fields]
 }
@@ -8564,6 +8567,54 @@ pub async fn gh_pr_title_body(
     Ok((raw.title, raw.body))
 }
 
+/// `gh pr view` over [`PR_VIEW_FIELDS`]. A gh older than 2.63.0 refuses the whole read
+/// over `baseRefOid`, so that exact refusal re-runs the view without it (`baseSha` null).
+async fn run_pr_view(repo_path: &str, n: &str, slug: &str) -> AppResult<GhOutput> {
+    pr_view_retrying_base_oid(n, slug, |argv| async move {
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        run_gh(Some(repo_path), &argv, GH_TIMEOUT).await
+    })
+    .await
+}
+
+/// [`run_pr_view`]'s retry over any gh runner, so a test can sequence the two answers.
+async fn pr_view_retrying_base_oid<F, Fut>(n: &str, slug: &str, mut run: F) -> AppResult<GhOutput>
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = AppResult<GhOutput>>,
+{
+    let argv = |fields: &str| {
+        lean_pr_view_args(n, slug, fields)
+            .map(str::to_string)
+            .to_vec()
+    };
+    let first = run(argv(PR_VIEW_FIELDS)).await;
+    if !refuses_base_ref_oid(&first) {
+        return first;
+    }
+    run(argv(&pr_view_fields_without_base_oid())).await
+}
+
+/// The view's stored base sha; an empty `baseRefOid` (an older gh's view) is unknown.
+fn stored_base_sha(base_ref_oid: String) -> Option<String> {
+    (!base_ref_oid.is_empty()).then_some(base_ref_oid)
+}
+
+/// gh names the unknown field on its first line, then lists the fields it knows.
+fn refuses_base_ref_oid(result: &AppResult<GhOutput>) -> bool {
+    matches!(result, Err(AppError::Gh(msg))
+        if crate::github::issue::is_unknown_json_field(msg)
+            && msg.lines().next().is_some_and(|line| line.contains("\"baseRefOid\"")))
+}
+
+fn pr_view_fields_without_base_oid() -> String {
+    PR_VIEW_FIELDS
+        .split(',')
+        .filter(|field| *field != "baseRefOid")
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Full details for one PR's read view.
 pub async fn gh_pr_view(
     repo_path: String,
@@ -8579,10 +8630,9 @@ pub async fn gh_pr_view(
     // Stack membership rides alongside the view AND is bounded — per hop, inside
     // `gh_pr_stack`, so a slow member fetch can't discard a membership already
     // established. Timing out hop 1 is a FAILED probe, not "unstacked".
-    let view_args = ["pr", "view", &n, "--repo", &slug, "--json", PR_VIEW_FIELDS];
     // The check-run events ride alongside too, so the collapse adds no serial hop.
     let (out, probe, check_runs) = tokio::join!(
-        run_gh(Some(&repo_path), &view_args, GH_TIMEOUT),
+        run_pr_view(&repo_path, &n, &slug),
         gh_pr_stack(&repo_path, &slug, number),
         Box::pin(gh_check_run_events(&repo_path, &slug, number)),
     );
@@ -8702,7 +8752,7 @@ pub async fn gh_pr_view(
         base_ref_name: raw.base_ref_name,
         head_ref_name: raw.head_ref_name,
         head_sha: (!raw.head_ref_oid.is_empty()).then_some(raw.head_ref_oid),
-        base_sha: (!raw.base_ref_oid.is_empty()).then_some(raw.base_ref_oid),
+        base_sha: stored_base_sha(raw.base_ref_oid),
         additions: raw.additions,
         deletions: raw.deletions,
         url: raw.url,
@@ -14567,6 +14617,67 @@ mod tests {
         assert_eq!(local_github_repo("git@github.com:"), None);
         assert_eq!(local_github_repo("https://github.com/owner"), None);
         assert_eq!(local_github_repo("https://github.com/a/b/c"), None);
+    }
+
+    /// gh's wording for a field its build lacks, as issue.rs measured it for `issueType`.
+    #[test]
+    fn only_a_base_ref_oid_refusal_reruns_the_view_without_it() {
+        let refused = |field: &str| -> crate::error::AppResult<crate::github::runner::GhOutput> {
+            Err(AppError::Gh(format!(
+                "Unknown JSON field: \"{field}\"\nAvailable fields:\n  additions\n  baseRefName"
+            )))
+        };
+        assert!(super::refuses_base_ref_oid(&refused("baseRefOid")));
+        assert!(!super::refuses_base_ref_oid(&refused("issueType")));
+        assert!(!super::refuses_base_ref_oid(&Err(AppError::Gh(
+            "HTTP 502: baseRefOid".into()
+        ))));
+        assert!(!super::refuses_base_ref_oid(&Ok(
+            crate::github::runner::GhOutput {
+                stdout: b"{}".to_vec(),
+                stderr: String::new(),
+                code: 0,
+            }
+        )));
+        let fields = super::pr_view_fields_without_base_oid();
+        let mut expected: Vec<&str> = PR_VIEW_FIELDS.split(',').collect();
+        expected.retain(|f| *f != "baseRefOid");
+        assert_eq!(fields.split(',').collect::<Vec<_>>(), expected);
+        assert!(PR_VIEW_FIELDS.split(',').any(|f| f == "baseRefOid"));
+    }
+
+    /// An older gh's refusal, then its answer to the narrowed view: two runs, the second
+    /// without `baseRefOid`, and the view reads its base sha as unknown.
+    #[tokio::test]
+    async fn an_old_gh_view_is_read_again_without_the_base_oid() {
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let mut answers = vec![
+            Err(AppError::Gh(
+                "Unknown JSON field: \"baseRefOid\"\nAvailable fields:\n  additions".into(),
+            )),
+            Ok(crate::github::runner::GhOutput {
+                stdout: br#"{"number":7,"state":"OPEN","baseRefName":"main"}"#.to_vec(),
+                stderr: String::new(),
+                code: 0,
+            }),
+        ];
+        let out = super::pr_view_retrying_base_oid("7", "o/r", |argv| {
+            calls.push(argv);
+            let answer = answers.remove(0);
+            async move { answer }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0][6], PR_VIEW_FIELDS);
+        assert_eq!(
+            calls[1][..6],
+            ["pr", "view", "7", "--repo", "o/r", "--json"]
+        );
+        assert_eq!(calls[1][6], super::pr_view_fields_without_base_oid());
+        let raw: RawPr = serde_json::from_str(&out.stdout_lossy()).unwrap();
+        assert_eq!(super::stored_base_sha(raw.base_ref_oid), None);
+        assert_eq!(super::stored_base_sha("b".repeat(40)), Some("b".repeat(40)));
     }
 
     /// The detail view's mergeability rides the SAME `gh pr view` call, so the

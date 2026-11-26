@@ -258,7 +258,7 @@ export function PrTasksSection({
   editable: boolean;
 }) {
   const queryClient = useQueryClient();
-  const tasksQuery = usePrTasks(repoPath, number);
+  const tasksQuery = usePrTasks(repoPath, number, { retryOnMount: false });
   const createTask = useCreatePrTask(repoPath);
   const editTask = useEditPrTask(repoPath);
   const setState = useSetPrTaskState(repoPath);
