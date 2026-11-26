@@ -50,8 +50,9 @@
 // caller's lines that renders zero or many times, outside the caller's commit
 // or under another binding of the name: inside a multi-line JSX prop value, a
 // nested component closure, a `.map(() => ...)` callback, a branch not taken,
-// or a scope that declares its own `mark`; and a per-caller case skipped from
-// inside a callback or a hook in its describe (`ctx.skip()`).
+// or a scope that declares its own `mark`; a per-caller case skipped from
+// inside a callback or a hook in its describe (`ctx.skip()`); and a per-caller
+// case registered under a condition (`if (...) it(...)`).
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -941,6 +942,22 @@ test("T5: each held-type assert and the import are pinned", () => {
   assert.ok(scan(binary).includes(`T5 ${SURFACE}: unreadable`));
 });
 
+// TypeScript reads a directive through intervening comments and blank lines.
+function commentBlockStart(text, block) {
+  for (;;) {
+    const prev = text.lastIndexOf("\n", block - 2) + 1;
+    if (prev >= block) break;
+    if (!/^\s*(?:\/\/.*)?\r?$/.test(text.slice(prev, block - 1))) break;
+    block = prev;
+  }
+  return block;
+}
+
+test("T5: the comment walk ends at the top of a file that opens with a blank line", () => {
+  const text = "\n// note\nexport type X = Assert<IsData<DiffLineAnchor>>;";
+  assert.equal(commentBlockStart(text, text.indexOf("export type")), 1);
+});
+
 test("T5: a directive that can silence the asserts fails, naming its line", () => {
   const text = REAL.get(SURFACE);
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
@@ -959,14 +976,7 @@ test("T5: a directive that can silence the asserts fails, naming its line", () =
       "m",
     ).exec(text);
     assert.ok(found, name);
-    // The start of the comment block above the line, when it has one:
-    // TypeScript reads a directive up through `//` and blank lines.
-    let block = found.index;
-    for (;;) {
-      const prev = text.lastIndexOf("\n", block - 2) + 1;
-      if (!/^\s*(?:\/\/.*)?\r?$/.test(text.slice(prev, block - 1))) break;
-      block = prev;
-    }
+    const block = commentBlockStart(text, found.index);
     const sites = block < found.index ? [found.index, block] : [found.index];
     for (const at of sites)
       for (const word of ["@ts-expect-error", "@ts-ignore"]) {

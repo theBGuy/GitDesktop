@@ -461,14 +461,13 @@ describe("StagingDiffView keeps the dark theme through a discarded rebuild", () 
   });
 });
 
-/** One `SnapshotMark` update, read when it ran: the layout it left, the
- *  layout it renders, and the scrollers `captureLineAnchor` read inside it. */
-type MarkUpdate = { from: string; to: string; scrollers: HTMLElement[] };
+type MarkUpdate = { from: string; to: string; onRows: number };
 
-/** Runs `before` and then switches the setting to split, and returns every
- *  layout flip a mounted `SnapshotMark` made in an update (a mark that mounts
- *  reads nothing), each as [from, to, the rows' scrollers it read the line
- *  on]: a scroller that holds the diff's rows and is on the page. */
+/** Runs `before`, switches the setting to split, and returns every layout flip
+ *  a mounted `SnapshotMark` made in an update (a mark that mounts reads
+ *  nothing), each as [from, to, the reads on a connected scroller holding the
+ *  outgoing rows], judged as the read runs since the split commit replaces
+ *  those rows. */
 async function modeReadsOnSplit(before?: () => void) {
   const original = SnapshotMark.prototype.getSnapshotBeforeUpdate;
   const updates: MarkUpdate[] = [];
@@ -477,24 +476,22 @@ async function modeReadsOnSplit(before?: () => void) {
     .mockImplementation(function (this: SnapshotMark, prev) {
       const read = gate.lineReads.length;
       const result = original.call(this, prev);
+      const rows = wrapperOf(document.body);
       updates.push({
         from: prev.on,
         to: this.props.on,
-        scrollers: gate.lineReads.slice(read),
+        onRows: gate.lineReads
+          .slice(read)
+          .filter((s) => s.isConnected && s.contains(rows)).length,
       });
       return result;
     });
-  const rows = () => wrapperOf(document.body);
   const flips = () =>
     updates
       .filter(
         ({ from, to }) => from !== to && ["unified", "split"].includes(from),
       )
-      .map(({ from, to, scrollers }) => [
-        from,
-        to,
-        scrollers.filter((s) => s.isConnected && s.contains(rows())).length,
-      ]);
+      .map(({ from, to, onRows }) => [from, to, onRows]);
   try {
     if (before !== undefined) await act(async () => before());
     await act(async () => {

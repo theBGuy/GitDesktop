@@ -7,11 +7,10 @@ import type {
 } from "@/features/diff/DiffSurface";
 import type { Assert, IsData } from "@/features/diff/held-data";
 
-// `tsc -b` checks this file (tsconfig.test.json). Every alias is exported, so an
-// unused-local error can never satisfy a directive: each `@ts-expect-error`
-// below is met only by `Assert` refusing its shape (each one reaches something
-// callable, but for the ones marked as refused on purpose), and a directive
-// left unmet fails the build (TS2578).
+// `tsc -b` checks this file (tsconfig.test.json). Exporting the assertion
+// aliases rules out unused-local errors. Any diagnostic on the target line
+// satisfies `@ts-expect-error`, so the test below also pins the most important
+// verdicts without a directive.
 
 type AnchorRenderer = (row: string) => ReactNode;
 interface CallableRenderer {
@@ -246,4 +245,5 @@ test("the held diff types are data only (checked by tsc -b)", () => {
   expectTypeOf<DiffLineAnchorIsData>().toEqualTypeOf<true>();
   expectTypeOf<ArmPaintIsData>().toEqualTypeOf<true>();
   expectTypeOf<IsData<{ render: () => void }>>().toEqualTypeOf<false>();
+  expectTypeOf<IsData<Growing<string>>>().toEqualTypeOf<false>();
 });

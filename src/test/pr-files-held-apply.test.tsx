@@ -355,7 +355,7 @@ describe("a thread resolved elsewhere while its comment edit is open", () => {
     await waitFor(() => expect(header("T_E")).toBeTruthy(), {
       timeout: 10_000,
     });
-    await editIn(user, "T_E");
+    const oldEditor = await editIn(user, "T_E");
     const text = remount ? P2 : P1;
     if (remount) {
       await view.update({
@@ -366,7 +366,10 @@ describe("a thread resolved elsewhere while its comment edit is open", () => {
       });
       await settle();
       await waitFor(() => expect(document.body.textContent).toContain("L5"));
-      expect(editBox()).toHaveValue("kept edit");
+      const editor = editBox();
+      expect(oldEditor.isConnected).toBe(false);
+      expect(editor).not.toBe(oldEditor);
+      expect(editor).toHaveValue("kept edit");
     }
     await view.update({
       path: "a.ts",
