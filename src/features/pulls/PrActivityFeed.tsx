@@ -300,8 +300,9 @@ export function PrActivityFeed({
   ) => boolean | Promise<boolean>;
   /** Absent hides the conversation-comment delete affordance (same reason). */
   onDeleteComment?: (commentId: string) => void;
-  /** Holds an ALREADY-OPEN comment editor's Save: withholding the callbacks only
-   *  drops the menu entries, so a stale caller sets this too. */
+  /** The caller's temporary hold over an ALREADY-OPEN comment editor: Save
+   *  holds silently. Set it whenever a stale arm withholds the edit callbacks,
+   *  or the open editor reads that absence as a lost permission. */
   editHeld?: boolean;
   /** Why the viewer's own comments can't be edited (null = they can), forwarded
    *  beside `editHeld` to the conversation comments and the review threads. */

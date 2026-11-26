@@ -1,4 +1,5 @@
 import {
+  type ReactNode,
   useCallback,
   useEffect,
   useId,
@@ -326,13 +327,22 @@ function subscribeBodyMutations(onChange: () => void): () => void {
 const subscribeNothing = () => () => undefined;
 const notHeld = () => false;
 
+/** A file's inline commit-comment placements and the body for each. */
+export interface CommitLineAnchors {
+  /** One placement per new-side line, its items the comment ids. */
+  anchors: DiffLineAnchor[];
+  /** A placement's body from the CURRENT comments: null once none of its
+   *  comments is listed on this path (or one is pinned to the list). */
+  renderAnchor: (anchor: DiffLineAnchor) => ReactNode;
+}
+
 /**
  * The inline diff anchors for a commit's line-anchored comments on ONE file:
  * every comment on `path` that resolves to a new-side line, grouped by that line
- * into a single stacked {@link DiffLineAnchor} (DiffSurface keeps one entry per
- * line/side, so same-line comments MUST be pre-grouped). A comment's line comes
- * from {@link commentLine} over `sections`, which must be the ones the host's
- * list resolves against; unresolvable comments are dropped here and surface in
+ * into a single placement (DiffSurface keeps one entry per line/side, so
+ * same-line comments MUST be pre-grouped). A comment's line comes from
+ * {@link commentLine} over `sections`, which must be the ones the host's list
+ * resolves against; unresolvable comments are dropped here and surface in
  * {@link CommitComments}' labelled group instead, and so are the `pinned`
  * ones (see {@link CommentPins}). A ranged comment gets a small mono range chip.
  */
@@ -342,10 +352,7 @@ export function useCommitLineAnchors(
   path: string | null,
   refs: MarkdownRefs | undefined,
   pinned: ReadonlySet<string>,
-): DiffLineAnchor[] {
-  // Held by field, not by object: `useMentionCandidates` rebuilds `refs` every
-  // render, and DiffSurface keys its widgets on anchor identity — an object dep
-  // would re-identify every anchor on every pass.
+): CommitLineAnchors {
   const refProvider = refs?.provider;
   const refRepoPath = refs?.repoPath;
   const refLens = refs?.lens;
@@ -353,62 +360,65 @@ export function useCommitLineAnchors(
   // observes, so no probe runs on an empty path. Its answer goes unused then.
   const openRepo = useUiStore((s) => s.repoPath);
   const ghHost = useForgeGhHost(refRepoPath ?? openRepo ?? "");
-  return useMemo<DiffLineAnchor[]>(() => {
+  const anchors = useMemo<DiffLineAnchor[]>(() => {
     if (!path) return [];
-    const bodyRefs: MarkdownRefs | undefined =
-      refProvider && refRepoPath && refLens
-        ? { provider: refProvider, repoPath: refRepoPath, lens: refLens }
-        : undefined;
-    const bodyHosted = hostedImagesFor(refRepoPath, ghHost);
-    const byLine = new Map<number, CommitCommentOut[]>();
+    const byLine = new Map<number, string[]>();
     for (const c of comments ?? []) {
       if (c.path !== path || pinned.has(c.id)) continue;
       const line = commentLine(c, sections);
       if (line == null) continue;
       const bucket = byLine.get(line);
-      if (bucket) bucket.push(c);
-      else byLine.set(line, [c]);
+      if (bucket) bucket.push(c.id);
+      else byLine.set(line, [c.id]);
     }
-    return [...byLine.entries()].map(([line, group]) => ({
+    return [...byLine.entries()].map(([line, items]) => ({
       side: "new" as const,
       line,
-      // A programmatic focus target (the Show whitespace landing), never a tab stop.
-      render: () => (
-        <div
-          tabIndex={-1}
-          role="group"
-          aria-label={`Comments on line ${line}`}
-          data-commit-comment-line={line}
-          className="space-y-2 outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
-        >
-          {group.map((c) => (
-            <div key={c.id} data-commit-comment-id={c.id} className="space-y-1">
-              <div className="flex items-center gap-1.5">
-                {c.startLine != null && c.startLine !== line && (
-                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
-                    Lines {c.startLine}–{line}
-                  </span>
-                )}
-                <p className="text-[11px] font-medium">{c.author}</p>
-              </div>
-              <Markdown refs={bodyRefs} hostedImages={bodyHosted}>
-                {c.body}
-              </Markdown>
-            </div>
-          ))}
-        </div>
-      ),
+      items,
     }));
-  }, [
-    comments,
-    sections,
-    path,
-    refProvider,
-    refRepoPath,
-    refLens,
-    ghHost,
-    pinned,
-  ]);
+  }, [comments, sections, path, pinned]);
+  const renderAnchor = (anchor: DiffLineAnchor) => {
+    const group = anchor.items.flatMap(
+      (id) =>
+        comments?.find(
+          (c) => c.id === id && c.path === path && !pinned.has(c.id),
+        ) ?? [],
+    );
+    if (group.length === 0) return null;
+    const { line } = anchor;
+    const bodyRefs: MarkdownRefs | undefined =
+      refProvider && refRepoPath && refLens
+        ? { provider: refProvider, repoPath: refRepoPath, lens: refLens }
+        : undefined;
+    const bodyHosted = hostedImagesFor(refRepoPath, ghHost);
+    // A programmatic focus target (the Show whitespace landing), never a tab stop.
+    return (
+      <div
+        tabIndex={-1}
+        role="group"
+        aria-label={`Comments on line ${line}`}
+        data-commit-comment-line={line}
+        className="space-y-2 outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
+      >
+        {group.map((c) => (
+          <div key={c.id} data-commit-comment-id={c.id} className="space-y-1">
+            <div className="flex items-center gap-1.5">
+              {c.startLine != null && c.startLine !== line && (
+                <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                  Lines {c.startLine}–{line}
+                </span>
+              )}
+              <p className="text-[11px] font-medium">{c.author}</p>
+            </div>
+            <Markdown refs={bodyRefs} hostedImages={bodyHosted}>
+              {c.body}
+            </Markdown>
+          </div>
+        ))}
+      </div>
+    );
+  };
+  return { anchors, renderAnchor };
 }
 
 /** Map a flat commit comment onto the {@link Thread} prop shape — commit
@@ -792,7 +802,7 @@ export function CommitComments({
   const composerReason = (() => {
     switch (true) {
       case stale:
-        return "Loading this commit…";
+        return COMMIT_LOADING_REASON;
       case held:
         return "Checking whether this commit is pushed…";
       case creating !== undefined:
@@ -897,8 +907,8 @@ export function CommitComments({
                     ? (next) => saveEdit(c.id, next)
                     : undefined
                 }
-                // Withholding the handler only drops the menu entry; an editor
-                // already open when the commit changed needs its Save held too.
+                // The same arm that withholds the saver holds an editor already
+                // open when the commit changed, so its Save holds silently.
                 editHeld={writesHeld}
                 onDelete={
                   c.viewerDidAuthor && !writesHeld
@@ -1076,6 +1086,9 @@ export function CommitComments({
   );
 }
 
+/** Both composers' wait while the commit, or its diff's rows, are still loading. */
+export const COMMIT_LOADING_REASON = "Loading this commit…";
+
 /** What a dragged range collapses to, per provider. Only GitLab commit discussions
  *  carry a real range; GitHub/Bitbucket commit comments are single-line APIs
  *  anchored at the END line, so they disclose the collapse rather than let it pass
@@ -1109,6 +1122,7 @@ export function CommitLineComposer({
   onClose,
   lens,
   patchOnly = false,
+  rowsBehind = false,
 }: {
   repoPath: string;
   sha: string;
@@ -1127,6 +1141,9 @@ export function CommitLineComposer({
   /** Refuse a line the section doesn't draw on every provider, for a host
    *  whose diff can draw lines outside its patch. GitHub always refuses one. */
   patchOnly?: boolean;
+  /** The diff's rows on screen are not yet the live text's (`LineWidget`'s
+   *  `rowsBehind`): a line counted now may be another row than the one drawn. */
+  rowsBehind?: boolean;
 }) {
   const createLineComment = useCreateCommitComment(repoPath, lens);
   const mentions = useMentionCandidates({ repoPath, lens, provider });
@@ -1162,6 +1179,8 @@ export function CommitLineComposer({
     switch (true) {
       case rowsHeld:
         return DIFF_ROWS_HELD_REASON;
+      case rowsBehind:
+        return COMMIT_LOADING_REASON;
       case side === "old":
         return "Commit comments anchor to the new side — pick a line on the right.";
       case offPatch:

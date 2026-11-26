@@ -11,6 +11,7 @@ import type { FileDiff } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
+import { bodies, renderBody } from "./anchor-bodies";
 import { stubCanvas } from "./canvas-stub";
 
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
@@ -84,13 +85,14 @@ it("never mounts the next commit's anchors on the previous commit's rows of the 
         data={diff(commit)}
         isPending={false}
         isError={false}
-        lineAnchors={[
+        renderAnchor={renderBody}
+        lineAnchors={bodies([
           {
             side: "new",
             line: 2,
             render: () => <span>Anchor of {commit}</span>,
           },
-        ]}
+        ])}
       />
     );
   }

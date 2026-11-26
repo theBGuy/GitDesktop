@@ -11,6 +11,7 @@ import type { FileDiff } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
+import { bodies, renderBody } from "./anchor-bodies";
 import { stubCanvas } from "./canvas-stub";
 
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
@@ -82,9 +83,10 @@ it("never mounts one file's anchors on another file's rows", async () => {
         data={diff(path, path === "a.txt" ? "B" : "G")}
         isPending={false}
         isError={false}
-        lineAnchors={[
+        renderAnchor={renderBody}
+        lineAnchors={bodies([
           { side: "new", line: 2, render: () => <span>Anchor of {path}</span> },
-        ]}
+        ])}
       />
     );
   }

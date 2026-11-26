@@ -156,6 +156,18 @@ export function ReviewComposer({
           ? "Can't read the current code for these lines here."
           : null;
   const canSuggest = suggestionDisabledReason === null;
+  // Rows a deferred render has not caught up yet load by themselves, so they
+  // read like the submits' wait; only held rows ask to close the editor.
+  const suggestionReason = (() => {
+    switch (true) {
+      case rowsHeld:
+        return DIFF_ROWS_HELD_REASON;
+      case rowsBehind:
+        return HEAD_PENDING_REVIEW_REASON.loading(noun);
+      default:
+        return suggestionDisabledReason;
+    }
+  })();
 
   function insertSuggestion() {
     if (!currentLines) return;
@@ -215,8 +227,9 @@ export function ReviewComposer({
         body: body.trim(),
         createdAt: new Date().toISOString(),
       });
-      forget();
-      onClose();
+      // A settle after the widget moved on (another line, or the same path
+      // in another pull request) leaves that composer and its range alone.
+      if (forget()) onClose();
     } catch (e) {
       toastError(e);
       setPending(false);
@@ -258,10 +271,11 @@ export function ReviewComposer({
           variant="ghost"
           size="xs"
           className="shrink-0 text-muted-foreground"
-          // Held rows draw an earlier text than `fileSection`, which the
-          // suggestion would prefill from.
-          disabled={!canSuggest || rowsHeld}
-          reason={rowsHeld ? DIFF_ROWS_HELD_REASON : suggestionDisabledReason}
+          // Held rows, or rows a deferred render has not caught up yet, draw
+          // an earlier text than `fileSection`, which the suggestion would
+          // prefill from.
+          disabled={!canSuggest || rowsHeld || rowsBehind}
+          reason={suggestionReason}
           onClick={insertSuggestion}
         >
           Add suggestion

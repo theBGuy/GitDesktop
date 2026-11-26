@@ -353,10 +353,13 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
   const swaps = swapAt.map((at) =>
     flat(masked.slice(at, masked.indexOf(")", at) + 1)),
   );
+  // The arm rescue (any change of the drawn body) follows both; its landing
+  // is the toolbar rescue's, and the Preview rescue never flips with it.
   need(
-    swaps.length === 2 &&
+    swaps.length === 3 &&
       swaps[0] === "useFocusOnControlsSwap(showsToolbar,armRescueRef)" &&
-      swaps[1] === "useFocusOnControlsSwap(previewOn,previewRescueRef)",
+      swaps[1] === "useFocusOnControlsSwap(previewOn,previewRescueRef)" &&
+      swaps[2] === "useFocusOnControlsSwap(paneArm,armRescueRef)",
     "the toolbar's focus rescue runs before the Preview rescue",
   );
 
@@ -380,7 +383,7 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
     const g = gate.code;
     need(
       g.includes(
-        "armRescueRef.current=held?(armLandingRef.current??controlsRef.current):null;",
+        "armRescueRef.current=held||lost?(armLandingRef.current??controlsRef.current):null;",
       ),
       "the toolbar rescue derives from the held record",
     );
@@ -389,8 +392,8 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
       "the held-focus gate takes no dependency array",
     );
     need(
-      swapAt.length === 2 && swapAt.every((at) => gate.at < at),
-      "the held-focus gate is declared ahead of both swap rescues",
+      swapAt.length === 3 && swapAt.every((at) => gate.at < at),
+      "the held-focus gate is declared ahead of every swap rescue",
     );
     const sameAt = g.indexOf(
       "constsameToolbarFile=showsToolbar&&prevSwapRef.current.toolbar&&prevSwapRef.current.path===filePath;",
@@ -523,7 +526,7 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
   need(
     mergedClose > 0 &&
       flat(masked.slice(mergedOpen, mergedClose + 1)) ===
-        "((node:HTMLDivElement|null)=>{scrollerRef.current=node;constcapture=captureHeldRef(node);return()=>{capture();scrollerRef.current=null;};},[captureHeldRef],)",
+        "((node:HTMLDivElement|null)=>{scrollerRef.current=node;setArmNode(node);constcapture=captureHeldRef(node);return()=>{capture();scrollerRef.current=null;setArmNode(null);};},[captureHeldRef],)",
     "the scroller's merged ref runs the capture's cleanup, identity-stable",
   );
   // Each capture node at its own placement, so a ref moved to another node
@@ -852,7 +855,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
   caught(
     swap(
       surface,
-      "armRescueRef.current = held\n      ? (armLandingRef.current ?? controlsRef.current)\n      : null;",
+      "armRescueRef.current =\n      held || lost ? (armLandingRef.current ?? controlsRef.current) : null;",
       "armRescueRef.current = armLandingRef.current ?? controlsRef.current;",
     ),
     image,
@@ -862,8 +865,8 @@ test("diff shell: negative controls trip the pin named beside them", () => {
   caught(
     swap(
       surface,
-      "      ? (armLandingRef.current ?? controlsRef.current)\n",
-      "      ? armLandingRef.current\n",
+      "held || lost ? (armLandingRef.current ?? controlsRef.current) : null;",
+      "held || lost ? armLandingRef.current : null;",
     ),
     image,
     "the toolbar rescue derives from the held record",
@@ -893,7 +896,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       `  useFocusOnControlsSwap(showsToolbar, armRescueRef);\n  useLayoutEffect(() => {\n${HELD_READ}`,
     ),
     image,
-    "the held-focus gate is declared ahead of both swap rescues",
+    "the held-focus gate is declared ahead of every swap rescue",
   );
   caught(
     swap(

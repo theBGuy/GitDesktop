@@ -17,8 +17,9 @@ type Side = "old" | "new";
 
 /** The plain text of the lines an editor was written against and the line on
  *  each side of them, in the build it first opened on; null where that build
- *  has no real line (past a file edge, or a placeholder composed in a gap). */
-export type LineTexts = readonly (string | null)[];
+ *  has no real line (a placeholder composed in a gap, or past a hunk-only
+ *  build's hunks), `FILE_EDGE` where it proves the file ends. */
+export type LineTexts = readonly (string | typeof FILE_EDGE | null)[];
 
 /** The lines an editor's comment is about: a line composer's resolved range
  *  (its "+" line may sit inside it), or an anchor row's own line. */
@@ -28,11 +29,37 @@ interface Span {
   to: number;
 }
 
-/** The id both line composers keep their text under: the library holds one
- *  widget per diff, so its record is keyed by position alone. */
+/** The id both line composers keep their text under. The library holds one
+ *  widget per diff, so the widget has one record under a constant key: its
+ *  line is checked on restore, and a claim at another line replaces it. */
 export const LINE_COMPOSER_KEEP_ID = "line";
 
+/** Set on the element wrapping one comment's editor and controls, with that
+ *  editor's keep id: a focus restore picks the control or field of the same
+ *  comment, whatever else a held save added to the row meanwhile. */
+export const KEEP_ID_ATTR = "data-keep-id";
+
+/** A focused field or control: its label, the keep id of the comment it sits
+ *  in (null outside a marked one), and its place among the row's same-labelled
+ *  ones, the fallback when it has no id. */
+interface FocusMark {
+  label: string;
+  id: string | null;
+  index: number;
+}
+
+/** What `plainLine` reads where a build proves there is no line: before line
+ *  1, or past the end of a side whose whole text the build holds. A symbol,
+ *  since a line's text keeps its newline (a blank line reads exactly "\n"),
+ *  so no string can stand for the edge. */
+const FILE_EDGE: unique symbol = Symbol("file edge");
+
+/** One claim of a record; the editor that took it acts on the record only
+ *  while it is still the one kept under its key. */
+export type KeptToken = KeptRecord;
+
 interface KeptRecord {
+  key: string;
   kind: "widget" | "anchor";
   side: Side;
   /** The anchor row's line; for the line composer, the line its widget sits
@@ -46,14 +73,18 @@ interface KeptRecord {
   /** The lines `lineTexts` covers; the comment posts on `span.to`. */
   span: Span;
   lineTexts: LineTexts;
+  /** When the span sits on the other side from the anchor (a Unified press
+   *  mapped into a range): the anchor line's own texts, read the same way, so
+   *  the widget never reopens on an anchor whose line moved under the range. */
+  anchorTexts: LineTexts | null;
   text: string;
   busy: boolean;
   /** `claimed`: an editor with this key is mounted. `released`: its editor
    *  unmounted in a commit not yet judged. `handover`: released in the commit
    *  that replaced the rows, kept for the remount that re-claims it. */
   state: "claimed" | "released" | "handover";
-  /** The aria-label of the text field that held focus when its row unmounted. */
-  focusLabel: string | null;
+  /** The text field that held focus when its row unmounted. */
+  focus: FocusMark | null;
 }
 
 interface KeptRowValue {
@@ -71,51 +102,137 @@ function spanOf(row: KeptRowValue): Span {
   return row.span ?? { side: row.side, from: row.line, to: row.line };
 }
 
+const WIDGET_KEY = "widget";
+
 function keyOf(
   kind: KeptRowValue["kind"],
   side: Side,
   line: number,
   id: string,
 ) {
-  return kind === "widget" ? "widget" : `${side}:${line}:${id}`;
+  return kind === "widget" ? WIDGET_KEY : `${side}:${line}:${id}`;
 }
 
 function rowKeyOf(kind: KeptRowValue["kind"], side: Side, line: number) {
   return `${kind}:${side}:${line}`;
 }
 
-function labelled(node: Element, label: string): HTMLElement[] {
+/** The same-labelled fields (textareas) or controls (anything else) in `node`. */
+function labelled(node: Element, label: string, field: boolean): HTMLElement[] {
   return [...node.querySelectorAll<HTMLElement>("[aria-label]")].filter(
-    (el) => el.getAttribute("aria-label") === label,
+    (el) =>
+      el.getAttribute("aria-label") === label &&
+      el instanceof HTMLTextAreaElement === field,
   );
 }
 
-function plainLine(file: DiffFile, side: Side, line: number): string | null {
-  if (line < 1) return null;
+function keepIdOf(el: Element): string | null {
+  return el.closest(`[${KEEP_ID_ATTR}]`)?.getAttribute(KEEP_ID_ATTR) ?? null;
+}
+
+function markOf(node: Element, el: HTMLElement, label: string): FocusMark {
+  const field = el instanceof HTMLTextAreaElement;
+  return {
+    label,
+    id: keepIdOf(el),
+    index: labelled(node, label, field).indexOf(el),
+  };
+}
+
+/** The element a mark names in `node`: by its comment's keep id when it had
+ *  one (none when that comment is gone), else by its place. */
+function findMark(
+  node: Element,
+  mark: FocusMark,
+  field: boolean,
+): HTMLElement | undefined {
+  const all = labelled(node, mark.label, field);
+  return mark.id === null
+    ? all[mark.index]
+    : all.find((el) => keepIdOf(el) === mark.id);
+}
+
+function plainLine(
+  file: DiffFile,
+  side: Side,
+  line: number,
+): LineTexts[number] {
+  if (line < 1) return FILE_EDGE;
   const bundle = file.getBundle();
   const placeholders =
     side === "old"
       ? bundle.oldFilePlaceholderLines
       : bundle.newFilePlaceholderLines;
   if (placeholders?.[line]) return null;
+  // Past the last line (where the library still answers an empty line): the
+  // file's end only when the build holds whole files. A hunk-only build
+  // composes both sides from its hunks (`composeByDiff`), so it knows nothing
+  // past them.
+  const whole = side === "old" ? file._oldFileContent : file._newFileContent;
+  if (line > lineCountOf(file, side, whole ?? ""))
+    return bundle.composeByDiff || bundle.composeByRange || !whole
+      ? null
+      : FILE_EDGE;
   const got: { value: string } | undefined =
     side === "old" ? file.getOldPlainLine(line) : file.getNewPlainLine(line);
-  return got === undefined ? null : got.value;
+  return got?.value ?? null;
+}
+
+const lineCounts = new WeakMap<DiffFile, Partial<Record<Side, number>>>();
+
+/** The lines in a build's side text, cached per build: a judge reads several. */
+function lineCountOf(file: DiffFile, side: Side, text: string): number {
+  const counts = lineCounts.get(file) ?? {};
+  let n = counts[side];
+  if (n === undefined) {
+    n = 0;
+    for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1))
+      n++;
+    if (text !== "" && !text.endsWith("\n")) n++;
+    counts[side] = n;
+    lineCounts.set(file, counts);
+  }
+  return n;
 }
 
 function lineTextsOf(file: DiffFile, span: Span): LineTexts {
-  const texts: (string | null)[] = [];
+  const texts: LineTexts[number][] = [];
   for (let n = span.from - 1; n <= span.to + 1; n++)
     texts.push(plainLine(file, span.side, n));
   return texts;
 }
 
-/** `file` reads the text a record took over its span and both neighbours. A
- *  line either build has no real text for never matches, so a composer is
- *  never restored onto code it was not written against. */
+function anchorTextsOf(
+  file: DiffFile,
+  side: Side,
+  line: number,
+  span: Span,
+): LineTexts | null {
+  return span.side === side
+    ? null
+    : lineTextsOf(file, { side, from: line, to: line });
+}
+
+function sameTexts(was: LineTexts, now: LineTexts): boolean {
+  return was.every((t, i) => t !== null && t === now[i]);
+}
+
+/** `file` reads the text a record took over its span and both neighbours (and
+ *  over its anchor line, when that sits on the other side). A provable file
+ *  edge matches itself; a line either build has no real text for (a gap
+ *  placeholder, past a hunk-only build's hunks) never matches, so a composer
+ *  is never restored onto code it was not written against. The texts are the
+ *  DRAWN ones, shortened past `DIFF_MAX_LINE_CHARS`: a change past the cut on
+ *  a longer line restores, since that tail is never displayed anywhere. */
 function textsPlaced(r: KeptRecord, file: DiffFile): boolean {
-  const now = lineTextsOf(file, r.span);
-  return r.lineTexts.every((t, i) => t !== null && t === now[i]);
+  return (
+    sameTexts(r.lineTexts, lineTextsOf(file, r.span)) &&
+    (r.anchorTexts === null ||
+      sameTexts(
+        r.anchorTexts,
+        lineTextsOf(file, { side: r.side, from: r.line, to: r.line }),
+      ))
+  );
 }
 
 /** A record rides onto `row`'s build: the same line of the same build, or of
@@ -137,11 +254,11 @@ export type EditorKeep = ReturnType<typeof createEditorKeep>;
  */
 export function createEditorKeep() {
   const records = new Map<string, KeptRecord>();
-  const rowFocus = new Map<string, string>();
-  const pendingFocus = new Map<string, string>();
+  const rowFocus = new Map<string, FocusMark>();
+  const pendingFocus = new Map<string, FocusMark>();
   // A labelled control other than a text field that held focus as its row
-  // unmounted, by its label and its place among the row's same-labelled ones.
-  const rowControl = new Map<string, { label: string; index: number }>();
+  // unmounted.
+  const rowControl = new Map<string, FocusMark>();
   const listeners = new Set<() => void>();
   let version = 0;
   let mountedFile: DiffFile | null = null;
@@ -181,101 +298,99 @@ export function createEditorKeep() {
       const r = records.get(keyOf(row.kind, row.side, row.line, id));
       return r !== undefined && rides(r, row) ? r : null;
     },
-    claim(row: KeptRowValue, id: string, text: string): string {
+    claim(row: KeptRowValue, id: string, text: string): KeptToken {
       const key = keyOf(row.kind, row.side, row.line, id);
       const prev = records.get(key);
       const span = spanOf(row);
       // The library moves its single widget without an onClose, so a widget
       // claimed at another line replaces the record rather than joining it.
       if (prev !== undefined && rides(prev, row)) {
-        if (prev.state !== "claimed" && prev.focusLabel !== null)
-          pendingFocus.set(
-            rowKeyOf(row.kind, row.side, row.line),
-            prev.focusLabel,
-          );
+        if (prev.state !== "claimed" && prev.focus !== null)
+          pendingFocus.set(rowKeyOf(row.kind, row.side, row.line), prev.focus);
         // A re-claim on the build it was read from takes the range the widget
         // resolves to now; a rebuild keeps the texts it was written against.
         if (prev.file === row.file) {
           prev.span = span;
           prev.lineTexts = lineTextsOf(row.file, span);
+          prev.anchorTexts = anchorTextsOf(row.file, row.side, row.line, span);
         }
         prev.state = "claimed";
-        prev.focusLabel = null;
+        prev.focus = null;
         prev.text = text;
         prev.file = row.file;
         prev.record = row.record;
-      } else {
-        records.set(key, {
-          kind: row.kind,
-          side: row.side,
-          line: row.line,
-          id,
-          file: row.file,
-          record: row.record,
-          span,
-          lineTexts: lineTextsOf(row.file, span),
-          text,
-          busy: false,
-          state: "claimed",
-          focusLabel: null,
-        });
+        notify();
+        return prev;
       }
+      const made: KeptRecord = {
+        key,
+        kind: row.kind,
+        side: row.side,
+        line: row.line,
+        id,
+        file: row.file,
+        record: row.record,
+        span,
+        lineTexts: lineTextsOf(row.file, span),
+        anchorTexts: anchorTextsOf(row.file, row.side, row.line, span),
+        text,
+        busy: false,
+        state: "claimed",
+        focus: null,
+      };
+      records.set(key, made);
       notify();
-      return key;
+      return made;
     },
-    release(key: string) {
-      const r = records.get(key);
-      if (r === undefined || r.state !== "claimed") return;
+    release(r: KeptToken) {
+      if (records.get(r.key) !== r || r.state !== "claimed") return;
       r.state = "released";
-      r.focusLabel = rowFocus.get(rowKeyOf(r.kind, r.side, r.line)) ?? null;
+      r.focus = rowFocus.get(rowKeyOf(r.kind, r.side, r.line)) ?? null;
       if (!sweepQueued) {
         sweepQueued = true;
         queueMicrotask(sweep);
       }
       notify();
     },
-    write(key: string, text: string) {
-      const r = records.get(key);
-      if (r !== undefined) r.text = text;
+    write(r: KeptToken, text: string) {
+      if (records.get(r.key) === r) r.text = text;
     },
-    setBusy(key: string, busy: boolean) {
-      const r = records.get(key);
-      if (r === undefined || r.busy === busy) return;
+    setBusy(r: KeptToken, busy: boolean) {
+      if (records.get(r.key) !== r || r.busy === busy) return;
       r.busy = busy;
       notify();
     },
-    forget(key: string) {
-      if (records.delete(key)) notify();
+    /** A no-op once another claim holds the key (the widget moved to another
+     *  line or diff), so a late settle never drops that editor's record.
+     *  False then: the caller no longer owns what it would close. */
+    forget(r: KeptToken): boolean {
+      if (records.get(r.key) !== r) return false;
+      records.delete(r.key);
+      notify();
+      return true;
     },
-    /** A row unmounting with focus in it: the editors it releases next take
-     *  the focused text field's label, to refocus it on a restore. */
+    /** A row unmounting with focus in it: the focused text field's mark
+     *  (label, keep id, place) goes to the editors it releases next, and a
+     *  focused control's to the row's next mount, to refocus it on a restore.
+     *  An element without an `aria-label` is not recorded. */
     noteRowLeaving(rowKey: string, node: HTMLElement | null) {
       const active = document.activeElement;
       if (node === null || active === null || !node.contains(active)) return;
       focusLeft = true;
-      const label =
-        active instanceof HTMLTextAreaElement
-          ? active.getAttribute("aria-label")
-          : null;
-      if (label !== null) rowFocus.set(rowKey, label);
-      const control =
-        active instanceof HTMLTextAreaElement
-          ? null
-          : active.getAttribute("aria-label");
-      if (control !== null)
-        rowControl.set(rowKey, {
-          label: control,
-          index: labelled(node, control).indexOf(active as HTMLElement),
-        });
+      const label = active.getAttribute("aria-label");
+      if (label === null || !(active instanceof HTMLElement)) return;
+      const mark = markOf(node, active, label);
+      if (active instanceof HTMLTextAreaElement) rowFocus.set(rowKey, mark);
+      else rowControl.set(rowKey, mark);
     },
-    takePendingFocus(rowKey: string): string | null {
-      const label = pendingFocus.get(rowKey) ?? null;
+    takePendingFocus(rowKey: string): FocusMark | null {
+      const mark = pendingFocus.get(rowKey) ?? null;
       pendingFocus.delete(rowKey);
-      return label;
+      return mark;
     },
     /** The control that held focus as this row's earlier mount went, in the
      *  commit that remounts it. */
-    takeLeftControl(rowKey: string): { label: string; index: number } | null {
+    takeLeftControl(rowKey: string): FocusMark | null {
       const control = rowControl.get(rowKey) ?? null;
       rowControl.delete(rowKey);
       return control;
@@ -330,7 +445,7 @@ export function createEditorKeep() {
     },
     /** The ids of the anchor-row editors open at `row` that ride onto its
      *  build, claimed by the rows a remount replaces or handed over. */
-    keptIds(row: KeptRowValue): string[] {
+    keptIds(_version: number, row: KeptRowValue): string[] {
       const ids: string[] = [];
       for (const r of records.values())
         if (r.kind === "anchor" && r.state !== "released" && rides(r, row))
@@ -339,13 +454,15 @@ export function createEditorKeep() {
     },
     /** The line composer's record, claimed or handed over. */
     widgetRecord(): { side: Side; line: number } | null {
-      const r = records.get("widget");
+      const r = records.get(WIDGET_KEY);
       return r === undefined || r.state === "released" ? null : r;
     },
     /** Whether new rows of the same record may go through now: every claimed
      *  or handed-over record is placed in them, none is mid-submit, and every
      *  editor the DOM shows is one the store holds. Anything else holds the
-     *  rows, so an editor that never adopted the keep is held, never dropped.
+     *  rows, so across rebuilds within one record an editor that never adopted
+     *  the keep is held, never dropped; a record move, or a new build on a
+     *  host that names no record, drops it.
      *  `file` is the new build when it differs from the one on screen: its
      *  text must read the same at each record's line and both neighbours. */
     placed(
@@ -379,6 +496,7 @@ export function createEditorKeep() {
         if (r.busy) return false;
         for (let n = r.span.from; n <= r.span.to; n++)
           if (!drawn[r.span.side].has(n)) return false;
+        if (r.anchorTexts !== null && !drawn[r.side].has(r.line)) return false;
         if (input.file !== null && !textsPlaced(r, input.file)) return false;
         if (r.kind === "widget") return input.widgetEnabled;
         return input.anchors.some(
@@ -414,12 +532,10 @@ export function KeptRow({
   useLayoutEffect(() => {
     const node = probe.current?.parentElement ?? null;
     const rowKey = rowKeyOf(kind, side, line);
-    const label = keep.takePendingFocus(rowKey);
-    if (node !== null && label !== null && interactive.current) {
-      const field = [...node.querySelectorAll("textarea")].find(
-        (t) => t.getAttribute("aria-label") === label,
-      );
-      if (field !== undefined) {
+    const mark = keep.takePendingFocus(rowKey);
+    if (node !== null && mark !== null && interactive.current) {
+      const field = findMark(node, mark, true);
+      if (field instanceof HTMLTextAreaElement) {
         field.focus({ preventScroll: true });
         field.setSelectionRange(field.value.length, field.value.length);
       }
@@ -434,9 +550,7 @@ export function KeptRow({
       interactive.current &&
       focusIsLost()
     )
-      labelled(node, control.label)[control.index]?.focus({
-        preventScroll: true,
-      });
+      findMark(node, control, false)?.focus({ preventScroll: true });
     return () => keep.noteRowLeaving(rowKey, node);
   }, [keep, kind, side, line]);
   return (
@@ -468,8 +582,23 @@ export function useKeptOpen(id: string | null): boolean {
  *  shows seeds that state from them. Empty outside a kept row. */
 export function useKeptIds(): readonly string[] {
   const row = use(KeptRowContext);
-  const [ids] = useState(() => (row === null ? [] : row.keep.keptIds(row)));
+  const [ids] = useState(() =>
+    row === null ? [] : row.keep.keptIds(row.keep.version(), row),
+  );
   return ids;
+}
+
+const NO_KEEP = { subscribe: () => () => undefined, version: () => 0 };
+
+/** The ids of the editors open in this row now, re-read on every claim and
+ *  release: a host that would hide an editor's card on a live change (a
+ *  thread resolved elsewhere) keeps it shown while its editor is open. Empty
+ *  outside a kept row. */
+export function useOpenKeptIds(): readonly string[] {
+  const row = use(KeptRowContext);
+  const store = row?.keep ?? NO_KEEP;
+  const version = useSyncExternalStore(store.subscribe, store.version);
+  return row === null ? [] : row.keep.keptIds(version, row);
 }
 
 export interface KeptDraft {
@@ -477,8 +606,11 @@ export interface KeptDraft {
   setText: (next: string | ((prev: string) => string)) => void;
   /** This editor was open, with this text, before its rows remounted. */
   restored: boolean;
-  /** Drops the record: after a successful submit, and on Cancel or close. */
-  forget: () => void;
+  /** Drops the record: for a direct post as it sends, for an add, an edit or
+   *  a reply once its save lands, and on Cancel or close. False when another
+   *  claim took the key meanwhile (a late settle must not close that editor);
+   *  true outside a kept row. */
+  forget: () => boolean;
   setBusy: (busy: boolean) => void;
 }
 
@@ -492,8 +624,12 @@ export function useKeptDraft(id: string | null): KeptDraft {
   const [seed] = useState(() =>
     row !== null && id !== null ? row.keep.seedFor(row, id) : null,
   );
+  // Consumed when the editor closes, so its host's next opening takes focus.
+  const [restored, setRestored] = useState(seed !== null);
+  if (restored && id === null) setRestored(false);
   const [text, setTextState] = useState(seed?.text ?? "");
   const textRef = useRef(text);
+  const tokenRef = useRef<KeptToken | null>(null);
   const keep = row?.keep;
   const kind = row?.kind;
   const side = row?.side;
@@ -503,13 +639,6 @@ export function useKeptDraft(id: string | null): KeptDraft {
   const spanSide = row?.span?.side;
   const spanFrom = row?.span?.from;
   const spanTo = row?.span?.to;
-  const key =
-    kind === undefined ||
-    side === undefined ||
-    line === undefined ||
-    id === null
-      ? null
-      : keyOf(kind, side, line, id);
   useLayoutEffect(() => {
     if (
       keep === undefined ||
@@ -524,12 +653,13 @@ export function useKeptDraft(id: string | null): KeptDraft {
       spanSide === undefined || spanFrom === undefined || spanTo === undefined
         ? undefined
         : { side: spanSide, from: spanFrom, to: spanTo };
-    const claimed = keep.claim(
+    const token = keep.claim(
       { keep, kind, side, line, file, record, span },
       id,
       textRef.current,
     );
-    return () => keep.release(claimed);
+    tokenRef.current = token;
+    return () => keep.release(token);
   }, [keep, kind, side, line, file, record, id, spanSide, spanFrom, spanTo]);
   return {
     text,
@@ -537,14 +667,17 @@ export function useKeptDraft(id: string | null): KeptDraft {
       const value = typeof next === "function" ? next(textRef.current) : next;
       textRef.current = value;
       setTextState(value);
-      if (keep !== undefined && key !== null) keep.write(key, value);
+      if (keep !== undefined && tokenRef.current !== null)
+        keep.write(tokenRef.current, value);
     },
-    restored: seed !== null,
-    forget: () => {
-      if (keep !== undefined && key !== null) keep.forget(key);
-    },
+    restored,
+    forget: () =>
+      keep === undefined || tokenRef.current === null
+        ? true
+        : keep.forget(tokenRef.current),
     setBusy: (busy) => {
-      if (keep !== undefined && key !== null) keep.setBusy(key, busy);
+      if (keep !== undefined && tokenRef.current !== null)
+        keep.setBusy(tokenRef.current, busy);
     },
   };
 }

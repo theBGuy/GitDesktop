@@ -157,19 +157,21 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
   );
   function StandIn({
     lineAnchors,
+    renderAnchor,
   }: {
     lineAnchors?: {
       side: "new" | "old";
       line: number;
-      render: () => React.ReactNode;
+      items: readonly string[];
     }[];
+    renderAnchor?: (anchor: never) => React.ReactNode;
   }) {
     useReportPaneSettled(true);
     return (
       <div>
         {lineAnchors?.map((a) => (
           <div key={`${a.side}:${a.line}`} data-anchor="">
-            {a.render()}
+            {renderAnchor?.(a as never)}
           </div>
         ))}
       </div>

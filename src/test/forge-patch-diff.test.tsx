@@ -24,8 +24,16 @@ import {
 } from "@/features/diff/content-source";
 import { DiffContent, type LineWidget } from "@/features/diff/DiffSurface";
 import { HOLD_BOUND_MS } from "@/features/diff/diff-pane-slots";
+import {
+  LINE_COMPOSER_KEEP_ID,
+  useDiffRowsHeld,
+  useKeptDraft,
+} from "@/features/diff/editor-keep";
 import { ImagePanes } from "@/features/diff/ImageDiff";
-import { SHOW_FULL_COMPOSER_HELD } from "@/features/diff/whitespace-mode";
+import {
+  DIFF_ROWS_HELD_REASON,
+  SHOW_FULL_COMPOSER_HELD,
+} from "@/features/diff/whitespace-mode";
 import { ReviewThreadCard } from "@/features/pulls/ReviewThreads";
 import { type FileBytes, forgeFileAtSha, gitFileBase64 } from "@/lib/git/api";
 import {
@@ -37,6 +45,7 @@ import type { FileDiff, ReviewThreadOut } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
+import { bodies, renderBody } from "./anchor-bodies";
 import { stubCanvas } from "./canvas-stub";
 
 vi.mock("@/lib/git/api", async (importOriginal) => ({
@@ -1255,6 +1264,64 @@ describe("a binary-to-link typechange on an image path", () => {
     await waitFor(() => expect(linkLine(view)).not.toBeNull());
   });
 
+  function Composer() {
+    const kept = useKeptDraft(LINE_COMPOSER_KEEP_ID);
+    return (
+      <textarea
+        aria-label="Link comment"
+        value={kept.text}
+        onChange={(e) => kept.setText(e.target.value)}
+      />
+    );
+  }
+  const scoped = (text: string, scope = "pr-1"): PaneProps => ({
+    ...FORGE,
+    forgePatch: { source: { lens: "origin" }, scope },
+    filePath: "logo.png",
+    data: { filePath: "logo.png", text, isBinary: true, isTruncated: false },
+    typechangeAnchors: true,
+    lineWidget: { enabled: true, render: () => <Composer /> },
+  });
+  /** The link half's composer open on its line, with "kept link" typed. */
+  async function linkComposer() {
+    vi.mocked(forgeFileAtSha).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    const pane = mountPane(scoped(LINK_TEXT));
+    const num = await waitFor(() => {
+      const cell = linkLine(pane)?.closest(".diff-line-num");
+      expect(cell).toBeTruthy();
+      return cell as HTMLElement;
+    });
+    fireEvent.mouseOver(num);
+    fireEvent.mouseDown(
+      num.closest("tr")?.querySelector(".diff-add-widget") as HTMLElement,
+    );
+    const box = await screen.findByRole("textbox", { name: "Link comment" });
+    fireEvent.change(box, { target: { value: "kept link" } });
+    return { pane, box };
+  }
+
+  it("keeps the text half's composer and its text across a push under the same record", async () => {
+    const { pane } = await linkComposer();
+    pane.update(
+      scoped(LINK_TEXT.replace("0000000..2222222", "0000000..3333333")),
+    );
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+    expect(screen.getByRole("textbox", { name: "Link comment" })).toHaveValue(
+      "kept link",
+    );
+  });
+
+  it("keeps the text half's composer under the next record's placeholder paint", async () => {
+    const { pane, box } = await linkComposer();
+    // The previous record's halves, painted under the next record's scope.
+    pane.update({ ...scoped(LINK_TEXT, "pr-2"), dataIsPlaceholder: true });
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+    expect(box.isConnected).toBe(true);
+    expect(box).toHaveValue("kept link");
+  });
+
   it("keeps the image comparison on a host that doesn't", async () => {
     const view = renderTypechange(false, bytes("png"));
     // The comparison draws both sides, and the link half stays out.
@@ -1483,7 +1550,7 @@ describe("an upgrade under a review thread card", () => {
       },
     ],
   };
-  const ANCHORS = [
+  const ANCHORS = bodies([
     {
       side: "new" as const,
       line: 2,
@@ -1496,7 +1563,7 @@ describe("an upgrade under a review thread card", () => {
         />
       ),
     },
-  ];
+  ]);
 
   it("lands focus from a thread card's button in the replaced rows on the diff's group", async () => {
     const land = deferredReads();
@@ -1516,6 +1583,7 @@ describe("an upgrade under a review thread card", () => {
           contentRevs={{ oldRev: OLD_SHA, newRev: NEW_SHA }}
           forgePatch={{ source: { lens: "origin" } }}
           lineAnchors={ANCHORS}
+          renderAnchor={renderBody}
         />
       </QueryClientProvider>,
     );
@@ -1714,5 +1782,184 @@ describe("a blank context line written without its space", () => {
     expect(screen.queryByText("No changes to show")).toBeNull();
     for (const n of [1, 2, 3, 4])
       expect(drawn(pane.container, n)).not.toBeNull();
+  });
+});
+
+describe("an arm change under an open line composer", () => {
+  /** A symlink whose target the PR changes: a text diff of one line. */
+  const RETARGET =
+    "diff --git a/link b/link\nindex 1111111..2222222 120000\n--- a/link\n+++ b/link\n" +
+    "@@ -1 +1 @@\n-old-target\n\\ No newline at end of file\n+new-target\n\\ No newline at end of file\n";
+  /** The same path pushed as a regular binary file: a typechange whose text
+   *  half is the removed link. */
+  const TO_BINARY =
+    "diff --git a/link b/link\ndeleted file mode 120000\nindex 1111111..0000000\n--- a/link\n+++ /dev/null\n" +
+    "@@ -1 +0,0 @@\n-old-target\n\\ No newline at end of file\n" +
+    "diff --git a/link b/link\nnew file mode 100644\nindex 0000000..3333333\nBinary files /dev/null and b/link differ\n";
+  /** Only a mode change left on the path: the header-only arm. */
+  const MODE_ONLY =
+    "diff --git a/link b/link\nold mode 100644\nnew mode 100755\n";
+
+  function HeldComposer({ onClose }: { onClose: () => void }) {
+    const kept = useKeptDraft(LINE_COMPOSER_KEEP_ID);
+    const held = useDiffRowsHeld();
+    return (
+      <div>
+        <textarea
+          aria-label="Arm comment"
+          value={kept.text}
+          onChange={(e) => kept.setText(e.target.value)}
+        />
+        <span data-held={held ? DIFF_ROWS_HELD_REASON : ""} />
+        <button
+          type="button"
+          onClick={() => {
+            kept.forget();
+            onClose();
+          }}
+        >
+          Close comment
+        </button>
+      </div>
+    );
+  }
+  const at = (text: string, isBinary: boolean, scope = "pr-1"): PaneProps => ({
+    forgePatch: { source: null, scope },
+    filePath: "link",
+    data: { filePath: "link", text, isBinary, isTruncated: false },
+    typechangeAnchors: true,
+    lineWidget: {
+      enabled: true,
+      render: ({ onClose }) => <HeldComposer onClose={onClose} />,
+    },
+  });
+  const heldReason = (view: { container: HTMLElement }) =>
+    view.container.querySelector("[data-held]")?.getAttribute("data-held");
+
+  /** The composer open on the new target's line, with "kept" typed. */
+  async function retargetComposer() {
+    const pane = mountPane(at(RETARGET, false));
+    const num = await waitFor(() => {
+      const cell = pane.container
+        .querySelector('span[data-line-new-num="1"]')
+        ?.closest(".diff-line-num");
+      expect(cell).toBeTruthy();
+      return cell as HTMLElement;
+    });
+    fireEvent.mouseOver(num);
+    fireEvent.mouseDown(
+      num.closest("tr")?.querySelector(".diff-add-widget") as HTMLElement,
+    );
+    const box = await screen.findByRole("textbox", { name: "Arm comment" });
+    fireEvent.change(box, { target: { value: "kept" } });
+    expect(heldReason(pane)).toBe("");
+    return { pane, box };
+  }
+  const settle = () => act(async () => new Promise((r) => setTimeout(r, 20)));
+
+  it.each([
+    ["a typechange to a binary file", TO_BINARY, true],
+    ["a header-only mode change", MODE_ONLY, false],
+  ])(
+    "keeps the text rows and the composer across %s until it closes",
+    async (_case, text, isBinary) => {
+      const { pane, box } = await retargetComposer();
+      pane.update(at(text, isBinary));
+      await settle();
+      // The outgoing rows stay drawn, the composer and its text with them, and
+      // its line submits hold.
+      expect(box.isConnected).toBe(true);
+      expect(box).toHaveValue("kept");
+      expect(
+        pane.container.querySelector('span[data-line-new-num="1"]'),
+      ).not.toBeNull();
+      expect(heldReason(pane)).toBe(DIFF_ROWS_HELD_REASON);
+      expect(screen.queryByText("Binary file added")).toBeNull();
+      // Closing it shows the new arm.
+      fireEvent.click(screen.getByRole("button", { name: "Close comment" }));
+      await settle();
+      expect(screen.queryByRole("textbox", { name: "Arm comment" })).toBeNull();
+      expect(
+        pane.container.querySelector('span[data-line-new-num="1"]'),
+      ).toBeNull();
+      if (isBinary) expect(screen.getByText("Binary file added")).toBeTruthy();
+      else expect(pane.rows().length).toBe(0);
+    },
+  );
+
+  it("drops the composer when the new arm belongs to another record", async () => {
+    const { pane } = await retargetComposer();
+    pane.update(at(TO_BINARY, true, "pr-2"));
+    await settle();
+    expect(screen.queryByRole("textbox", { name: "Arm comment" })).toBeNull();
+    expect(screen.getByText("Binary file added")).toBeTruthy();
+  });
+
+  it("keeps the SVG panes above held rows on the pair and source they drew", async () => {
+    const PUSHED_SHA = "c".repeat(40);
+    vi.mocked(gitFileBase64).mockClear().mockResolvedValue(bytes("<svg/>"));
+    vi.mocked(forgeFileAtSha).mockClear().mockResolvedValue(bytes("<svg/>"));
+    const SVG_EDIT =
+      "diff --git a/icon.svg b/icon.svg\nindex 1111111..2222222 100644\n--- a/icon.svg\n+++ b/icon.svg\n" +
+      "@@ -1 +1 @@\n-<svg a/>\n+<svg b/>\n";
+    const SVG_MODE =
+      "diff --git a/icon.svg b/icon.svg\nold mode 100644\nnew mode 100755\n";
+    const svg = (
+      text: string,
+      revs: { old: string; new: string },
+      source: "local" | { lens: "origin" },
+    ): PaneProps => ({
+      forgePatch: { source, scope: "pr-1" },
+      imageRevs: revs,
+      filePath: "icon.svg",
+      data: { filePath: "icon.svg", text, isBinary: false, isTruncated: false },
+      lineWidget: {
+        enabled: true,
+        render: ({ onClose }) => <HeldComposer onClose={onClose} />,
+      },
+    });
+    const pane = mountPane(
+      svg(SVG_EDIT, { old: OLD_SHA, new: NEW_SHA }, "local"),
+    );
+    const num = await waitFor(() => {
+      const cell = pane.container
+        .querySelector('span[data-line-new-num="1"]')
+        ?.closest(".diff-line-num");
+      expect(cell).toBeTruthy();
+      return cell as HTMLElement;
+    });
+    fireEvent.mouseOver(num);
+    fireEvent.mouseDown(
+      num.closest("tr")?.querySelector(".diff-add-widget") as HTMLElement,
+    );
+    const box = await screen.findByRole("textbox", { name: "Arm comment" });
+    fireEvent.change(box, { target: { value: "kept" } });
+    await waitFor(() =>
+      expect(vi.mocked(gitFileBase64).mock.calls.length).toBeGreaterThan(0),
+    );
+    // A mode-only push whose new head only the forge holds.
+    pane.update(
+      svg(SVG_MODE, { old: OLD_SHA, new: PUSHED_SHA }, { lens: "origin" }),
+    );
+    await settle();
+    expect(box).toHaveValue("kept");
+    expect(heldReason(pane)).toBe(DIFF_ROWS_HELD_REASON);
+    const readsOf = (fn: typeof gitFileBase64 | typeof forgeFileAtSha) =>
+      vi.mocked(fn).mock.calls.filter((c) => c.includes(PUSHED_SHA)).length;
+    // The panes read the held pair from the held source: the pushed head is
+    // never asked of the local store, nor read under the held text.
+    expect(readsOf(gitFileBase64)).toBe(0);
+    expect(readsOf(forgeFileAtSha)).toBe(0);
+    // Nor is the held local pair asked of the live forge source.
+    expect(
+      vi
+        .mocked(forgeFileAtSha)
+        .mock.calls.filter((c) => c.includes(OLD_SHA) || c.includes(NEW_SHA))
+        .length,
+    ).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: "Close comment" }));
+    await settle();
+    expect(screen.queryByRole("textbox", { name: "Arm comment" })).toBeNull();
+    expect(readsOf(gitFileBase64)).toBe(0);
   });
 });

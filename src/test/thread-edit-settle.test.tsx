@@ -15,7 +15,11 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LocalComment } from "@/features/conversations/LocalComment";
-import { Thread } from "@/features/conversations/Thread";
+import { EDIT_SAVER_GONE, Thread } from "@/features/conversations/Thread";
+import {
+  type LocalConvEntity,
+  useLocalConversation,
+} from "@/features/conversations/useLocalConversation";
 import { TabPanel } from "@/features/repository/TabPanel";
 import type { PrThreadOut } from "@/lib/git/types";
 
@@ -324,7 +328,7 @@ describe("LocalComment's inline edit", () => {
   it.each(["Save", "Cancel"])(
     "lands focus on the comment's trigger after %s",
     async (button) => {
-      const onSaveEdit = vi.fn();
+      const onSaveEdit = vi.fn(() => true);
       render(
         <Host>
           <LocalComment
@@ -337,10 +341,169 @@ describe("LocalComment's inline edit", () => {
         </Host>,
       );
       await openAndRevise();
-      fireEvent.click(screen.getByRole("button", { name: button }));
-      expect(editBox()).toBeNull();
+      await act(async () =>
+        fireEvent.click(screen.getByRole("button", { name: button })),
+      );
+      await waitFor(() => expect(editBox()).toBeNull());
       expect(document.activeElement).toBe(trigger());
       expect(onSaveEdit).toHaveBeenCalledTimes(button === "Save" ? 1 : 0);
     },
   );
+
+  it.each([false, true])(
+    "keeps the editor, its text and the caret at the end when the save fails (rejects: %s)",
+    async (rejects) => {
+      const d = deferred<boolean>();
+      const user = userEvent.setup();
+      const saver = () =>
+        rejects
+          ? d.promise.then(() => Promise.reject(new Error("x")))
+          : d.promise;
+      render(
+        <Host>
+          <LocalComment
+            comment={comment}
+            onSaveEdit={saver}
+            onDelete={noop}
+            onHide={noop}
+            onUnhide={noop}
+          />
+        </Host>,
+      );
+      const box = await openAndRevise();
+      box.setSelectionRange(0, 0);
+      await user.click(screen.getByRole("button", { name: "Save" }));
+      await settle(d, false);
+      await tick();
+      expect(editBox()).toBe(box);
+      expect(box).toHaveValue("Revised words");
+      expect(document.activeElement).toBe(box);
+      expect(box.selectionStart).toBe(box.value.length);
+    },
+  );
+});
+
+describe("LocalComment's inline edit through useLocalConversation", () => {
+  const entity: LocalConvEntity = {
+    id: "e1",
+    title: "T",
+    body: "",
+    labels: [],
+    comments: [
+      { id: "c1", body: "Original words", createdAt: "2026-11-01T10:00:00Z" },
+    ],
+  };
+  const noop = () => undefined;
+  type Mutate = (cur: LocalConvEntity) => LocalConvEntity;
+  function Local({ apply }: { apply: (m: Mutate) => Promise<void> }) {
+    const conv = useLocalConversation("e1", entity, apply);
+    return (
+      <LocalComment
+        comment={entity.comments[0]}
+        onSaveEdit={(body) => conv.editComment("c1", body)}
+        onDelete={noop}
+        onHide={noop}
+        onUnhide={noop}
+      />
+    );
+  }
+  async function saveThrough(onDisk: LocalConvEntity, fails = false) {
+    let written: LocalConvEntity | null = null;
+    const apply = vi.fn(async (m: Mutate) => {
+      written = m(onDisk);
+      if (fails) throw new Error("disk full");
+    });
+    render(
+      <Host>
+        <Local apply={apply} />
+      </Host>,
+    );
+    const box = await openAndRevise();
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Save" })),
+    );
+    await tick();
+    expect(apply).toHaveBeenCalledTimes(1);
+    return { box, written: written as LocalConvEntity | null };
+  }
+
+  it("closes on a landed write, which carries the revised body", async () => {
+    const { written } = await saveThrough(entity);
+    await waitFor(() => expect(editBox()).toBeNull());
+    expect(written?.comments[0].body).toBe("Revised words");
+  });
+
+  it("keeps the editor and its text when the write fails", async () => {
+    const { box } = await saveThrough(entity, true);
+    expect(editBox()).toBe(box);
+    expect(box).toHaveValue("Revised words");
+  });
+
+  it("keeps the editor and its text when another writer deleted the comment", async () => {
+    const { box, written } = await saveThrough({ ...entity, comments: [] });
+    expect(written?.comments).toEqual([]);
+    expect(editBox()).toBe(box);
+    expect(box).toHaveValue("Revised words");
+  });
+});
+
+describe("Thread's inline edit when its saver goes away", () => {
+  it("holds Save with a reason and keeps the draft editable and Cancel usable", async () => {
+    const onSaveEdit = vi.fn(() => true);
+    const view = render(
+      <Host>
+        <Thread thread={thread} onSaveEdit={onSaveEdit} />
+      </Host>,
+    );
+    const box = await openAndRevise();
+    // A refresh under another account: the viewer no longer authored it.
+    view.rerender(
+      <Host>
+        <Thread thread={thread} />
+      </Host>,
+    );
+    expect(editBox()).toBe(box);
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toBeDisabled();
+    expect(screen.getAllByText(EDIT_SAVER_GONE).length).toBeGreaterThan(0);
+    fireEvent.click(save);
+    fireEvent.change(box, { target: { value: "Revised again" } });
+    expect(box).toHaveValue("Revised again");
+    expect(onSaveEdit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(editBox()).toBeNull();
+  });
+
+  it("holds Save silently while the host's temporary hold withdraws it", async () => {
+    const onSaveEdit = vi.fn(() => true);
+    const view = render(
+      <Host>
+        <Thread thread={thread} onSaveEdit={onSaveEdit} />
+      </Host>,
+    );
+    const box = await openAndRevise();
+    // The host went stale (another entity loading): saver withdrawn, editHeld on.
+    view.rerender(
+      <Host>
+        <Thread thread={thread} editHeld />
+      </Host>,
+    );
+    expect(editBox()).toBe(box);
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toBeDisabled();
+    expect(screen.queryByText(EDIT_SAVER_GONE)).toBeNull();
+    fireEvent.click(save);
+    expect(onSaveEdit).not.toHaveBeenCalled();
+    expect(box).toHaveValue("Revised words");
+    // The hold lifts: the saver is back and Save sends the kept draft.
+    view.rerender(
+      <Host>
+        <Thread thread={thread} onSaveEdit={onSaveEdit} />
+      </Host>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(onSaveEdit).toHaveBeenCalledWith("Revised words"),
+    );
+  });
 });

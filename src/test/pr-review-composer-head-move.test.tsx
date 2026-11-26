@@ -168,14 +168,16 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
   function StandIn({
     data,
     lineAnchors,
+    renderAnchor,
     lineWidget,
   }: {
     data?: { filePath: string; text: string };
     lineAnchors?: {
       side: "new" | "old";
       line: number;
-      render: () => React.ReactNode;
+      items: readonly string[];
     }[];
+    renderAnchor?: (anchor: never) => React.ReactNode;
     lineWidget?: {
       render: (args: {
         side: "new" | "old";
@@ -196,7 +198,7 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
         })}
         {lineAnchors?.map((a) => (
           <div key={`${a.side}:${a.line}`} data-anchor="">
-            {a.render()}
+            {renderAnchor?.(a as never)}
           </div>
         ))}
       </div>
@@ -568,7 +570,9 @@ describe("what the hold leaves alone (AC-A12)", () => {
     await waitFor(() =>
       expect(forgePrThreadReply).toHaveBeenCalledWith(REPO, 7, "T1", "a reply"),
     );
-    await user.click(within(anchor).getByRole("button", { name: "Edit" }));
+    await user.click(
+      within(anchor).getByRole("button", { name: "Edit pending comment" }),
+    );
     const edit = within(anchor).getByRole("textbox", {
       name: "Edit pending comment",
     });

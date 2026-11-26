@@ -5,6 +5,7 @@ import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CommentEditor } from "@/features/conversations/CommentEditor";
+import { useEditorCloseLanding } from "@/features/conversations/Thread";
 import { useKeptDraft, useKeptOpen } from "@/features/diff/editor-keep";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
@@ -59,6 +60,11 @@ export function DraftCommentCard({
   const kept = useKeptDraft(editing ? keptId : null);
   const body = kept.text;
   const setBody = kept.setText;
+  const landing = useEditorCloseLanding(editing);
+  function closeEditor() {
+    landing.arm();
+    setEditing(false);
+  }
   const [confirmDelete, setConfirmDelete] = useState(false);
   const updateDraft = useUpdateReviewDraft(repoPath, lens, number);
   const removeDraft = useRemoveReviewDraft(repoPath, lens, number);
@@ -78,15 +84,17 @@ export function DraftCommentCard({
   // observer has no listeners. The catches do nothing because both draft hooks
   // toast failures at mutation level, which fires for `mutateAsync` rejections
   // too, so a catch of our own would double-report.
-  async function saveEdit() {
-    if (!canSave) return;
+  async function saveEdit(): Promise<boolean> {
+    if (!canSave) return false;
     kept.setBusy(true);
     try {
       await updateDraft.mutateAsync({ id: draft.id, body: next });
       kept.forget();
-      setEditing(false);
+      closeEditor();
+      return true;
     } catch {
       // Reported at hook level (see above).
+      return false;
     } finally {
       kept.setBusy(false);
     }
@@ -103,8 +111,10 @@ export function DraftCommentCard({
 
   return (
     <div
+      ref={landing.rootRef}
       className="space-y-1.5 rounded border bg-background px-3 py-2 text-xs"
       data-diff-editor={editing || undefined}
+      data-keep-id={keptId}
     >
       <div className="flex items-center gap-2">
         <Badge variant="secondary" className="shrink-0 text-warning">
@@ -116,7 +126,10 @@ export function DraftCommentCard({
         {!editing && (
           <>
             <span className="flex-1" />
+            {/* Labelled, so a held save's restore can find them again. */}
             <Button
+              ref={landing.triggerRef}
+              aria-label="Edit pending comment"
               variant="ghost"
               size="xs"
               className="text-muted-foreground"
@@ -128,6 +141,7 @@ export function DraftCommentCard({
               Edit
             </Button>
             <Button
+              aria-label="Delete pending comment"
               variant="ghost"
               size="xs"
               className="text-destructive"
@@ -143,10 +157,10 @@ export function DraftCommentCard({
           value={body}
           onChange={setBody}
           autoFocus={!kept.restored}
-          onSubmit={() => void saveEdit()}
+          onSubmit={saveEdit}
           onCancel={() => {
             kept.forget();
-            setEditing(false);
+            closeEditor();
           }}
           canSubmit={canSave}
           pending={updateDraft.isPending}

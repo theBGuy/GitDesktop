@@ -882,6 +882,49 @@ describe("the Diff options sheet", () => {
     await waitFor(() => expect(modeWrites()).toEqual(["split"]));
   });
 
+  it("refuses Raw/Preview while an editor is open in the pane's rows", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    const { container } = render(
+      <DiffContent
+        filePath="x.md"
+        repoPath="/repo"
+        previewRev="HEAD"
+        data={diffOf(TEXT, "x.md")}
+        isPending={false}
+        isError={false}
+      />,
+      { wrapper: wrap(newClient(false)) },
+    );
+    await gearNamed("Diff options");
+    const composer = openComposer(container);
+    const held =
+      "Finish or close the comment you're writing, then switch between Raw and Preview.";
+    act(() => void dispatchAction("toggle-markdown-preview"));
+    expect(info).toHaveBeenCalledWith(held);
+    // Both segments hold with the reason while the editor is open.
+    const preview = screen.getByRole("button", { name: "Preview" });
+    await waitFor(() =>
+      expect(preview).toHaveAttribute("aria-disabled", "true"),
+    );
+    for (const name of ["Raw", "Preview"]) {
+      const button = screen.getByRole("button", { name });
+      expect(button).toHaveAttribute("aria-disabled", "true");
+      expect(button).toHaveAccessibleDescription(held);
+    }
+    await user.click(preview);
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(preview).toHaveAttribute("aria-pressed", "false");
+    expect(composer.isConnected).toBe(true);
+    expect(screen.getByRole("button", { name: "Diff options" })).toBeTruthy();
+    composer.remove();
+    await waitFor(() => expect(preview).not.toHaveAttribute("aria-disabled"));
+    await user.click(preview);
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Diff options" })).toBeNull(),
+    );
+  });
+
   it("a read-only host withholds the layout flip in Markdown preview", async () => {
     render(
       <DiffContent

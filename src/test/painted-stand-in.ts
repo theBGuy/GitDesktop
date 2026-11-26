@@ -28,6 +28,12 @@ export function useStandInReport(
         .sort()
         .join(" ")
     : "";
+  const items = paints
+    ? drawn
+        .flatMap((a) => a.items)
+        .sort()
+        .join(" ")
+    : "";
   const patch = data?.text ?? "";
   const hidden = data?.whitespaceHidden === true;
   const truncated = data?.isTruncated === true;
@@ -39,6 +45,7 @@ export function useStandInReport(
       truncated,
       cut: paints && !paintsOtherCommit ? null : "pending",
       anchors: keys === "" ? [] : keys.split(" "),
+      drawn: items === "" ? [] : items.split(" "),
     });
   }, [
     publish,
@@ -48,6 +55,7 @@ export function useStandInReport(
     truncated,
     paints,
     keys,
+    items,
     paintsOtherCommit,
   ]);
   useLayoutEffect(() => () => publish(null), [publish]);

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { MarkdownHostedImages } from "@/components/markdown/markdown";
 import {
   MarkdownEditor,
@@ -18,9 +18,9 @@ import type { MentionSource } from "./useMentionCandidates";
  * rendered comment body. Shared by the PR/issue/discussion, local, Jira and
  * pending-review-draft comment surfaces.
  *
- * Controlled and close-agnostic — the caller owns the draft and decides when to
- * leave edit mode, so a fire-and-forget saver and a mutation-driven one (which
- * holds the editor open and `pending` until the write lands) both fit.
+ * Controlled and close-agnostic: the caller owns the draft and decides when to
+ * leave edit mode. Every host holds the editor open and `pending` until its
+ * write lands, and keeps it open with the text when the write fails.
  */
 export function CommentEditor({
   value,
@@ -37,13 +37,14 @@ export function CommentEditor({
 }: {
   value: string;
   onChange: (value: string) => void;
-  onSubmit: () => void;
+  /** A returned promise resolving `false`, or rejecting, says the save failed:
+   *  the field takes focus back whether or not a pending frame rendered. */
+  onSubmit: () => void | Promise<boolean>;
   onCancel: () => void;
   /** Whether the draft is savable — the caller derives it (empty / unchanged). */
   canSubmit: boolean;
   /** A save is in flight: freezes the editor and both buttons, which stay
-   *  focusable. Mutation-driven callers pass it; fire-and-forget ones leave it
-   *  unset. */
+   *  focusable. */
   pending?: boolean;
   ariaLabel?: string;
   textareaClassName?: string;
@@ -74,20 +75,38 @@ export function CommentEditor({
   const rootRef = useRef<HTMLDivElement>(null);
   const saveRef = useRef<HTMLButtonElement>(null);
   const wasPending = useRef(false);
+  // A failed save's own signal: a rejection can settle before its pending
+  // frame ever renders, so the edge above is never seen.
+  const [failures, setFailures] = useState(0);
+  const failedRef = useRef(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `failures` is the commit of a failed save, read through `failedRef`
   useLayoutEffect(() => {
     const was = wasPending.current;
     wasPending.current = !!pending;
+    const failed = failedRef.current && !pending;
+    if (failed) failedRef.current = false;
     const root = rootRef.current;
     const active = document.activeElement;
     const inside = root !== null && active !== null && root.contains(active);
     if (pending && !was) {
       if (inside && active?.matches(":disabled")) saveRef.current?.focus();
-    } else if (!pending && was && (inside || focusIsLost())) {
+    } else if ((failed || (!pending && was)) && (inside || focusIsLost())) {
       editorRef.current?.focus();
       const field = root?.querySelector("textarea");
       field?.setSelectionRange(field.value.length, field.value.length);
     }
-  }, [pending]);
+  }, [pending, failures]);
+  const submit = () => {
+    const result = onSubmit();
+    if (result === undefined) return;
+    const fail = () => {
+      failedRef.current = true;
+      setFailures((n) => n + 1);
+    };
+    result.then((saved) => {
+      if (!saved) fail();
+    }, fail);
+  };
 
   return (
     <div ref={rootRef} className="space-y-2" aria-busy={pending || undefined}>
@@ -102,7 +121,7 @@ export function CommentEditor({
             // fires inside editable targets, so a chord this handler declines to
             // submit would otherwise reach the global action.
             e.preventDefault();
-            if (canSubmit && !pending) onSubmit();
+            if (canSubmit && !pending) submit();
           }
         }}
         rows={3}
@@ -120,7 +139,7 @@ export function CommentEditor({
           focusableWhenDisabled={!!pending}
           render={heldButtonRender(!!pending)}
           className={ARIA_DISABLED_CLASS}
-          onClick={onSubmit}
+          onClick={submit}
           title={SUBMIT_HINT}
         >
           Save

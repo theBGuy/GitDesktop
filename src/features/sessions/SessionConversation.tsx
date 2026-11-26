@@ -114,7 +114,7 @@ export function SessionConversation({
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="relative min-h-0 flex-1">
         {/* Positioned: the column anchor measures step boxes by their offset
-            chain up to this element, which must be their offset parent. */}
+            chain up to this element, which must sit on that chain. */}
         <div
           ref={scrollRef}
           onScroll={onScroll}

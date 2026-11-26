@@ -1344,16 +1344,25 @@ test("one selector names every in-diff editor, and the layout probe reads it", (
   );
 });
 
-/** The anchor row's wrapper tags itself like the composer wrapper. */
+/** The anchor row's wrapper tags itself like the composer wrapper, by the
+ *  host's rebuild kind its renderer hands it. */
 function pinAnchorMarker(text) {
   const rows = text.slice(once(text, "const renderExtendLine = extendData"));
   if (
-    !/^\s*\? \(\{ data \}: \{ data: \{ render: \(\) => ReactNode \} \}\) => \(\s*<div\s+data-diff-anchor=\{rebuildsOnWhitespace \? "whitespace" : "layout"\}\s+className="border-y bg-background/.test(
+    !/^\s*\? \(\{ data \}: \{ data: AnchorRowData \}\) => \(\s*<AnchorRow\b[^>]*\swhitespace=\{rebuildsOnWhitespace\}[^>]*\/>/.test(
       rows.slice("const renderExtendLine = extendData".length),
     )
   )
     throw new Error(
-      "renderExtendLine's wrapper must tag itself whitespace or layout by its host",
+      "renderExtendLine must hand AnchorRow its host's rebuild kind",
+    );
+  if (
+    !/\breturn \(\s*<div\s+data-diff-anchor=\{whitespace \? "whitespace" : "layout"\}\s+className="border-y bg-background/.test(
+      bodyOf(text, "function AnchorRow("),
+    )
+  )
+    throw new Error(
+      "AnchorRow's wrapper must tag itself whitespace or layout by its host",
     );
 }
 
@@ -1364,7 +1373,7 @@ test("the anchor row marks its rebuild kind for the editor probes", () => {
     pinAnchorMarker,
     swap(
       text,
-      '          data-diff-anchor={rebuildsOnWhitespace ? "whitespace" : "layout"}\n',
+      '      data-diff-anchor={whitespace ? "whitespace" : "layout"}\n',
       "",
     ),
     "the attribute removed",
@@ -1373,10 +1382,19 @@ test("the anchor row marks its rebuild kind for the editor probes", () => {
     pinAnchorMarker,
     swap(
       text,
-      'data-diff-anchor={rebuildsOnWhitespace ? "whitespace" : "layout"}',
+      'data-diff-anchor={whitespace ? "whitespace" : "layout"}',
       'data-diff-anchor="layout"',
     ),
     "the value made a constant",
+  );
+  red(
+    pinAnchorMarker,
+    swap(
+      text,
+      "          whitespace={rebuildsOnWhitespace}\n",
+      "          whitespace={false}\n",
+    ),
+    "the renderer's rebuild kind made a constant",
   );
 });
 

@@ -1160,8 +1160,8 @@ export function DiscussionView({
                       ? (body) => saveCommentEdit(c.id, body)
                       : undefined
                   }
-                  // Withholding the handler only drops the menu entry; an editor
-                  // already open when the switch began needs its Save held too.
+                  // The same stale arm that withholds the saver holds an editor
+                  // already open, so its Save holds silently.
                   editHeld={detailsStale}
                   onDelete={
                     c.viewerDidAuthor && !detailsStale

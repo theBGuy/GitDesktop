@@ -9,7 +9,14 @@ import {
   waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { createContext, createRef, type RefObject, use, useState } from "react";
+import {
+  createContext,
+  createRef,
+  Profiler,
+  type RefObject,
+  use,
+  useState,
+} from "react";
 import {
   afterEach,
   beforeAll,
@@ -31,42 +38,71 @@ import {
 import { captureLineAnchor } from "@/features/diff/diff-rows";
 import {
   createEditorKeep,
+  KeptRow,
   LINE_COMPOSER_KEEP_ID,
   useDiffRowsHeld,
   useKeptDraft,
   useKeptOpen,
 } from "@/features/diff/editor-keep";
 import { DIFF_ROWS_HELD_REASON } from "@/features/diff/whitespace-mode";
-import { CommitLineComposer } from "@/features/pulls/CommitComments";
+import {
+  COMMIT_LOADING_REASON,
+  CommitLineComposer,
+} from "@/features/pulls/CommitComments";
 import { DraftCommentCard } from "@/features/pulls/PendingReviewBar";
 import { DiffThreadAnchor } from "@/features/pulls/RemotePrViewParts";
 import { ReviewThreadCard } from "@/features/pulls/ReviewThreads";
 import { TabPanel } from "@/features/repository/TabPanel";
+import { gitFileBase64 } from "@/lib/git/api";
 import type { PrThreadOut, ReviewThreadOut } from "@/lib/git/types";
 import type { ReviewDraft } from "@/lib/pulls/review-drafts";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
+import { bodies, renderBody } from "./anchor-bodies";
 import { stubCanvas } from "./canvas-stub";
 
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
   loadSettings: vi.fn(),
 }));
-const writes = vi.hoisted(() => ({
-  draft: vi.fn(async (_vars: unknown) => undefined),
-  commit: vi.fn(async (_vars: unknown) => undefined),
-}));
-vi.mock("@/lib/pulls/review-drafts", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/pulls/review-drafts")>()),
-  useUpdateReviewDraft: () => ({
-    mutateAsync: writes.draft,
-    isPending: false,
-  }),
-  useRemoveReviewDraft: () => ({
-    mutateAsync: async () => undefined,
-    isPending: false,
-  }),
+const writes = vi.hoisted(() => {
+  const listeners = new Set<() => void>();
+  let draftPending = false;
+  return {
+    draft: vi.fn(async (_vars: unknown) => undefined),
+    commit: vi.fn(async (_vars: unknown) => undefined),
+    /** The draft update's `isPending`, flipped by a test as its write runs. */
+    draftPending: () => draftPending,
+    setDraftPending(next: boolean) {
+      draftPending = next;
+      for (const listener of listeners) listener();
+    },
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+});
+vi.mock("@/lib/pulls/review-drafts", async (importOriginal) => {
+  const { useSyncExternalStore } = await import("react");
+  return {
+    ...(await importOriginal<typeof import("@/lib/pulls/review-drafts")>()),
+    useUpdateReviewDraft: () => ({
+      mutateAsync: writes.draft,
+      isPending: useSyncExternalStore(writes.subscribe, writes.draftPending),
+    }),
+    useRemoveReviewDraft: () => ({
+      mutateAsync: async () => undefined,
+      isPending: false,
+    }),
+  };
+});
+vi.mock("@/lib/git/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/api")>()),
+  gitFileBase64: vi.fn(),
 }));
 vi.mock("@/lib/git/host", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/host")>()),
@@ -170,26 +206,27 @@ const draft: ReviewDraft = {
   createdAt: "2026-11-01T10:00:00Z",
 };
 
-const anchorAt = (line: number): DiffLineAnchor[] => [
-  {
-    side: "new",
-    line,
-    ids: ["edit:c1", "reply:t1", "draft:d1"],
-    render: () => (
-      <>
-        <Thread thread={thread} onSaveEdit={saveEdit} />
-        <ReplySlot />
-        <StandIn />
-        <DraftCommentCard
-          repoPath="C:/repo"
-          lens="origin"
-          number={1}
-          draft={draft}
-        />
-      </>
-    ),
-  },
-];
+const anchorAt = (line: number): DiffLineAnchor[] =>
+  bodies([
+    {
+      side: "new",
+      line,
+      ids: ["edit:c1", "reply:t1", "draft:d1"],
+      render: () => (
+        <>
+          <Thread thread={thread} onSaveEdit={saveEdit} />
+          <ReplySlot />
+          <StandIn />
+          <DraftCommentCard
+            repoPath="C:/repo"
+            lens="origin"
+            number={1}
+            draft={draft}
+          />
+        </>
+      ),
+    },
+  ]);
 const ANCHORS = anchorAt(3);
 
 function TestComposer({ line }: { line: number }) {
@@ -247,6 +284,8 @@ interface ViewProps {
   lineWidget?: LineWidget;
   /** History's shape: the record comes from the revisions alone. */
   revs?: DiffContentRevs;
+  /** With `revs`, the repo whose whole files content mode reads. */
+  repo?: string;
   scroller?: RefObject<HTMLDivElement | null>;
 }
 
@@ -261,6 +300,7 @@ function view({
   reply = true,
   lineWidget = widget,
   revs,
+  repo,
   scroller,
 }: ViewProps) {
   return (
@@ -275,7 +315,9 @@ function view({
               forceUnified={narrow}
               lineWidget={lineWidget}
               lineAnchors={anchors}
+              renderAnchor={renderBody}
               contentRevs={revs}
+              repoPath={repo}
               scrollerRef={scroller}
               forgePatch={
                 scope === undefined ? undefined : { source: null, scope }
@@ -373,13 +415,20 @@ describe("in-diff editors across a layout swap", () => {
     const user = userEvent.setup();
     const { rerender } = render(view({ narrow: true }));
     await user.click(await screen.findByRole("button", { name: "Reply…" }));
-    await user.type(screen.getByRole("textbox", { name: "Reply" }), "hello");
+    const reply = () => screen.getByRole("textbox", { name: "Reply" });
+    await user.type(reply(), "hello");
+    const narrowBox = reply();
     await act(async () => rerender(view({ narrow: false })));
     await settle();
-    expect(screen.getByRole("textbox", { name: "Reply" })).toHaveValue("hello");
+    expect(splitRows()).toBeGreaterThan(0);
+    expect(reply()).not.toBe(narrowBox);
+    expect(reply()).toHaveValue("hello");
+    const wideBox = reply();
     await act(async () => rerender(view({ narrow: true })));
     await settle();
-    expect(screen.getByRole("textbox", { name: "Reply" })).toHaveValue("hello");
+    expect(splitRows()).toBe(0);
+    expect(reply()).not.toBe(wideBox);
+    expect(reply()).toHaveValue("hello");
   });
 
   it("A1-5: an editor the keep cannot place holds the layout until it goes", async () => {
@@ -458,7 +507,9 @@ describe("in-diff editors across a layout swap", () => {
   it("A1-1 K4: a pending draft's edit keeps its text", async () => {
     const user = userEvent.setup();
     const { rerender } = render(view({ narrow: true }));
-    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Edit pending comment" }),
+    );
     const box = screen.getByRole("textbox", { name: "Edit pending comment" });
     await user.clear(box);
     await user.type(box, "Draft revised");
@@ -473,7 +524,9 @@ describe("in-diff editors across a layout swap", () => {
   it("A1-8: a restored edit that did not have focus leaves it where it was", async () => {
     const user = userEvent.setup();
     const { rerender } = render(view({ narrow: true }));
-    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Edit pending comment" }),
+    );
     await user.type(
       screen.getByRole("textbox", { name: "Edit pending comment" }),
       "!",
@@ -685,7 +738,7 @@ describe("in-diff editors across a text rebuild", () => {
     expect(document.body.textContent).not.toContain("added");
   });
 
-  it("A1-18: a composer on the hunk's first line holds a text rebuild and restores across a layout swap", async () => {
+  it("A1-18 + A10: a composer on the file's first line restores across a layout swap and a text rebuild", async () => {
     const user = userEvent.setup();
     const { rerender } = render(view({ narrow: true, scope: SCOPE }));
     const box = await openComposer(1);
@@ -699,8 +752,9 @@ describe("in-diff editors across a text rebuild", () => {
       rerender(view({ narrow: false, scope: SCOPE, text: FIVE_EDITED })),
     );
     await settle();
-    expect(shown.isConnected).toBe(true);
-    expect(document.body.textContent).not.toContain("five");
+    await waitFor(() => expect(document.body.textContent).toContain("five"));
+    expect(composer(1)).toHaveValue("first");
+    expect(composer(1)).not.toBe(shown);
   });
 
   it("A1 (placeholder): a gap placeholder above the line never matches a real blank line", async () => {
@@ -736,7 +790,7 @@ const cardThread = (id: string, resolved: boolean): ReviewThreadOut => ({
 const onCardReply = vi.fn(async (_id: string, _body: string) => undefined);
 const onCardEdit = vi.fn(async (_id: string, _body: string) => true);
 const RESOLVED = cardThread("T_8", true);
-const resolvedAnchors: DiffLineAnchor[] = [
+const resolvedAnchors: DiffLineAnchor[] = bodies([
   {
     side: "new",
     line: 3,
@@ -749,7 +803,7 @@ const resolvedAnchors: DiffLineAnchor[] = [
       />
     ),
   },
-];
+]);
 const OPEN_CARD = cardThread("T_9", false);
 function CardSlot() {
   const { reply } = use(RowState);
@@ -763,9 +817,9 @@ function CardSlot() {
     />
   );
 }
-const cardAnchors: DiffLineAnchor[] = [
+const cardAnchors: DiffLineAnchor[] = bodies([
   { side: "new", line: 3, ids: ["reply:T_9"], render: () => <CardSlot /> },
-];
+]);
 const REPLY_BOX = { name: "Reply to review thread" };
 
 async function expandResolved() {
@@ -998,7 +1052,7 @@ function commitWidgetFor(section: string): LineWidget {
   if (w === undefined) {
     w = {
       enabled: true,
-      render: ({ side, line, fromLine, onClose }) => (
+      render: ({ side, line, fromLine, onClose, rowsBehind }) => (
         <CommitLineComposer
           repoPath="C:/repo"
           sha="abc1234"
@@ -1011,6 +1065,7 @@ function commitWidgetFor(section: string): LineWidget {
           onClose={onClose}
           lens="origin"
           patchOnly
+          rowsBehind={rowsBehind}
         />
       ),
     };
@@ -1024,7 +1079,7 @@ const commitBox = () =>
 const REVS = { oldRev: "a1", newRev: "b2" };
 
 /** The anchor row on new line 3 with every id-addressed writer live. */
-const liveAnchors: DiffLineAnchor[] = [
+const liveAnchors: DiffLineAnchor[] = bodies([
   {
     side: "new",
     line: 3,
@@ -1042,7 +1097,7 @@ const liveAnchors: DiffLineAnchor[] = [
       </>
     ),
   },
-];
+]);
 
 /** A promise the test settles, for a write held in flight. */
 function deferred() {
@@ -1097,7 +1152,9 @@ describe("open coverage: held rows, History, the line anchor, ranges", () => {
     await settle();
     expect(saveEdit).toHaveBeenCalledTimes(1);
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(
+      screen.getByRole("button", { name: "Edit pending comment" }),
+    );
     await user.type(
       screen.getByRole("textbox", { name: "Edit pending comment" }),
       " too",
@@ -1139,7 +1196,9 @@ describe("open coverage: held rows, History, the line anchor, ranges", () => {
     const user = userEvent.setup();
     const at = (text: string) => view({ narrow: true, scope: SCOPE, text });
     const { rerender } = render(at(TEXT));
-    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Edit pending comment" }),
+    );
     const box = screen.getByRole("textbox", { name: "Edit pending comment" });
     await user.type(box, " later");
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -1155,6 +1214,10 @@ describe("open coverage: held rows, History, the line anchor, ranges", () => {
     expect(
       screen.queryByRole("textbox", { name: "Edit pending comment" }),
     ).toBeNull();
+    // The release remounts the row: focus goes back to the draft's Edit.
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Edit pending comment" }),
+    );
   });
 
   it("CommitLineComposer on a PR commit drill-in: a changed line holds its post with the rows reason", async () => {
@@ -1305,6 +1368,9 @@ describe("open coverage: held rows, History, the line anchor, ranges", () => {
     );
     await waitFor(() => expect(composer(4)).toBeTruthy());
     await settle();
+    fireEvent.change(composer(4) as HTMLTextAreaElement, {
+      target: { value: "ranged" },
+    });
     const unifiedRow = (line: number) =>
       document
         .querySelector(`span[data-line-new-num="${line}"]`)
@@ -1316,7 +1382,7 @@ describe("open coverage: held rows, History, the line anchor, ranges", () => {
     await act(async () => rerender(view({ narrow: false, anchors: [] })));
     await settle();
     expect(splitRows()).toBeGreaterThan(0);
-    expect(composer(4)).toBeTruthy();
+    expect(composer(4)).toHaveValue("ranged");
     const splitCell = (line: number) =>
       document
         .querySelector(`td[data-side="new"] span[data-line-num="${line}"]`)
@@ -1377,5 +1443,665 @@ describe("fix round 3: focus across a comment save", () => {
 
   it("a save a rebuild held behind it ends on the comment's actions trigger, not the diff group", async () => {
     await saveInAnchorRow(true);
+  });
+});
+
+const build = (text: string, content?: { old: string; new: string }) =>
+  createDiffFile(PATH, text, undefined, content) as DiffFile;
+const fileOf = (two: string) =>
+  ["keep 1", two, "keep 3", "keep 4", "keep 5", "keep 6"].join("\n");
+
+/** A keep whose widget was claimed on `file` at `line` (side new), over `span`. */
+function widgetKeep(
+  file: DiffFile,
+  line: number,
+  span?: { side: "old" | "new"; from: number; to: number },
+) {
+  const keep = createEditorKeep();
+  keep.rowsReplaced(file, "unified", "r");
+  const row = (at: number) => ({
+    keep,
+    kind: "widget" as const,
+    side: "new" as const,
+    line: at,
+    file,
+    record: "r",
+    span,
+  });
+  const token = keep.claim(row(line), LINE_COMPOSER_KEEP_ID, "text");
+  const placedOn = (next: DiffFile, shown: string) =>
+    keep.placed(keep.version(), {
+      openEditors: 1,
+      file: next,
+      shown,
+      anchors: [],
+      widgetEnabled: true,
+    });
+  return { keep, row, token, placedOn };
+}
+
+/** Nine context lines with `edits` (line → new text) as one-line changes. */
+const nine = (edits: Record<number, string> = {}) =>
+  `${HEAD}@@ -1,9 +1,9 @@\n${Array.from({ length: 9 }, (_, i) => {
+    const n = i + 1;
+    return edits[n] === undefined ? ` k${n}` : `-k${n}\n+${edits[n]}`;
+  }).join("\n")}\n`;
+
+describe("round zero: keep records", () => {
+  it("T2: a range's check covers each of its lines and each neighbour", () => {
+    const base = build(nine({ 9: "nine" }));
+    const after = (edits: Record<number, string>) => {
+      const text = nine({ 9: "nine", ...edits });
+      return widgetKeep(base, 5, { side: "new", from: 3, to: 5 }).placedOn(
+        build(text),
+        text,
+      );
+    };
+    expect(after({ 7: "seven" })).toBe(true);
+    expect(after({ 4: "four" })).toBe(false);
+    expect(after({ 2: "two" })).toBe(false);
+    expect(after({ 6: "six" })).toBe(false);
+  });
+
+  it("A2: a Unified range on the other side holds when its anchor line moved", () => {
+    // The press reported new 4 ("keep 4") and mapped into old 3-4.
+    const inserted = `${HEAD}@@ -1,6 +1,7 @@\n keep 1\n-old 2\n+new 2\n+added\n keep 3\n keep 4\n keep 5\n keep 6\n`;
+    const { placedOn } = widgetKeep(build(TEXT), 4, {
+      side: "old",
+      from: 3,
+      to: 4,
+    });
+    const kept = diffOf("newer 2");
+    expect(placedOn(build(kept), kept)).toBe(true);
+    expect(placedOn(build(inserted), inserted)).toBe(false);
+  });
+
+  it("A4: a settle from a replaced widget claim leaves the new claim's record", () => {
+    const { keep, row, token: first } = widgetKeep(build(TEXT), 2);
+    const second = keep.claim(row(4), LINE_COMPOSER_KEEP_ID, "other");
+    keep.setBusy(first, true);
+    keep.forget(first);
+    expect(keep.widgetRecord()).toMatchObject({ line: 4 });
+    expect(
+      keep.placed(keep.version(), {
+        openEditors: 1,
+        file: null,
+        shown: TEXT,
+        anchors: [],
+        widgetEnabled: true,
+      }),
+    ).toBe(true);
+    keep.forget(second);
+    expect(keep.widgetRecord()).toBeNull();
+  });
+
+  it("A10: in a whole-file build, a composer on the last line restores", () => {
+    const content = (two: string) => ({
+      old: fileOf("old 2"),
+      new: fileOf(two),
+    });
+    const { placedOn } = widgetKeep(build(TEXT, content("new 2")), 6);
+    const next = diffOf("newer 2");
+    expect(placedOn(build(next, content("newer 2")), next)).toBe(true);
+    // A hunk-only build knows nothing past its hunk: the same line holds.
+    expect(widgetKeep(build(TEXT), 6).placedOn(build(next), next)).toBe(false);
+  });
+
+  it("B1: a blank line appended or removed past the last line holds a composer on it", () => {
+    const old = `${fileOf("old 2")}\n`;
+    const six = (two: string) => `${fileOf(two)}\n`;
+    // A blank line's text is "\n", the same as the file's end used to read.
+    const blankAtEnd = `${HEAD}@@ -1,6 +1,7 @@\n keep 1\n-old 2\n+new 2\n keep 3\n keep 4\n keep 5\n keep 6\n+\n`;
+    const next = diffOf("newer 2");
+    const plain = widgetKeep(build(TEXT, { old, new: six("new 2") }), 6);
+    expect(
+      plain.placedOn(build(next, { old, new: six("newer 2") }), next),
+    ).toBe(true);
+    expect(
+      plain.placedOn(
+        build(blankAtEnd, { old, new: `${six("new 2")}\n` }),
+        blankAtEnd,
+      ),
+    ).toBe(false);
+    const blank = widgetKeep(
+      build(blankAtEnd, { old, new: `${six("new 2")}\n` }),
+      6,
+    );
+    expect(blank.placedOn(build(TEXT, { old, new: six("new 2") }), TEXT)).toBe(
+      false,
+    );
+  });
+
+  it("A9: a restore lands on the same comment's control after a comment was added above it", () => {
+    const keep = createEditorKeep();
+    const file = build(TEXT);
+    const Row = ({ ids }: { ids: string[] }) => (
+      <KeptRow
+        keep={keep}
+        kind="anchor"
+        side="new"
+        line={3}
+        file={file}
+        record="r"
+      >
+        {ids.map((id) => (
+          <div key={id} data-keep-id={id}>
+            <button type="button" aria-label="Comment actions">
+              {id}
+            </button>
+          </div>
+        ))}
+      </KeptRow>
+    );
+    const { rerender } = render(<Row ids={["edit:a", "edit:b"]} />);
+    act(() => screen.getByText("edit:b").focus());
+    rerender(<div />);
+    rerender(<Row ids={["edit:new", "edit:a", "edit:b"]} />);
+    expect(document.activeElement).toBe(screen.getByText("edit:b"));
+  });
+
+  it("A8: a restored edit closed with Cancel takes focus when opened again", async () => {
+    const keep = createEditorKeep();
+    const file = build(TEXT);
+    function Editor() {
+      const reopened = useKeptOpen("edit:x");
+      const [open, setOpen] = useState(reopened);
+      const kept = useKeptDraft(open ? "edit:x" : null);
+      return open ? (
+        <>
+          <textarea
+            aria-label="Edit x"
+            value={kept.text}
+            onChange={(e) => kept.setText(e.target.value)}
+            autoFocus={!kept.restored}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              kept.forget();
+              setOpen(false);
+            }}
+          >
+            Cancel x
+          </button>
+        </>
+      ) : (
+        <button type="button" onClick={() => setOpen(true)}>
+          Edit x
+        </button>
+      );
+    }
+    const at = (n: string) => (
+      <KeptRow
+        key={n}
+        keep={keep}
+        kind="anchor"
+        side="new"
+        line={3}
+        file={file}
+        record="r"
+      >
+        <Editor />
+      </KeptRow>
+    );
+    const { rerender } = render(at("1"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit x" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Edit x" }), {
+      target: { value: "kept" },
+    });
+    act(() => screen.getByRole("button", { name: "Cancel x" }).focus());
+    rerender(at("2"));
+    expect(screen.getByRole("textbox", { name: "Edit x" })).toHaveValue("kept");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel x" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit x" }));
+    expect(document.activeElement).toBe(
+      screen.getByRole("textbox", { name: "Edit x" }),
+    );
+  });
+});
+
+describe("A11: a pending draft's edit lands like a comment's", () => {
+  const card = () => (
+    <QueryClientProvider client={client}>
+      <DraftCommentCard
+        repoPath="C:/repo"
+        lens="origin"
+        number={1}
+        draft={draft}
+      />
+    </QueryClientProvider>
+  );
+  const editButton = () =>
+    screen.getByRole("button", { name: "Edit pending comment" });
+  const box = () =>
+    screen.queryByRole<HTMLTextAreaElement>("textbox", {
+      name: "Edit pending comment",
+    });
+  async function open() {
+    fireEvent.click(editButton());
+    const field = await waitFor(() => box() as HTMLTextAreaElement);
+    fireEvent.change(field, { target: { value: "Revised draft" } });
+    act(() => field.focus());
+    return field;
+  }
+
+  it.each(["Save", "Cancel"])(
+    "lands on its Edit button after %s",
+    async (name) => {
+      render(card());
+      await open();
+      await act(async () =>
+        fireEvent.click(screen.getByRole("button", { name })),
+      );
+      await waitFor(() => expect(box()).toBeNull());
+      expect(document.activeElement).toBe(editButton());
+    },
+  );
+
+  it("sends the revised body, holds while it runs, and gives the field back with its text when the save fails", async () => {
+    let refuse!: () => void;
+    writes.draft.mockImplementationOnce(() => {
+      writes.setDraftPending(true);
+      return new Promise<undefined>((_, reject) => {
+        refuse = () => reject(new Error("refused"));
+      });
+    });
+    render(card());
+    const field = await open();
+    field.setSelectionRange(0, 0);
+    const save = screen.getByRole("button", { name: "Save" });
+    await act(async () => fireEvent.click(save));
+    expect(writes.draft).toHaveBeenCalledWith({
+      id: "d1",
+      body: "Revised draft",
+    });
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    await act(async () => {
+      writes.setDraftPending(false);
+      refuse();
+    });
+    await settle();
+    expect(box()).toBe(field);
+    expect(field).toHaveValue("Revised draft");
+    expect(document.activeElement).toBe(field);
+    expect(field.selectionStart).toBe(field.value.length);
+  });
+});
+
+describe("round zero: held builds, record moves, hidden tabs and refocus", () => {
+  afterEach(() => document.documentElement.classList.remove("dark"));
+
+  it("A1: a held build released after a theme change first-commits the current theme", async () => {
+    document.documentElement.classList.add("dark");
+    const commits: { node: Element; theme: string | null }[] = [];
+    const wrapper = () => document.querySelector(".diff-tailwindcss-wrapper");
+    const probed = (props: ViewProps) => (
+      <Profiler
+        id="keep"
+        onRender={() => {
+          const node = wrapper();
+          if (node !== null)
+            commits.push({ node, theme: node.getAttribute("data-theme") });
+        }}
+      >
+        {view(props)}
+      </Profiler>
+    );
+    const at = (standIn: boolean, text = TEXT) =>
+      probed({ narrow: true, scope: SCOPE, standIn, text });
+    const { rerender } = render(at(true));
+    await screen.findByText("unadopted");
+    await act(async () => rerender(at(true, FIVE_EDITED)));
+    await settle();
+    expect(document.body.textContent).not.toContain("five");
+    await act(async () => {
+      document.documentElement.classList.remove("dark");
+    });
+    await settle();
+    const held = wrapper();
+    expect(held?.getAttribute("data-theme")).toBe("light");
+    commits.length = 0;
+    await act(async () => rerender(at(false, FIVE_EDITED)));
+    await settle();
+    expect(document.body.textContent).toContain("five");
+    const released = commits.find((c) => c.node !== held);
+    expect(released).toBeDefined();
+    expect(released?.theme).toBe("light");
+  });
+
+  it("A5: a '+' on another record's same line opens a single-line composer", async () => {
+    const ranged: LineWidget = {
+      enabled: true,
+      render: ({ line, fromLine }) => (
+        <>
+          <TestComposer line={line} />
+          <output aria-label="range start">{fromLine ?? line}</output>
+        </>
+      ),
+    };
+    const at = (scope: string) =>
+      view({ narrow: true, anchors: [], scope, lineWidget: ranged });
+    const { rerender } = render(at("pr-3"));
+    fireEvent.mouseDown(await gutter(2));
+    fireEvent.mouseOver(await gutter(4));
+    fireEvent.mouseUp(document);
+    await openComposer(4);
+    expect(screen.getByLabelText("range start")).toHaveTextContent("2");
+    await act(async () => rerender(at("pr-4")));
+    await settle();
+    expect(anyComposer()).toHaveLength(0);
+    await openComposer(4);
+    expect(screen.getByLabelText("range start")).toHaveTextContent("4");
+  });
+
+  it("A9 (field): a restore refocuses the same comment's edit box after another opened above it", () => {
+    const keep = createEditorKeep();
+    const file = build(TEXT);
+    function Edit({ id }: { id: string }) {
+      const kept = useKeptDraft(id);
+      return (
+        <div data-keep-id={id}>
+          <textarea
+            aria-label="Edit comment"
+            value={kept.text}
+            onChange={(e) => kept.setText(e.target.value)}
+          />
+        </div>
+      );
+    }
+    const at = (n: string, ids: string[]) => (
+      <KeptRow
+        key={n}
+        keep={keep}
+        kind="anchor"
+        side="new"
+        line={3}
+        file={file}
+        record="r"
+      >
+        {ids.map((id) => (
+          <Edit key={id} id={id} />
+        ))}
+      </KeptRow>
+    );
+    const { rerender } = render(at("1", ["edit:a", "edit:b"]));
+    const boxes = () =>
+      screen.getAllByRole("textbox", { name: "Edit comment" });
+    fireEvent.change(boxes()[1], { target: { value: "b text" } });
+    act(() => boxes()[1].focus());
+    rerender(at("2", ["edit:new", "edit:a", "edit:b"]));
+    expect(boxes()[2]).toHaveValue("b text");
+    expect(document.activeElement).toBe(boxes()[2]);
+  });
+});
+
+describe("B5: rows a rebuild's whole-file reads are still building", () => {
+  it("hold the commit comment with the loading reason, then catch up and post", async () => {
+    writes.commit.mockClear();
+    const OLD_FILE = `${fileOf("old 2")}\n`;
+    const NEW_FILE = `${fileOf("new 2").replace("keep 5", "five")}\n`;
+    const waiting = new Map<string, () => void>();
+    vi.mocked(gitFileBase64).mockImplementation(
+      (_repo, rev) =>
+        new Promise((resolve) => {
+          const body = rev === REVS.oldRev ? OLD_FILE : NEW_FILE;
+          waiting.set(rev ?? "", () =>
+            resolve({
+              base64: Buffer.from(body).toString("base64"),
+              mime: null,
+              tooLarge: false,
+              size: body.length,
+            }),
+          );
+        }),
+    );
+    // Over the line cap, content mode stays off and reads nothing.
+    const count = DIFF_LINE_CAP + 20;
+    const extra = Array.from({ length: count }, (_, i) => `+add ${i}`);
+    const over = `${TEXT}@@ -6,0 +7,${count} @@\n${extra.join("\n")}\n`;
+    const user = userEvent.setup();
+    const at = (text: string) =>
+      view({
+        narrow: true,
+        revs: REVS,
+        repo: "C:/repo",
+        anchors: [],
+        text,
+        lineWidget: commitWidgetFor(text),
+      });
+    const { rerender } = render(at(over));
+    const box = await openComposer(2, COMMIT_BOX);
+    await user.type(box, "kept");
+    expect(gitFileBase64).not.toHaveBeenCalled();
+    await act(async () => rerender(at(FIVE_EDITED)));
+    await waitFor(() => expect(waiting.size).toBe(2));
+    await settle();
+    expect(box.isConnected).toBe(true);
+    expect(document.body.textContent).not.toContain("five");
+    const held = screen.getByRole("button", { name: "Comment" });
+    expect(held).toHaveAccessibleDescription(COMMIT_LOADING_REASON);
+    await user.click(held);
+    box.focus();
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await settle();
+    expect(writes.commit).not.toHaveBeenCalled();
+    expect(box).toHaveValue("kept");
+    await act(async () => {
+      for (const land of waiting.values()) land();
+    });
+    await waitFor(() => expect(document.body.textContent).toContain("five"));
+    await waitFor(() => expect(commitBox()).toHaveValue("kept"));
+    const post = screen.getByRole("button", { name: "Comment" });
+    expect(post).not.toHaveAccessibleDescription(COMMIT_LOADING_REASON);
+    await user.click(post);
+    expect(writes.commit).toHaveBeenCalledTimes(1);
+    expect(writes.commit).toHaveBeenCalledWith(
+      expect.objectContaining({ body: "kept", line: 2, path: PATH }),
+    );
+  });
+});
+
+describe("C2: the close reason means the keep refused a replacement that is there", () => {
+  // One array for every render: a new one is an anchors change of its own.
+  const NO_ANCHORS: DiffLineAnchor[] = bodies([]);
+  const held = (line: number) =>
+    expect(composer(line)).toHaveAccessibleDescription("rows held");
+  const notHeld = (line: number) =>
+    expect(composer(line)).not.toHaveAccessibleDescription("rows held");
+
+  it("(a) a busy composer across a layout change while the whole-file reads load reads as loading, then as held once they land", async () => {
+    const OLD_FILE = `${fileOf("old 2")}\n`;
+    const NEW_FILE = `${fileOf("new 2").replace("keep 5", "five")}\n`;
+    const waiting = new Map<string, () => void>();
+    vi.mocked(gitFileBase64).mockImplementation(
+      (_repo, rev) =>
+        new Promise((resolve) => {
+          const body = rev === REVS.oldRev ? OLD_FILE : NEW_FILE;
+          waiting.set(rev ?? "", () =>
+            resolve({
+              base64: Buffer.from(body).toString("base64"),
+              mime: null,
+              tooLarge: false,
+              size: body.length,
+            }),
+          );
+        }),
+    );
+    const count = DIFF_LINE_CAP + 20;
+    const extra = Array.from({ length: count }, (_, i) => `+add ${i}`);
+    const over = `${TEXT}@@ -6,0 +7,${count} @@\n${extra.join("\n")}\n`;
+    const user = userEvent.setup();
+    const at = (narrow: boolean, text: string) =>
+      view({ narrow, revs: REVS, repo: "C:/repo", anchors: NO_ANCHORS, text });
+    const { rerender } = render(at(true, over));
+    const box = await openComposer(2);
+    await user.type(box, "kept");
+    await user.click(screen.getByRole("button", { name: "Busy" }));
+    await act(async () => rerender(at(false, FIVE_EDITED)));
+    await waitFor(() => expect(waiting.size).toBe(2));
+    await settle();
+    expect(box.isConnected).toBe(true);
+    expect(document.body.textContent).not.toContain("five");
+    notHeld(2);
+    await act(async () => {
+      for (const land of waiting.values()) land();
+    });
+    await settle();
+    expect(box.isConnected).toBe(true);
+    expect(document.body.textContent).not.toContain("five");
+    held(2);
+    await user.click(screen.getByRole("button", { name: "Idle" }));
+    await waitFor(() => expect(document.body.textContent).toContain("five"));
+    await waitFor(() => expect(composer(2)).toHaveValue("kept"));
+    notHeld(2);
+  });
+
+  it("(b) a push that makes the file a mega-line under an open composer reads as held", async () => {
+    const user = userEvent.setup();
+    const at = (text: string) =>
+      view({ narrow: true, scope: SCOPE, anchors: NO_ANCHORS, text });
+    const { rerender } = render(at(TEXT));
+    const box = await openComposer(2);
+    await user.type(box, "kept");
+    notHeld(2);
+    await act(async () =>
+      rerender(at(diffOf("x".repeat(DIFF_MEGA_LINE_CHARS + 1)))),
+    );
+    await settle();
+    expect(box.isConnected).toBe(true);
+    held(2);
+  });
+
+  it("a candidate build that changes the composer's line reads as held", async () => {
+    const user = userEvent.setup();
+    const at = (text: string) =>
+      view({ narrow: true, scope: SCOPE, anchors: NO_ANCHORS, text });
+    const { rerender } = render(at(TEXT));
+    const box = await openComposer(2);
+    await user.type(box, "kept");
+    await act(async () => rerender(at(diffOf("newer 2"))));
+    await settle();
+    expect(box.isConnected).toBe(true);
+    expect(document.body.textContent).not.toContain("newer 2");
+    held(2);
+  });
+});
+
+describe("B10: a reordered row refocuses the comment focus was in", () => {
+  const Order = createContext(["c1", "c2"]);
+  function Comments() {
+    return use(Order).map((id) => (
+      <Thread
+        key={id}
+        thread={{ ...thread, id, body: `Words ${id}` }}
+        onSaveEdit={saveEdit}
+      />
+    ));
+  }
+  const twoComments: DiffLineAnchor[] = bodies([
+    {
+      side: "new",
+      line: 3,
+      ids: ["edit:c1", "edit:c2"],
+      render: () => <Comments />,
+    },
+  ]);
+  const at = (narrow: boolean, order: string[]) => (
+    <Order value={order}>{view({ narrow, anchors: twoComments })}</Order>
+  );
+  const triggers = () =>
+    screen.getAllByRole("button", { name: "Comment actions" });
+  const boxes = () =>
+    screen.getAllByRole<HTMLTextAreaElement>("textbox", {
+      name: "Edit comment",
+    });
+  const c2First = () => {
+    const text = document.body.textContent ?? "";
+    expect(text.indexOf("Words c2")).toBeLessThan(text.indexOf("Words c1"));
+  };
+
+  it("its actions trigger", async () => {
+    const { rerender } = render(at(true, ["c1", "c2"]));
+    await waitFor(() => expect(triggers()).toHaveLength(2));
+    const second = triggers()[1];
+    act(() => second.focus());
+    await act(async () => rerender(at(false, ["c2", "c1"])));
+    await settle();
+    expect(splitRows()).toBeGreaterThan(0);
+    expect(second.isConnected).toBe(false);
+    c2First();
+    expect(document.activeElement).toBe(triggers()[0]);
+  });
+
+  it("its edit box", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(at(true, ["c1", "c2"]));
+    await waitFor(() => expect(triggers()).toHaveLength(2));
+    for (const [nth, open] of [
+      [1, 1],
+      [0, 2],
+    ] as const) {
+      await user.click(triggers()[nth]);
+      await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+      await waitFor(() => expect(boxes()).toHaveLength(open));
+    }
+    fireEvent.change(boxes()[1], { target: { value: "c2 revised" } });
+    const field = boxes()[1];
+    act(() => field.focus());
+    await act(async () => rerender(at(false, ["c2", "c1"])));
+    await settle();
+    expect(field.isConnected).toBe(false);
+    c2First();
+    expect(boxes()[0]).toHaveValue("c2 revised");
+    expect(boxes()[1]).toHaveValue("Words c1");
+    expect(document.activeElement).toBe(boxes()[0]);
+  });
+
+  it("its review thread's Reply box", async () => {
+    const CardOrder = createContext(["T_a", "T_b"]);
+    function Cards() {
+      return use(CardOrder).map((id) => (
+        <ReviewThreadCard
+          key={id}
+          thread={cardThread(id, false)}
+          compact
+          expanded
+          onToggleExpand={() => undefined}
+          onReply={onCardReply}
+        />
+      ));
+    }
+    const twoCards: DiffLineAnchor[] = bodies([
+      {
+        side: "new",
+        line: 3,
+        ids: ["reply:T_a", "reply:T_b"],
+        render: () => <Cards />,
+      },
+    ]);
+    const cardsAt = (narrow: boolean, order: string[]) => (
+      <CardOrder value={order}>{view({ narrow, anchors: twoCards })}</CardOrder>
+    );
+    const user = userEvent.setup();
+    const { rerender } = render(cardsAt(true, ["T_a", "T_b"]));
+    const replies = () =>
+      screen.getAllByRole<HTMLTextAreaElement>("textbox", REPLY_BOX);
+    for (const open of [1, 2]) {
+      await user.click(
+        (await screen.findAllByRole("button", { name: "Reply…" }))[0],
+      );
+      await waitFor(() => expect(replies()).toHaveLength(open));
+    }
+    fireEvent.change(replies()[0], { target: { value: "a reply" } });
+    fireEvent.change(replies()[1], { target: { value: "b reply" } });
+    const field = replies()[1];
+    act(() => field.focus());
+    await act(async () => rerender(cardsAt(false, ["T_b", "T_a"])));
+    await settle();
+    expect(splitRows()).toBeGreaterThan(0);
+    expect(field.isConnected).toBe(false);
+    expect(replies()[0]).toHaveValue("b reply");
+    expect(replies()[1]).toHaveValue("a reply");
+    expect(document.activeElement).toBe(replies()[0]);
   });
 });

@@ -4,6 +4,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
   use,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -23,6 +24,7 @@ import { reviewCommentsNotice } from "@/features/conversations/remote-section-st
 import { Thread } from "@/features/conversations/Thread";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import { useKeptDraft, useKeptOpen } from "@/features/diff/editor-keep";
+import { focusIsLost } from "@/lib/focus-lost";
 import type { PendingThreadWrites } from "@/lib/git/queries";
 import type {
   ApplyLinesResult,
@@ -70,9 +72,10 @@ interface ThreadCallbacks {
   /** Present when the viewer may delete their own thread comments; opens the
    *  delete confirmation. Wired only for a comment the viewer wrote. */
   onDeleteComment?: (commentId: string) => void;
-  /** Holds an ALREADY-OPEN comment editor's Save — withholding `onEditComment`
-   *  only drops the menu entry, so a caller whose threads went stale sets this
-   *  too. Threaded straight through to every card's Thread. */
+  /** The caller's temporary hold over an ALREADY-OPEN comment editor: Save
+   *  holds silently. Set it whenever a stale arm withholds `onEditComment`,
+   *  or the open editor reads that absence as a lost permission. Threaded
+   *  straight through to every card's Thread. */
   editHeld?: boolean;
   /** Why the viewer's own comments can't be edited (null = they can): holds the
    *  Edit row and an open editor's Save with this reason. */
@@ -627,6 +630,27 @@ export function ReviewThreadCard({
     node.scrollIntoView({ block: "nearest", behavior: "auto" });
     onRevealed?.();
   }, [revealTarget, onRevealed]);
+  // A body that collapses under focus (a thread resolved elsewhere closing
+  // with its last editor) hands focus to the header, never to <body>. The body
+  // records that it held focus in its own ref cleanup, which runs before its
+  // removal, since the removal's focusout (if the engine fires one) names no
+  // target inside the card.
+  const headerRef = useRef<HTMLButtonElement>(null);
+  const bodyHeldFocus = useRef(false);
+  const bodyRef = useCallback(
+    (node: HTMLDivElement | null) => () => {
+      if (node?.contains(document.activeElement)) bodyHeldFocus.current = true;
+    },
+    [],
+  );
+  const wasExpanded = useRef(expanded);
+  useLayoutEffect(() => {
+    const collapsed = wasExpanded.current && !expanded;
+    wasExpanded.current = expanded;
+    const held = bodyHeldFocus.current;
+    bodyHeldFocus.current = false;
+    if (collapsed && held && focusIsLost()) headerRef.current?.focus();
+  }, [expanded]);
   // Suggestion blocks applied in THIS view, keyed `${commentId}:${blockIndex}` — a
   // confusing re-click is prevented (the backend content-verify would reject a real
   // re-apply).
@@ -685,7 +709,11 @@ export function ReviewThreadCard({
   }
 
   return (
-    <div ref={rootRef} className={cn("border", compact ? "text-xs" : "")}>
+    <div
+      ref={rootRef}
+      className={cn("border", compact ? "text-xs" : "")}
+      data-keep-id={replyKeptId}
+    >
       <div
         className={cn(
           "flex items-center gap-2",
@@ -693,6 +721,7 @@ export function ReviewThreadCard({
         )}
       >
         <button
+          ref={headerRef}
           type="button"
           data-thread-id={thread.id}
           aria-expanded={expanded}
@@ -746,6 +775,7 @@ export function ReviewThreadCard({
 
       {expanded && (
         <div
+          ref={bodyRef}
           className={cn(
             "space-y-3 border-t",
             compact ? "px-2 py-2" : "px-3 py-2",

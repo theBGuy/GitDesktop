@@ -1,2 +1,2 @@
-- Staging or unstaging a hunk keeps the diff in the dark theme while it
+- Staging or unstaging a hunk keeps a dark-themed diff dark while it
   redraws.

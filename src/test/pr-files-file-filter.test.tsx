@@ -172,6 +172,7 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
     data,
     contentRevs,
     lineAnchors,
+    renderAnchor,
     lineWidget,
   }: {
     filePath: string;
@@ -180,8 +181,9 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
     lineAnchors?: {
       side: "new" | "old";
       line: number;
-      render: () => React.ReactNode;
+      items: readonly string[];
     }[];
+    renderAnchor?: (anchor: never) => React.ReactNode;
     lineWidget?: {
       render: (args: {
         side: "new" | "old";
@@ -203,7 +205,7 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
         {lineWidget?.render({ side: "new", line: 1, onClose: () => undefined })}
         {lineAnchors?.map((a) => (
           <div key={`${a.side}:${a.line}`} data-anchor="">
-            {a.render()}
+            {renderAnchor?.(a as never)}
           </div>
         ))}
       </div>

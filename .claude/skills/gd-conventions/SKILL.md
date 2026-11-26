@@ -1791,12 +1791,54 @@ one grep away on the named symbol. Grows via Conventions-sync.
   composer, and in an anchor row a comment edit, a thread Reply or a pending
   draft's edit) keeps its text through `useKeptDraft`
   (`src/features/diff/editor-keep.tsx`). A rebuild of the rows restores it on
-  the same line when that line and its two neighbours still read the same;
-  otherwise that file's earlier rows stay drawn until it closes, and while
+  the same line number (an insert above it holds) when that line and its two
+  neighbours still read the same: a provable file edge (before line 1, or past
+  the end of a whole-file build) reads as a sentinel no line's text equals, so
+  it matches only another edge (a blank line added or removed there holds),
+  and a gap
+  placeholder or a line past a hunk-only build's hunks never matches.
+  Otherwise that file's earlier rows stay drawn until it closes, and while
   those rows show an older text the line composers (`ReviewComposer`,
-  `CommitLineComposer`) hold their submits with `DIFF_ROWS_HELD_REASON`. An
+  `CommitLineComposer`) hold their submits with `DIFF_ROWS_HELD_REASON`
+  (rows that catch up by themselves, a build waiting on its read, hold with
+  the loading reason instead). An
   editor that marks itself for `DIFF_EDITOR_SELECTOR` without adopting the
-  hook is held, never dropped.
+  hook is held across rebuilds within one record, never dropped; a record
+  move, or a new build on a host that names no record, drops it. A diff with
+  no `forgePatch` whose rows belong to a host record (a typechange's text
+  half) passes that record as `keepScope`. Each comment's editor and its
+  controls sit inside an element carrying `data-keep-id` (`KEEP_ID_ATTR`)
+  set to the editor's keep id, so a restore refocuses that comment's field
+  or the control that had focus (its Comment actions menu, a pending draft's
+  Edit), never a same-labelled one of another comment in the row. A control
+  is recorded only by its `aria-label`, so each of these carries one. While an
+  editor holds rows or an arm, the pane draws one held paint, data only (the
+  comment above DiffContent's `armHeld`): a `DiffLineAnchor` is a placement
+  (side, line, `items`, editor `ids`, compared by value), and its body comes
+  from the host's `renderAnchor`, passed straight through and read live by
+  each row, never stored (`scripts/diff-view-host-key.test.mjs` T10 fails a
+  function member on the held types). So every card action runs on live
+  state, resolved by item id, and a held row whose items the host no longer
+  lists gets a null body: no row chrome and no `AnchorMount`, so its ids are
+  absent from the report's `drawn`, which holds the item ids of mounted
+  placements whose body is non-null (every id the placement carries). The host
+  lists any comment it still has whose id `drawn` lacks, so a newer item on a
+  held row's line stays listed until a placement carrying it mounts.
+  Line posting and Add suggestion are refused while held. A thread resolved
+  elsewhere stays open while it holds an open Reply or edit
+  (`useOpenKeptIds`). A host pairs a placeholder's anchors itself, by text
+  (the Files slot keeps its last own paint's placements, History gates on its
+  settled read), and DiffContent draws exactly the anchors it is handed. Not covered: a push swapping an
+  outgoing body that is no capture node (arm landing, image arm); an
+  `<Activity>` hide during a hold; an arm change over a same-arm hold can draw
+  the panes above the rows from the refused candidate. Accepted: thread
+  positions are the forge's newest, so threads read before the details name
+  the new head place its lines on the older text; an editor whose item the
+  host drops goes with its card; items created since the held or older-head
+  paint stay off the rows until release (the Conversation tab and the
+  pending-review bar list them); a held card shows the live thread at the held
+  row; Apply reads the live branch, thread and section, its only content guard
+  the backend's expected-lines check.
 - **Forge-patch diff hosts** — a host whose diff text comes from a forge (a
   pull request's Files pane and commit drill-in) passes `forgePatch` beside
   its `contentRevs` / `imageRevs`: the hunk-match guard

@@ -25,8 +25,11 @@ export function anchorKey(side: "old" | "new", line: number): string {
 /** What one diff pane has mounted now. `patch` is the text its rows were built
  *  from (an arm with no rows names its data's), `whitespaceHidden` that
  *  build's `-w` mark, `truncated` whether that read was cut short (a line it
- *  lacks may lie past the cut), `cut` what holds part of the patch back, and
- *  `anchors` the sorted {@link anchorKey}s of the anchor rows mounted now. */
+ *  lacks may lie past the cut), `cut` what holds part of the patch back,
+ *  `anchors` the sorted {@link anchorKey}s of the anchor rows mounted now, and
+ *  `drawn` the sorted item ids of the mounted placements whose body is non-null
+ *  (every id a placement carries, so a newer item on its line is not among
+ *  them). */
 export interface PaneReport {
   path: string;
   patch: string;
@@ -34,6 +37,7 @@ export interface PaneReport {
   truncated: boolean;
   cut: PaintedCut | null;
   anchors: readonly string[];
+  drawn: readonly string[];
 }
 
 /** The visible slot's report, as the host relays it. */
@@ -54,7 +58,8 @@ export function samePaneReport(
     a.whitespaceHidden === b.whitespaceHidden &&
     a.truncated === b.truncated &&
     a.cut === b.cut &&
-    sameKeys(a.anchors, b.anchors)
+    sameKeys(a.anchors, b.anchors) &&
+    sameKeys(a.drawn, b.drawn)
   );
 }
 
@@ -62,37 +67,47 @@ export function samePaneReport(
  *  mount twice (a remount's new row commits before the old one's cleanup is
  *  read), and it stays mounted until its last row leaves. */
 export interface AnchorRegistry {
-  /** One row of `key` mounted; the returned release unmounts it once. */
-  add(key: string): () => void;
+  /** One row of `key` mounted, drawing `items`; the returned release
+   *  unmounts it once. */
+  add(key: string, items?: readonly string[]): () => void;
   subscribe(onChange: () => void): () => void;
   /** The mounted keys, sorted; the same array until the set changes. */
   snapshot(): readonly string[];
+  /** The items the mounted rows draw, sorted; the same array until the set
+   *  changes. */
+  drawn(): readonly string[];
 }
 
 export function createAnchorRegistry(): AnchorRegistry {
   const counts = new Map<string, number>();
+  const itemCounts = new Map<string, number>();
   const listeners = new Set<() => void>();
   let keys: readonly string[] = [];
+  let items: readonly string[] = [];
   const changed = () => {
     keys = [...counts.keys()].sort();
+    items = [...itemCounts.keys()].sort();
     for (const listener of [...listeners]) listener();
   };
+  // Whether the key set changed: a count left 0 or reached it.
+  const bump = (map: Map<string, number>, key: string, by: 1 | -1) => {
+    const n = (map.get(key) ?? 0) + by;
+    if (n > 0) map.set(key, n);
+    else map.delete(key);
+    return by === 1 ? n === 1 : n <= 0;
+  };
   return {
-    add(key) {
-      const n = counts.get(key) ?? 0;
-      counts.set(key, n + 1);
-      if (n === 0) changed();
+    add(key, drawn = []) {
+      let moved = bump(counts, key, 1);
+      for (const item of drawn) moved = bump(itemCounts, item, 1) || moved;
+      if (moved) changed();
       let released = false;
       return () => {
         if (released) return;
         released = true;
-        const left = (counts.get(key) ?? 1) - 1;
-        if (left > 0) {
-          counts.set(key, left);
-          return;
-        }
-        counts.delete(key);
-        changed();
+        let left = bump(counts, key, -1);
+        for (const item of drawn) left = bump(itemCounts, item, -1) || left;
+        if (left) changed();
       };
     },
     subscribe(onChange) {
@@ -102,6 +117,7 @@ export function createAnchorRegistry(): AnchorRegistry {
       };
     },
     snapshot: () => keys,
+    drawn: () => items,
   };
 }
 
@@ -208,8 +224,8 @@ function stepsFor({ preview, megaBlocked, pastCap }: Held): DrawSteps | null {
 }
 
 /**
- * Places each comment exactly once: inline when the pane has its anchor row
- * mounted (and it isn't pinned), else listed. `pinned` holds the ids of listed
+ * Places each comment exactly once: inline when a mounted anchor row draws it
+ * (its id is in the report's `drawn`) and it isn't pinned, else listed. `pinned` holds the ids of listed
  * rows whose editor is open, which stay listed and which the pane never
  * anchors, so no row change can unmount an edit. Notes come only from a
  * judged report (one present and not pending): no report means nothing is
@@ -225,12 +241,9 @@ export function placeComments<C extends PlaceableComment>(
   pinned: ReadonlySet<string>,
   patchReady: boolean,
 ): Placement<C> {
-  const mounted = new Set(report?.anchors ?? []);
+  const drawn = new Set(report?.drawn ?? []);
   const listed = comments.filter(
-    (c) =>
-      c.line === null ||
-      pinned.has(c.id) ||
-      !mounted.has(anchorKey(c.side, c.line)),
+    (c) => c.line === null || pinned.has(c.id) || !drawn.has(c.id),
   );
   const judged =
     report === null || report.cut === "pending" || listed.length === 0

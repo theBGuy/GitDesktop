@@ -28,6 +28,7 @@ import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import { bodies, renderBody } from "./anchor-bodies";
 import { stubCanvas } from "./canvas-stub";
 
 /** A render-time suspension the deferred rebuild hits inside the library's
@@ -37,6 +38,9 @@ const gate = vi.hoisted(() => ({
   armed: false,
   promise: null as Promise<void> | null,
   release: (): void => undefined,
+  /** Settles once a render first reaches the armed gate. */
+  entered: Promise.resolve(),
+  enter: (): void => undefined,
 }));
 
 // The staging viewer's hunk headers call `hunkRange` from the library's extend
@@ -47,8 +51,10 @@ vi.mock("@/features/diff/diff-rows", async (importOriginal) => {
   return {
     ...actual,
     hunkRange: (hunk: Parameters<typeof actual.hunkRange>[0]) => {
-      if (gate.armed && gate.promise && hunk.header.includes("fnB"))
+      if (gate.armed && gate.promise && hunk.header.includes("fnB")) {
+        gate.enter();
         throw gate.promise;
+      }
       return actual.hunkRange(hunk);
     },
   };
@@ -75,6 +81,9 @@ vi.mock("@/lib/use-container-width", () => ({
 beforeAll(stubCanvas);
 
 function arm() {
+  gate.entered = new Promise<void>((resolve) => {
+    gate.enter = resolve;
+  });
   gate.promise = new Promise<void>((resolve) => {
     gate.release = () => {
       gate.armed = false;
@@ -85,7 +94,10 @@ function arm() {
 }
 
 function SuspendWhileArmed(): null {
-  if (gate.armed && gate.promise) throw gate.promise;
+  if (gate.armed && gate.promise) {
+    gate.enter();
+    throw gate.promise;
+  }
   return null;
 }
 
@@ -145,9 +157,8 @@ const patchOf = (lines: string[]) =>
 const TEXT_A = patchOf(["@@ -1,3 +1,3 @@", " a1", "-a2", "+A2", " a3"]);
 const TEXT_B = patchOf(["@@ -1,3 +1,3 @@", " b1", "-b2", "+B2", " b3"]);
 
-const anchorsOf = (render: () => ReactNode): DiffLineAnchor[] => [
-  { side: "new", line: 2, render },
-];
+const anchorsOf = (render: () => ReactNode): DiffLineAnchor[] =>
+  bodies([{ side: "new", line: 2, render }]);
 
 function view(props: {
   text: string;
@@ -163,6 +174,7 @@ function view(props: {
             filePath={PATH}
             text={props.text}
             lineAnchors={props.anchors}
+            renderAnchor={renderBody}
             forceUnified={props.forceUnified}
             lineWidget={props.lineWidget}
           />
@@ -196,7 +208,7 @@ describe("RenderedDiff keeps the dark theme through a discarded rebuild", () => 
         lineWidget,
       }),
     );
-    await settle();
+    await gate.entered;
     // The rebuild is still suspended: the committed rows are the old build's.
     expect(rowsShow("B2")).toBe(false);
     expect(screen.queryByText("suspended")).toBeNull();
@@ -402,7 +414,7 @@ describe("StagingDiffView keeps the dark theme through a discarded rebuild", () 
         predicate: (q) => q.queryKey[0] !== settingsKeys.settings[0],
       });
     });
-    await settle();
+    await gate.entered;
     expect(rowsShow("B2")).toBe(false);
     expect(screen.queryByText("suspended")).toBeNull();
 

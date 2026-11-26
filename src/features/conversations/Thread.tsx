@@ -94,6 +94,10 @@ export function AuthorAvatar({
 }
 
 // Restates src/lib/focus-lost.ts's fallback: jsdom has no checkVisibility.
+/** Save's reason when an open editor's saver went away under it. */
+export const EDIT_SAVER_GONE =
+  "This comment can no longer be edited from the account you're signed in with.";
+
 function isRendered(el: Element): boolean {
   if (typeof el.checkVisibility === "function") return el.checkVisibility();
   for (let node: Element | null = el; node !== null; node = node.parentElement)
@@ -106,12 +110,14 @@ function mayTakeFocus(root: HTMLElement | null): boolean {
   return root.contains(document.activeElement) || focusIsLost();
 }
 
-/** Lands focus on a comment's "Comment actions" trigger as its inline editor
- *  closes. `arm()` before the close reads the focus at that moment: it takes
+/** Lands focus on a comment's trigger (its "Comment actions" menu, or a
+ *  pending draft's Edit) as its inline editor closes. `arm()` before the close reads the focus at that moment: it takes
  *  focus only from inside the comment or from nowhere, and never while the
  *  comment is hidden, since a save can settle after the user moved on or while
  *  its tab is hidden. The landing rides the commit that remounts the trigger,
- *  re-checking first. */
+ *  re-checking first. A host that can render no trigger at that commit (a
+ *  withdrawn permission or link) gives its root `tabIndex={-1}`, which the
+ *  landing then takes instead. */
 export function useEditorCloseLanding(editing: boolean) {
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -120,7 +126,7 @@ export function useEditorCloseLanding(editing: boolean) {
     const land = armed.current;
     armed.current = false;
     if (!editing && land && mayTakeFocus(rootRef.current))
-      triggerRef.current?.focus();
+      (triggerRef.current ?? rootRef.current)?.focus();
   }, [editing]);
   return {
     rootRef,
@@ -166,10 +172,10 @@ export function Thread({
    *  resolves whether it saved. The editor stays open, frozen, until it settles,
    *  and `false` keeps it open with the draft. */
   onSaveEdit?: (body: string) => boolean | Promise<boolean>;
-  /** Holds an ALREADY-OPEN editor's Save without claiming a write is running —
-   *  withholding `onSaveEdit` only removes the menu's Edit entry, so an editor
-   *  opened before the caller went stale would otherwise save into nothing and
-   *  close, discarding the text. */
+  /** The host's temporary hold (its entity is stale or switching): an open
+   *  editor keeps its text and Save holds, silent by itself (an explicit
+   *  `editHeldReason` still shows). A host withdraws `onSaveEdit` alongside
+   *  it; that absence reads as the saver-gone reason only while this is false. */
   editHeld?: boolean;
   /** Why the forge won't take an edit or a delete of this comment (null = it
    *  will): the Edit and Delete rows stay shown but disabled, and an open editor
@@ -230,11 +236,17 @@ export function Thread({
     landing.arm();
     setEditing(false);
   }
-  async function save() {
+  // A saver withdrawn under an open editor (the viewer stopped being the
+  // author) holds Save with a reason; the draft stays editable and Cancel works.
+  // A host's temporary `editHeld` also withdraws it, and outranks that reason.
+  const saveHeldReason =
+    editHeldReason ??
+    (onSaveEdit === undefined && !editHeld ? EDIT_SAVER_GONE : null);
+  async function save(): Promise<boolean> {
     // Returns BEFORE closing: a held save keeps the draft on screen rather than
     // swallow it.
-    if (editHeld || editHeldReason !== null || savingRef.current) return;
-    if (!onSaveEdit) return;
+    if (editHeld || saveHeldReason !== null || savingRef.current) return false;
+    if (!onSaveEdit) return false;
     savingRef.current = true;
     setSaving(true);
     kept.setBusy(true);
@@ -253,6 +265,7 @@ export function Thread({
       kept.forget();
       closeEditor();
     }
+    return saved;
   }
   const minimized = thread.isMinimized;
   const disabledSuffix = disabledReason ? ` — ${disabledReason}` : "";
@@ -263,6 +276,7 @@ export function Thread({
       ref={landing.rootRef}
       className="group space-y-1"
       data-thread-editing={editing || undefined}
+      data-keep-id={keptId}
     >
       <p className="flex items-center gap-2 text-xs">
         <AuthorAvatar
@@ -386,19 +400,19 @@ export function Thread({
       {editing ? (
         <>
           {/* Not a live region: the always-mounted span below announces it. */}
-          {editHeldReason !== null && (
+          {saveHeldReason !== null && (
             <p className="flex items-start gap-1.5 text-muted-foreground text-xs">
               <LockIcon aria-hidden className="mt-px size-3.5 shrink-0" />
               <span>
                 <span className="font-medium text-foreground">
-                  {editHeldReason}
+                  {saveHeldReason}
                 </span>
                 {draft.trim() && " Your edit is kept; Cancel discards it."}
               </span>
             </p>
           )}
           <span aria-live="polite" className="sr-only">
-            {editHeldReason ?? ""}
+            {saveHeldReason ?? ""}
           </span>
           <CommentEditor
             ariaLabel="Edit comment"
@@ -409,10 +423,10 @@ export function Thread({
               !!draft.trim() &&
               draft.trim() !== thread.body.trim() &&
               !editHeld &&
-              editHeldReason === null
+              saveHeldReason === null
             }
             pending={saving}
-            onSubmit={() => void save()}
+            onSubmit={save}
             onCancel={() => {
               if (savingRef.current) return;
               kept.forget();

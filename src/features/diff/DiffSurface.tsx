@@ -14,6 +14,7 @@ import {
 import { FileIcon, GearSixIcon } from "@phosphor-icons/react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import {
+  type ComponentProps,
   createContext,
   Fragment,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -54,6 +55,7 @@ import {
   offlinePendingMessage,
   refreshFailed,
 } from "@/features/conversations/remote-section-state";
+import { focusIsLost } from "@/lib/focus-lost";
 import { decodeBase64Utf8, type FileBytes } from "@/lib/git/api";
 import {
   classifyHeaderOnlyDiff,
@@ -201,20 +203,31 @@ import {
   whitespaceComposerOpen,
 } from "./whitespace-mode";
 
+/** Raw/Preview's twin of the layout flip's held reason: Preview unmounts the
+ *  rows, and an editor open in them would lose its text. */
+const PREVIEW_COMPOSER_HELD =
+  "Finish or close the comment you're writing, then switch between Raw and Preview.";
+
 /**
  * A line-anchored annotation rendered under a diff line (e.g. a PR review
  * thread), always-visible in both Unified and Split modes.
  *
  * `extendData` holds ONE entry per line per side — duplicates silently
- * last-write-win — so callers must pre-group same-side+line anchors into a
- * single stacking `render()` (as PrFilesPane does). Anchors past the
- * large-diff cap don't render until "Show full diff".
+ * last-write-win — so callers must pre-group same-side+line items into one
+ * placement (as PrFilesPane does). Anchors past the large-diff cap don't
+ * render until "Show full diff".
+ *
+ * An anchor is a PLACEMENT, data only: held rows and a held arm keep it for as
+ * long as an editor holds them, and compare it by value. Its body comes from
+ * the host's `renderAnchor`, read live on every render and never stored, so
+ * a held row draws the host's current items and handlers.
  */
 export interface DiffLineAnchor {
   side: "old" | "new";
   /** 1-based line number in that side's file. */
   line: number;
-  render: () => ReactNode;
+  /** The host's ids of the items this row draws, resolved by `renderAnchor`. */
+  items: readonly string[];
   /** The ids of the editors this row can host (`reply:<thread id>`,
    *  `edit:<comment id>`, `draft:<draft id>`): an editor open in it is put
    *  back after a remount of the rows only when the row still lists its id. */
@@ -254,14 +267,16 @@ const PaintedRowsBehindContext = createContext(false);
 /** What a diff pane's rows draw NOW: `text` is the patch the rows on screen
  *  were built from (an arm that draws no rows names its own data's), `cut`
  *  what holds part of it back when something does, with the path and `-w`
- *  mark they were built with and the anchor rows mounted now (keys from
- *  `anchorKey`). The pane's painted report, as painted-view.ts names it. */
+ *  mark they were built with, the anchor rows mounted now (keys from
+ *  `anchorKey`) and the items they draw. The pane's painted report, as
+ *  painted-view.ts names it. */
 interface RowsReport {
   path: string;
   text: string;
   cut: PaintedCut | null;
   whitespaceHidden: boolean;
   anchors: readonly string[];
+  drawn: readonly string[];
 }
 
 /** How a pane report's rows came in: the arm's own read, the text arm's
@@ -276,6 +291,7 @@ function paneReportOf(rows: RowsReport, truncated: boolean): PaneReport {
     truncated,
     cut: rows.cut,
     anchors: rows.anchors,
+    drawn: rows.drawn,
   };
 }
 
@@ -286,19 +302,99 @@ function sameRows(a: RowsReport, b: RowsReport): boolean {
     a.path === b.path &&
     a.whitespaceHidden === b.whitespaceHidden &&
     a.anchors.length === b.anchors.length &&
-    a.anchors.every((k, i) => k === b.anchors[i])
+    a.anchors.every((k, i) => k === b.anchors[i]) &&
+    a.drawn.length === b.drawn.length &&
+    a.drawn.every((k, i) => k === b.drawn[i])
   );
 }
 
-/** Counts a line anchor's row as mounted for exactly as long as it is. */
+/** The host's anchor bodies for the rows below, read live by each row. */
+const AnchorRenderContext = createContext<
+  ((anchor: DiffLineAnchor) => ReactNode) | null
+>(null);
+
+/** Placements by value: the same rows, items and editor ids. */
+function sameAnchors(
+  a: readonly DiffLineAnchor[] | undefined,
+  b: readonly DiffLineAnchor[] | undefined,
+): boolean {
+  if (a === b) return true;
+  if (a === undefined || b === undefined || a.length !== b.length) return false;
+  const same = (x: readonly string[] = [], y: readonly string[] = []) =>
+    x.length === y.length && x.every((k, i) => k === y[i]);
+  return a.every((p, i) => {
+    const q = b[i];
+    return (
+      p.side === q.side &&
+      p.line === q.line &&
+      same(p.items, q.items) &&
+      same(p.ids, q.ids)
+    );
+  });
+}
+
+/** One anchor row: the host's current body for its placement. A null body
+ *  (the host draws none of its items any more) mounts no chrome and no
+ *  AnchorMount, so its ids are absent from the painted report's `drawn`, and
+ *  the host lists any comment it still has whose id `drawn` lacks. */
+function AnchorRow({
+  data,
+  keep,
+  registry,
+  whitespace,
+}: {
+  data: AnchorRowData;
+  keep: ComponentProps<typeof KeptRow>["keep"];
+  registry: AnchorRegistry;
+  /** Valued like the composer wrapper, so the editor probes
+   *  (whitespace-mode.ts) count an editor open in this row by the flips that
+   *  rebuild it. */
+  whitespace: boolean;
+}) {
+  const renderAnchor = useContext(AnchorRenderContext);
+  const body = renderAnchor?.(data.anchor) ?? null;
+  if (body === null || body === false) return null;
+  const { side, line } = data.anchor;
+  return (
+    <div
+      data-diff-anchor={whitespace ? "whitespace" : "layout"}
+      className="border-y bg-background px-3 py-2 font-sans text-xs"
+    >
+      <KeptRow
+        keep={keep}
+        kind="anchor"
+        side={side}
+        line={line}
+        file={data.file}
+        record={data.record}
+      >
+        <AnchorMount
+          registry={registry}
+          anchor={anchorKey(side, line)}
+          items={JSON.stringify(data.anchor.items)}
+        />
+        {body}
+      </KeptRow>
+    </div>
+  );
+}
+
+/** Counts a line anchor's row, and the items its placement names, as mounted
+ *  for exactly as long as it is. `items` is serialized, so a re-render with
+ *  the same placement keeps the registration. */
 function AnchorMount({
   registry,
   anchor,
+  items,
 }: {
   registry: AnchorRegistry;
   anchor: string;
+  items: string;
 }) {
-  useLayoutEffect(() => registry.add(anchor), [registry, anchor]);
+  useLayoutEffect(
+    () => registry.add(anchor, JSON.parse(items) as string[]),
+    [registry, anchor, items],
+  );
   return null;
 }
 
@@ -447,13 +543,17 @@ export function GitDiffView({
   repoPath,
   contentRevs,
   lineAnchors,
+  renderAnchor,
   lineWidget,
   forceUnified,
   revealLanding,
   scrollerRef,
   rebuildsOnWhitespace,
   forgePatch,
+  keepScope,
   dataIsPlaceholder,
+  armHeld,
+  onRowsHeld,
   whitespaceHidden,
   lineKeeper,
   onRows,
@@ -468,6 +568,10 @@ export function GitDiffView({
   contentRevs?: DiffContentRevs;
   /** Line-anchored annotations (e.g. PR review threads) rendered under a line. */
   lineAnchors?: DiffLineAnchor[];
+  /** An anchor's body from the host's current items, or null when it lists
+   *  none of them (the row then draws nothing). Passed straight through and
+   *  read live, never stored. */
+  renderAnchor?: (anchor: DiffLineAnchor) => ReactNode;
   /** Inline composer opened from a diff line. Absent = plain read-only diff. */
   lineWidget?: LineWidget;
   /** Render unified whatever the preference says — the measuring pane sets this
@@ -486,9 +590,19 @@ export function GitDiffView({
   rebuildsOnWhitespace?: boolean;
   /** See {@link DiffContent}'s prop of the same name. */
   forgePatch?: ForgePatch;
+  /** The record the host's rows belong to, for a diff that takes no
+   *  `forgePatch` (a typechange's text half): a rebuild under it is judged
+   *  for open editors rather than dropping them. `forgePatch.scope` wins. */
+  keepScope?: string;
   /** `text` is the previous record's diff, painted while this one's loads:
    *  its build stays, whatever record `forgePatch.scope` names. */
   dataIsPlaceholder?: boolean;
+  /** The host keeps these rows up over a diff of another kind until their
+   *  editors close (DiffContent's arm hold): line submits read as held. */
+  armHeld?: boolean;
+  /** Takes whether the rows keep an earlier build for an open editor while
+   *  this diff's replacement waits, and false when they unmount. */
+  onRowsHeld?: (held: boolean) => void;
   /** `text` is a `-w` diff (the diff's `whitespaceHidden` mark): under
    *  `forgePatch`, the hunk-match guard compares lines as `-w` does. */
   whitespaceHidden?: boolean;
@@ -514,13 +628,17 @@ export function GitDiffView({
           repoPath={repoPath}
           contentRevs={contentRevs}
           lineAnchors={lineAnchors}
+          renderAnchor={renderAnchor}
           lineWidget={lineWidget}
           forceUnified={forceUnified}
           revealLanding={revealLanding ?? sinkRef}
           scrollerRef={scrollerRef}
           rebuildsOnWhitespace={rebuildsOnWhitespace}
           forgePatch={forgePatch}
+          keepScope={keepScope}
           dataIsPlaceholder={dataIsPlaceholder}
+          armHeld={armHeld}
+          onRowsHeld={onRowsHeld}
           whitespaceHidden={whitespaceHidden}
           lineKeeper={lineKeeper}
           onRows={onRows}
@@ -1447,8 +1565,15 @@ export function useModeLineAnchor(
   return { keepLine, mark: <SnapshotMark on={mode} read={readMode} /> };
 }
 
-/** The per-side line -> render() maps the vendored DiffView consumes. */
-type AnchorExtendData = Record<string, { data: { render: () => ReactNode } }>;
+/** One anchor row's data: its placement and the build and record it was
+ *  placed on. Held with the rows, so nothing in it is callable. */
+interface AnchorRowData {
+  anchor: DiffLineAnchor;
+  file: DiffFile;
+  record: string | null;
+}
+/** One side's line -> anchor row data map, as the vendored DiffView consumes. */
+type AnchorExtendData = Record<string, { data: AnchorRowData }>;
 
 /** What one diff build is made of. */
 interface DiffBuildInputs extends SyntaxPrefs {
@@ -1475,7 +1600,8 @@ function sameBuildInputs(a: DiffBuildInputs, b: DiffBuildInputs): boolean {
  * The diff's DiffFile, built once per set of inputs: a gate that withheld the
  * build (a refresh's hold, a pending read) and lets the same inputs through
  * again gets the same instance back. The view keys its rows by the instance,
- * so a new one remounts them and drops an editor open in them. A grammar loads
+ * so a new one remounts them; an editor open in them is the keeper's to carry
+ * over or hold for (`createEditorKeep`, editor-keep.tsx). A grammar loads
  * before the first build of its language, so no build predates its arrival.
  */
 function useDiffBuild(
@@ -1556,13 +1682,17 @@ function RenderedDiff({
   repoPath,
   contentRevs,
   lineAnchors,
+  renderAnchor,
   lineWidget,
   forceUnified,
   revealLanding,
   scrollerRef,
   rebuildsOnWhitespace = false,
   forgePatch,
+  keepScope,
   dataIsPlaceholder = false,
+  armHeld = false,
+  onRowsHeld,
   whitespaceHidden = false,
   lineKeeper,
   onRows,
@@ -1573,13 +1703,20 @@ function RenderedDiff({
   repoPath?: string;
   contentRevs?: DiffContentRevs;
   lineAnchors?: DiffLineAnchor[];
+  /** An anchor's body from the host's current items, or null when it lists
+   *  none of them (the row then draws nothing). Passed straight through and
+   *  read live, never stored. */
+  renderAnchor?: (anchor: DiffLineAnchor) => ReactNode;
   lineWidget?: LineWidget;
   forceUnified?: boolean;
   revealLanding?: { readonly current: HTMLElement | null };
   scrollerRef?: { readonly current: HTMLElement | null };
   rebuildsOnWhitespace?: boolean;
   forgePatch?: ForgePatch;
+  keepScope?: string;
   dataIsPlaceholder?: boolean;
+  armHeld?: boolean;
+  onRowsHeld?: (held: boolean) => void;
   whitespaceHidden?: boolean;
   lineKeeper?: { current: LineKeeper | null };
   onRows?: (rows: RowsReport) => void;
@@ -1614,6 +1751,7 @@ function RenderedDiff({
   // The record the deferred text belongs to, deferred with it: an urgent
   // render pairs the old text with these values' old state.
   const deferredScope = useDeferredValue(forgePatch?.scope);
+  const deferredHostScope = useDeferredValue(forgePatch?.scope ?? keepScope);
   const deferredPlaceholder = useDeferredValue(dataIsPlaceholder);
   const deferredWhitespaceHidden = useDeferredValue(whitespaceHidden);
   // The anchors ride the text they were built for: a host hands a new diff's
@@ -1702,7 +1840,7 @@ function RenderedDiff({
     };
   }, [deferredText, showFull, content, blocked, longestLine]);
   // What a build of the deferred text draws of it.
-  const drawnNow = useMemo<Omit<RowsReport, "anchors">>(
+  const drawnNow = useMemo<Omit<RowsReport, "anchors" | "drawn">>(
     () => ({
       path: deferredPath,
       text: deferredText,
@@ -1753,9 +1891,9 @@ function RenderedDiff({
       ? undefined
       : `${contentRevs.oldRev}\0${contentRevs.newRev}`,
   );
-  const keepScope = deferredScope ?? deferredRevs;
+  const recordScope = deferredHostScope ?? deferredRevs;
   const record =
-    keepScope === undefined ? null : `${deferredPath}\0${keepScope}`;
+    recordScope === undefined ? null : `${deferredPath}\0${recordScope}`;
   // The rows on screen: their build, layout, anchors and record. A new one
   // goes through when no editor is open in them, when every open editor goes
   // back on its line in it, or when it is another record's; otherwise the
@@ -1782,14 +1920,16 @@ function RenderedDiff({
   const recordKept = contentHold || deferredPlaceholder;
   const recordMoved =
     !recordKept &&
-    deferredScope !== undefined &&
+    deferredHostScope !== undefined &&
     mounted.record !== null &&
     record !== mounted.record;
   const changed =
     fileMoved ||
     recordMoved ||
     viewMode !== mounted.layout ||
-    deferredAnchors !== mounted.anchors;
+    !sameAnchors(deferredAnchors, mounted.anchors);
+  // Known gap: a rebuild under a placeholder paint judges the next record and
+  // drops an edit (typechange half + same-path switch + syntax change in one).
   const recordChanged =
     recordMoved ||
     (fileMoved &&
@@ -1852,11 +1992,26 @@ function RenderedDiff({
   const shownHidden = useRetained(hidden, !rowsHold);
   const shownShortened = useRetained(shortened, !rowsHold);
   const rowsBehind = paintedText !== text;
-  // Held rows that draw an earlier text than the newest build's: the one
-  // cause that holds the line composers' submits (a held layout or anchors
-  // set still draws the same text).
-  const rowsHeld =
-    rowsHold && paintedShown !== null && paintedShown.text !== drawnNow.text;
+  // The one cause that asks to close an editor: the keep refused a replacement
+  // that is there now (a candidate build, or the final mega-line placeholder)
+  // whose text differs from the rows'. A read or grammar still on its way, or
+  // a release's commit, catches up by itself and reads as `rowsBehind`.
+  const replacementReady =
+    fileMoved ||
+    (blocked && !contentPending && !holdForGrammar && !contentHold);
+  // The host's arm hold paints these rows' own text over a diff of another
+  // kind, which is a replacement waiting the same way.
+  const editorHeldRows =
+    replacementReady &&
+    (!fits || waiting) &&
+    paintedShown !== null &&
+    paintedShown.text !== drawnNow.text;
+  const rowsHeld = armHeld || editorHeldRows;
+  useLayoutEffect(() => {
+    if (onRowsHeld === undefined) return;
+    onRowsHeld(editorHeldRows);
+    return () => onRowsHeld(false);
+  }, [onRowsHeld, editorHeldRows]);
 
   // The anchor rows this diff has mounted, whatever build they belong to.
   const [anchorRegistry] = useState(createAnchorRegistry);
@@ -1880,36 +2035,15 @@ function RenderedDiff({
     const newFile: AnchorExtendData = {};
     for (const a of deferredAnchors) {
       const target = a.side === "old" ? oldFile : newFile;
-      const anchor = anchorKey(a.side, a.line);
       target[String(a.line)] = {
-        data: {
-          render: () => (
-            <KeptRow
-              keep={keep}
-              kind="anchor"
-              side={a.side}
-              line={a.line}
-              file={diffFile}
-              record={shownRecord}
-            >
-              <AnchorMount registry={anchorRegistry} anchor={anchor} />
-              {a.render()}
-            </KeptRow>
-          ),
-        },
+        data: { anchor: a, file: diffFile, record: shownRecord },
       };
     }
     return { oldFile, newFile };
-  }, [
-    anchorsFitRows,
-    deferredAnchors,
-    anchorRegistry,
-    keep,
-    diffFile,
-    shownRecord,
-  ]);
-  // A held row keeps the render it had when the hold began: a same-numbered
-  // live anchor may be another thread.
+  }, [anchorsFitRows, deferredAnchors, diffFile, shownRecord]);
+  // A held row keeps the placement it had when the hold began (a
+  // same-numbered live anchor may be another thread); its body still comes
+  // from the host's live `renderAnchor`.
   const extendData = useRetained(liveExtendData, !rowsHold);
 
   // --- Drag-range survival across the "+" click (vendored-library workaround) ---
@@ -2099,13 +2233,13 @@ function RenderedDiff({
   // Valued like the composer wrapper, so the editor probes (whitespace-mode.ts)
   // count a reply or an edit open in this row by the flips that rebuild it.
   const renderExtendLine = extendData
-    ? ({ data }: { data: { render: () => ReactNode } }) => (
-        <div
-          data-diff-anchor={rebuildsOnWhitespace ? "whitespace" : "layout"}
-          className="border-y bg-background px-3 py-2 font-sans text-xs"
-        >
-          {data.render()}
-        </div>
+    ? ({ data }: { data: AnchorRowData }) => (
+        <AnchorRow
+          data={data}
+          keep={keep}
+          registry={anchorRegistry}
+          whitespace={rebuildsOnWhitespace}
+        />
       )
     : undefined;
 
@@ -2255,7 +2389,7 @@ function RenderedDiff({
     text: deferredText,
     whitespaceHidden: deferredWhitespaceHidden,
   };
-  const reported = ((): Omit<RowsReport, "anchors"> => {
+  const reported = ((): Omit<RowsReport, "anchors" | "drawn"> => {
     if (waiting) return paintedShown ?? { ...unbuilt, cut: null };
     if (blocked) return drawnNow;
     if (contentPending || holdForGrammar || holdBlank)
@@ -2273,7 +2407,11 @@ function RenderedDiff({
   const lastShown = useRef<RowsReport | null>(null);
   useLayoutEffect(() => {
     if (onRows === undefined) return;
-    const rows = { ...reported, anchors: anchorRegistry.snapshot() };
+    const rows = {
+      ...reported,
+      anchors: anchorRegistry.snapshot(),
+      drawn: anchorRegistry.drawn(),
+    };
     const prev = lastShown.current;
     if (prev !== null && sameRows(prev, rows)) return;
     lastShown.current = rows;
@@ -2287,7 +2425,7 @@ function RenderedDiff({
     () => () => {
       lastShown.current = null;
       const { onRows: report, unbuilt: left } = leaving.current;
-      report?.({ ...left, cut: null, anchors: [] });
+      report?.({ ...left, cut: null, anchors: [], drawn: [] });
     },
     [],
   );
@@ -2367,10 +2505,14 @@ function RenderedDiff({
     lineKeeper,
   );
   // A view that mounts onto a source built under the other theme (the arm
-  // swap below keeps the build) first-commits the theme its source carries.
+  // swap below keeps the build, a held candidate is released onto a new view)
+  // first-commits the theme its source carries: the view clones the source in
+  // render, before its own theme effect runs.
   useLayoutEffect(() => {
-    diffFile?.initTheme(isDark ? "dark" : "light");
-  }, [diffFile, isDark]);
+    const theme = isDark ? "dark" : "light";
+    diffFile?.initTheme(theme);
+    builtDiffFile?.initTheme(theme);
+  }, [diffFile, builtDiffFile, isDark]);
   // A forge-patch upgrade lands in a step of its own, declared after the hook
   // above: the line read here from the hunk-only rows is the one the content
   // build restores. An editor open in this diff would lose its text with the
@@ -2422,6 +2564,13 @@ function RenderedDiff({
   const landInteractive = useLatestRef(interactive);
   useLayoutEffect(() => {
     const focusLeft = keep.rowsReplaced(diffFile, drawn, shownRecord);
+    // A range read off rows no kept widget carries over (another record's, or
+    // a composer that closed) would be posted from a "+" on the same line.
+    if (keep.widgetRecord() === null) {
+      activeOverrideRef.current = null;
+      dragRangeRef.current = null;
+      changeRangeRef.current = null;
+    }
     const root = diffLandingRef.current;
     const active = document.activeElement;
     if (
@@ -2476,16 +2625,47 @@ function RenderedDiff({
           render would repaint in the light theme. And per record: a widget it
           holds open never carries to another record's rows of the same text. */}
       <DiffRowsHeldContext value={rowsHeld}>
-        {lineWidget?.enabled ? (
-          // Line-comment mode: the multi-select variant adds clickable line numbers
-          // and drag-to-select, opening the composer below the line. Opt-in only.
-          <PaintedRowsBehindContext value={rowsBehind}>
-            <DiffViewWithMultiSelect<{ render: () => ReactNode }>
+        <AnchorRenderContext value={renderAnchor ?? null}>
+          {lineWidget?.enabled ? (
+            // Line-comment mode: the multi-select variant adds clickable line numbers
+            // and drag-to-select, opening the composer below the line. Opt-in only.
+            <PaintedRowsBehindContext value={rowsBehind}>
+              <DiffViewWithMultiSelect<AnchorRowData>
+                key={viewKey(viewGen, diffFile)}
+                ref={multiSelectRef}
+                diffFile={diffFile}
+                // Worker ASTs land as a highlighter PROP, not a rebuild: the view's
+                // effect applies them to its own clone, so expansion state survives.
+                registerHighlighter={shownHighlighter}
+                diffViewMode={diffViewMode}
+                diffViewTheme={isDark ? "dark" : "light"}
+                diffViewHighlight
+                diffViewWrap
+                diffViewFontSize={12}
+                extendData={extendData}
+                renderExtendLine={renderExtendLine}
+                // Makes line-number cells clickable (flows through to the inner
+                // DiffView), which is what opens the widget slot.
+                diffViewAddWidget
+                enableMultiSelect
+                // Track the drag range ourselves so a "+" press on ANY line of it opens
+                // a range composer. The library's own max-line fast path never fires:
+                // "+" mousedown starts a native single-line selection in an ANCESTOR
+                // listener (before React's synthetic handlers), wiping the stored
+                // multiResult; the React onMouseDown then opens the widget and calls
+                // clearSelection, so mouseup fires no onSelectionComplete. The widget
+                // renders during the mousedown flush, BEFORE mouseup — so our captured
+                // range still holds at render time and overrides the single-line report.
+                onMultiSelectComplete={onMultiSelectComplete}
+                onMultiSelectChange={onMultiSelectChange}
+                renderWidgetLine={renderWidgetLine}
+                onCreateUseWidgetHook={onCreateUseWidgetHook}
+              />
+            </PaintedRowsBehindContext>
+          ) : (
+            <DiffView<AnchorRowData>
               key={viewKey(viewGen, diffFile)}
-              ref={multiSelectRef}
               diffFile={diffFile}
-              // Worker ASTs land as a highlighter PROP, not a rebuild: the view's
-              // effect applies them to its own clone, so expansion state survives.
               registerHighlighter={shownHighlighter}
               diffViewMode={diffViewMode}
               diffViewTheme={isDark ? "dark" : "light"}
@@ -2494,39 +2674,10 @@ function RenderedDiff({
               diffViewFontSize={12}
               extendData={extendData}
               renderExtendLine={renderExtendLine}
-              // Makes line-number cells clickable (flows through to the inner
-              // DiffView), which is what opens the widget slot.
-              diffViewAddWidget
-              enableMultiSelect
-              // Track the drag range ourselves so a "+" press on ANY line of it opens
-              // a range composer. The library's own max-line fast path never fires:
-              // "+" mousedown starts a native single-line selection in an ANCESTOR
-              // listener (before React's synthetic handlers), wiping the stored
-              // multiResult; the React onMouseDown then opens the widget and calls
-              // clearSelection, so mouseup fires no onSelectionComplete. The widget
-              // renders during the mousedown flush, BEFORE mouseup — so our captured
-              // range still holds at render time and overrides the single-line report.
-              onMultiSelectComplete={onMultiSelectComplete}
-              onMultiSelectChange={onMultiSelectChange}
-              renderWidgetLine={renderWidgetLine}
               onCreateUseWidgetHook={onCreateUseWidgetHook}
             />
-          </PaintedRowsBehindContext>
-        ) : (
-          <DiffView<{ render: () => ReactNode }>
-            key={viewKey(viewGen, diffFile)}
-            diffFile={diffFile}
-            registerHighlighter={shownHighlighter}
-            diffViewMode={diffViewMode}
-            diffViewTheme={isDark ? "dark" : "light"}
-            diffViewHighlight
-            diffViewWrap
-            diffViewFontSize={12}
-            extendData={extendData}
-            renderExtendLine={renderExtendLine}
-            onCreateUseWidgetHook={onCreateUseWidgetHook}
-          />
-        )}
+          )}
+        </AnchorRenderContext>
       </DiffRowsHeldContext>
       <DiffCapFooter
         hidden={shownHidden}
@@ -2862,6 +3013,7 @@ export function DiffSurface({
   contentRevs,
   previewRev,
   lineAnchors,
+  renderAnchor,
   lineWidget,
   stagingSide,
   forgePatch,
@@ -2875,6 +3027,10 @@ export function DiffSurface({
   /** See {@link DiffContent}'s prop of the same name — preview only. */
   previewRev?: string;
   lineAnchors?: DiffLineAnchor[];
+  /** An anchor's body from the host's current items, or null when it lists
+   *  none of them (the row then draws nothing). Passed straight through and
+   *  read live, never stored. */
+  renderAnchor?: (anchor: DiffLineAnchor) => ReactNode;
   lineWidget?: LineWidget;
   /** See {@link DiffContent}'s prop of the same name. */
   stagingSide?: StagingSide;
@@ -2898,6 +3054,7 @@ export function DiffSurface({
       previewRev={previewRev}
       dataIsPlaceholder={diff.isPlaceholderData}
       lineAnchors={lineAnchors}
+      renderAnchor={renderAnchor}
       lineWidget={lineWidget}
       stagingSide={stagingSide}
       forgePatch={forgePatch}
@@ -2913,25 +3070,26 @@ export function DiffSurface({
  */
 export function DiffContent({
   filePath,
-  data,
+  data: liveData,
   isPending,
   isError,
   isPaused = false,
   isFetching = false,
   onRetry,
   repoPath,
-  imageRevs: hostImageRevs,
-  contentRevs,
-  previewRev,
-  dataIsPlaceholder,
-  lineAnchors,
+  imageRevs: liveImageRevs,
+  contentRevs: liveContentRevs,
+  previewRev: livePreviewRev,
+  dataIsPlaceholder: livePlaceholder,
+  lineAnchors: liveLineAnchors,
+  renderAnchor,
   lineWidget,
   stagingSide,
-  anchorCommit,
+  anchorCommit: liveAnchorCommit,
   whitespaceControl = false,
-  forgePatch,
+  forgePatch: liveForgePatch,
   typechangeAnchors = false,
-  whitespaceNote,
+  whitespaceNote: liveWhitespaceNote,
   paintsOtherCommit = false,
 }: {
   filePath: string;
@@ -2966,6 +3124,10 @@ export function DiffContent({
   dataIsPlaceholder?: boolean;
   /** Line-anchored annotations (e.g. PR review threads). Absent = no anchors. */
   lineAnchors?: DiffLineAnchor[];
+  /** An anchor's body from the host's current items, or null when it lists
+   *  none of them (the row then draws nothing). Passed straight through and
+   *  read live, never stored. */
+  renderAnchor?: (anchor: DiffLineAnchor) => ReactNode;
   /** Inline composer opened from a diff line (PR review). Absent = read-only. */
   lineWidget?: LineWidget;
   /** Set only by the working-tree staging host; enables the non-UTF-8 note.
@@ -3023,6 +3185,92 @@ export function DiffContent({
     controlsRef,
     returnFocusIfTriggerHidden,
   } = useHiddenTriggerFocus();
+  const hideWhitespace = useHideWhitespace();
+  // A change of arm (a push turning a text diff into a typechange, a
+  // header-only, binary or empty one) would unmount the rows and an editor
+  // open in them. The text-bearing arm on screen keeps painting its own inputs,
+  // its line submits held, until its editors close; a record or file change
+  // still drops it, as a rebuild's does.
+  const [armNode, setArmNode] = useState<HTMLElement | null>(null);
+  const armEditing = useDiffEditorCount(armNode) > 0;
+  const liveRecord = armRecordOf(liveForgePatch, liveContentRevs);
+  const liveRetainedOther =
+    liveData !== undefined &&
+    (liveData.filePath !== filePath ||
+      (whitespaceControl &&
+        liveForgePatch === undefined &&
+        !hideWhitespace &&
+        liveData.whitespaceOnly === true));
+  const liveArm = useMemo(
+    () =>
+      liveData === undefined
+        ? null
+        : rowsArmOf(liveData, filePath, {
+            whitespaceOnly:
+              (hideWhitespace || liveForgePatch !== undefined) &&
+              liveData.whitespaceOnly === true,
+            typechangeAnchors,
+          }),
+    [liveData, filePath, hideWhitespace, liveForgePatch, typechangeAnchors],
+  );
+  const [armShown, setArmShown] = useState<ArmPaint | null>(null);
+  // A held arm draws one held paint, data only: rows, the panes above them,
+  // notes, anchor placements (side, line, item ids). Nothing callable is held:
+  // cards render from the host's current props by item id, and one the host no
+  // longer lists draws nothing; line posting and Add suggestion are refused
+  // while held, and the diff draws exactly the anchors its host hands it. A
+  // release lands focus that sat in, or was lost from, the held body. Not
+  // covered, and the classes this accepts: gd-conventions SKILL.md, In-diff
+  // editor keep (held paint).
+  const armHeld =
+    armShown !== null &&
+    armEditing &&
+    !isPending &&
+    liveData !== undefined &&
+    !liveRetainedOther &&
+    armShown.data.filePath === filePath &&
+    armShown.record !== null &&
+    (livePlaceholder === true || armShown.record === liveRecord) &&
+    liveArm !== armShown.kind;
+  if (!armHeld) {
+    // A placeholder paint is the earlier record's, so it keeps that record.
+    const next: ArmPaint | null =
+      liveArm === null || liveRetainedOther || isPending || !liveData
+        ? null
+        : {
+            kind: liveArm,
+            data: liveData,
+            record: livePlaceholder ? (armShown?.record ?? null) : liveRecord,
+            contentRevs: liveContentRevs,
+            forgePatch: liveForgePatch,
+            imageRevs: liveImageRevs,
+            previewRev: livePreviewRev,
+            placeholder: livePlaceholder === true,
+            anchorCommit: liveAnchorCommit,
+            whitespaceNote: liveWhitespaceNote,
+            lineAnchors: liveLineAnchors,
+          };
+    if (!sameArmPaint(armShown, next)) setArmShown(next);
+  }
+  // Every input the arm paints from, the panes above its rows and its
+  // placeholder pairing included, is the held paint's: a live one would pair
+  // the new head's revisions with the old source and text.
+  const heldPaint = armHeld ? armShown : null;
+  const data = heldPaint ? heldPaint.data : liveData;
+  const contentRevs = heldPaint ? heldPaint.contentRevs : liveContentRevs;
+  const forgePatch = heldPaint ? heldPaint.forgePatch : liveForgePatch;
+  const hostImageRevs = heldPaint ? heldPaint.imageRevs : liveImageRevs;
+  const previewRev = heldPaint ? heldPaint.previewRev : livePreviewRev;
+  const dataIsPlaceholder = heldPaint ? heldPaint.placeholder : livePlaceholder;
+  const anchorCommit = heldPaint ? heldPaint.anchorCommit : liveAnchorCommit;
+  const whitespaceNote = heldPaint
+    ? heldPaint.whitespaceNote
+    : liveWhitespaceNote;
+  // A thread the live diff anchors would render beside the held text.
+  const lineAnchors = heldPaint ? heldPaint.lineAnchors : liveLineAnchors;
+  // The rows below keep an earlier build of this arm for an editor (a
+  // same-arm hold), which the notice names as the held paint's.
+  const [rowsHeldBelow, setRowsHeldBelow] = useState(false);
   // Computed above the early-return chain (which the `emptyDiff` arm joins, so
   // the text is trimmed once) because the registrations below are hooks: offer
   // each action only in the states that actually render its control.
@@ -3034,7 +3282,6 @@ export function DiffContent({
     () => (dataText === undefined ? null : classifyHeaderOnlyDiff(dataText)),
     [dataText],
   );
-  const hideWhitespace = useHideWhitespace();
   // A host keeping previous data retains the other mode's answer through the
   // refetch after a flip, and it keeps painting: the two answers differ only in
   // whitespace lines, so a flip never blanks a read-only host. The one stale
@@ -3098,10 +3345,12 @@ export function DiffContent({
   const scrollerCaptureRef = useCallback(
     (node: HTMLDivElement | null) => {
       scrollerRef.current = node;
+      setArmNode(node);
       const capture = captureHeldRef(node);
       return () => {
         capture();
         scrollerRef.current = null;
+        setArmNode(null);
       };
     },
     [captureHeldRef],
@@ -3122,15 +3371,24 @@ export function DiffContent({
   // passes a same-file Raw/Preview toggle from <body>; another file's swap
   // passes only held focus. The toolbar rescue falls back to the controls,
   // since the image and typechange arms render no landing.
+  const armHeldOn = useRef<string | null>(null);
   useLayoutEffect(() => {
     const held = paneHeldFocus.current;
+    // An arm hold released as its editors closed: focus the closing editor
+    // lost (its field leaves before the scroller's capture runs) lands as held
+    // focus does. A live element, or one outside the pane, keeps it.
+    const lost =
+      armHeldOn.current === filePath &&
+      !armEditing &&
+      interactive &&
+      focusIsLost();
+    armHeldOn.current = armHeld ? filePath : null;
     const sameToolbarFile =
       showsToolbar &&
       prevSwapRef.current.toolbar &&
       prevSwapRef.current.path === filePath;
-    armRescueRef.current = held
-      ? (armLandingRef.current ?? controlsRef.current)
-      : null;
+    armRescueRef.current =
+      held || lost ? (armLandingRef.current ?? controlsRef.current) : null;
     previewRescueRef.current =
       held || sameToolbarFile ? controlsRef.current : null;
     prevSwapRef.current = { path: filePath, toolbar: showsToolbar };
@@ -3169,9 +3427,19 @@ export function DiffContent({
     // In Preview the picker isn't mounted, so the action would open nothing.
     interactive && showsToolbar && !previewOn && Boolean(fileExt(filePath)),
   );
+  // Preview unmounts this pane's rows, so an editor open in them holds the
+  // toggle with its reason, and the palette route refuses at fire time.
+  function flipMdView(next: MarkdownDiffView) {
+    if (next === mdView) return;
+    if (armNode !== null && diffEditorOpen(armNode)) {
+      toast.info(PREVIEW_COMPOSER_HELD);
+      return;
+    }
+    setMdView(next);
+  }
   useHotkeyAction(
     "toggle-markdown-preview",
-    () => setMdView((v) => (v === "raw" ? "preview" : "raw")),
+    () => flipMdView(mdView === "raw" ? "preview" : "raw"),
     interactive && canPreview,
   );
   // Every whitespace flip this pane owns goes through here: an open line
@@ -3305,7 +3573,11 @@ export function DiffContent({
       >
         {canPreview && (
           <span className="contents" ref={captureHeldRef}>
-            <MarkdownViewToggle view={mdView} onChange={setMdView} />
+            <MarkdownViewToggle
+              view={mdView}
+              onChange={flipMdView}
+              heldReason={armEditing ? PREVIEW_COMPOSER_HELD : undefined}
+            />
           </span>
         )}
         {/* The picker and the options sheet configure the raw diff, so they
@@ -3384,6 +3656,20 @@ export function DiffContent({
     imageRevs !== undefined &&
     imageMime(filePath) !== null &&
     !(typechangeAnchors && halves !== null);
+  // The body the returns below draw. Any change of it (an arm hold's release
+  // included) lands focus the pane held as the old body left, on the new
+  // body's landing or the path row's controls, as the toolbar edge does.
+  const paneArm = paneArmOf({
+    isPending,
+    retainedOther,
+    data,
+    imageArm,
+    typechange: halves !== null,
+    whitespaceOnly,
+    emptyDiff,
+    headerOnly: headerOnly !== null,
+  });
+  useFocusOnControlsSwap(paneArm, armRescueRef);
   // One report stream for every arm, by value: the text arm's rows and a
   // typechange's text half report what they draw and mount, and every other
   // arm mounts no rows. It goes to the enclosing file slot as the pane's
@@ -3448,6 +3734,7 @@ export function DiffContent({
     cut,
     whitespaceHidden: data?.whitespaceHidden === true,
     anchors: [],
+    drawn: [],
   });
   useLayoutEffect(() => {
     if (!rowsReport) {
@@ -3527,11 +3814,18 @@ export function DiffContent({
     <DegradedListNotice
       noun="this diff"
       degraded={failed || isPaused}
-      message={detailNoticeMessage({
-        noun: "diff",
-        isError: failed,
-        stale: dataIsPlaceholder ?? false,
-      })}
+      message={
+        // Held content is no loaded version of the live read: name it as the
+        // earlier one an editor keeps.
+        heldPaint !== null || rowsHeldBelow
+          ? heldNoticeMessage(failed)
+          : detailNoticeMessage({
+              noun: "diff",
+              isError: failed,
+              // The live read's state, as the rest of the notice is.
+              stale: livePlaceholder ?? false,
+            })
+      }
       onRetry={failed ? onRetry : undefined}
       className="shrink-0 border-b py-1.5"
     />
@@ -3602,7 +3896,12 @@ export function DiffContent({
           text={halves.text}
           repoPath={repoPath}
           lineAnchors={halfAnchors}
+          renderAnchor={renderAnchor}
           lineWidget={halfWidget}
+          keepScope={scope}
+          dataIsPlaceholder={dataIsPlaceholder}
+          armHeld={armHeld}
+          onRowsHeld={setRowsHeldBelow}
           forceUnified={narrowPane}
           revealLanding={controlsRef}
           scrollerRef={scrollerRef}
@@ -3764,7 +4063,10 @@ export function DiffContent({
               dataIsPlaceholder={dataIsPlaceholder}
               whitespaceHidden={data.whitespaceHidden === true}
               lineAnchors={lineAnchors}
+              renderAnchor={renderAnchor}
               lineWidget={lineWidget}
+              armHeld={armHeld}
+              onRowsHeld={setRowsHeldBelow}
               forceUnified={narrowPane}
               revealLanding={controlsRef}
               scrollerRef={scrollerRef}
@@ -3783,6 +4085,29 @@ export function DiffContent({
     </Fragment>,
     notice,
   );
+}
+
+/** The body DiffContent's returns draw, in their order. */
+function paneArmOf(a: {
+  isPending: boolean;
+  retainedOther: boolean;
+  data: FileDiff | undefined;
+  imageArm: boolean;
+  typechange: boolean;
+  whitespaceOnly: boolean;
+  emptyDiff: boolean;
+  headerOnly: boolean;
+}): string {
+  if (a.isPending) return "pending";
+  if (a.retainedOther) return "retained";
+  if (a.data === undefined) return "failed";
+  if (a.data.isBinary) {
+    if (a.imageArm) return "image";
+    return a.typechange ? "typechange" : "binary";
+  }
+  if (a.whitespaceOnly) return "whitespace-only";
+  if (a.emptyDiff) return "empty";
+  return a.headerOnly ? "header-only" : "text";
 }
 
 /** The pair a PR host's image arm draws, with the record and path it was
@@ -3805,6 +4130,97 @@ function sameImage(a: ImageOn | null, b: ImageOn): boolean {
     a.revs.old === b.revs.old &&
     a.revs.new === b.revs.new &&
     contentSourceKey(a.source) === contentSourceKey(b.source)
+  );
+}
+
+/** What a text-bearing arm paints from: the arm hold repaints it. */
+interface ArmPaint {
+  kind: RowsArm;
+  data: FileDiff;
+  /** The record the rows belong to (RenderedDiff's record scope); null: none,
+   *  so no hold. */
+  record: string | null;
+  contentRevs: DiffContentRevs | undefined;
+  forgePatch: ForgePatch | undefined;
+  imageRevs: ImageRevs | undefined;
+  previewRev: string | undefined;
+  placeholder: boolean;
+  anchorCommit: string | null | undefined;
+  whitespaceNote: string | undefined;
+  /** Placements only (see {@link DiffLineAnchor}), compared by value: a host
+   *  re-minting an equal list moves nothing. */
+  lineAnchors: DiffLineAnchor[] | undefined;
+}
+
+/** The degraded notice over held rows: failed or parked, the live read's
+ *  status, beside the earlier version the editor keeps on screen. */
+function heldNoticeMessage(failed: boolean): string {
+  return failed
+    ? "Couldn't refresh this diff — showing the earlier version while you're editing."
+    : "You're offline — showing the earlier version while you're editing.";
+}
+
+/** The arms that draw rows an editor can open in. */
+type RowsArm = "text" | "typechange";
+
+/** The rows arm `data` paints, null for an arm with none. A typechange's
+ *  text half takes editors only on a host that anchors it, and on such a host
+ *  it is never the image arm. */
+function rowsArmOf(
+  data: FileDiff,
+  filePath: string,
+  opts: { whitespaceOnly: boolean; typechangeAnchors: boolean },
+): RowsArm | null {
+  if (data.isBinary)
+    return opts.typechangeAnchors && typechangeHalves(data.text, filePath)
+      ? "typechange"
+      : null;
+  if (opts.whitespaceOnly || data.text.trim() === "") return null;
+  return classifyHeaderOnlyDiff(data.text) === null ? "text" : null;
+}
+
+/** The record RenderedDiff keys its rows to: the host's scope, else the
+ *  revisions its content reads. */
+function armRecordOf(
+  forgePatch: ForgePatch | undefined,
+  revs: DiffContentRevs | undefined,
+): string | null {
+  if (forgePatch?.scope !== undefined) return forgePatch.scope;
+  return revs === undefined ? null : `${revs.oldRev}\0${revs.newRev}`;
+}
+
+function sameArmPaint(a: ArmPaint | null, b: ArmPaint | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.kind === b.kind &&
+    a.data === b.data &&
+    a.record === b.record &&
+    a.contentRevs?.oldRev === b.contentRevs?.oldRev &&
+    a.contentRevs?.newRev === b.contentRevs?.newRev &&
+    (a.contentRevs === undefined) === (b.contentRevs === undefined) &&
+    sameForgePatch(a.forgePatch, b.forgePatch) &&
+    a.imageRevs?.old === b.imageRevs?.old &&
+    a.imageRevs?.new === b.imageRevs?.new &&
+    (a.imageRevs === undefined) === (b.imageRevs === undefined) &&
+    a.previewRev === b.previewRev &&
+    a.placeholder === b.placeholder &&
+    a.anchorCommit === b.anchorCommit &&
+    a.whitespaceNote === b.whitespaceNote &&
+    sameAnchors(a.lineAnchors, b.lineAnchors)
+  );
+}
+
+function sameForgePatch(
+  a: ForgePatch | undefined,
+  b: ForgePatch | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return (
+    a.scope === b.scope &&
+    a.pairUnavailable === b.pairUnavailable &&
+    (a.source === null || b.source === null
+      ? a.source === b.source
+      : contentSourceKey(a.source) === contentSourceKey(b.source))
   );
 }
 

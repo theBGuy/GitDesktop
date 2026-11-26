@@ -1355,10 +1355,10 @@ export function RemoteIssueView({
               ? (body) => saveCommentEdit(c.id, body)
               : undefined
           }
-          // Withholding the handler only drops the menu entry: an editor already
-          // open when a placeholder took over holds its Save here. During a hold
-          // the inert frame covers it (no focus or pointer reaches it).
-          editHeld={detailsPlaceholder}
+          // Every stale arm that withholds the saver holds an open editor here,
+          // so its Save holds silently instead of reading as a lost permission.
+          // During a hold the inert frame also covers it.
+          editHeld={detailsStale}
           onDelete={
             canEditOwnComments && c.viewerDidAuthor && !detailsStale
               ? () => setDeletingCommentId(c.id)
