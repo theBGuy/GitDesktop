@@ -20,7 +20,7 @@ import {
 import { useKeptDraft, useKeptOpen } from "@/features/diff/editor-keep";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
-import { focusIsLost } from "@/lib/focus-lost";
+import { focusIsLost, isRendered } from "@/lib/focus-lost";
 import type { MinimizeReason } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import { useActiveForgeGhHost, useActiveGhHost } from "@/lib/git/host";
@@ -93,17 +93,9 @@ export function AuthorAvatar({
   );
 }
 
-// Restates src/lib/focus-lost.ts's fallback: jsdom has no checkVisibility.
 /** Save's reason when an open editor's saver went away under it. */
 export const EDIT_SAVER_GONE =
   "This comment can no longer be edited from the account you're signed in with.";
-
-function isRendered(el: Element): boolean {
-  if (typeof el.checkVisibility === "function") return el.checkVisibility();
-  for (let node: Element | null = el; node !== null; node = node.parentElement)
-    if (getComputedStyle(node).display === "none") return false;
-  return true;
-}
 
 function mayTakeFocus(root: HTMLElement | null): boolean {
   if (root === null || !root.isConnected || !isRendered(root)) return false;
@@ -111,13 +103,14 @@ function mayTakeFocus(root: HTMLElement | null): boolean {
 }
 
 /** Lands focus on a comment's trigger (its "Comment actions" menu, or a
- *  pending draft's Edit) as its inline editor closes. `arm()` before the close reads the focus at that moment: it takes
- *  focus only from inside the comment or from nowhere, and never while the
- *  comment is hidden, since a save can settle after the user moved on or while
- *  its tab is hidden. The landing rides the commit that remounts the trigger,
- *  re-checking first. A host that can render no trigger at that commit (a
- *  withdrawn permission or link) gives its root `tabIndex={-1}`, which the
- *  landing then takes instead. */
+ *  pending draft's Edit) as its inline editor closes. `arm()` before the
+ *  close reads the focus at that moment: it takes focus only from inside the
+ *  comment or from nowhere, and never while the comment is hidden, since a
+ *  save can settle after the user moved on or while its tab is hidden. The
+ *  landing rides the commit that remounts the trigger, re-checking first. A
+ *  host that can render no trigger at that commit (a withdrawn permission or
+ *  link) gives its root `tabIndex={-1}`, which the landing then takes
+ *  instead. */
 export function useEditorCloseLanding(editing: boolean) {
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -218,8 +211,7 @@ export function Thread({
   // An edit open in a diff row comes back, with its text, when the rows
   // remount around it.
   const keptId = `edit:${thread.id}`;
-  const reopened = useKeptOpen(keptId);
-  const [editing, setEditing] = useState(reopened);
+  const [editing, setEditing] = useKeptOpen(keptId);
   const editingChange = useLatestRef(onEditingChange);
   useLayoutEffect(() => {
     editingChange.current?.(editing);

@@ -1816,8 +1816,16 @@ one grep away on the named symbol. Grows via Conventions-sync.
   comment above DiffContent's `armHeld`): a `DiffLineAnchor` is a placement
   (side, line, `items`, editor `ids`, compared by value), and its body comes
   from the host's `renderAnchor`, passed straight through and read live by
-  each row, never stored (`scripts/diff-view-host-key.test.mjs` T10 fails a
-  function member on the held types). So every card action runs on live
+  each row, never stored (an `Assert<IsData<…>>` beside each held type, from
+  `src/features/diff/held-data.ts`, fails `tsc -b` when anything reachable
+  from it is or may be callable, an optional member, a union constituent or a
+  member declared beside an index signature included; out of its reach, and
+  read as data: a member a brand adds under its primitive's own key, one a
+  readonly array adds under a mutable array's method name, an Array
+  subclass's non-public member, a template-pattern index signature's value
+  beside a `string` one, and a member declared beside an
+  index signature on a brand, array or tuple, a split made on plain objects
+  only). So every card action runs on live
   state, resolved by item id, and a held row whose items the host no longer
   lists gets a null body: no row chrome and no `AnchorMount`, so its ids are
   absent from the report's `drawn`, which holds the item ids of mounted
@@ -1825,8 +1833,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   lists any comment it still has whose id `drawn` lacks, so a newer item on a
   held row's line stays listed until a placement carrying it mounts.
   Line posting and Add suggestion are refused while held. A thread resolved
-  elsewhere stays open while it holds an open Reply or edit
-  (`useOpenKeptIds`). A host pairs a placeholder's anchors itself, by text
+  elsewhere stays open while it draws an open Reply or edit, an `<Activity>`
+  hide included: `DiffThreadAnchor` owns the row's open editor set
+  (`useOpenEditorsHost`, read by the fold and by each editor's
+  `useKeptOpen`). A host pairs a placeholder's anchors itself, by text
   (the Files slot keeps its last own paint's placements, History gates on its
   settled read), and DiffContent draws exactly the anchors it is handed. Not covered: a push swapping an
   outgoing body that is no capture node (arm landing, image arm); an

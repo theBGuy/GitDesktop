@@ -1,6 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
-import { Profiler, type ReactNode, Suspense } from "react";
+import {
+  createRef,
+  Profiler,
+  type ReactNode,
+  type RefObject,
+  Suspense,
+} from "react";
 import {
   afterEach,
   beforeAll,
@@ -16,6 +22,7 @@ import {
   type LineWidget,
 } from "@/features/diff/DiffSurface";
 import { DiffViewer } from "@/features/diff/DiffViewer";
+import { SnapshotMark } from "@/features/diff/snapshot-mark";
 import {
   type FileBytes,
   gitBlobSizes,
@@ -38,6 +45,8 @@ const gate = vi.hoisted(() => ({
   armed: false,
   promise: null as Promise<void> | null,
   release: (): void => undefined,
+  /** Every scroller `captureLineAnchor` read, in call order. */
+  lineReads: [] as HTMLElement[],
   /** Settles once a render first reaches the armed gate. */
   entered: Promise.resolve(),
   enter: (): void => undefined,
@@ -56,6 +65,12 @@ vi.mock("@/features/diff/diff-rows", async (importOriginal) => {
         throw gate.promise;
       }
       return actual.hunkRange(hunk);
+    },
+    captureLineAnchor: (
+      ...args: Parameters<typeof actual.captureLineAnchor>
+    ) => {
+      gate.lineReads.push(args[0]);
+      return actual.captureLineAnchor(...args);
     },
   };
 });
@@ -165,19 +180,24 @@ function view(props: {
   anchors?: DiffLineAnchor[];
   forceUnified?: boolean;
   lineWidget?: LineWidget;
+  /** The scroller around the diff, passed as its `scrollerRef`. */
+  scroller?: RefObject<HTMLDivElement | null>;
 }) {
   return (
     <QueryClientProvider client={client}>
       <CommitProbe>
         <Suspense fallback={<p>suspended</p>}>
-          <GitDiffView
-            filePath={PATH}
-            text={props.text}
-            lineAnchors={props.anchors}
-            renderAnchor={renderBody}
-            forceUnified={props.forceUnified}
-            lineWidget={props.lineWidget}
-          />
+          <div ref={props.scroller}>
+            <GitDiffView
+              filePath={PATH}
+              text={props.text}
+              lineAnchors={props.anchors}
+              renderAnchor={renderBody}
+              forceUnified={props.forceUnified}
+              lineWidget={props.lineWidget}
+              scrollerRef={props.scroller}
+            />
+          </div>
         </Suspense>
       </CommitProbe>
     </QueryClientProvider>
@@ -438,5 +458,81 @@ describe("StagingDiffView keeps the dark theme through a discarded rebuild", () 
     renderStaging();
     await waitFor(() => expect(rowsShow("A2")).toBe(true));
     expect(commits[0]?.theme).toBe("dark");
+  });
+});
+
+/** One `SnapshotMark` update, read when it ran: the layout it left, the
+ *  layout it renders, and the scrollers `captureLineAnchor` read inside it. */
+type MarkUpdate = { from: string; to: string; scrollers: HTMLElement[] };
+
+/** Runs `before` and then switches the setting to split, and returns every
+ *  layout flip a mounted `SnapshotMark` made in an update (a mark that mounts
+ *  reads nothing), each as [from, to, the rows' scrollers it read the line
+ *  on]: a scroller that holds the diff's rows and is on the page. */
+async function modeReadsOnSplit(before?: () => void) {
+  const original = SnapshotMark.prototype.getSnapshotBeforeUpdate;
+  const updates: MarkUpdate[] = [];
+  const snapshot = vi
+    .spyOn(SnapshotMark.prototype, "getSnapshotBeforeUpdate")
+    .mockImplementation(function (this: SnapshotMark, prev) {
+      const read = gate.lineReads.length;
+      const result = original.call(this, prev);
+      updates.push({
+        from: prev.on,
+        to: this.props.on,
+        scrollers: gate.lineReads.slice(read),
+      });
+      return result;
+    });
+  const rows = () => wrapperOf(document.body);
+  const flips = () =>
+    updates
+      .filter(
+        ({ from, to }) => from !== to && ["unified", "split"].includes(from),
+      )
+      .map(({ from, to, scrollers }) => [
+        from,
+        to,
+        scrollers.filter((s) => s.isConnected && s.contains(rows())).length,
+      ]);
+  try {
+    if (before !== undefined) await act(async () => before());
+    await act(async () => {
+      client.setQueryData(settingsKeys.settings, {
+        ...DEFAULT_SETTINGS,
+        diffViewMode: "split" as const,
+      });
+    });
+    // Waits for the commit that flips the layout, then lets any later read in.
+    await waitFor(() => expect(flips().length).toBeGreaterThan(0), {
+      timeout: 2_000,
+    });
+    await settle();
+    return flips();
+  } finally {
+    snapshot.mockRestore();
+  }
+}
+
+describe("each useModeLineAnchor caller reads its line once on a switch", () => {
+  it("RenderedDiff", async () => {
+    client.setQueryData(settingsKeys.settings, DEFAULT_SETTINGS);
+    const scroller = createRef<HTMLDivElement>();
+    const { rerender } = render(view({ text: TEXT_A, scroller }));
+    await waitFor(() => expect(rowsShow("A2")).toBe(true));
+    // A mark update while still unified (a new scroller ref re-renders it)
+    // comes before the switch, and is no flip.
+    const next = createRef<HTMLDivElement>();
+    const reads = await modeReadsOnSplit(() =>
+      rerender(view({ text: TEXT_A, scroller: next })),
+    );
+    expect(reads).toEqual([["unified", "split", 1]]);
+    expect(next.current?.contains(wrapperOf(document.body))).toBe(true);
+  });
+
+  it("the staging viewer", async () => {
+    renderStaging();
+    await waitFor(() => expect(rowsShow("A2")).toBe(true));
+    expect(await modeReadsOnSplit()).toEqual([["unified", "split", 1]]);
   });
 });

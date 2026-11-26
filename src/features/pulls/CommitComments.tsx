@@ -377,13 +377,13 @@ export function useCommitLineAnchors(
       items,
     }));
   }, [comments, sections, path, pinned]);
+  // The comments a row may draw, by id (the first of a repeated id).
+  const drawable = new Map<string, CommitCommentOut>();
+  for (const c of comments ?? [])
+    if (c.path === path && !pinned.has(c.id) && !drawable.has(c.id))
+      drawable.set(c.id, c);
   const renderAnchor = (anchor: DiffLineAnchor) => {
-    const group = anchor.items.flatMap(
-      (id) =>
-        comments?.find(
-          (c) => c.id === id && c.path === path && !pinned.has(c.id),
-        ) ?? [],
-    );
+    const group = anchor.items.flatMap((id) => drawable.get(id) ?? []);
     if (group.length === 0) return null;
     const { line } = anchor;
     const bodyRefs: MarkdownRefs | undefined =

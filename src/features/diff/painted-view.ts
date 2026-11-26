@@ -71,10 +71,11 @@ export interface AnchorRegistry {
    *  unmounts it once. */
   add(key: string, items?: readonly string[]): () => void;
   subscribe(onChange: () => void): () => void;
-  /** The mounted keys, sorted; the same array until the set changes. */
+  /** The mounted keys, sorted; the same array until the key set or the
+   *  item set changes (either rebuilds both, so compare by content). */
   snapshot(): readonly string[];
-  /** The items the mounted rows draw, sorted; the same array until the set
-   *  changes. */
+  /** The items the mounted rows draw, sorted; the same array until either
+   *  set changes, as for `snapshot`. */
   drawn(): readonly string[];
 }
 

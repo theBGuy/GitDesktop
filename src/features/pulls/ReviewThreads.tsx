@@ -589,11 +589,11 @@ export function ReviewThreadCard({
   // A reply open in a diff row comes back, with its text, when the rows
   // remount around it; it is kept only while its box shows.
   const replyKeptId = `reply:${thread.id}`;
-  const reopenedReply = useKeptOpen(replyKeptId);
   // Only a box that claims its record on mount reopens: one that can't would
   // open empty later, its text already dropped.
-  const [replying, setReplying] = useState(
-    reopenedReply && expanded && onReply !== undefined,
+  const [replying, setReplying] = useKeptOpen(
+    replyKeptId,
+    expanded && onReply !== undefined,
   );
   const replyKept = useKeptDraft(
     expanded && onReply !== undefined && replying ? replyKeptId : null,

@@ -14,6 +14,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
 import { DIFF_ROWS_HELD_REASON } from "@/features/diff/whitespace-mode";
 import { HEAD_PENDING_REVIEW_REASON } from "@/features/pulls/head-pending";
 import { RemotePrView } from "@/features/pulls/RemotePrView";
@@ -172,12 +173,8 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
     lineWidget,
   }: {
     data?: { filePath: string; text: string };
-    lineAnchors?: {
-      side: "new" | "old";
-      line: number;
-      items: readonly string[];
-    }[];
-    renderAnchor?: (anchor: never) => React.ReactNode;
+    lineAnchors?: DiffLineAnchor[];
+    renderAnchor?: (anchor: DiffLineAnchor) => React.ReactNode;
     lineWidget?: {
       render: (args: {
         side: "new" | "old";
@@ -198,7 +195,7 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
         })}
         {lineAnchors?.map((a) => (
           <div key={`${a.side}:${a.line}`} data-anchor="">
-            {renderAnchor?.(a as never)}
+            {renderAnchor?.(a)}
           </div>
         ))}
       </div>

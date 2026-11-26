@@ -14,7 +14,6 @@ import {
 import { FileIcon, GearSixIcon } from "@phosphor-icons/react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import {
-  type ComponentProps,
   createContext,
   Fragment,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -111,6 +110,7 @@ import {
 import { HOLD_BOUND_MS } from "./diff-pane-slots";
 import { usePaintedPublish } from "./file-slot";
 import { base64Bytes } from "./forge-whitespace";
+import type { Assert, IsData } from "./held-data";
 import {
   type AnchorRegistry,
   anchorKey,
@@ -143,6 +143,7 @@ import { drawnLayout } from "./drawn-layout";
 import {
   createEditorKeep,
   DiffRowsHeldContext,
+  type EditorKeep,
   KeptRow,
   useEditorKeepVersion,
 } from "./editor-keep";
@@ -233,6 +234,9 @@ export interface DiffLineAnchor {
    *  back after a remount of the rows only when the row still lists its id. */
   ids?: readonly string[];
 }
+// Held across a hold and compared by value, so nothing callable may be
+// reachable from it (held-data.ts; `tsc -b` fails this line otherwise).
+export type DiffLineAnchorIsData = Assert<IsData<DiffLineAnchor>>;
 
 /**
  * An inline composer opened from a diff line: click a line number (or drag a
@@ -344,7 +348,7 @@ function AnchorRow({
   whitespace,
 }: {
   data: AnchorRowData;
-  keep: ComponentProps<typeof KeptRow>["keep"];
+  keep: EditorKeep;
   registry: AnchorRegistry;
   /** Valued like the composer wrapper, so the editor probes
    *  (whitespace-mode.ts) count an editor open in this row by the flips that
@@ -2331,8 +2335,11 @@ function RenderedDiff({
   );
   // Each new view hands over its widget store (a remount of the rows makes a
   // new one): a kept line composer reopens on its line, and the highlight is
-  // re-asserted, since the new view draws none. Hand-over records no editor
-  // re-claimed by then are gone.
+  // re-asserted, since the new view draws none. Hand-over records of the
+  // replacement that made this view stay claimable until the next task (a
+  // zero-delay timer), then go unless an editor re-claimed them; a
+  // later replacement's stay for its own view (React flushes this passive
+  // effect before any later commit, so no later replacement's is read here).
   const widgetOn = useLatestRef(lineWidget?.enabled ?? false);
   const onCreateUseWidgetHook = useCallback(
     (hook: {
@@ -2347,7 +2354,7 @@ function RenderedDiff({
           side: kept.side === "old" ? SplitSide.old : SplitSide.new,
           lineNumber: kept.line,
         });
-      setTimeout(keep.dropHandOver, 0);
+      keep.queueHandOverDrop();
     },
     [keep],
   );
@@ -2543,8 +2550,11 @@ function RenderedDiff({
       root.focus({ preventScroll: true });
   }, [diffFile, interactive]);
   // A held build's release: the line read here off the held rows is the one
-  // the new build restores, and focus that sat in them, or was lost as the
-  // editor holding them closed, lands on the diff's own group.
+  // the new build restores (only when the held rows are the incoming build's
+  // file: another file's line means nothing there), and focus that sat in
+  // them, or was lost as the editor holding them closed, lands on the diff's
+  // own group.
+  const releasesSamePath = mounted.path === deferredPath;
   useLayoutEffect(() => {
     if (!releasing) return;
     const root = diffLandingRef.current;
@@ -2556,9 +2566,9 @@ function RenderedDiff({
         active === document.body ||
         !active.isConnected ||
         root.contains(active));
-    keepLine();
+    if (releasesSamePath) keepLine();
     setHeldFor(null);
-  }, [releasing, keepLine]);
+  }, [releasing, releasesSamePath, keepLine]);
   // A commit that replaced the rows: the keep judges its releases, and focus
   // that was in a row it took away lands on the diff's own group.
   const landInteractive = useLatestRef(interactive);
@@ -4151,6 +4161,9 @@ interface ArmPaint {
    *  re-minting an equal list moves nothing. */
   lineAnchors: DiffLineAnchor[] | undefined;
 }
+// Kept while an editor holds the rows, so nothing callable may be reachable
+// from it (held-data.ts; `tsc -b` fails this line otherwise).
+export type ArmPaintIsData = Assert<IsData<ArmPaint>>;
 
 /** The degraded notice over held rows: failed or parked, the live read's
  *  status, beside the earlier version the editor keeps on screen. */

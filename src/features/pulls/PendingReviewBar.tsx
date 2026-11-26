@@ -55,8 +55,7 @@ export function DraftCommentCard({
   // An edit open in a diff row comes back, with its text, when the rows
   // remount around it.
   const keptId = `draft:${draft.id}`;
-  const reopened = useKeptOpen(keptId);
-  const [editing, setEditing] = useState(reopened);
+  const [editing, setEditing] = useKeptOpen(keptId);
   const kept = useKeptDraft(editing ? keptId : null);
   const body = kept.text;
   const setBody = kept.setText;

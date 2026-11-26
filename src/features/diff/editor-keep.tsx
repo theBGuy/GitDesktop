@@ -83,6 +83,8 @@ interface KeptRecord {
    *  unmounted in a commit not yet judged. `handover`: released in the commit
    *  that replaced the rows, kept for the remount that re-claims it. */
   state: "claimed" | "released" | "handover";
+  /** The rows replacement that handed it over (see `queueHandOverDrop`). */
+  gen: number;
   /** The text field that held focus when its row unmounted. */
   focus: FocusMark | null;
 }
@@ -263,6 +265,7 @@ export function createEditorKeep() {
   let version = 0;
   let mountedFile: DiffFile | null = null;
   let mountedRecord: string | null = null;
+  let generation = 0;
   let sweepQueued = false;
   let focusLeft = false;
   const notify = () => {
@@ -336,6 +339,7 @@ export function createEditorKeep() {
         text,
         busy: false,
         state: "claimed",
+        gen: 0,
         focus: null,
       };
       records.set(key, made);
@@ -405,6 +409,7 @@ export function createEditorKeep() {
       _layout: "split" | "unified",
       record: string | null,
     ): boolean {
+      generation++;
       if (
         file === null ||
         record !== mountedRecord ||
@@ -415,7 +420,10 @@ export function createEditorKeep() {
       } else {
         for (const [key, r] of records)
           if (r.state === "handover") records.delete(key);
-          else if (r.state === "released") r.state = "handover";
+          else if (r.state === "released") {
+            r.state = "handover";
+            r.gen = generation;
+          }
       }
       mountedFile = file;
       mountedRecord = record;
@@ -425,16 +433,20 @@ export function createEditorKeep() {
       notify();
       return hadFocus;
     },
-    /** Drops hand-over records no editor re-claimed: called once the new
-     *  rows mounted and the widget reopen ran. */
-    dropHandOver() {
-      let dropped = false;
-      for (const [key, r] of records)
-        if (r.state === "handover") {
-          records.delete(key);
-          dropped = true;
-        }
-      if (dropped) notify();
+    /** Called as a view of the rows is created: on the next task, drops the
+     *  hand-over records no editor re-claimed of the latest replacement, read
+     *  now, never a later one's whose editor has yet to re-claim it. */
+    queueHandOverDrop() {
+      const gen = generation;
+      setTimeout(() => {
+        let dropped = false;
+        for (const [key, r] of records)
+          if (r.state === "handover" && r.gen === gen) {
+            records.delete(key);
+            dropped = true;
+          }
+        if (dropped) notify();
+      }, 0);
     },
     /** Whether an editor is open in the rows: one the DOM shows, or one the
      *  store holds claimed. */
@@ -566,39 +578,109 @@ export function useEditorKeepVersion(keep: EditorKeep): number {
   return useSyncExternalStore(keep.subscribe, keep.version);
 }
 
-/** Whether the editor `id` was open in this row before its rows remounted:
- *  an anchor-row editor initialises its open flag from it. False outside a
- *  kept row. */
-export function useKeptOpen(id: string | null): boolean {
-  const row = use(KeptRowContext);
-  const [open] = useState(
-    () => row !== null && id !== null && row.keep.seedFor(row, id) !== null,
-  );
-  return open;
+/** A token for one opening of an editor: an instance closes its id only while
+ *  the set still holds the opening it made or found at mount. */
+type OpenSerial = symbol;
+
+interface OpenEditors {
+  has: (id: string) => boolean;
+  serialOf: (id: string) => OpenSerial | undefined;
+  open: (id: string) => OpenSerial;
+  close: (id: string, serial: OpenSerial | undefined) => void;
 }
 
-/** The ids of the editors open in this row before its rows remounted, read
- *  once at mount: a host whose own state decides whether an editor's card
- *  shows seeds that state from them. Empty outside a kept row. */
-export function useKeptIds(): readonly string[] {
+/** Around a host's editors (`useOpenEditorsHost`): each `useKeptOpen` under
+ *  it reads and writes the host's set instead of state of its own. */
+export const OpenEditorsContext = createContext<OpenEditors | null>(null);
+
+const NO_OPEN: ReadonlyMap<string, OpenSerial> = new Map();
+
+/**
+ * The open editors of a host that keeps a card shown while one of its editors
+ * is open. `seeds` are the ids the row lists whose editor could draw now; the
+ * ones the keep holds at this row open at mount. `drawn` decides, in each
+ * render, whether an open id stays in the host's set (a withdrawn Reply stays
+ * while its textarea is absent); an id it refuses leaves the set in that
+ * render. Provide the result through `OpenEditorsContext`.
+ */
+export function useOpenEditorsHost(
+  seeds: readonly string[],
+  drawn: (id: string, has: (id: string) => boolean) => boolean,
+): OpenEditors {
   const row = use(KeptRowContext);
-  const [ids] = useState(() =>
-    row === null ? [] : row.keep.keptIds(row.keep.version(), row),
-  );
-  return ids;
+  // The ids of this row's open editors. The fold and each editor's own open
+  // flag read this one set, so a thread is never held open by an editor it
+  // does not draw. It changes on the seed from the keep at mount, on an
+  // editor's open or close call, and in the render that stops drawing an id;
+  // never from an effect, so an <Activity> hide changes nothing.
+  const [open, setOpen] = useState<ReadonlyMap<string, OpenSerial>>(() => {
+    if (row === null) return NO_OPEN;
+    const kept = row.keep.keptIds(row.keep.version(), row);
+    return new Map(
+      seeds.filter((id) => kept.includes(id)).map((id) => [id, Symbol(id)]),
+    );
+  });
+  const had = (id: string) => open.has(id);
+  let pruned: Map<string, OpenSerial> | null = null;
+  for (const id of open.keys())
+    if (!drawn(id, had)) {
+      pruned ??= new Map(open);
+      pruned.delete(id);
+    }
+  if (pruned !== null) setOpen(pruned);
+  const now: ReadonlyMap<string, OpenSerial> = pruned ?? open;
+  return {
+    has: (id) => now.has(id),
+    serialOf: (id) => now.get(id),
+    open: (id) => {
+      const serial = Symbol(id);
+      setOpen((prev) => new Map(prev).set(id, serial));
+      return serial;
+    },
+    close: (id, serial) =>
+      setOpen((prev) => {
+        if (serial === undefined || prev.get(id) !== serial) return prev;
+        const next = new Map(prev);
+        next.delete(id);
+        return next;
+      }),
+  };
 }
 
-const NO_KEEP = { subscribe: () => () => undefined, version: () => 0 };
-
-/** The ids of the editors open in this row now, re-read on every claim and
- *  release: a host that would hide an editor's card on a live change (a
- *  thread resolved elsewhere) keeps it shown while its editor is open. Empty
- *  outside a kept row. */
-export function useOpenKeptIds(): readonly string[] {
+/**
+ * Whether the editor `id` is open, and its setter. Under a host's
+ * `OpenEditorsContext` it is the host's set; elsewhere it is state of its
+ * own, open at mount when the editor was open in this row before its rows
+ * remounted and `canReopen` allows it. A host owns the reopen gate: its seeds
+ * decide, and `canReopen` is read only without one.
+ */
+export function useKeptOpen(
+  id: string | null,
+  canReopen = true,
+): [boolean, (open: boolean) => void] {
   const row = use(KeptRowContext);
-  const store = row?.keep ?? NO_KEEP;
-  const version = useSyncExternalStore(store.subscribe, store.version);
-  return row === null ? [] : row.keep.keptIds(version, row);
+  const editors = use(OpenEditorsContext);
+  const hosted = editors !== null && id !== null;
+  const [local, setLocal] = useState(
+    () =>
+      !hosted &&
+      canReopen &&
+      row !== null &&
+      id !== null &&
+      row.keep.seedFor(row, id) !== null,
+  );
+  const [adopted] = useState(() =>
+    editors !== null && id !== null ? editors.serialOf(id) : undefined,
+  );
+  const opened = useRef<OpenSerial | undefined>(undefined);
+  if (!hosted) return [local, setLocal];
+  return [
+    editors.has(id),
+    (next) => {
+      if (next) opened.current = editors.open(id);
+      else editors.close(id, opened.current ?? adopted);
+    },
+  ];
 }
 
 export interface KeptDraft {

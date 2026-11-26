@@ -1,33 +1,63 @@
-// Pins the diff panes' library-view and line-anchor wiring, read from source
-// (src/ outside src/test/ and src/components/ui/), comment- and string-masked:
-//   T1 every `<DiffView` / `<DiffViewWithMultiSelect` open tag's own `key`
-//      attribute (never one inside a nested element in another attribute's
-//      value) is one of `HOST_KEYS`, a key on the retained build every host
-//      names `diffFile`:
-//      the library clears its on-screen clone during render when the source
-//      changes, so a view React keeps across a discarded render repaints in
-//      the light theme;
-//   T2 every `useModeLineAnchor(` call binds the result's `mark` and renders
-//      that binding as a JSX child (`{mark}` after a tag's `>` or a sibling
-//      child, never after a JavaScript block or a type argument list) before
-//      the next call in its file, so a
-//      switch reads the line in its commit;
-//   T3 every file that calls a keeper's `.restore()` renders a `<SnapshotMark`
-//      whose own `read` attribute's value calls that keeper's `.read()`;
-//   T4 an unreadable file, an open tag with no end, and an empty roster for any
-//      of the three each FAIL.
-// The grammar is deliberately narrow. Out of its sight: the library components
-// imported under another name, a `key` arriving through a spread, a `diffFile`
-// that names something other than the retained build, a mark rendered through
-// another variable, passed down as a prop or rendered past the next call, a
-// call whose result isn't destructured by the `const` right before it, and a
-// destructure spread over several statements.
+// Pins the diff panes' library-view and line-anchor wiring. It reads src/
+// (outside src/test/ and src/components/ui/) line by line, comments and
+// strings masked, in the form Biome writes it (CI runs `biome ci` over src/,
+// which this suite relies on and does not check); a pinned shape spelled
+// outside that form FAILS:
+//   T1 every `<DiffView` / `<DiffViewWithMultiSelect` open tag starts its line,
+//      and one of its own attributes is exactly one of `HOST_KEYS`, a key on
+//      the retained build every host names `diffFile`: the library clears its
+//      on-screen clone during render when the source changes, so a view React
+//      keeps across a discarded render repaints in the light theme. A tag that
+//      spans lines owns the attribute lines indented one step past it, up to
+//      the `>` or `/>` line at its own indent; a one-line tag owns its
+//      attributes only when every value is quoted or a brace group with no
+//      brace inside, so no element nested in a value can lend it one;
+//   T2 every `useModeLineAnchor(` call is the whole initializer of a `const`
+//      whose pattern has an element written exactly `mark`: the text before it
+//      ends `const { ... } = ` and its closing parenthesis is followed by `;`.
+//      A line after that parenthesis's line, before the first line indented
+//      less than that binding, is exactly `{mark}`, in a `.tsx` file, so a
+//      switch reads the line in its commit (a `{mark}` inside the call's
+//      arguments never counts). Biome writes no other statement, attribute
+//      or type that way; a mark on a line with anything else or under
+//      another name fails, and so does any `useModeLineAnchor` that is not
+//      such a call, its `function` definition or a plain import specifier.
+//      This is the fast tripwire; src/test/diff-white-flash.test.tsx proves
+//      each caller's mark reads its scroller's line exactly once on a switch,
+//      one case per caller in its describe `CALLER_CASES`, and the number of
+//      callers T2 reads must equal that number of cases, each written
+//      `it(title, fn)` or `test(title, fn)` inside a describe written
+//      `describe(title, fn)` (a modifier, an options object or a timeout on a
+//      case or on the describe, a nested describe, or the describe not found
+//      exactly once FAILS);
+//   T3 every file whose code names both `lineKeeper` and `restore` renders a
+//      `<SnapshotMark` (read as T1 reads a host tag) with an own attribute
+//      that is exactly a zero-argument arrow calling `lineKeeper`'s `.read()`
+//      and nothing else; a file naming both for another reason FAILS;
+//   T4 an unreadable file, a spanning tag with no end, and an empty roster for
+//      any of the three each FAIL;
+//   T5 DiffSurface.tsx imports `Assert` and `IsData` from ./held-data and
+//      declares `Assert<IsData<DiffLineAnchor>>` and `Assert<IsData<ArmPaint>>`
+//      on code lines, so `tsc -b` still proves the held types carry data only
+//      (src/test/held-data.test.ts holds that proof's controls), and its raw
+//      text names no `@ts-ignore`, `@ts-expect-error` or `@ts-nocheck` (in any
+//      case, a string or comment included), which could silence those lines;
+//      the file unread or unreadable FAILS.
+// Out of its sight: the library components imported under another name, a
+// `key` arriving through a spread, a `diffFile` that names something other
+// than the retained build, a keeper restored in a file that never names
+// `lineKeeper` or through a string key, and a `{mark}` line inside the
+// caller's lines that renders zero or many times, outside the caller's commit
+// or under another binding of the name: inside a multi-line JSX prop value, a
+// nested component closure, a `.map(() => ...)` callback, a branch not taken,
+// or a scope that declares its own `mark`; and a per-caller case skipped from
+// inside a callback or a hook in its describe (`ctx.skip()`).
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { lineOf, maskNonCode } from "./lib/ts-mask.mjs";
+import { lineOf, maskNonCode, matchBrace } from "./lib/ts-mask.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SKIP = ["src/test/", "src/components/ui/"];
@@ -49,135 +79,36 @@ function loadCorpus() {
   return corpus;
 }
 
-/** The index just past an open tag's closing `>`, or -1: `<…>` type arguments
- *  after the name and `{…}` attribute values may hold a `>` of their own. */
-function openTagEnd(masked, from) {
-  let braces = 0;
-  let angles = 0;
-  for (let k = from; k < masked.length; k++) {
-    const c = masked[k];
-    if (c === "{" || c === "(") braces++;
-    else if (c === "}" || c === ")") braces--;
-    else if (braces === 0 && c === "<") angles++;
-    else if (c === ">" && masked[k - 1] !== "=" && braces === 0) {
-      if (angles > 0) angles--;
-      else return k + 1;
-    }
-    if (braces < 0) return -1;
-  }
-  return -1;
-}
+const indentOf = (line) => /^ */.exec(line)[0].length;
+const blank = (line) => line.trim() === "";
 
-/** The open tag's own attributes, from just past its name to `end`: a brace
- *  or paren group at the top level (a spread, an attribute's value) and an
- *  unbraced element value are skipped whole, so an element nested in a value
- *  contributes none. `value` is the raw masked text (`{…}`, a quoted string or
- *  an element), null for a bare name. */
-function tagAttrs(masked, from, end) {
-  const attrs = [];
-  const group = (i) => {
-    let depth = 0;
-    for (; i < end; i++) {
-      const c = masked[i];
-      if (c === "{" || c === "(") depth++;
-      else if ((c === "}" || c === ")") && --depth === 0) return i + 1;
-    }
-    return end;
-  };
-  // Past the element whose `<` is at `i`, its children and closing tag
-  // included; `end` when it never closes inside the host's tag.
-  const element = (i) => {
-    let depth = 0;
-    while (i < end) {
-      if (masked[i] === "{") {
-        i = group(i);
-        continue;
-      }
-      if (masked[i] !== "<") {
-        i++;
-        continue;
-      }
-      const closing = masked[i + 1] === "/";
-      const tagEnd = openTagEnd(masked, i + 1);
-      if (tagEnd === -1 || tagEnd > end) return end;
-      if (closing) depth--;
-      else if (masked[tagEnd - 2] !== "/") depth++;
-      i = tagEnd;
-      if (depth <= 0) return i;
-    }
-    return end;
-  };
-  let angles = 0;
-  let k = from;
-  while (k < end) {
-    const c = masked[k];
-    if (c === "{" || c === "(") {
-      k = group(k);
-      continue;
-    }
-    if (c === "<") angles++;
-    else if (c === ">" && masked[k - 1] !== "=" && angles > 0) angles--;
-    else if (angles === 0 && /[A-Za-z_$]/.test(c) && /\s/.test(masked[k - 1])) {
-      const name = /^[\w$:-]+/.exec(masked.slice(k, end))[0];
-      let j = k + name.length;
-      while (j < end && /\s/.test(masked[j])) j++;
-      if (masked[j] !== "=") {
-        attrs.push({ name, value: null });
-        k += name.length;
-        continue;
-      }
-      j++;
-      while (j < end && /\s/.test(masked[j])) j++;
-      const q = masked[j];
-      let vEnd = j;
-      if (q === "{") vEnd = group(j);
-      else if (q === "<") vEnd = element(j);
-      else if (q === '"' || q === "'") vEnd = masked.indexOf(q, j + 1) + 1;
-      attrs.push({ name, value: masked.slice(j, vEnd) });
-      k = Math.max(vEnd, j + 1);
-      continue;
-    }
-    k++;
-  }
-  return attrs;
-}
+// A one-line open tag's attributes: each value quoted or a brace group with no
+// brace inside. The type arguments carry no space or `=`.
+const ONE_LINE_TAG =
+  /^(?:<[^=\s]*>)?((?: [\w$-]+(?:="[^"]*"|=\{[^{}]*\})?)*) ?\/?>/;
+const ONE_LINE_ATTR = / ([\w$-]+(?:="[^"]*"|=\{[^{}]*\})?)/g;
 
-/** Whether the `{` at `at` opens a JSX child: right after a tag's `>` (never
- *  an arrow's `=>` or a type argument list's), or after a sibling `{…}` that
- *  itself opens one, so a JavaScript block's `}` never counts. */
-function opensJsxChild(masked, at) {
-  let k = at - 1;
-  while (k >= 0 && /\s/.test(masked[k])) k--;
-  if (masked[k] === ">")
-    return masked[k - 1] !== "=" && closesJsxTag(masked, k);
-  if (masked[k] !== "}") return false;
-  for (let depth = 0; k >= 0; k--) {
-    if (masked[k] === "}") depth++;
-    else if (masked[k] === "{" && --depth === 0)
-      return opensJsxChild(masked, k);
-  }
-  return false;
-}
-
-/** Whether the `>` at `at` ends a JSX tag: its `<` (back past `{…}` attribute
- *  values) starts a tag name, a `/` or a fragment, and follows no identifier
- *  but a keyword, since `Name<…>` is a type argument list. */
-function closesJsxTag(masked, at) {
-  let depth = 0;
-  for (let k = at - 1; k >= 0; k--) {
-    const c = masked[k];
-    if (c === "}") depth++;
-    else if (c === "{") depth--;
-    else if (depth === 0 && c === "<") {
-      if (!/[A-Za-z/>]/.test(masked[k + 1] ?? "")) return false;
-      let j = k - 1;
-      while (j >= 0 && /\s/.test(masked[j])) j--;
-      if (!/[\w$]/.test(masked[j] ?? "")) return true;
-      const word = /[\w$]+$/.exec(masked.slice(0, j + 1))?.[0] ?? "";
-      return /^(return|yield|await|case|default|in|of)$/.test(word);
+/** The own attributes of the open tag whose name ends at `col` of line `i`,
+ *  each as its trimmed text, or a reason the tag isn't in Biome's form. */
+function ownAttrs(lines, i, start, col) {
+  if (!blank(lines[i].slice(0, start)))
+    return { why: "doesn't start its line" };
+  const rest = lines[i].slice(col).trimEnd();
+  if (/^(?:<[^=]*>)?$/.test(rest)) {
+    const attrs = [];
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (blank(line)) continue;
+      const indent = indentOf(line);
+      if (indent === start && /^\/?>$/.test(line.trim())) return { attrs };
+      if (indent === start + 2) attrs.push(line.trim());
+      else if (indent < start + 2) return { why: "isn't in Biome's form" };
     }
+    return { why: "has no end" };
   }
-  return false;
+  const one = ONE_LINE_TAG.exec(rest);
+  if (one === null) return { why: "isn't in Biome's form" };
+  return { attrs: [...one[1].matchAll(ONE_LINE_ATTR)].map((m) => m[1]) };
 }
 
 const HOST_TAG = /<(DiffViewWithMultiSelect|DiffView)\b/g;
@@ -185,108 +116,180 @@ const HOST_TAG = /<(DiffViewWithMultiSelect|DiffView)\b/g;
 // own entry here, scoped to the file whose host draws it (`file` absent = any).
 // RenderedDiff's two arms key on the build and the record its rows are for.
 const HOST_KEYS = [
-  { re: /^\{\s*diffFile\.getId\(\)\s*\}$/ },
+  { attr: "key={diffFile.getId()}" },
   {
-    re: /^\{\s*viewKey\(viewGen, diffFile\)\s*\}$/,
+    attr: "key={viewKey(viewGen, diffFile)}",
     file: "src/features/diff/DiffSurface.tsx",
   },
 ];
 const ANCHOR_CALL = /\buseModeLineAnchor\(/g;
+const ANCHOR_NAME = /\buseModeLineAnchor\b/g;
+const IMPORT_LIST = /\bimport\s*\{([^}]*)\}\s*from\b/g;
+
+/** Offsets of `useModeLineAnchor` written as a plain import specifier. */
+function plainImports(masked) {
+  const at = new Set();
+  for (const m of masked.matchAll(IMPORT_LIST)) {
+    let pos = m.index + m[0].indexOf("{") + 1;
+    for (const spec of m[1].split(",")) {
+      if (spec.trim() === "useModeLineAnchor")
+        at.add(pos + spec.length - spec.trimStart().length);
+      pos += spec.length + 1;
+    }
+  }
+  return at;
+}
 const ANCHOR_DEF = /\bfunction\s+$/;
 const MARK_BIND = /\bconst\s*\{([^}]*)\}\s*=\s*$/;
-const KEEPER_RESTORE = /\blineKeeper\??\.current\??\.restore\(/g;
-const KEEPER_READ = /\blineKeeper\??\.current\??\.read\(\)/;
+// Names, not a call's spelling: counting an extra site only asks it to render
+// the snapshot read.
+const KEEPER_NAME = /\blineKeeper\b/;
+const RESTORE_NAME = /\brestore\b/;
+const KEEPER_READ = /^read=\{\(\) => lineKeeper\??\.current\??\.read\(\)\}$/;
+const SURFACE = "src/features/diff/DiffSurface.tsx";
+const HELD_IMPORT = 'import type { Assert, IsData } from "./held-data";';
+const HELD_TYPES = ["DiffLineAnchor", "ArmPaint"];
+const SUPPRESS = /@ts-(?:ignore|expect-error|nocheck)/i;
+const NOT_CALLED =
+  "useModeLineAnchor is named other than by a call, its definition or a plain import";
+const NOT_WHOLE = "useModeLineAnchor's call isn't the whole initializer";
 
-/** Violations over a corpus; also returns the roster counts T4 reads. */
+/** T5 over DiffSurface.tsx's text: the import and both held-type asserts. */
+function heldAsserts(text, masked) {
+  const out = [];
+  const lines = text.split("\n").map((l) => l.replace(/\r$/, ""));
+  const code = masked.split("\n").map((l) => l.replace(/\r$/, "").trim());
+  if (!lines.some((l, i) => l === HELD_IMPORT && code[i].startsWith("import")))
+    out.push(`T5 ${SURFACE}: no \`${HELD_IMPORT}\``);
+  for (const name of HELD_TYPES) {
+    const line = new RegExp(`^export type [\\w$]+ = Assert<IsData<${name}>>;$`);
+    if (!code.some((l) => line.test(l)))
+      out.push(`T5 ${SURFACE}: no \`Assert<IsData<${name}>>\` line`);
+  }
+  // Read raw, so a string or a comment naming one fails too.
+  lines.forEach((l, i) => {
+    const directive = SUPPRESS.exec(l);
+    if (directive !== null)
+      out.push(`T5 ${SURFACE}:${i + 1}: \`${directive[0]}\` can silence tsc`);
+  });
+  return out;
+}
+
+// The mutation tests rescan the shipped corpus, whose texts repeat: each text
+// is masked once (a throw is not cached, so it recurs on every scan).
+const MASKED = [new Map(), new Map()];
+function masks(text, jsx) {
+  const cache = MASKED[jsx ? 1 : 0];
+  if (!cache.has(text)) cache.set(text, maskNonCode(text, jsx));
+  return cache.get(text);
+}
+
+/** Violations over a corpus. */
 export function scan(corpus) {
+  return scanCounts(corpus).out;
+}
+
+/** Violations over a corpus, and how many `useModeLineAnchor` callers T2 read. */
+function scanCounts(corpus) {
   const out = [];
   let tags = 0;
   let callers = 0;
   let restores = 0;
   if (corpus.size === 0) out.push("T4 no source files read");
+  if (!corpus.has(SURFACE)) out.push(`T5 ${SURFACE}: not read`);
   for (const [rel, text] of corpus) {
     if (typeof text !== "string" || text.includes("\0")) {
       out.push(`T4 ${rel}: unreadable`);
+      if (rel === SURFACE) out.push(`T5 ${SURFACE}: unreadable`);
       continue;
     }
     let masked;
     try {
-      masked = maskNonCode(text, rel.endsWith(".tsx"));
+      masked = masks(text, rel.endsWith(".tsx"));
     } catch (e) {
       out.push(`T4 ${rel}: ${e.message}`);
       continue;
     }
-    for (const m of masked.matchAll(HOST_TAG)) {
-      tags++;
-      const end = openTagEnd(masked, m.index + m[0].length);
-      const at = `${rel}:${lineOf(text, m.index)} <${m[1]}>`;
-      if (end === -1) out.push(`T4 ${at}: no end to the open tag`);
-      else if (
-        !tagAttrs(masked, m.index + m[0].length, end).some(
-          (a) =>
-            a.name === "key" &&
-            a.value !== null &&
+    if (rel === SURFACE) out.push(...heldAsserts(text, masked));
+    const lines = masked.split("\n").map((l) => l.replace(/\r$/, ""));
+    let snapshotReads = false;
+    lines.forEach((line, i) => {
+      for (const m of line.matchAll(HOST_TAG)) {
+        tags++;
+        const at = `${rel}:${i + 1} <${m[1]}>`;
+        const own = ownAttrs(lines, i, m.index, m.index + m[0].length);
+        if (own.why === "has no end")
+          out.push(`T4 ${at}: the open tag has no end`);
+        else if (own.why !== undefined)
+          out.push(`T1 ${at}: the open tag ${own.why}`);
+        else if (
+          !own.attrs.some((a) =>
             HOST_KEYS.some(
-              (k) =>
-                (k.file === undefined || k.file === rel) && k.re.test(a.value),
+              (k) => (k.file === undefined || k.file === rel) && k.attr === a,
             ),
-        )
-      )
-        out.push(`T1 ${at}: no key on the retained build (HOST_KEYS)`);
-    }
-    const calls = [...masked.matchAll(ANCHOR_CALL)].map((m) => m.index);
-    calls.forEach((at, i) => {
-      const before = masked.slice(Math.max(0, at - 300), at);
-      if (ANCHOR_DEF.test(before)) return;
-      callers++;
-      const bind = MARK_BIND.exec(before);
-      const mark = bind && /\bmark\b(?:\s*:\s*([\w$]+))?/.exec(bind[1]);
-      const name = mark && (mark[1] ?? "mark");
-      const scope = masked.slice(at, calls[i + 1] ?? masked.length);
-      // A JSX child, before a tag or another child (see `opensJsxChild`).
-      const rendered =
-        name !== null &&
-        [
-          ...scope.matchAll(
-            new RegExp(`\\{\\s*${name}\\s*\\}(?=\\s*[<{])`, "g"),
-          ),
-        ].some((m) => opensJsxChild(masked, at + m.index));
-      if (!rendered)
-        out.push(
-          `T2 ${rel}:${lineOf(text, at)}: useModeLineAnchor's mark is not rendered`,
-        );
-    });
-    const restoreSites = [...masked.matchAll(KEEPER_RESTORE)].length;
-    if (restoreSites > 0) {
-      restores += restoreSites;
-      const marks = [...masked.matchAll(/<SnapshotMark\b/g)].some((m) => {
-        const end = openTagEnd(masked, m.index + m[0].length);
-        return (
-          end !== -1 &&
-          tagAttrs(masked, m.index + m[0].length, end).some(
-            (a) =>
-              a.name === "read" &&
-              a.value !== null &&
-              KEEPER_READ.test(a.value),
           )
-        );
-      });
-      if (!marks)
+        )
+          out.push(`T1 ${at}: no key on the retained build (HOST_KEYS)`);
+      }
+      for (const m of line.matchAll(/<SnapshotMark\b/g)) {
+        const own = ownAttrs(lines, i, m.index, m.index + m[0].length);
+        if (own.attrs?.some((a) => KEEPER_READ.test(a))) snapshotReads = true;
+      }
+    });
+    for (const m of masked.matchAll(ANCHOR_CALL)) {
+      const before = masked.slice(Math.max(0, m.index - 300), m.index);
+      if (ANCHOR_DEF.test(before)) continue;
+      callers++;
+      const at = `T2 ${rel}:${lineOf(text, m.index)}`;
+      const bind = MARK_BIND.exec(before);
+      if (
+        bind === null ||
+        !bind[1].split(",").some((element) => element.trim() === "mark")
+      ) {
+        out.push(`${at}: useModeLineAnchor's result binds no \`mark\``);
+        continue;
+      }
+      const close = matchBrace(masked, m.index + m[0].length - 1);
+      if (close === -1 || masked[close + 1] !== ";") {
+        out.push(`${at}: ${NOT_WHOLE}`);
+        continue;
+      }
+      const bindLine = lineOf(masked, m.index - before.length + bind.index) - 1;
+      const indent = indentOf(lines[bindLine]);
+      let rendered = false;
+      for (let j = lineOf(masked, close); j < lines.length; j++) {
+        if (blank(lines[j])) continue;
+        if (indentOf(lines[j]) < indent) break;
+        if (lines[j].trim() === "{mark}") rendered = true;
+      }
+      if (!rendered || !rel.endsWith(".tsx"))
+        out.push(`${at}: no line of the caller after the call is \`{mark}\``);
+    }
+    const imports = plainImports(masked);
+    for (const m of masked.matchAll(ANCHOR_NAME)) {
+      if (masked[m.index + m[0].length] === "(" || imports.has(m.index))
+        continue;
+      out.push(`T2 ${rel}:${lineOf(text, m.index)}: ${NOT_CALLED}`);
+    }
+    if (KEEPER_NAME.test(masked) && RESTORE_NAME.test(masked)) {
+      restores++;
+      if (!snapshotReads)
         out.push(`T3 ${rel}: no <SnapshotMark> reads the keeper it restores`);
     }
   }
   if (tags === 0) out.push("T4 no library view tags found");
   if (callers === 0) out.push("T4 no useModeLineAnchor callers found");
   if (restores === 0) out.push("T4 no keeper restore sites found");
-  return out;
+  return { out, callers };
 }
 
 const REAL = loadCorpus();
-const SURFACE = "src/features/diff/DiffSurface.tsx";
 const VIEWER = "src/features/diff/DiffViewer.tsx";
 const IMAGE = "src/features/diff/ImageDiff.tsx";
 const KEY = "key={diffFile.getId()}";
 const RECORD_KEY = "key={viewKey(viewGen, diffFile)}";
+const NO_MARK = "no line of the caller after the call is `{mark}`";
+const NO_BIND = "useModeLineAnchor's result binds no `mark`";
 
 /** The corpus with the `nth` occurrence of `from` in `file` replaced. */
 function mutate(file, from, to, nth = 0) {
@@ -301,6 +304,9 @@ function mutate(file, from, to, nth = 0) {
   next.set(file, text.slice(0, at) + to + text.slice(at + from.length));
   return { corpus: next, line: lineOf(text, at) };
 }
+
+/** The T2 violations of a corpus. */
+const t2 = (corpus) => scan(corpus).filter((v) => v.startsWith("T2"));
 
 test("diff view hosts: the shipped source passes", () => {
   assert.deepEqual(scan(REAL), []);
@@ -359,7 +365,7 @@ test("T1 decoys: a key on a neighbour or in a comment doesn't count", () => {
     SURFACE,
     text.replace(
       /<DiffView<AnchorRowData>\r?\n/,
-      (m) => `${m}          // ${RECORD_KEY}\n`,
+      (m) => `${m}              // ${RECORD_KEY}\n`,
     ),
   );
   assert.notEqual(comment.get(SURFACE), text);
@@ -383,15 +389,22 @@ test("T1/T3 decoys: a data- attribute spelled like the key or read fails", () =>
 
 test("T1/T3 decoys: a nested element's key or a later prop's read fails", () => {
   for (const [file, nth, tag, key] of HOSTS) {
-    const { corpus } = mutate(
-      file,
-      key,
+    const text = REAL.get(file);
+    let at = -1;
+    for (let i = 0; i <= nth; i++) at = text.indexOf(key, at + 1);
+    const pad = /( *)$/.exec(text.slice(0, at))[1];
+    for (const value of [
       `renderWidgetLine={() => <div ${key} />}`,
-      nth,
-    );
-    const out = scan(corpus);
-    assert.equal(out.length, 1, out.join("\n"));
-    assert.match(out[0], new RegExp(`^T1 ${file}:\\d+ <${tag}>`));
+      // An element value, and one spanning lines whose key sits deeper.
+      `renderer=<Other ${key} />`,
+      `renderer=<Other ${key}>text</Other>`,
+      `renderer={\n${pad}  <Other\n${pad}    ${key}\n${pad}  />\n${pad}}`,
+    ]) {
+      const { corpus } = mutate(file, key, value, nth);
+      const out = scan(corpus);
+      assert.equal(out.length, 1, `${value}\n${out.join("\n")}`);
+      assert.match(out[0], new RegExp(`^T1 ${file}:\\d+ <${tag}>`));
+    }
   }
   const from = "read={() => lineKeeper.current?.read()}";
   const { corpus } = mutate(
@@ -405,327 +418,402 @@ test("T1/T3 decoys: a nested element's key or a later prop's read fails", () => 
   );
 });
 
-test("T1 decoy: an unbraced element value's key doesn't count", () => {
-  for (const [file, nth, tag, key] of HOSTS) {
-    for (const value of [`<Other ${key} />`, `<Other ${key}>text</Other>`]) {
-      const { corpus } = mutate(file, key, `renderer=${value}`, nth);
-      const out = scan(corpus);
-      assert.equal(out.length, 1, `${value}\n${out.join("\n")}`);
-      assert.match(out[0], new RegExp(`^T1 ${file}:\\d+ <${tag}>`));
-    }
-  }
-  // The element value is skipped, so the host's own key after it still counts.
-  const { corpus } = mutate(VIEWER, KEY, `renderer=<Other /> ${KEY}`);
-  assert.deepEqual(scan(corpus), []);
+/** The corpus with one more file, `src/extra.tsx`, holding `body`. */
+function withFile(body, rel = "src/extra.tsx") {
+  const corpus = new Map(REAL);
+  corpus.set(rel, body);
+  return corpus;
+}
+
+test("T1: a host outside Biome's line form fails closed", () => {
+  const at = "T1 src/extra.tsx:2 <DiffView>";
+  for (const [body, verdict] of [
+    // Mid-line, a key on the same line as another attribute, a one-line tag
+    // whose value holds a brace, an attribute line dedented past the tag's.
+    [
+      `export const v = (\n  ok && <DiffView ${KEY} />\n);\n`,
+      `${at}: the open tag doesn't start its line`,
+    ],
+    [
+      `export const v = (\n  <DiffView\n    a={1} ${KEY}\n  />\n);\n`,
+      `${at}: no key on the retained build (HOST_KEYS)`,
+    ],
+    [
+      `export const v = (\n  <DiffView a={{ b: 1 }} ${KEY} />\n);\n`,
+      `${at}: the open tag isn't in Biome's form`,
+    ],
+    [
+      `export const v = (\n  <DiffView\n    a={1}\n  ${KEY}\n  />\n);\n`,
+      `${at}: the open tag isn't in Biome's form`,
+    ],
+  ])
+    assert.deepEqual(
+      scan(withFile(body)).filter((v) => v.startsWith("T1")),
+      [verdict],
+      body,
+    );
+  // A one-line tag in Biome's form passes, its own key read.
+  assert.deepEqual(
+    scan(
+      withFile(
+        `export const v = (\n  <DiffView a="x" ${KEY} b={c(d)} />\n);\n`,
+      ),
+    ),
+    [],
+  );
 });
 
 test("T2: dropping each caller's mark names it", () => {
   for (const file of [SURFACE, VIEWER]) {
     const { corpus } = mutate(file, "{mark}", "{null}");
-    const out = scan(corpus).filter((v) => v.startsWith("T2"));
+    const out = t2(corpus);
     assert.equal(out.length, 1, out.join("\n"));
-    assert.match(
+    assert.ok(
+      out[0].startsWith(`T2 ${file}:`) && out[0].endsWith(`: ${NO_MARK}`),
       out[0],
-      new RegExp(`^T2 ${file}:\\d+: useModeLineAnchor's mark is not rendered$`),
     );
   }
 });
 
 test("T2 decoy: a mark bound and never rendered fails", () => {
   const { corpus } = mutate(VIEWER, "{mark}", "");
-  assert.equal(scan(corpus).filter((v) => v.startsWith("T2")).length, 1);
+  assert.equal(t2(corpus).length, 1);
 });
 
-test("T2 decoys: a mark named outside a JSX child fails", () => {
-  const call = "const { mark } = useModeLineAnchor(";
-  for (const use of [
-    "void ({ mark });",
-    "useEffect(() => { mark });",
-    "const kept = { mark };",
-    "if (flag) {} {mark} {paint()}",
-    "function finish(): ReturnType<() => void> {mark} {paint()}",
-  ]) {
-    const unrendered = mutate(VIEWER, "{mark}", "");
-    const text = unrendered.corpus.get(VIEWER);
-    const at = text.indexOf(call);
-    assert.notEqual(at, -1, "DiffViewer's useModeLineAnchor call");
-    const stmt = text.indexOf(";", at) + 1;
-    unrendered.corpus.set(
-      VIEWER,
-      `${text.slice(0, stmt)}\n  ${use}${text.slice(stmt)}`,
-    );
-    assert.equal(
-      scan(unrendered.corpus).filter((v) => v.startsWith("T2")).length,
-      1,
-      use,
-    );
-  }
-});
-
-// T10: the placement types the diff holds across a hold carry data only, so
-// nothing callable is retained. A member typed `(…) => …`, written as a
-// method, or typed by a literal with a call or construct signature fails, as
-// does such a signature on the interface itself; its type on the next line
-// counts (a member ending in `:`, `=>`, `|` or `&` runs on). A name in a
-// member's type resolves one level against the file's own `type` and
-// `interface` declarations and fails when that declaration is callable by the
-// same rules; an imported name is out of reach. A missing interface fails
-// closed.
-const HELD_TYPES = ["DiffLineAnchor", "ArmPaint"];
-const CALL_SIG = /^\s*(?:new\s*)?[(<]/;
-const RUNS_ON = /(?::|=>|\||&)\s*$/;
-/** Whether a type literal anywhere in `type` opens a member with a call or
- *  construct signature (a newline separates members unless the line runs on). */
-function hasCallSignature(type) {
-  const open = [];
-  for (let k = 0; k < type.length; k++) {
-    const c = type[k];
-    if ("{([".includes(c)) open.push(c);
-    else if ("})]".includes(c)) open.pop();
-    if (open.at(-1) !== "{" || !"{;,\n".includes(c)) continue;
-    if (c === "\n" && RUNS_ON.test(type.slice(0, k))) continue;
-    if (CALL_SIG.test(type.slice(k + 1))) return true;
-  }
-  return false;
-}
-/** The text from `open` (a `{`) through its matching close, or null. */
-function braced(masked, open) {
-  let depth = 0;
-  for (let k = open; k < masked.length; k++) {
-    if ("{([".includes(masked[k])) depth++;
-    else if ("})]".includes(masked[k]) && --depth === 0)
-      return masked.slice(open, k + 1);
-  }
-  return null;
-}
-/** The index just past the generic parameter list that opens at `open` (a
- *  `<`), or -1 when it never closes. Angle brackets count only outside
- *  `{([`, and an `=>` or a parameter default's `=` closes nothing. */
-function genericEnd(masked, open) {
-  let angle = 0;
-  let depth = 0;
-  for (let k = open; k < masked.length; k++) {
-    const c = masked[k];
-    if (c === "=" && masked[k + 1] === ">") k++;
-    else if ("{([".includes(c)) depth++;
-    else if ("})]".includes(c)) depth--;
-    else if (depth === 0 && c === "<") angle++;
-    else if (depth === 0 && c === ">" && --angle === 0) return k + 1;
-  }
-  return -1;
-}
-/** Whether `name` is declared in this file as a function type, or as a type
- *  literal or interface with a call or construct signature. */
-function callableDeclaration(masked, word) {
-  const name = word.replace(/\$/g, "\\$");
-  const head = new RegExp(`\\btype ${name}(?![\\w$])\\s*`).exec(masked);
-  let from = head === null ? -1 : head.index + head[0].length;
-  // An unterminated parameter list reads as callable: the scan fails closed.
-  if (from >= 0 && masked[from] === "<") {
-    from = genericEnd(masked, from);
-    if (from < 0) return true;
-  }
-  const assign = /\s*=/y;
-  if (from >= 0) assign.lastIndex = from;
-  if (from >= 0 && assign.exec(masked) !== null) {
-    from = assign.lastIndex;
-    let depth = 0;
-    let end = masked.length;
-    for (let k = from; k < masked.length; k++) {
-      if ("{([".includes(masked[k])) depth++;
-      else if ("})]".includes(masked[k])) depth--;
-      else if (masked[k] === ";" && depth === 0) {
-        end = k;
-        break;
-      }
-    }
-    const body = masked.slice(from, end);
-    if (body.includes("=>") || hasCallSignature(body)) return true;
-  }
-  const iface = new RegExp(`\\binterface ${name}(?![\\w$])[^{]*\\{`).exec(
-    masked,
+test("T2 decoy: a `{mark}` line inside the call's arguments never counts", () => {
+  // The shipped viewer's last argument turned into a closure returning JSX
+  // with a `{mark}` child, its rendered mark dropped.
+  const viewer = REAL.get(VIEWER);
+  const eol = viewer.includes("\r\n") ? "\r\n" : "\n";
+  const lines = (...l) => l.join(eol);
+  const arg = lines("    deferredPath,", "    diffFile,", "  );");
+  assert.equal(viewer.split(arg).length, 2, "the viewer's call arguments");
+  assert.equal(viewer.split("{mark}").length, 2, "the viewer's mark");
+  const closure = lines(
+    "    deferredPath,",
+    "    () => (",
+    "      <div>",
+    "        {mark}",
+    "      </div>",
+    "    ),",
+    "  );",
   );
-  if (iface === null) return false;
-  const body = braced(masked, iface.index + iface[0].length - 1);
-  return body === null || hasCallSignature(body);
-}
-function functionMembers(text) {
-  const masked = maskNonCode(text.replace(/\r\n/g, "\n"), true);
-  const out = [];
-  const namesCallable = (type) =>
-    (type.match(/[A-Za-z_$][\w$]*/g) ?? []).some((n) =>
-      callableDeclaration(masked, n),
-    );
-  for (const name of HELD_TYPES) {
-    const head = new RegExp(`\\binterface ${name}\\s*\\{`).exec(masked);
-    if (head === null) throw new Error(`T10: interface ${name} not found`);
-    const open = head.index + head[0].length - 1;
-    let depth = 0;
-    let end = -1;
-    for (let k = open; k < masked.length; k++) {
-      if ("{([".includes(masked[k])) depth++;
-      else if ("})]".includes(masked[k]) && --depth === 0) {
-        end = k;
-        break;
-      }
-    }
-    if (end < 0) throw new Error(`T10: interface ${name} has no end`);
-    let member = "";
-    depth = 0;
-    const flush = () => {
-      const m = /^\s*(?:readonly\s+)?([\w$]+)\s*\??\s*([:(<])([\s\S]*)$/.exec(
-        member,
-      );
-      if (CALL_SIG.test(member)) out.push(`${name}.(call)`);
-      else if (
-        m !== null &&
-        (m[2] !== ":" ||
-          m[3].includes("=>") ||
-          hasCallSignature(m[3]) ||
-          namesCallable(m[3]))
-      )
-        out.push(`${name}.${m[1]}`);
-      member = "";
-    };
-    const runsOn = () => RUNS_ON.test(member);
-    for (const c of masked.slice(open + 1, end)) {
-      if ("{([".includes(c)) depth++;
-      else if ("})]".includes(c)) depth--;
-      const ends = depth === 0 && (c === ";" || (c === "\n" && !runsOn()));
-      if (ends && member.trim() !== "") flush();
-      else if (!ends) member += c;
-    }
-    if (member.trim() !== "") flush();
-  }
-  return out;
-}
-const SURFACE_FILE = fileURLToPath(
-  new URL("../src/features/diff/DiffSurface.tsx", import.meta.url),
-);
-
-test("T10: DiffLineAnchor and ArmPaint declare no function member", () => {
-  const text = readFileSync(SURFACE_FILE, "utf8");
-  assert.deepEqual(functionMembers(text), []);
-  const put = (anchor, member) => {
-    assert.equal(text.split(anchor).length, 2, anchor);
-    return text.replace(anchor, () => `${anchor}\n  ${member}`);
-  };
+  const decoyed = viewer
+    .replace("{mark}", () => "{null}")
+    .replace(arg, () => closure);
+  const call = viewer.indexOf("const { mark } = useModeLineAnchor(");
+  assert.deepEqual(t2(withFile(decoyed, VIEWER)), [
+    `T2 ${VIEWER}:${lineOf(viewer, call)}: ${NO_MARK}`,
+  ]);
+  // The same closure with the mark still rendered after the call passes.
   assert.deepEqual(
-    functionMembers(
-      put("export interface DiffLineAnchor {", "render: () => ReactNode;"),
-    ),
-    ["DiffLineAnchor.render"],
-  );
-  assert.deepEqual(
-    functionMembers(put("interface ArmPaint {", "draw(): void;")),
-    ["ArmPaint.draw"],
-  );
-  // A member whose type starts on the next line.
-  assert.deepEqual(
-    functionMembers(put("interface ArmPaint {", "render:\n    () => void;")),
-    ["ArmPaint.render"],
-  );
-  assert.deepEqual(
-    functionMembers(
-      put(
-        "export interface DiffLineAnchor {",
-        "render?:\n    | (() => void)\n    | null;",
+    scan(
+      withFile(
+        viewer.replace(arg, () => closure),
+        VIEWER,
       ),
     ),
-    ["DiffLineAnchor.render"],
-  );
-  // A type literal with a call or construct signature, and the interface's own.
-  for (const member of [
-    "render: { (): ReactNode };",
-    "render: {\n    (value: string): string;\n  };",
-    "make: { new (): object };",
-    "nested: { inner: { (): void } };",
-  ])
-    assert.deepEqual(
-      functionMembers(put("interface ArmPaint {", member)),
-      [`ArmPaint.${member.slice(0, member.indexOf(":"))}`],
-      member,
-    );
-  assert.deepEqual(functionMembers(put("interface ArmPaint {", "(): void;")), [
-    "ArmPaint.(call)",
-  ]);
-  // Data-only literals pass, a parenthesized type on a run-on line included.
-  for (const member of [
-    "meta: { a: string; b: (number | string)[] };",
-    "meta: {\n    a:\n      (string | number);\n  };",
-  ])
-    assert.deepEqual(
-      functionMembers(put("interface ArmPaint {", member)),
-      [],
-      member,
-    );
-  // A member typed by a name this file declares: callable declarations fail,
-  // the union member included; data declarations pass.
-  const named = (decl, member) =>
-    functionMembers(`${put("interface ArmPaint {", member)}\n${decl}\n`);
-  for (const [decl, member] of [
-    [
-      "type AnchorRenderer = (row: string) => ReactNode;",
-      "render?: AnchorRenderer;",
-    ],
-    [
-      "type AnchorRenderer = (row: string) => ReactNode;",
-      "render: AnchorRenderer | null;",
-    ],
-    ["type Renderer<T> = (value: T) => void;", "render: Renderer<string>;"],
-    // A parameter default's `=` (a function-typed default included) neither
-    // ends the parameter list nor hides the alias behind it.
-    ["type Renderer<T = string> = (value: T) => void;", "render?: Renderer;"],
-    ["type R<T = () => void> = (v: T) => void;", "render?: R;"],
-    ["type AnchorRenderer = { new (): object };", "render: AnchorRenderer;"],
-    [
-      "interface AnchorRenderer {\n  (row: string): ReactNode;\n}",
-      "render: AnchorRenderer;",
-    ],
-  ])
-    assert.deepEqual(named(decl, member), ["ArmPaint.render"], decl);
-  for (const [decl, member] of [
-    [
-      "type AnchorMeta = { a: string; b: (number | string)[] };",
-      "meta?: AnchorMeta;",
-    ],
-    ["interface AnchorMeta {\n  a: string;\n}", "meta: AnchorMeta | null;"],
-    ["type Box<T = string> = { value: T };", "box?: Box;"],
-  ])
-    assert.deepEqual(named(decl, member), [], decl);
-  assert.throws(() =>
-    functionMembers(text.replace("interface ArmPaint {", "type ArmPaint = {")),
+    [],
   );
 });
 
-test("T2: a second caller is judged on its own mark", () => {
-  const withCaller = (body) => {
-    const corpus = new Map(REAL);
-    const text = REAL.get(VIEWER);
-    const next = `${text}\nexport function SecondCaller() {\n${body}\n}\n`;
-    corpus.set(VIEWER, next);
-    return { corpus, line: lineOf(next, next.indexOf(call, text.length)) };
-  };
-  const call = 'useModeLineAnchor(undefined, "split", "a.ts", null)';
-  // The first caller's rendered mark sits before this one: it doesn't count.
-  const unrendered = withCaller(
-    `  const { mark } = ${call};\n  return <div />;`,
+const CALL = 'useModeLineAnchor(undefined, "split", "a.ts", null)';
+/** A file with one caller whose body is `body` (`mark` bound before it),
+ *  and the line of its call. */
+function caller(body, bind = "{ mark }") {
+  const text = `export function Caller() {\n  const ${bind} = ${CALL};\n${body}\n}\n`;
+  return { corpus: withFile(text), at: "T2 src/extra.tsx:2" };
+}
+
+test("T2: a mark on its own child line counts under any parent", () => {
+  for (const open of [
+    "<Wrapper<Row>>",
+    "<Wrapper<{ id: string }>>",
+    "<Wrapper<Map<string, Row>>>",
+    "<Ns.Wrapper<Row> a={1}>",
+    "<>",
+  ]) {
+    const close = `</${/^<([\w.]*)/.exec(open)[1]}>`;
+    const { corpus } = caller(
+      `  return (\n    ${open}\n      {mark}\n    ${close}\n  );`,
+    );
+    assert.deepEqual(scan(corpus), [], open);
+  }
+});
+
+test("T2: every other spelling fails closed, by meaning", () => {
+  for (const use of [
+    // Rendered, but not on a line of its own: Biome's one-line JSX.
+    "  return <div>{mark}</div>;",
+    "  return <Wrapper<Row>>{mark}</Wrapper>;",
+    // A contextual `of` before a type argument list, then a block.
+    "  function finish(): of<Wrapper<Row>> {mark} {paint()}\n  return null;",
+    // An attribute value, on the tag's line or on a line of its own.
+    "  return <div a={mark} />;",
+    "  return (\n    <div\n      a={mark}\n    />\n  );",
+    // A block statement, on one line or as Biome writes it.
+    "  if (flag) {} {mark} {paint()}\n  return null;",
+    "  if (flag) {\n    mark;\n  }\n  return null;",
+    // Named in a comment, a string, an object or an effect.
+    "  // {mark}\n  return null;",
+    '  return "{mark}";',
+    "  const kept = { mark };\n  return kept;",
+    "  useEffect(() => {\n    mark;\n  });\n  return null;",
+    // Spaced inside the braces, which Biome would never leave.
+    "  return (\n    <div>\n      { mark }\n    </div>\n  );",
+  ]) {
+    const { corpus, at } = caller(use);
+    assert.deepEqual(t2(corpus), [`${at}: ${NO_MARK}`], use);
+  }
+});
+
+test("T2: a binding other than a literal `mark` fails closed", () => {
+  const body = "  return (\n    <div>\n      {mark}\n    </div>\n  );";
+  for (const bind of [
+    "{ mark: m }",
+    "{ mark: $m }",
+    "{ keepLine }",
+    "anchor",
+  ]) {
+    const { corpus, at } = caller(body, bind);
+    assert.deepEqual(t2(corpus), [`${at}: ${NO_BIND}`], bind);
+  }
+  // Several elements, one per line as Biome wraps them, still bind it.
+  const { corpus } = caller(body, "{\n    keepLine,\n    mark,\n  }");
+  assert.deepEqual(scan(corpus), []);
+});
+
+test("T2: only the caller's own function counts", () => {
+  // The mark line sits in the next function, after the caller's closing brace.
+  const text = `export function Caller() {\n  const { mark } = ${CALL};\n  return null;\n}\nexport function Other() {\n  return (\n    <div>\n      {mark}\n    </div>\n  );\n}\n`;
+  assert.deepEqual(t2(withFile(text)), [`T2 src/extra.tsx:2: ${NO_MARK}`]);
+  // A second caller in the shipped corpus is judged on its own lines.
+  const second = new Map(REAL);
+  const viewer = REAL.get(VIEWER);
+  second.set(
+    VIEWER,
+    `${viewer}\nexport function SecondCaller() {\n  const { mark } = ${CALL};\n  return <div />;\n}\n`,
   );
-  assert.deepEqual(
-    scan(unrendered.corpus).filter((v) => v.startsWith("T2")),
+  assert.deepEqual(t2(second), [
+    `T2 ${VIEWER}:${lineOf(viewer, viewer.length) + 2}: ${NO_MARK}`,
+  ]);
+});
+
+test("T2: a `.ts` file renders no JSX", () => {
+  const text = `export function f() {\n  const { mark } = ${CALL};\n  return (\n    <Row>\n      {mark}\n  );\n}\n`;
+  assert.deepEqual(t2(withFile(text, "src/lib/asserted-mark.ts")), [
+    `T2 src/lib/asserted-mark.ts:2: ${NO_MARK}`,
+  ]);
+});
+
+test("T2: the hook named other than by a call, its definition or a plain import fails closed", () => {
+  const good = `  const { mark } = ${CALL};\n  return (\n    <div>\n      {mark}\n    </div>\n  );`;
+  for (const [text, line] of [
+    // An aliased import, whose calls T2 would never see.
     [
-      `T2 ${VIEWER}:${unrendered.line}: useModeLineAnchor's mark is not rendered`,
+      `import { useModeLineAnchor as useAnchor } from "./x";\nexport function C() {\n  const { mark } = useAnchor(undefined, "split", "a.ts", null);\n  return null;\n}\n`,
+      1,
     ],
+    // A reference stored, passed on or re-exported.
+    [
+      `export function C() {\n  const hook = useModeLineAnchor;\n${good}\n}\n`,
+      2,
+    ],
+    [`export function C() {\n  register(useModeLineAnchor);\n${good}\n}\n`, 2],
+    [`export { useModeLineAnchor } from "./x";\n`, 1],
+    [`import type { useModeLineAnchor } from "./x";\n`, 1],
+  ])
+    assert.deepEqual(
+      t2(withFile(text)),
+      [`T2 src/extra.tsx:${line}: ${NOT_CALLED}`],
+      text,
+    );
+  // A plain specifier, on one line or as Biome wraps a list, passes.
+  for (const imports of [
+    'import { a, useModeLineAnchor } from "./x";',
+    'import {\n  a,\n  useModeLineAnchor,\n} from "./x";',
+  ])
+    assert.deepEqual(
+      scan(withFile(`${imports}\nexport function C() {\n${good}\n}\n`)),
+      [],
+      imports,
+    );
+});
+
+test("T2: a call that isn't the whole initializer fails closed", () => {
+  const mark = "  return (\n    <div>\n      {mark}\n    </div>\n  );";
+  /** A caller whose call to the hook ends with `tail` instead of `;`. */
+  const ending = (call, tail) =>
+    withFile(
+      `export function Caller() {\n  const { mark } = ${call}${tail}\n${mark}\n}\n`,
+    );
+  for (const tail of [
+    " && { mark: null };",
+    " ?? { mark: null };",
+    " || fallback;",
+    " as Anchor;",
+    "!;",
+    ".other;",
+    ",\n    other = 1;",
+    " && {\n    mark: null,\n  };",
+    "",
+  ])
+    assert.deepEqual(
+      t2(ending(CALL, tail)),
+      [`T2 src/extra.tsx:2: ${NOT_WHOLE}`],
+      JSON.stringify(tail),
+    );
+  // The shipped viewer's call with its result discarded.
+  const viewer = REAL.get(VIEWER);
+  const start = viewer.indexOf("const { mark } = useModeLineAnchor(");
+  const call = viewer.slice(start, viewer.indexOf(");", start) + 2);
+  const { corpus, line } = mutate(
+    VIEWER,
+    call,
+    call.replace(/\);$/, () => ") && { mark: null };"),
   );
-  const unbound = withCaller(`  const { keepLine } = ${call};\n  return null;`);
+  assert.deepEqual(t2(corpus), [`T2 ${VIEWER}:${line}: ${NOT_WHOLE}`]);
+  // Arguments holding parentheses, strings and regexes keep the call whole.
+  for (const whole of [
+    "useModeLineAnchor(ref, mode)",
+    "useModeLineAnchor(\n    ref,\n    mode,\n    path,\n    build,\n  )",
+    'useModeLineAnchor(ref, pick(mode), "a)b", { k: [1] }, () => fn())',
+    "useModeLineAnchor(ref, /\\)/.test(x), `${a})`)",
+    "useModeLineAnchor(ref, a ? (b) : (c), [d(e)])",
+  ])
+    assert.deepEqual(scan(ending(whole, ";")), [], whole);
+});
+
+const FLASH = "src/test/diff-white-flash.test.tsx";
+const CALLER_CASES =
+  'describe("each useModeLineAnchor caller reads its line once on a switch"';
+
+/** The plain `it(` / `test(` cases in the white-flash test's per-caller
+ *  describe, or why that block can't be counted. */
+export function callerCases(text) {
+  const at = text.indexOf(CALLER_CASES);
+  if (at === -1 || text.indexOf(CALLER_CASES, at + 1) !== -1)
+    return "the per-caller describe isn't written exactly once";
+  let masked;
+  try {
+    masked = maskNonCode(text, true);
+  } catch (e) {
+    return e.message;
+  }
+  const close = matchBrace(masked, at + "describe".length);
+  if (close === -1) return "the per-caller describe has no end";
+  if (!plainCase(masked.slice(at + "describe(".length, close)))
+    return DESCRIBE_FORM;
+  const body = masked.slice(at + CALLER_CASES.length, close);
+  if (/(?<![\w.$])(?:it|test|describe)\s*\./.test(body))
+    return "a case is written with a modifier";
+  if (/(?<![\w.$])describe\s*\(/.test(body))
+    return "the per-caller describe nests another";
+  const cases = [...body.matchAll(/(?<![\w.$])(?:it|test)\s*\(/g)];
+  for (const c of cases) {
+    const open = c.index + c[0].length - 1;
+    const end = matchBrace(body, open);
+    if (end === -1 || !plainCase(body.slice(open + 1, end))) return CASE_FORM;
+  }
+  return cases.length;
+}
+
+const DESCRIBE_FORM =
+  "the per-caller describe isn't written `describe(title, fn)` (an options object or a timeout rides it): write it in that form, never skip it";
+
+const CASE_FORM =
+  "a case isn't written `it(title, fn)` or `test(title, fn)` (an options object or a timeout rides it): write it in that form, or delete it rather than skip it";
+
+/** Whether a case's masked argument text is exactly a string title and a
+ *  function, so no options object (`{ skip: true }`) or timeout rides it. */
+function plainCase(args) {
+  const parts = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < args.length; i++) {
+    if ("([{".includes(args[i])) depth++;
+    else if (")]}".includes(args[i])) depth--;
+    else if (args[i] === "," && depth === 0) {
+      parts.push(args.slice(from, i).trim());
+      from = i + 1;
+    }
+  }
+  const last = args.slice(from).trim();
+  if (last !== "") parts.push(last);
+  return (
+    parts.length === 2 &&
+    /^(["'`])[^"'`]*\1$/.test(parts[0]) &&
+    /^(?:async\s+)?(?:\([^()]*\)\s*=>|function\b)/.test(parts[1])
+  );
+}
+
+test("T2: the callers T2 reads match the white-flash test's per-caller cases", () => {
+  const text = readFileSync(join(ROOT, FLASH), "utf8").replace(/\r\n/g, "\n");
+  const cases = callerCases(text);
+  assert.equal(typeof cases, "number", String(cases));
+  assert.equal(scanCounts(REAL).callers, cases);
+  // A third caller with no case of its own.
+  const { corpus } = caller("  return <>\n    {mark}\n  </>;");
+  assert.deepEqual(scan(corpus), []);
+  assert.equal(scanCounts(corpus).callers, cases + 1);
+  // A case dropped, renamed with a modifier, or the describe retitled.
+  const first = text.indexOf('  it("RenderedDiff"');
+  assert.notEqual(first, -1);
+  const end = text.indexOf("\n  });\n", first) + "\n  });\n".length;
+  assert.equal(callerCases(text.slice(0, first) + text.slice(end)), cases - 1);
   assert.equal(
-    scan(unbound.corpus).filter((v) => v.startsWith("T2")).length,
-    1,
+    callerCases(
+      text.replace('  it("RenderedDiff"', () => '  it.skip("RenderedDiff"'),
+    ),
+    "a case is written with a modifier",
   );
-  const rendered = withCaller(
-    `  const { mark } = ${call};\n  return <div>{mark}</div>;`,
+  assert.equal(
+    callerCases(
+      text.replace("caller reads its line once", () => "caller reads"),
+    ),
+    "the per-caller describe isn't written exactly once",
   );
-  assert.deepEqual(scan(rendered.corpus), []);
+  // A case carrying an options object or a timeout, which can skip it.
+  const staging = '  it("the staging viewer", async';
+  assert.equal(text.split(staging).length, 2, staging);
+  for (const options of ["{ skip: true }", "{ todo: true }", "{ only: true }"])
+    assert.equal(
+      callerCases(
+        text.replace(
+          staging,
+          () => `  it("the staging viewer", ${options}, async`,
+        ),
+      ),
+      CASE_FORM,
+      options,
+    );
+  const caseEnd = text.slice(0, end).lastIndexOf("  });\n");
+  assert.equal(
+    callerCases(
+      `${text.slice(0, caseEnd)}  }, 10_000);\n${text.slice(caseEnd + "  });\n".length)}`,
+    ),
+    CASE_FORM,
+  );
+  // The describe itself carrying an options object or a timeout, which skips
+  // every case in it.
+  const head = `${CALLER_CASES}, () => {`;
+  assert.equal(text.split(head).length, 2, head);
+  for (const options of ["{ skip: true }", "{ todo: true }"])
+    assert.equal(
+      callerCases(
+        text.replace(head, () => `${CALLER_CASES}, ${options}, () => {`),
+      ),
+      DESCRIBE_FORM,
+      options,
+    );
+  const describeEnd = text.indexOf("\n});\n", text.indexOf(head));
+  assert.notEqual(describeEnd, -1);
+  assert.equal(
+    callerCases(
+      `${text.slice(0, describeEnd)}\n}, 10_000);\n${text.slice(describeEnd + "\n});\n".length)}`,
+    ),
+    DESCRIBE_FORM,
+  );
 });
 
 test("T3: dropping each keeper site's SnapshotMark fails", () => {
@@ -741,10 +829,74 @@ test("T3: dropping each keeper site's SnapshotMark fails", () => {
   }
 });
 
+test("T3 decoys: a read that isn't the snapshot's own call fails", () => {
+  for (const [file, from, call] of [
+    [SURFACE, "read={() => lineKeeper.current?.read()}", "lineKeeper.current"],
+    [IMAGE, "read={() => lineKeeper?.current?.read()}", "lineKeeper?.current"],
+  ])
+    for (const value of [
+      // A snapshot calls the outer function only.
+      `{() => () => ${call}?.read()}`,
+      // The call runs at render, not at the snapshot.
+      `{${call}?.read()}`,
+      `{() => undefined && ${call}?.read()}`,
+      `{() => { void ${call}?.read(); }}`,
+    ]) {
+      const { corpus } = mutate(file, from, `read=${value}`);
+      assert.deepEqual(
+        scan(corpus).filter((v) => v.startsWith("T3")),
+        [`T3 ${file}: no <SnapshotMark> reads the keeper it restores`],
+        value,
+      );
+    }
+});
+
+test("T3: a restore spelled any way is a site, by the names alone", () => {
+  const text = REAL.get(IMAGE);
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const restore = "lineKeeper?.current?.restore();";
+  const read = "read={() => lineKeeper?.current?.read()}";
+  const drop = [`T3 ${IMAGE}: no <SnapshotMark> reads the keeper it restores`];
+  for (const spelling of [
+    "lineKeeper?.current?.restore?.();",
+    "lineKeeper!.current!.restore();",
+    `lineKeeper?.current${eol}      ?.restore();`,
+    `const { restore } = lineKeeper?.current ?? {};${eol}    restore?.();`,
+    `const keeper = lineKeeper?.current;${eol}    keeper?.restore();`,
+    "lineKeeper?.current?.restore.call(null);",
+  ]) {
+    assert.equal(text.split(restore).length, 2, restore);
+    const respelled = text.replace(restore, () => spelling);
+    const kept = withFile(respelled, IMAGE);
+    assert.deepEqual(scan(kept), [], `${spelling} with the read`);
+    const unread = withFile(
+      respelled.replace(read, () => "read={() => undefined}"),
+      IMAGE,
+    );
+    assert.deepEqual(
+      scan(unread).filter((v) => v.startsWith("T3")),
+      drop,
+      spelling,
+    );
+  }
+  // A file that only hands the keeper on is no site.
+  const handsOn =
+    "export const v = (\n  <Child lineKeeper={lineKeeper} />\n);\n";
+  assert.deepEqual(scan(withFile(handsOn)), []);
+  // Fails closed: the keeper named beside an unrelated `restore`.
+  const unrelated =
+    "export function C({ lineKeeper, restore }) {\n  return null;\n}\n";
+  assert.deepEqual(
+    scan(withFile(unrelated)).filter((v) => v.startsWith("T3")),
+    ["T3 src/extra.tsx: no <SnapshotMark> reads the keeper it restores"],
+  );
+});
+
 test("T4: empty rosters, unreadable files and open tags fail closed", () => {
   assert.ok(scan(new Map()).includes("T4 no source files read"));
   const none = new Map([["src/a.ts", "export const a = 1;\n"]]);
   assert.deepEqual(scan(none), [
+    `T5 ${SURFACE}: not read`,
     "T4 no library view tags found",
     "T4 no useModeLineAnchor callers found",
     "T4 no keeper restore sites found",
@@ -756,4 +908,81 @@ test("T4: empty rosters, unreadable files and open tags fail closed", () => {
   open.set("src/c.tsx", "export const c = <DiffView diffFile={x}");
   // The masker refuses the unterminated tag before the tag scan reads it.
   assert.ok(scan(open).some((v) => v.startsWith("T4 src/c.tsx")));
+  // A spanning tag that reaches the end of its file.
+  const endless = withFile(`export const v = (\n  <DiffView\n    ${KEY}\n`);
+  assert.ok(scan(endless).some((v) => v.startsWith("T4 src/extra.tsx")));
+});
+
+test("T5: each held-type assert and the import are pinned", () => {
+  const text = REAL.get(SURFACE);
+  for (const name of HELD_TYPES) {
+    const line = new RegExp(
+      `^export type [\\w$]+ = Assert<IsData<${name}>>;\\r?$`,
+      "m",
+    );
+    const found = line.exec(text);
+    assert.ok(found, name);
+    for (const to of ["", `// ${found[0]}`, `/*\n${found[0]}\n*/`]) {
+      const { corpus } = mutate(SURFACE, found[0], to);
+      assert.deepEqual(
+        scan(corpus),
+        [`T5 ${SURFACE}: no \`Assert<IsData<${name}>>\` line`],
+        `${name} -> ${JSON.stringify(to)}`,
+      );
+    }
+  }
+  const { corpus } = mutate(SURFACE, HELD_IMPORT, `// ${HELD_IMPORT}`);
+  assert.deepEqual(scan(corpus), [`T5 ${SURFACE}: no \`${HELD_IMPORT}\``]);
+  const missing = new Map(REAL);
+  missing.delete(SURFACE);
+  assert.ok(scan(missing).includes(`T5 ${SURFACE}: not read`));
+  const binary = new Map(REAL);
+  binary.set(SURFACE, `${REAL.get(SURFACE)}\0`);
+  assert.ok(scan(binary).includes(`T5 ${SURFACE}: unreadable`));
+});
+
+test("T5: a directive that can silence the asserts fails, naming its line", () => {
+  const text = REAL.get(SURFACE);
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  /** `insert` as a line of its own at offset `at`, and the verdict naming it. */
+  const added = (at, insert, word) => {
+    const corpus = new Map(REAL);
+    corpus.set(SURFACE, text.slice(0, at) + insert + eol + text.slice(at));
+    return [
+      corpus,
+      `T5 ${SURFACE}:${lineOf(text, at)}: \`${word}\` can silence tsc`,
+    ];
+  };
+  for (const name of HELD_TYPES) {
+    const found = new RegExp(
+      `^export type [\\w$]+ = Assert<IsData<${name}>>;\\r?$`,
+      "m",
+    ).exec(text);
+    assert.ok(found, name);
+    // The start of the comment block above the line, when it has one:
+    // TypeScript reads a directive up through `//` and blank lines.
+    let block = found.index;
+    for (;;) {
+      const prev = text.lastIndexOf("\n", block - 2) + 1;
+      if (!/^\s*(?:\/\/.*)?\r?$/.test(text.slice(prev, block - 1))) break;
+      block = prev;
+    }
+    const sites = block < found.index ? [found.index, block] : [found.index];
+    for (const at of sites)
+      for (const word of ["@ts-expect-error", "@ts-ignore"]) {
+        const [corpus, verdict] = added(at, `// ${word}`, word);
+        assert.deepEqual(scan(corpus), [verdict], `${name} ${word} at ${at}`);
+      }
+  }
+  for (const [insert, word] of [
+    ["// @ts-nocheck", "@ts-nocheck"],
+    ["/* @ts-nocheck */", "@ts-nocheck"],
+    ["// @TS-IGNORE", "@TS-IGNORE"],
+    // Fails closed: a string literal naming one is no directive, but the raw
+    // read can't tell, and the file has no reason to spell one.
+    ['export const NOTE = "@ts-ignore";', "@ts-ignore"],
+  ]) {
+    const [corpus, verdict] = added(0, insert, word);
+    assert.deepEqual(scan(corpus), [verdict], insert);
+  }
 });

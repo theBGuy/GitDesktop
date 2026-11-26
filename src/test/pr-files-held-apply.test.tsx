@@ -339,9 +339,12 @@ describe("a thread resolved elsewhere while its comment edit is open", () => {
   const P1 = `${HEAD}@@ -1,5 +1,5 @@\n l1\n l2\n-l3\n+L3\n l4\n l5\n`;
   const open = thread("T_E", "a.ts", 2, [comment("C_E", "Mine", true)]);
   const resolved = { ...open, isResolved: true };
+  /** Line 5 changed: the edit's line and its neighbours read the same. */
+  const P2 = `${HEAD}@@ -1,5 +1,5 @@\n l1\n l2\n-l3\n+L3\n l4\n-l5\n+L5\n`;
 
-  /** Edits the comment, resolves the thread elsewhere, then Cancels. */
-  async function cancelResolvedEdit() {
+  /** Edits the comment, resolves the thread elsewhere, then Cancels; with
+   *  `remount`, a push that restores the edit remounts its rows first. */
+  async function cancelResolvedEdit(remount = false) {
     const user = userEvent.setup();
     const view = mount({
       path: "a.ts",
@@ -353,9 +356,21 @@ describe("a thread resolved elsewhere while its comment edit is open", () => {
       timeout: 10_000,
     });
     await editIn(user, "T_E");
+    const text = remount ? P2 : P1;
+    if (remount) {
+      await view.update({
+        path: "a.ts",
+        text,
+        threads: [open],
+        apply: apply("feature"),
+      });
+      await settle();
+      await waitFor(() => expect(document.body.textContent).toContain("L5"));
+      expect(editBox()).toHaveValue("kept edit");
+    }
     await view.update({
       path: "a.ts",
-      text: P1,
+      text,
       threads: [resolved],
       apply: apply("feature"),
     });
@@ -376,6 +391,10 @@ describe("a thread resolved elsewhere while its comment edit is open", () => {
 
   it("stays open with the typed text, and collapses onto its header once the edit closes", async () => {
     await cancelResolvedEdit();
+  }, 30_000);
+
+  it("collapses onto its header once the edit closes after a push remounted its rows", async () => {
+    await cancelResolvedEdit(true);
   }, 30_000);
 
   it("lands on its header when removing the focused control fires a focusout", async () => {

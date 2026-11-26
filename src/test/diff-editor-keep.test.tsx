@@ -7,6 +7,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
@@ -15,7 +16,7 @@ import {
   Profiler,
   type RefObject,
   use,
-  useState,
+  useLayoutEffect,
 } from "react";
 import {
   afterEach,
@@ -163,8 +164,7 @@ const thread: PrThreadOut = {
 function TestReply() {
   const { expanded } = use(RowState);
   const id = "reply:t1";
-  const reopened = useKeptOpen(id);
-  const [open, setOpen] = useState(reopened);
+  const [open, setOpen] = useKeptOpen(id);
   const kept = useKeptDraft(expanded && open ? id : null);
   if (!expanded) return null;
   return open ? (
@@ -229,16 +229,25 @@ const anchorAt = (line: number): DiffLineAnchor[] =>
   ]);
 const ANCHORS = anchorAt(3);
 
-function TestComposer({ line }: { line: number }) {
+function TestComposer({
+  line,
+  rowsBehind = false,
+}: {
+  line: number;
+  rowsBehind?: boolean;
+}) {
   const { text, setText, restored, setBusy } = useKeptDraft(
     LINE_COMPOSER_KEEP_ID,
   );
   const held = useDiffRowsHeld();
+  let note: string | undefined;
+  if (held) note = "rows held";
+  else if (rowsBehind) note = "rows loading";
   return (
     <>
       <textarea
         aria-label={`Comment on ${line}`}
-        aria-description={held ? "rows held" : undefined}
+        aria-description={note}
         value={text}
         onChange={(e) => setText(e.target.value)}
         autoFocus={!restored}
@@ -255,7 +264,9 @@ function TestComposer({ line }: { line: number }) {
 
 const widget: LineWidget = {
   enabled: true,
-  render: ({ line }) => <TestComposer line={line} />,
+  render: ({ line, rowsBehind }) => (
+    <TestComposer line={line} rowsBehind={rowsBehind} />
+  ),
 };
 
 let client: QueryClient;
@@ -287,10 +298,12 @@ interface ViewProps {
   /** With `revs`, the repo whose whole files content mode reads. */
   repo?: string;
   scroller?: RefObject<HTMLDivElement | null>;
+  path?: string;
 }
 
 function view({
   narrow,
+  path = PATH,
   text = TEXT,
   active = true,
   expanded = true,
@@ -310,7 +323,7 @@ function view({
         <RowState value={{ expanded, standIn, reply }}>
           <div ref={scroller} data-testid="scroller">
             <GitDiffView
-              filePath={PATH}
+              filePath={path}
               text={text}
               forceUnified={narrow}
               lineWidget={lineWidget}
@@ -821,6 +834,28 @@ const cardAnchors: DiffLineAnchor[] = bodies([
   { side: "new", line: 3, ids: ["reply:T_9"], render: () => <CardSlot /> },
 ]);
 const REPLY_BOX = { name: "Reply to review thread" };
+const headerOf = (id: string) =>
+  document.querySelector(`[data-thread-id="${id}"]`) as HTMLElement;
+const cardOf = (id: string) =>
+  headerOf(id).closest("[data-keep-id]") as HTMLElement;
+
+/** No resolved thread its test never toggled reads open without an editor's
+ *  field in its body: an open set never holds a card for an editor it does
+ *  not draw. Reads the DOM, so a hidden tab's cards count too. */
+function expectNoEmptyHold(toggled: readonly string[] = []) {
+  for (const header of document.querySelectorAll<HTMLElement>(
+    "[data-thread-id]",
+  )) {
+    const id = header.dataset.threadId ?? "";
+    if (
+      toggled.includes(id) ||
+      !header.textContent?.includes("Resolved") ||
+      header.getAttribute("aria-expanded") !== "true"
+    )
+      continue;
+    expect(cardOf(id).querySelector("textarea")).not.toBeNull();
+  }
+}
 
 async function expandResolved() {
   const user = userEvent.setup();
@@ -872,6 +907,76 @@ describe("fix round: kept editors", () => {
     expect(screen.getByRole("textbox", { name: "Edit comment" })).toHaveValue(
       "Card words revised",
     );
+  });
+
+  // A thread on line 3, open, then resolved elsewhere (one array each).
+  const tripAnchors = (resolved: boolean): DiffLineAnchor[] => {
+    const t = cardThread("T_7", resolved);
+    return bodies([
+      {
+        side: "new",
+        line: 3,
+        ids: ["reply:T_7", "edit:N_T_7"],
+        render: () => (
+          <DiffThreadAnchor
+            threads={[t]}
+            onReply={onCardReply}
+            onEditComment={onCardEdit}
+          />
+        ),
+      },
+    ]);
+  };
+  const TRIP_OPEN = tripAnchors(false);
+  const TRIP_RESOLVED = tripAnchors(true);
+
+  /** Edits the comment, resolves the thread elsewhere, then hides the tab;
+   *  with `remount`, a layout swap remounts the rows first. The hide releases
+   *  the edit's keep claim, which must not read as a close. */
+  async function hideTab(remount: boolean) {
+    const user = userEvent.setup();
+    const at = (anchors: DiffLineAnchor[], narrow = true, active = true) =>
+      view({ narrow, scope: SCOPE, anchors, active });
+    const { rerender } = render(at(TRIP_OPEN));
+    const header = () =>
+      document.querySelector('[data-thread-id="T_7"]') as HTMLElement;
+    await waitFor(() => expect(header()).toBeTruthy());
+    await user.click(
+      await screen.findByRole("button", { name: "Comment actions" }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    await user.type(
+      await screen.findByRole("textbox", { name: "Edit comment" }),
+      " kept",
+    );
+    const narrow = !remount;
+    if (remount) {
+      await act(async () => rerender(at(TRIP_OPEN, narrow)));
+      await settle();
+      expect(splitRows()).toBeGreaterThan(0);
+    }
+    await act(async () => rerender(at(TRIP_RESOLVED, narrow)));
+    await settle();
+    expect(within(cardOf("T_7")).getByText("Resolved")).toBeTruthy();
+    expect(header()).toHaveAttribute("aria-expanded", "true");
+    await act(async () => rerender(at(TRIP_RESOLVED, narrow, false)));
+    await settle();
+    expect(header()).toHaveAttribute("aria-expanded", "true");
+    // Hidden, so out of the accessibility tree: read the field itself.
+    const field = document.querySelector('textarea[aria-label="Edit comment"]');
+    expect(field).toHaveValue("Card words kept");
+    expect(field).not.toBeVisible();
+    expectNoEmptyHold();
+    // The show half is "b (show)" below: showing these rows again crashes the
+    // library diff in jsdom once a thread row is drawn.
+  }
+
+  it("S3b: a resolved thread's open edit stays open, with its text, while its tab is hidden", async () => {
+    await hideTab(false);
+  });
+
+  it("S3b: after a remount of its rows, a resolved thread's open edit stays open while its tab is hidden", async () => {
+    await hideTab(true);
   });
 
   it("F2: a record move over the same build lets another record's anchors through", async () => {
@@ -1248,6 +1353,29 @@ describe("open coverage: held rows, History, the line anchor, ranges", () => {
     expect(box).toHaveValue("kept");
   });
 
+  it("CommitLineComposer on a PR commit drill-in: unheld, Ctrl+Enter posts once", async () => {
+    writes.commit.mockClear();
+    const user = userEvent.setup();
+    render(
+      view({
+        narrow: true,
+        scope: SCOPE,
+        anchors: [],
+        text: TEXT,
+        lineWidget: commitWidgetFor(TEXT),
+      }),
+    );
+    const box = await openComposer(2, COMMIT_BOX);
+    await user.type(box, "sent");
+    box.focus();
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await settle();
+    expect(writes.commit).toHaveBeenCalledTimes(1);
+    expect(writes.commit).toHaveBeenCalledWith(
+      expect.objectContaining({ body: "sent", line: 2, path: PATH }),
+    );
+  });
+
   it("A1-13: History's shape (revisions, no repo): a rebuild keeping the line restores its CommitLineComposer", async () => {
     const user = userEvent.setup();
     const at = (text: string) =>
@@ -1352,6 +1480,74 @@ describe("open coverage: held rows, History, the line anchor, ranges", () => {
     } finally {
       rect.mockRestore();
     }
+  });
+
+  /** Scrolls the first file, pushes a change to it (held while `holds`),
+   *  then moves the same view onto another file. */
+  async function changeFile(holds: boolean) {
+    const OTHER = "src/other.txt";
+    // The other file's rows start at line 11, so a line of the first file
+    // restored into it moves the scroller.
+    const other = `diff --git a/${OTHER} b/${OTHER}\n--- a/${OTHER}\n+++ b/${OTHER}\n@@ -11,40 +11,40 @@\n keep 11\n-old 12\n+new 12\n${Array.from(
+      { length: 38 },
+      (_, i) => ` keep ${i + 13}`,
+    ).join("\n")}\n`;
+    const scroller = createRef<HTMLDivElement>();
+    const at = (path: string, text: string) =>
+      view({
+        narrow: true,
+        standIn: holds,
+        scope: SCOPE,
+        scroller,
+        path,
+        text,
+      });
+    const { rerender } = render(at(PATH, LONG));
+    await gutter(30);
+    const el = scroller.current as HTMLDivElement;
+    let top = 0;
+    Object.defineProperty(el, "scrollTop", {
+      configurable: true,
+      get: () => top,
+      set: (v: number) => {
+        top = v;
+      },
+    });
+    const rowsIn = () => [...el.querySelectorAll("tr[data-line]")];
+    const rect = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        const rows = this.matches("tr[data-line]") ? rowsIn() : [];
+        const i = rows.indexOf(this);
+        if (i < 0) return { top: 0, bottom: 0 } as DOMRect;
+        return { top: i * 30 - top, bottom: i * 30 + 30 - top } as DOMRect;
+      });
+    try {
+      top = 300;
+      el.dispatchEvent(new Event("scroll"));
+      await act(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+      const read = captureLineAnchor(el)?.new;
+      expect(read).toBeGreaterThan(1);
+      // A push that changes the file: an editor the keep cannot place holds it.
+      const pushed = LONG.replace(" keep 20\n", "-keep 20\n+kept 20\n");
+      await act(async () => rerender(at(PATH, pushed)));
+      await settle();
+      expect(document.body.textContent?.includes("kept 20")).toBe(!holds);
+      await act(async () => rerender(at(OTHER, other)));
+      await settle();
+      await gutter(50);
+      expect(top).toBe(300);
+    } finally {
+      rect.mockRestore();
+    }
+  }
+
+  it("S1: an unheld change of file keeps the new file's scroll position", async () => {
+    await changeFile(false);
+  });
+
+  it("S1: a held build released by a change of file restores no line of the old file into the new one", async () => {
+    await changeFile(true);
   });
 
   it("A1-1 K1 range: a dragged range's composer comes back with its highlight on the range's rows", async () => {
@@ -1535,6 +1731,36 @@ describe("round zero: keep records", () => {
     expect(keep.widgetRecord()).toBeNull();
   });
 
+  it("S2: a view's queued hand-over drop leaves a later replacement's hand-over claimable", async () => {
+    const file = build(TEXT);
+    const keep = createEditorKeep();
+    keep.rowsReplaced(file, "unified", "r");
+    const row = {
+      keep,
+      kind: "anchor" as const,
+      side: "new" as const,
+      line: 3,
+      file,
+      record: "r",
+    };
+    const nextTask = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const token = keep.claim(row, "edit:c1", "draft");
+    // The first replacement's view is created and queues its drop; the edit
+    // re-claims, and a second replacement hands it over before that drop runs.
+    keep.release(token);
+    keep.rowsReplaced(file, "split", "r");
+    keep.queueHandOverDrop();
+    expect(keep.claim(row, "edit:c1", "draft")).toBe(token);
+    keep.release(token);
+    keep.rowsReplaced(file, "unified", "r");
+    await nextTask();
+    expect(keep.seedFor(row, "edit:c1")?.text).toBe("draft");
+    // The second view's own drop takes it, unclaimed.
+    keep.queueHandOverDrop();
+    await nextTask();
+    expect(keep.seedFor(row, "edit:c1")).toBeNull();
+  });
+
   it("A10: in a whole-file build, a composer on the last line restores", () => {
     const content = (two: string) => ({
       old: fileOf("old 2"),
@@ -1604,8 +1830,7 @@ describe("round zero: keep records", () => {
     const keep = createEditorKeep();
     const file = build(TEXT);
     function Editor() {
-      const reopened = useKeptOpen("edit:x");
-      const [open, setOpen] = useState(reopened);
+      const [open, setOpen] = useKeptOpen("edit:x");
       const kept = useKeptDraft(open ? "edit:x" : null);
       return open ? (
         <>
@@ -1893,7 +2118,10 @@ describe("B5: rows a rebuild's whole-file reads are still building", () => {
     await waitFor(() => expect(commitBox()).toHaveValue("kept"));
     const post = screen.getByRole("button", { name: "Comment" });
     expect(post).not.toHaveAccessibleDescription(COMMIT_LOADING_REASON);
-    await user.click(post);
+    // Caught up, the chord the held check pressed posts.
+    (commitBox() as HTMLTextAreaElement).focus();
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await settle();
     expect(writes.commit).toHaveBeenCalledTimes(1);
     expect(writes.commit).toHaveBeenCalledWith(
       expect.objectContaining({ body: "kept", line: 2, path: PATH }),
@@ -1908,6 +2136,8 @@ describe("C2: the close reason means the keep refused a replacement that is ther
     expect(composer(line)).toHaveAccessibleDescription("rows held");
   const notHeld = (line: number) =>
     expect(composer(line)).not.toHaveAccessibleDescription("rows held");
+  const loading = (line: number) =>
+    expect(composer(line)).toHaveAccessibleDescription("rows loading");
 
   it("(a) a busy composer across a layout change while the whole-file reads load reads as loading, then as held once they land", async () => {
     const OLD_FILE = `${fileOf("old 2")}\n`;
@@ -1942,7 +2172,7 @@ describe("C2: the close reason means the keep refused a replacement that is ther
     await settle();
     expect(box.isConnected).toBe(true);
     expect(document.body.textContent).not.toContain("five");
-    notHeld(2);
+    loading(2);
     await act(async () => {
       for (const land of waiting.values()) land();
     });
@@ -2103,5 +2333,398 @@ describe("B10: a reordered row refocuses the comment focus was in", () => {
     expect(replies()[0]).toHaveValue("b reply");
     expect(replies()[1]).toHaveValue("a reply");
     expect(document.activeElement).toBe(replies()[0]);
+  });
+});
+
+describe("the anchor's open editors", () => {
+  const two = (
+    id: string,
+    resolved: boolean,
+    ids: readonly string[],
+  ): ReviewThreadOut => ({
+    ...cardThread(id, resolved),
+    comments: ids.map((c) => ({
+      ...thread,
+      id: c,
+      body: c === `N_${id}` ? "Card words" : "Other words",
+    })),
+  });
+
+  /** The anchor alone in a tab, with no diff around it. */
+  function anchorOnly(
+    threads: ReviewThreadOut[],
+    {
+      active = true,
+      onEdit = onCardEdit,
+      reply = true,
+    }: {
+      active?: boolean;
+      onEdit?: (id: string, body: string) => Promise<boolean>;
+      reply?: boolean;
+    } = {},
+  ) {
+    return (
+      <QueryClientProvider client={client}>
+        <button type="button">outside</button>
+        <TabPanel active={active}>
+          <DiffThreadAnchor
+            threads={threads}
+            onReply={reply ? onCardReply : undefined}
+            onEditComment={onEdit}
+          />
+        </TabPanel>
+      </QueryClientProvider>
+    );
+  }
+
+  async function editOf(
+    user: ReturnType<typeof userEvent.setup>,
+    id: string,
+    index = 0,
+  ) {
+    await user.click(
+      within(cardOf(id)).getAllByRole("button", { name: "Comment actions" })[
+        index
+      ],
+    );
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    return screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Edit comment",
+    });
+  }
+
+  const editBox = () =>
+    document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Edit comment"]',
+    );
+  const replyBox = () =>
+    document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Reply to review thread"]',
+    );
+
+  // What the resolved thread's header and edit field read in each mount's
+  // first commit.
+  const firstCommits: { expanded: string | null; edit: string | null }[] = [];
+  function FirstCommit() {
+    useLayoutEffect(() => {
+      firstCommits.push({
+        expanded: headerOf("T_8")?.getAttribute("aria-expanded") ?? null,
+        edit: editBox()?.value ?? null,
+      });
+    }, []);
+    return null;
+  }
+  const probedAnchors: DiffLineAnchor[] = bodies([
+    {
+      side: "new",
+      line: 3,
+      ids: ["reply:T_8", "edit:N_T_8"],
+      render: () => (
+        <>
+          <DiffThreadAnchor
+            threads={[RESOLVED]}
+            onReply={onCardReply}
+            onEditComment={onCardEdit}
+          />
+          <FirstCommit />
+        </>
+      ),
+    },
+  ]);
+
+  it("a: a remount's first paint holds the resolved thread open with its edit; Cancel folds it", async () => {
+    const at = (narrow: boolean) =>
+      view({ narrow, scope: SCOPE, anchors: probedAnchors });
+    const { rerender } = render(at(true));
+    const user = await expandResolved();
+    await user.type(await editOf(user, "T_8"), " revised");
+    const mounts = firstCommits.length;
+    await act(async () => rerender(at(false)));
+    expect(splitRows()).toBeGreaterThan(0);
+    // The rows remounted, and every new mount's first commit, the first of
+    // them included, showed the header open over the edit with its text.
+    expect(firstCommits.length).toBeGreaterThan(mounts);
+    for (const first of firstCommits.slice(mounts))
+      expect(first).toEqual({
+        expanded: "true",
+        edit: "Card words revised",
+      });
+    expect(headerOf("T_8")).toHaveAttribute("aria-expanded", "true");
+    expect(editBox()).toHaveValue("Card words revised");
+    expectNoEmptyHold();
+    await user.click(
+      within(cardOf("T_8")).getByRole("button", { name: "Cancel" }),
+    );
+    await waitFor(() =>
+      expect(headerOf("T_8")).toHaveAttribute("aria-expanded", "false"),
+    );
+    expect(editBox()).toBeNull();
+    expectNoEmptyHold();
+  });
+
+  it("b (show): a resolved thread's open edit survives a hide and folds on Cancel once shown", async () => {
+    const user = userEvent.setup();
+    const at = (resolved: boolean, active = true) =>
+      anchorOnly([cardThread("T_B", resolved)], { active });
+    const { rerender } = render(at(false));
+    await user.type(await editOf(user, "T_B"), " kept");
+    await act(async () => rerender(at(true)));
+    expect(within(cardOf("T_B")).getByText("Resolved")).toBeTruthy();
+    expect(headerOf("T_B")).toHaveAttribute("aria-expanded", "true");
+    await act(async () => rerender(at(true, false)));
+    await settle();
+    expect(headerOf("T_B")).toHaveAttribute("aria-expanded", "true");
+    expect(editBox()).toHaveValue("Card words kept");
+    expect(editBox()).not.toBeVisible();
+    expectNoEmptyHold();
+    await act(async () => rerender(at(true)));
+    await settle();
+    expect(editBox()).toHaveValue("Card words kept");
+    await user.click(
+      within(cardOf("T_B")).getByRole("button", { name: "Cancel" }),
+    );
+    await waitFor(() =>
+      expect(headerOf("T_B")).toHaveAttribute("aria-expanded", "false"),
+    );
+    expectNoEmptyHold();
+  });
+
+  // The anchor on new line 3 of a diff, so its rows' keep is live. It is
+  // placed, with its editors' ids, from the threads on that line, as the
+  // Files pane places it: one body over each test's threads, which arrive
+  // through context so the anchor stays mounted while the line keeps one.
+  const Threads = createContext<ReviewThreadOut[]>([]);
+  function ThreadsAnchor() {
+    return (
+      <DiffThreadAnchor
+        threads={use(Threads)}
+        onReply={onCardReply}
+        onEditComment={onCardEdit}
+      />
+    );
+  }
+  const threadsBody = () => <ThreadsAnchor />;
+  const inDiff = (threads: ReviewThreadOut[]) => {
+    const here = threads.filter((t) => t.side === "new" && t.line === 3);
+    const anchors = bodies(
+      here.length === 0
+        ? []
+        : [
+            {
+              side: "new",
+              line: 3,
+              ids: here.flatMap((t) => [
+                `reply:${t.id}`,
+                ...t.comments.map((c) => `edit:${c.id}`),
+              ]),
+              render: threadsBody,
+            },
+          ],
+    );
+    return (
+      <Threads value={threads}>
+        {view({ narrow: true, scope: SCOPE, anchors })}
+      </Threads>
+    );
+  };
+  const shown = (id: string) =>
+    waitFor(() => {
+      expect(headerOf(id)).toBeTruthy();
+    });
+
+  it("c: an edit whose comment is dropped and comes back shows closed, with no editor", async () => {
+    const user = userEvent.setup();
+    const both = ["N_T_C", "N_other"];
+    const at = (resolved: boolean, ids: readonly string[]) =>
+      inDiff([two("T_C", resolved, ids)]);
+    const { rerender } = render(at(false, both));
+    await shown("T_C");
+    await user.type(await editOf(user, "T_C"), " revised");
+    await act(async () => rerender(at(true, both)));
+    expect(headerOf("T_C")).toHaveAttribute("aria-expanded", "true");
+    await act(async () => rerender(at(true, ["N_other"])));
+    await settle();
+    await act(async () => rerender(at(true, both)));
+    await settle();
+    expect(headerOf("T_C")).toHaveAttribute("aria-expanded", "false");
+    expect(editBox()).toBeNull();
+    expectNoEmptyHold();
+    await user.click(headerOf("T_C"));
+    expect(editBox()).toBeNull();
+    expect(await editOf(user, "T_C")).toHaveValue("Card words");
+    expectNoEmptyHold(["T_C"]);
+  });
+
+  it("d: a Reply whose thread is dropped and comes back beside a sibling is closed", async () => {
+    const user = userEvent.setup();
+    const sibling = cardThread("T_S", false);
+    const at = (threads: ReviewThreadOut[]) => inDiff(threads);
+    const { rerender } = render(at([cardThread("T_D", false), sibling]));
+    await shown("T_D");
+    await user.click(
+      within(cardOf("T_D")).getByRole("button", { name: "Reply…" }),
+    );
+    await user.type(screen.getByRole("textbox", REPLY_BOX), "gone");
+    await act(async () => rerender(at([cardThread("T_D", true), sibling])));
+    expect(headerOf("T_D")).toHaveAttribute("aria-expanded", "true");
+    const siblingCard = cardOf("T_S");
+    await act(async () => rerender(at([sibling])));
+    await settle();
+    // The sibling keeps the line's anchor mounted, so the Reply closed in it.
+    expect(siblingCard.isConnected).toBe(true);
+    await act(async () => rerender(at([cardThread("T_D", true), sibling])));
+    await settle();
+    expect(headerOf("T_D")).toHaveAttribute("aria-expanded", "false");
+    expect(replyBox()).toBeNull();
+    expectNoEmptyHold();
+  });
+
+  it("e: the same drops and returns made while the tab is hidden show closed", async () => {
+    const user = userEvent.setup();
+    const both = ["N_T_C", "N_other"];
+    const sibling = cardThread("T_S", false);
+    const at = (threads: ReviewThreadOut[], active = true) =>
+      anchorOnly(threads, { active });
+    const full = (resolved: boolean) => [
+      two("T_C", resolved, both),
+      cardThread("T_D", resolved),
+      sibling,
+    ];
+    const { rerender } = render(at(full(false)));
+    await user.type(await editOf(user, "T_C"), " revised");
+    await user.click(
+      within(cardOf("T_D")).getByRole("button", { name: "Reply…" }),
+    );
+    await user.type(screen.getByRole("textbox", REPLY_BOX), "gone");
+    await act(async () => rerender(at(full(true))));
+    expect(headerOf("T_C")).toHaveAttribute("aria-expanded", "true");
+    expect(headerOf("T_D")).toHaveAttribute("aria-expanded", "true");
+    await act(async () => rerender(at(full(true), false)));
+    await settle();
+    // Hidden with both fields still there, before their items drop.
+    expect(editBox()).toHaveValue("Card words revised");
+    expect(editBox()).not.toBeVisible();
+    expect(replyBox()).toHaveValue("gone");
+    expect(replyBox()).not.toBeVisible();
+    await act(async () =>
+      rerender(at([two("T_C", true, ["N_other"]), sibling], false)),
+    );
+    await settle();
+    await act(async () => rerender(at(full(true), false)));
+    await settle();
+    await act(async () => rerender(at(full(true))));
+    await settle();
+    expect(headerOf("T_C")).toHaveAttribute("aria-expanded", "false");
+    expect(headerOf("T_D")).toHaveAttribute("aria-expanded", "false");
+    expect(editBox()).toBeNull();
+    expect(replyBox()).toBeNull();
+    expectNoEmptyHold();
+  });
+
+  it("f: a collapse over an open edit closes it; expanding again shows no editor", async () => {
+    const user = userEvent.setup();
+    render(anchorOnly([cardThread("T_F", false)]));
+    await user.type(await editOf(user, "T_F"), " revised");
+    await user.click(headerOf("T_F"));
+    expect(headerOf("T_F")).toHaveAttribute("aria-expanded", "false");
+    await user.click(headerOf("T_F"));
+    expect(headerOf("T_F")).toHaveAttribute("aria-expanded", "true");
+    expect(editBox()).toBeNull();
+    expectNoEmptyHold(["T_F"]);
+  });
+
+  it("g: a save that lands after its comment went and came back leaves the editor opened since", async () => {
+    const user = userEvent.setup();
+    let land: (saved: boolean) => void = () => undefined;
+    const onEdit = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          land = resolve;
+        }),
+    );
+    const at = (ids: readonly string[]) =>
+      anchorOnly([two("T_G", false, ids)], { onEdit });
+    const { rerender } = render(at(["N_T_G"]));
+    await user.type(await editOf(user, "T_G"), " first");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(onEdit).toHaveBeenCalledTimes(1);
+    await act(async () => rerender(at([])));
+    await act(async () => rerender(at(["N_T_G"])));
+    expect(editBox()).toBeNull();
+    await user.type(await editOf(user, "T_G"), " second");
+    await act(async () => land(true));
+    await settle();
+    expect(editBox()).toHaveValue("Card words second");
+    expectNoEmptyHold();
+  });
+
+  it("i: replies withdrawn under an open Reply fold its resolved thread; restored, they open it with its text", async () => {
+    const user = userEvent.setup();
+    const at = (resolved: boolean, reply = true) =>
+      anchorOnly([cardThread("T_I", resolved)], { reply });
+    const { rerender } = render(at(false));
+    await user.click(
+      within(cardOf("T_I")).getByRole("button", { name: "Reply…" }),
+    );
+    await user.type(screen.getByRole("textbox", REPLY_BOX), "withdrawn");
+    await act(async () => rerender(at(true)));
+    expect(headerOf("T_I")).toHaveAttribute("aria-expanded", "true");
+    expect(replyBox()).toHaveValue("withdrawn");
+    await act(async () => rerender(at(true, false)));
+    expectNoEmptyHold();
+    expect(headerOf("T_I")).toHaveAttribute("aria-expanded", "false");
+    expect(replyBox()).toBeNull();
+    await act(async () => rerender(at(true)));
+    await settle();
+    expect(headerOf("T_I")).toHaveAttribute("aria-expanded", "true");
+    expect(replyBox()).toHaveValue("withdrawn");
+    expectNoEmptyHold();
+  });
+
+  const RESOLVED_H = cardThread("T_H", true);
+  function WithheldAnchor() {
+    const { reply } = use(RowState);
+    return (
+      <DiffThreadAnchor
+        threads={[RESOLVED_H]}
+        onReply={reply ? onCardReply : undefined}
+        onEditComment={onCardEdit}
+      />
+    );
+  }
+  const withheldAnchors: DiffLineAnchor[] = bodies([
+    {
+      side: "new",
+      line: 3,
+      ids: ["reply:T_H", "edit:N_T_H"],
+      render: () => <WithheldAnchor />,
+    },
+  ]);
+
+  it("h: a remount while replies are withheld never opens the Reply empty, nor holds the card open", async () => {
+    const user = userEvent.setup();
+    const at = (narrow: boolean, reply = true) =>
+      view({ narrow, scope: SCOPE, anchors: withheldAnchors, reply });
+    const { rerender } = render(at(true));
+    await user.click(
+      await waitFor(() => {
+        expect(headerOf("T_H")).toBeTruthy();
+        return headerOf("T_H");
+      }),
+    );
+    await user.click(
+      within(cardOf("T_H")).getByRole("button", { name: "Reply…" }),
+    );
+    await user.type(screen.getByRole("textbox", REPLY_BOX), "withheld");
+    await act(async () => rerender(at(false, false)));
+    await settle();
+    expect(splitRows()).toBeGreaterThan(0);
+    expect(headerOf("T_H")).toHaveAttribute("aria-expanded", "false");
+    expectNoEmptyHold();
+    await act(async () => rerender(at(false)));
+    await settle();
+    expect(headerOf("T_H")).toHaveAttribute("aria-expanded", "false");
+    expect(replyBox()).toBeNull();
+    expectNoEmptyHold();
   });
 });

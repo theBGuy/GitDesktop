@@ -23,7 +23,10 @@ import {
   type DiffLineAnchor,
   type LineWidget,
 } from "@/features/diff/DiffSurfaceLazy";
-import { useKeptIds, useOpenKeptIds } from "@/features/diff/editor-keep";
+import {
+  OpenEditorsContext,
+  useOpenEditorsHost,
+} from "@/features/diff/editor-keep";
 import {
   FileSlots,
   keyedPaneView,
@@ -130,58 +133,69 @@ export function DiffThreadAnchor({
   fileDiffLookup,
   mentions,
 }: { threads: ReviewThreadOut[] } & DiffThreadWiring) {
-  // A thread whose Reply or comment edit was open in this row before its rows
-  // remounted mounts expanded, resolved or not, so that editor comes back.
-  const keptIds = useKeptIds();
-  const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(
-      threads
-        .filter(
-          (t) =>
-            keptIds.includes(`reply:${t.id}`) ||
-            t.comments.some((c) => keptIds.includes(`edit:${c.id}`)),
-        )
-        .map((t) => [t.id, true]),
-    ),
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // A thread resolved elsewhere stays open while it draws an open Reply or
+  // comment edit, so the editor and its text survive (a remount of the rows
+  // and a hide of the tab included); it takes the resolved default once that
+  // editor closes. Both read the editors the card draws: a Reply only while
+  // replies are wired, an edit only on a comment the thread still lists. A
+  // Reply stays in the open set while replies are withdrawn, so their return
+  // re-expands the thread with the Reply and its text, on purpose.
+  const holds = (t: ReviewThreadOut, has: (id: string) => boolean) =>
+    (onReply !== undefined && has(`reply:${t.id}`)) ||
+    t.comments.some((c) => has(`edit:${c.id}`));
+  const fold = (t: ReviewThreadOut, has: (id: string) => boolean) =>
+    expanded[t.id] ?? (!t.isResolved || holds(t, has));
+  const editors = useOpenEditorsHost(
+    threads.flatMap((t) => [
+      ...(onReply === undefined ? [] : [`reply:${t.id}`]),
+      ...t.comments.map((c) => `edit:${c.id}`),
+    ]),
+    // Only the Reply and edit ids are this anchor's to prune; another
+    // editor's id under its provider passes through.
+    (id, has) =>
+      !/^(?:reply|edit):/.test(id) ||
+      threads.some(
+        (t) =>
+          id === `reply:${t.id}` ||
+          (fold(t, has) && t.comments.some((c) => id === `edit:${c.id}`)),
+      ),
   );
-  // A thread resolved elsewhere stays open while it holds an open Reply or
-  // comment edit, so the editor and its text survive; it takes the resolved
-  // default once that editor closes.
-  const openIds = useOpenKeptIds();
-  const ownsOpenEditor = (t: ReviewThreadOut) =>
-    openIds.includes(`reply:${t.id}`) ||
-    t.comments.some((c) => openIds.includes(`edit:${c.id}`));
-  const isExpanded = (t: ReviewThreadOut) =>
-    expanded[t.id] ?? (!t.isResolved || ownsOpenEditor(t));
+  const isExpanded = (t: ReviewThreadOut) => fold(t, editors.has);
   return (
-    <div className="flex flex-col gap-2">
-      {threads.map((t) => (
-        <ReviewThreadCard
-          key={t.id}
-          thread={t}
-          compact
-          expanded={isExpanded(t)}
-          onToggleExpand={() =>
-            setExpanded((prev) => ({
-              ...prev,
-              [t.id]: !(prev[t.id] ?? (!t.isResolved || ownsOpenEditor(t))),
-            }))
-          }
-          onQuote={onQuote}
-          onReply={onReply}
-          onResolve={onResolve}
-          onEditComment={onEditComment}
-          onDeleteComment={onDeleteComment}
-          editHeld={editHeld}
-          editHeldReason={editHeldReason}
-          pendingWrites={pendingWrites}
-          provider={provider}
-          apply={apply}
-          fileDiffLookup={fileDiffLookup}
-          mentions={mentions}
-        />
-      ))}
-    </div>
+    <OpenEditorsContext value={editors}>
+      <div className="flex flex-col gap-2">
+        {threads.map((t) => (
+          <ReviewThreadCard
+            key={t.id}
+            thread={t}
+            compact
+            expanded={isExpanded(t)}
+            onToggleExpand={() =>
+              setExpanded((prev) => ({
+                ...prev,
+                [t.id]: !(
+                  prev[t.id] ??
+                  (!t.isResolved || holds(t, editors.has))
+                ),
+              }))
+            }
+            onQuote={onQuote}
+            onReply={onReply}
+            onResolve={onResolve}
+            onEditComment={onEditComment}
+            onDeleteComment={onDeleteComment}
+            editHeld={editHeld}
+            editHeldReason={editHeldReason}
+            pendingWrites={pendingWrites}
+            provider={provider}
+            apply={apply}
+            fileDiffLookup={fileDiffLookup}
+            mentions={mentions}
+          />
+        ))}
+      </div>
+    </OpenEditorsContext>
   );
 }
 
@@ -617,10 +631,17 @@ function PrFileDiffSlot({
     repoPath !== undefined && lens !== undefined && number !== undefined
       ? { repoPath, lens, number }
       : undefined;
+  // By id, the first of a repeated id.
+  const threadById = new Map<string, ReviewThreadOut>();
+  for (const t of threads ?? [])
+    if (!threadById.has(t.id)) threadById.set(t.id, t);
+  const draftById = new Map<string, ReviewDraft>();
+  for (const d of drafts ?? [])
+    if (!draftById.has(d.id)) draftById.set(d.id, d);
   const renderAnchor = (anchor: DiffLineAnchor) => {
     const rowThreads = anchor.items.flatMap((k) =>
       k.startsWith(THREAD_ITEM)
-        ? (threads?.find((t) => t.id === k.slice(THREAD_ITEM.length)) ?? [])
+        ? (threadById.get(k.slice(THREAD_ITEM.length)) ?? [])
         : [],
     );
     const rowDrafts =
@@ -628,7 +649,7 @@ function PrFileDiffSlot({
         ? []
         : anchor.items.flatMap((k) =>
             k.startsWith(DRAFT_ITEM)
-              ? (drafts?.find((d) => d.id === k.slice(DRAFT_ITEM.length)) ?? [])
+              ? (draftById.get(k.slice(DRAFT_ITEM.length)) ?? [])
               : [],
           );
     if (rowThreads.length === 0 && rowDrafts.length === 0) return null;

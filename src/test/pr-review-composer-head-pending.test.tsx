@@ -105,6 +105,21 @@ function expectHeld(reason: string) {
   }
 }
 
+/** Types a draft, then presses every way to submit it: both buttons and the
+ *  chord. Nothing writes and the text stays. */
+async function expectSubmitsWriteNothing(
+  user: ReturnType<typeof userEvent.setup>,
+) {
+  await user.click(editor());
+  await user.keyboard("kept");
+  for (const button of submitButtons()) await user.click(button);
+  editor().focus();
+  await user.keyboard("{Control>}{Enter}{/Control}");
+  expect(writes.thread).not.toHaveBeenCalled();
+  expect(writes.draft).not.toHaveBeenCalled();
+  expect(editor()).toHaveValue("kept");
+}
+
 describe("headPendingKind", () => {
   it.each([
     [{ isError: false, isPaused: true, isFetching: false }, "offline"],
@@ -122,14 +137,8 @@ describe("the review composer over an older head's diff (AC-A10, AC-A11)", () =>
       const { node, onClose } = composer(kind);
       render(node);
       const user = userEvent.setup();
-      await user.click(editor());
-      await user.keyboard("kept");
+      await expectSubmitsWriteNothing(user);
       expectHeld(HEAD_PENDING_REVIEW_REASON[kind]("merge request"));
-      await user.keyboard("{Control>}{Enter}{/Control}");
-      await user.click(single());
-      expect(writes.thread).not.toHaveBeenCalled();
-      expect(writes.draft).not.toHaveBeenCalled();
-      expect(editor()).toHaveValue("kept");
       await user.click(screen.getByRole("button", { name: "Add suggestion" }));
       expect(editor().value).toContain("```suggestion");
       expect(onClose).not.toHaveBeenCalled();
@@ -183,32 +192,29 @@ describe("the review composer over an older head's diff (AC-A10, AC-A11)", () =>
     expect(suggest).toHaveAttribute("aria-disabled", "true");
     expect(suggest).toHaveAccessibleDescription(loading);
     expectHeld(loading);
+    await expectSubmitsWriteNothing(user);
     await user.click(suggest);
-    expect(editor()).toHaveValue("");
+    expect(editor()).toHaveValue("kept");
   });
 
-  it("held rows hold Add suggestion and the submits with the rows reason", () => {
+  it("held rows hold Add suggestion and the submits with the rows reason", async () => {
     render(behind(true));
+    const user = userEvent.setup();
     const suggest = screen.getByRole("button", { name: "Add suggestion" });
     expect(suggest).toHaveAccessibleDescription(DIFF_ROWS_HELD_REASON);
     expectHeld(DIFF_ROWS_HELD_REASON);
+    await expectSubmitsWriteNothing(user);
   });
 
   it("held rows alone, the deferred render caught up, still hold Add suggestion and the submits", async () => {
     render(behind(true, false));
     const user = userEvent.setup();
-    await user.click(editor());
-    await user.keyboard("kept");
     const suggest = screen.getByRole("button", { name: "Add suggestion" });
     expect(suggest).toHaveAttribute("aria-disabled", "true");
     expect(suggest).toHaveAccessibleDescription(DIFF_ROWS_HELD_REASON);
     expectHeld(DIFF_ROWS_HELD_REASON);
+    await expectSubmitsWriteNothing(user);
     await user.click(suggest);
-    expect(editor()).toHaveValue("kept");
-    await user.keyboard("{Control>}{Enter}{/Control}");
-    await user.click(single());
-    expect(writes.thread).not.toHaveBeenCalled();
-    expect(writes.draft).not.toHaveBeenCalled();
     expect(editor()).toHaveValue("kept");
   });
 

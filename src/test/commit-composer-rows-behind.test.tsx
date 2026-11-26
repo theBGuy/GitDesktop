@@ -260,13 +260,22 @@ async function expectHeld(user: ReturnType<typeof userEvent.setup>) {
   expect(commitBox()).toHaveValue("kept");
 }
 
-/** After the paint, Comment carries no reason and one click posts once. */
-async function expectPostsOnce(user: ReturnType<typeof userEvent.setup>) {
+/** After the paint, Comment carries no reason and one press posts once: the
+ *  button, or the Mod+Enter chord the held check pressed (its positive
+ *  control). */
+async function expectPostsOnce(
+  user: ReturnType<typeof userEvent.setup>,
+  via: "button" | "chord",
+) {
   await waitFor(() => expect(commitBox()).toHaveValue("kept"));
   const post = commentButton();
   expect(post).not.toHaveAccessibleDescription(COMMIT_LOADING_REASON);
-  await user.click(post);
-  expect(writes.commit).toHaveBeenCalledTimes(1);
+  if (via === "button") await user.click(post);
+  else {
+    (commitBox() as HTMLTextAreaElement).focus();
+    await user.keyboard("{Control>}{Enter}{/Control}");
+  }
+  await waitFor(() => expect(writes.commit).toHaveBeenCalledTimes(1));
   expect(writes.commit).toHaveBeenCalledWith(
     expect.objectContaining({ body: "kept", line: 2, path: PATH }),
   );
@@ -317,7 +326,7 @@ describe("the PR commit drill-in's composer while its slot paints a deferred vie
 
     await act(async () => gate.release());
     await waitFor(() => expect(newLine(150)).toBeNull());
-    await expectPostsOnce(user);
+    await expectPostsOnce(user, "button");
     client.clear();
   }, 30_000);
 });
@@ -397,7 +406,7 @@ describe("History's commit composer while the diff's own rows are behind", () =>
       for (const land of waiting.values()) land();
     });
     await waitFor(() => expect(document.body.textContent).toContain("five"));
-    await expectPostsOnce(user);
+    await expectPostsOnce(user, "chord");
     client.clear();
   }, 30_000);
 });

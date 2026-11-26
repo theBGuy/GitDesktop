@@ -1266,14 +1266,25 @@ describe("a binary-to-link typechange on an image path", () => {
 
   function Composer() {
     const kept = useKeptDraft(LINE_COMPOSER_KEEP_ID);
+    const held = useDiffRowsHeld();
     return (
-      <textarea
-        aria-label="Link comment"
-        value={kept.text}
-        onChange={(e) => kept.setText(e.target.value)}
-      />
+      <div>
+        <textarea
+          aria-label="Link comment"
+          value={kept.text}
+          onChange={(e) => kept.setText(e.target.value)}
+        />
+        <span data-held={held ? DIFF_ROWS_HELD_REASON : ""} />
+      </div>
     );
   }
+  /** The link half grown to four lines, the last of them `tail`: line 4 sits
+   *  outside a composer on line 1 and its neighbours. */
+  const longLink = (tail: string, hash = "2222222") =>
+    LINK_TEXT.replace(
+      "@@ -0,0 +1 @@\n+target.png\n",
+      `@@ -0,0 +1,4 @@\n+target.png\n+two\n+three\n+${tail}\n`,
+    ).replace("0000000..2222222", `0000000..${hash}`);
   const scoped = (text: string, scope = "pr-1"): PaneProps => ({
     ...FORGE,
     forgePatch: { source: { lens: "origin" }, scope },
@@ -1283,11 +1294,11 @@ describe("a binary-to-link typechange on an image path", () => {
     lineWidget: { enabled: true, render: () => <Composer /> },
   });
   /** The link half's composer open on its line, with "kept link" typed. */
-  async function linkComposer() {
+  async function linkComposer(text = LINK_TEXT) {
     vi.mocked(forgeFileAtSha).mockImplementation(
       () => new Promise(() => undefined),
     );
-    const pane = mountPane(scoped(LINK_TEXT));
+    const pane = mountPane(scoped(text));
     const num = await waitFor(() => {
       const cell = linkLine(pane)?.closest(".diff-line-num");
       expect(cell).toBeTruthy();
@@ -1303,13 +1314,21 @@ describe("a binary-to-link typechange on an image path", () => {
   }
 
   it("keeps the text half's composer and its text across a push under the same record", async () => {
-    const { pane } = await linkComposer();
-    pane.update(
-      scoped(LINK_TEXT.replace("0000000..2222222", "0000000..3333333")),
+    const { pane } = await linkComposer(longLink("tail-old"));
+    expect(pane.container.textContent).toContain("tail-old");
+    // The push changes line 4, outside the composer's line and neighbours.
+    pane.update(scoped(longLink("tail-new", "3333333")));
+    await waitFor(() =>
+      expect(pane.container.textContent).toContain("tail-new"),
     );
-    await act(async () => new Promise((r) => setTimeout(r, 20)));
+    expect(pane.container.textContent).not.toContain("tail-old");
     expect(screen.getByRole("textbox", { name: "Link comment" })).toHaveValue(
       "kept link",
+    );
+    // Applied, not held: the composer's line submits stay open.
+    expect(pane.container.querySelector("[data-held]")).toHaveAttribute(
+      "data-held",
+      "",
     );
   });
 
@@ -1423,11 +1442,16 @@ describe("an image pair's forge reads that can't run", () => {
     vi.mocked(forgeFileAtSha).mockRejectedValue(new Error("read failed"));
     renderPanes(OLD_SHA);
     // A rejected read is retried once, a second later, before it fails.
-    const [retry] = await screen.findAllByRole(
-      "button",
-      { name: "Retry" },
+    // Each side reads through its own observer, so wait for both: a side
+    // still reading when the test goes offline would park instead.
+    await waitFor(
+      () =>
+        expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(
+          2,
+        ),
       { timeout: 5_000 },
     );
+    const [retry] = screen.getAllByRole("button", { name: "Retry" });
     retry.focus();
     onlineManager.setOnline(false);
     try {
@@ -1897,8 +1921,23 @@ describe("an arm change under an open line composer", () => {
 
   it("keeps the SVG panes above held rows on the pair and source they drew", async () => {
     const PUSHED_SHA = "c".repeat(40);
-    vi.mocked(gitFileBase64).mockClear().mockResolvedValue(bytes("<svg/>"));
-    vi.mocked(forgeFileAtSha).mockClear().mockResolvedValue(bytes("<svg/>"));
+    // Each rev reads its own bytes, so a pane drawn from another rev shows.
+    // Valid documents that differ in colour, so a swapped pane is a different image.
+    const square = (fill: string) =>
+      `<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="${fill}"/></svg>`;
+    const SVG_TEXT: Record<string, string> = {
+      [OLD_SHA]: square("red"),
+      [NEW_SHA]: square("blue"),
+      [PUSHED_SHA]: square("green"),
+    };
+    const svgOf = (rev: string | null | undefined) =>
+      bytes(SVG_TEXT[rev ?? ""] ?? square("black"));
+    vi.mocked(gitFileBase64)
+      .mockClear()
+      .mockImplementation(async (_repo, rev) => svgOf(rev));
+    vi.mocked(forgeFileAtSha)
+      .mockClear()
+      .mockImplementation(async (_repo, rev) => svgOf(rev));
     const SVG_EDIT =
       "diff --git a/icon.svg b/icon.svg\nindex 1111111..2222222 100644\n--- a/icon.svg\n+++ b/icon.svg\n" +
       "@@ -1 +1 @@\n-<svg a/>\n+<svg b/>\n";
@@ -1934,9 +1973,22 @@ describe("an arm change under an open line composer", () => {
     );
     const box = await screen.findByRole("textbox", { name: "Arm comment" });
     fireEvent.change(box, { target: { value: "kept" } });
-    await waitFor(() =>
-      expect(vi.mocked(gitFileBase64).mock.calls.length).toBeGreaterThan(0),
-    );
+    // The pair's two panes, each as its own rev's bytes: the data URL the
+    // reads' mime-less answer draws under the path's extension.
+    const drawn = () =>
+      ["Old", "New"].map(
+        (alt) =>
+          pane.container
+            .querySelector(`img[alt="${alt}"]`)
+            ?.getAttribute("src") ?? null,
+      );
+    const dataUrl = (text: string) =>
+      `data:image/svg+xml;base64,${Buffer.from(text).toString("base64")}`;
+    const pair = [
+      dataUrl(SVG_TEXT[OLD_SHA] ?? ""),
+      dataUrl(SVG_TEXT[NEW_SHA] ?? ""),
+    ];
+    await waitFor(() => expect(drawn()).toEqual(pair));
     // A mode-only push whose new head only the forge holds.
     pane.update(
       svg(SVG_MODE, { old: OLD_SHA, new: PUSHED_SHA }, { lens: "origin" }),
@@ -1944,6 +1996,8 @@ describe("an arm change under an open line composer", () => {
     await settle();
     expect(box).toHaveValue("kept");
     expect(heldReason(pane)).toBe(DIFF_ROWS_HELD_REASON);
+    // The held pair stays drawn, neither blanked nor swapped for the pushed one.
+    expect(drawn()).toEqual(pair);
     const readsOf = (fn: typeof gitFileBase64 | typeof forgeFileAtSha) =>
       vi.mocked(fn).mock.calls.filter((c) => c.includes(PUSHED_SHA)).length;
     // The panes read the held pair from the held source: the pushed head is
