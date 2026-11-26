@@ -1826,10 +1826,15 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (`diff/{source full_name}:{head}%0D{dest}?topic=true`, the by-number text
   byte for byte), so the request ties the text to the head; a contradiction
   drops it unfetched, and an unreadable read or a failed by-commit request
-  falls back to the by-number diff, unproven. A by-number text
-  carries no identity, so a replica flipping back can still prove another
-  head's text: GitHub's by-number fallback and Bitbucket's fallback keep that
-  exposure. GitHub's head proof, and Bitbucket's after its fallback, is the
+  falls back to the by-number diff, unproven. GitHub's diff read compares by
+  sha from the target's base sha, or, when the record names none (a gh older
+  than 2.63.0), from a pull request read naming the target's head and base
+  branch; a compare over the cap, refused as too large or not found, or a
+  pull request read naming anything else or unreadable, falls back to the
+  by-number diff. A by-number text carries no identity, so a replica
+  flipping back can still prove another head's text: GitHub's by-number
+  fallback and Bitbucket's fallback keep that exposure. GitHub's head proof,
+  and Bitbucket's after its fallback, is the
   diff read's own re-read; GitLab's is
   contradiction-only (`gl_head_read_proof`: `moved` or `unproven`, never
   `proven`), since its `/changes` text carries its own identity and a later

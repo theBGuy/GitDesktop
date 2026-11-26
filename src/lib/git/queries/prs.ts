@@ -491,8 +491,10 @@ function overlayLandedMerge(
  *  checks. `recheckAt`, set by the first moved answer, is the settle
  *  deadline: only a run started at or after it decides the entry. `endedAt`
  *  names the answer that ended the check and rides every later moved read,
- *  so the check's details re-read is asked once. */
-export type PrDiffRead =
+ *  so the check's details re-read is asked once. `afterDetails`, on a held
+ *  entry only, is the details answer (its `dataUpdatedAt`) cached when the
+ *  run started. */
+export type PrDiffRead = (
   | { proof: "proven" | "unproven"; text: string }
   | {
       proof: "moved";
@@ -500,7 +502,8 @@ export type PrDiffRead =
       checks: number;
       recheckAt: number;
       endedAt?: number;
-    };
+    }
+) & { afterDetails?: number };
 
 /** A diff read whose forge answer kept naming another head or base. */
 export class PrDiffMovedError extends Error {
@@ -516,6 +519,15 @@ export function prDiffText(read: PrDiffRead): string {
   if (read.proof === "moved") throw new PrDiffMovedError();
   return read.text;
 }
+
+/** An answered entry: a proven one never re-reads for the details, so only an
+ *  unproven one keeps the answer its run started after. */
+const answeredRead = (
+  proof: "proven" | "unproven",
+  text: string,
+  afterDetails: number,
+): PrDiffRead =>
+  proof === "proven" ? { proof, text } : { proof, text, afterDetails };
 
 /** A proof as the wire carried it: any value but proven or moved fails toward
  *  the hold. */
@@ -577,20 +589,30 @@ export const prDiffOptions = (
     target.baseRef,
     target.baseSha,
   ] as const;
+  const detailsKey = prDetailsOptions(repo, number, lens).queryKey;
   return queryOptions({
     queryKey,
     queryFn: async (context): Promise<PrDiffRead> => {
       // Monotonic: a wall-clock step must not spend the settle delay early.
       const startedAt = performance.now();
+      // A details answer landing after this run started, joined or not,
+      // re-reads a held entry (`usePrDiff`): this run can't have seen it.
+      // The stamp tells successive fetched details answers apart, since each
+      // is a network round trip; a frozen or fake clock can tie them. The
+      // app's own patches to the entry (a draft toggle, merge landed, an Edit
+      // save) change no diff target.
+      const afterDetails =
+        context.client.getQueryState(detailsKey)?.dataUpdatedAt ?? 0;
       const head = target.head;
       // A head-less record, or one whose head is abbreviated, has no full head
       // to prove against: the by-target command refuses a short sha, so it
       // reads by number, proven only where the target allows it (Bitbucket).
       if (head === null || !FULL_OID_RE.test(head))
-        return {
-          proof: target.byNumberProven ? "proven" : "unproven",
-          text: await api.forgePrDiff(repo, number, lens),
-        };
+        return answeredRead(
+          target.byNumberProven ? "proven" : "unproven",
+          await api.forgePrDiff(repo, number, lens),
+          afterDetails,
+        );
       const at = { head, baseRef: target.baseRef, baseSha: target.baseSha };
       const answer = await api.forgePrDiffAt(repo, number, lens, at);
       // This run starts its own head read after its diff read answered. The
@@ -613,14 +635,17 @@ export const prDiffOptions = (
           text: prior.text,
           checks: PR_DIFF_MOVED_CHECKS - 1,
           recheckAt: prior.recheckAt,
+          afterDetails,
         };
-      if (proof !== "moved") return { proof, text: answer.diff };
+      if (proof !== "moved")
+        return answeredRead(proof, answer.diff, afterDetails);
       if (prior?.proof !== "moved")
         return {
           proof: "moved",
           text: prior?.text ?? null,
           checks: 1,
           recheckAt: performance.now() + PR_DIFF_MOVED_RECHECK_MS,
+          afterDetails,
         };
       return {
         proof: "moved",
@@ -628,6 +653,7 @@ export const prDiffOptions = (
         checks: PR_DIFF_MOVED_CHECKS,
         recheckAt: prior.recheckAt,
         endedAt: prior.endedAt ?? performance.now(),
+        afterDetails,
       };
     },
     // An unproven or moved entry is stale at once, so any re-read retries it.
@@ -1080,17 +1106,18 @@ export function usePrDiff(
         !(q.state.fetchStatus !== "idle" && q.state.data === undefined),
     });
   }, [queryClient, repo, lens, number, head, baseRef, baseSha, holdsOwn]);
-  // A held entry (unproven, or a check that ended) reads again when the
-  // details answer anew, so it checks again when the pull request refreshes.
+  // A held entry (unproven, or a check that ended) reads again while the
+  // details hold an answer its run started before, so it checks again when the
+  // pull request refreshes, even when that answer landed mid-run.
   const awaitsDetails = read?.proof === "unproven" || movedEnded;
+  const readAfter = read?.afterDetails;
+  const answeredAt = query.dataUpdatedAt;
   const refetch = query.refetch;
-  const detailsSeen = useRef<{ key: string; at: number } | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: every answer re-asks (`answeredAt`), since structural sharing keeps a joined run's equal answer as the same entry.
   useEffect(() => {
-    const seen = detailsSeen.current;
-    detailsSeen.current = { key: diffHash, at: detailsAt };
-    if (seen?.key === diffHash && detailsAt > seen.at && awaitsDetails)
+    if (awaitsDetails && readAfter !== detailsAt)
       void refetch({ cancelRefetch: false });
-  }, [diffHash, detailsAt, awaitsDetails, refetch]);
+  }, [awaitsDetails, readAfter, detailsAt, answeredAt, refetch]);
   // The accepted entry that ends a check asks the details to re-read, once
   // per ended check, so a real push re-keys the view. A superseded run's
   // answer is never accepted, so it asks nothing.

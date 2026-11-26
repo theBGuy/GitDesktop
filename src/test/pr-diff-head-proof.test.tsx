@@ -550,6 +550,86 @@ describe("an unproven answer (AC-U*)", () => {
     expect(forgePrDiffAt).toHaveBeenCalledTimes(2);
   });
 
+  it("U4: a Refresh landing during a cold read reads the diff again once that read answers unproven", async () => {
+    const held = deferred<PrDiffAt>();
+    // The re-read answers unproven too, so only the snapshot ends the re-reads.
+    answers.push(() => held.promise, answer("unproven"));
+    headReadFails();
+    headReadFails();
+    const { client, hook } = mount();
+    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(1));
+    // Refresh's exact diff invalidation joins the data-less read in flight.
+    await act(() => refreshOpenPr(client, REPO, "origin", 7));
+    await sleep(30);
+    expect(forgePrDiffAt).toHaveBeenCalledTimes(1);
+    await act(async () => held.resolve(await answer("unproven")()));
+    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(client.getQueryState(diffKey())?.fetchStatus).toBe("idle"),
+    );
+    await sleep(30);
+    expect(forgePrDiffAt).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.diff.headUnproven).toBe(true);
+  });
+
+  it("U4: a details answer landing during a re-read of an unproven entry reads again once that re-read answers unproven", async () => {
+    answers.push(answer("unproven"));
+    headReadFails();
+    const { client, hook } = mount();
+    await waitFor(() =>
+      expect(hook.result.current.diff.headUnproven).toBe(true),
+    );
+    const held = deferred<PrDiffAt>();
+    // The re-read answers unproven too, so only the snapshot ends the re-reads.
+    answers.push(() => held.promise, answer("unproven"));
+    headReadFails();
+    headReadFails();
+    act(() => {
+      void client.refetchQueries({ queryKey: diffKey(), exact: true });
+    });
+    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(2));
+    // The view's own re-read for this answer joins the run in flight.
+    await rereadDetails(client);
+    await sleep(30);
+    expect(forgePrDiffAt).toHaveBeenCalledTimes(2);
+    await act(async () => held.resolve(await answer("unproven")()));
+    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(client.getQueryState(diffKey())?.fetchStatus).toBe("idle"),
+    );
+    await sleep(30);
+    expect(forgePrDiffAt).toHaveBeenCalledTimes(3);
+    expect(hook.result.current.diff.headUnproven).toBe(true);
+  });
+
+  it("U4: a details answer stamped before the run's snapshot (a wall-clock step back) still reads the diff again", async () => {
+    answers.push(answer("unproven"), answer("unproven"));
+    headReadFails();
+    headReadFails();
+    const { client, hook } = mount();
+    await waitFor(() =>
+      expect(hook.result.current.diff.headUnproven).toBe(true),
+    );
+    await waitFor(() =>
+      expect(client.getQueryState(diffKey())?.fetchStatus).toBe("idle"),
+    );
+    expect(forgePrDiffAt).toHaveBeenCalledTimes(1);
+    const snapshot =
+      client.getQueryData<PrDiffRead>(diffKey())?.afterDetails ?? 0;
+    expect(snapshot).toBeGreaterThan(0);
+    act(() => {
+      client.setQueryData(detailsKey, detailsNow(), {
+        updatedAt: snapshot - 60_000,
+      });
+    });
+    await waitFor(() => expect(forgePrDiffAt).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(client.getQueryState(diffKey())?.fetchStatus).toBe("idle"),
+    );
+    await sleep(30);
+    expect(forgePrDiffAt).toHaveBeenCalledTimes(2);
+  });
+
   it("AC-U3: a fetch of an unproven entry reads again at once; a proven entry's is served from the cache", async () => {
     headReadFails();
     answers.push(answer("unproven"));
@@ -995,6 +1075,7 @@ describe("what a run's own head read can prove (E*, T10)", () => {
       text: null,
       checks: 1,
       recheckAt: expect.any(Number),
+      afterDetails: expect.any(Number),
     });
     expect(client.getQueryData<PrDiffRead>(diffKey())?.text).toBeNull();
   });
@@ -1184,6 +1265,7 @@ describe("the settle deadline and the ended check's hint (G*, T13, T14)", () => 
           text: OLD,
           checks: PR_DIFF_MOVED_CHECKS - 1,
           recheckAt: ctx.deadline,
+          afterDetails: expect.any(Number),
         });
         const shown = ctx.hook.result.current.diff;
         expect(shown.headChecking).toBe(true);
@@ -1241,6 +1323,7 @@ describe("the settle deadline and the ended check's hint (G*, T13, T14)", () => 
       text: OLD,
       checks: PR_DIFF_MOVED_CHECKS - 1,
       recheckAt: ctx.deadline,
+      afterDetails: expect.any(Number),
     });
     expect(ctx.hook.result.current.diff.headChecking).toBe(true);
     expect(ctx.hook.result.current.diff.data).toBe(OLD);
