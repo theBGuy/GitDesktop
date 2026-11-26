@@ -190,7 +190,15 @@ pub(super) async fn workspace_slug(repo_path: &str) -> AppResult<(String, String
     // Bitbucket repo paths are exactly `workspace/slug` (no nested groups).
     let mut parts = path.splitn(2, '/');
     match (parts.next(), parts.next()) {
-        (Some(w), Some(s)) if !w.is_empty() && !s.is_empty() => Ok((w.to_string(), s.to_string())),
+        // A `.` or `..` part would resolve away in the request URL and read another API path.
+        (Some(w), Some(s))
+            if !w.is_empty()
+                && !s.is_empty()
+                && !matches!(w, "." | "..")
+                && !matches!(s, "." | "..") =>
+        {
+            Ok((w.to_string(), s.to_string()))
+        }
         _ => Err(AppError::Bitbucket(format!(
             "unexpected Bitbucket repository path: {path}"
         ))),
@@ -1247,6 +1255,16 @@ pub(crate) async fn pr_checkout_source(
         )
     })?;
     let (src_ws, src_slug) = src.trim().split_once('/').unwrap_or_default();
+    // A `.` or `..` part would resolve away in the request URL and read another API path.
+    if [src_ws.trim(), src_slug.trim()]
+        .iter()
+        .any(|v| matches!(*v, "." | ".."))
+    {
+        return Err(http::bb_unreadable(
+            "the pull request's source repository",
+            format!("unreadable repository name {src}"),
+        ));
+    }
     let repo = format!(
         "repositories/{}/{}",
         encode_query_value(src_ws.trim()),
@@ -1521,13 +1539,21 @@ struct BbForkOf {
 }
 
 /// A fork's parent as `(workspace, slug)`: `Ok(None)` for a repository that is not a fork,
-/// an `Err` for a parent whose `full_name` isn't `workspace/slug`. Pure.
+/// an `Err` for a parent whose `full_name` isn't `workspace/slug` (a `.` or `..` part
+/// included). Pure.
 fn bb_fork_parent(repo: &BbForkOf) -> AppResult<Option<(String, String)>> {
     let Some(parent) = repo.parent.as_ref() else {
         return Ok(None);
     };
     match parent.full_name.as_deref().and_then(|f| f.split_once('/')) {
-        Some((ws, slug)) if !ws.is_empty() && !slug.is_empty() && !slug.contains('/') => {
+        // A `.` or `..` part would resolve away in the request URL and read another API path.
+        Some((ws, slug))
+            if !ws.is_empty()
+                && !slug.is_empty()
+                && !slug.contains('/')
+                && !matches!(ws, "." | "..")
+                && !matches!(slug, "." | "..") =>
+        {
             Ok(Some((ws.to_string(), slug.to_string())))
         }
         _ => Err(AppError::Bitbucket(
@@ -1646,10 +1672,21 @@ mod remote_branch_pull_tests {
             json!({"parent": {"full_name": "/repo"}}),
             json!({"parent": {"full_name": "up/"}}),
             json!({"parent": {"full_name": "a/b/c"}}),
+            json!({"parent": {"full_name": "../repo"}}),
+            json!({"parent": {"full_name": "up/.."}}),
+            json!({"parent": {"full_name": "./repo"}}),
+            json!({"parent": {"full_name": "up/."}}),
         ] {
             assert!(
                 matches!(parent_of(body.clone()), Err(AppError::Bitbucket(_))),
                 "{body}"
+            );
+        }
+        for (full_name, slug) in [("up/re.po", "re.po"), ("up/...", "...")] {
+            assert_eq!(
+                parent_of(json!({"parent": {"full_name": full_name}})).unwrap(),
+                Some(("up".to_string(), slug.to_string())),
+                "{full_name}"
             );
         }
     }
@@ -7541,6 +7578,54 @@ mod tests {
                 "https://bitbucket.org/thebguy1/dispatch-demo"
             );
         }
+    }
+
+    /// A `.` or `..` origin part is refused before any request is built; a `.` inside a
+    /// name stays legal. A fresh temp repo per row (`git_remote_url`'s TTL cache).
+    #[tokio::test]
+    async fn workspace_slug_refuses_a_dot_segment() {
+        async fn run(repo: &str, args: &[&str]) {
+            let _ = crate::git::runner::run_git(
+                Some(repo),
+                args,
+                crate::git::runner::TEST_GIT_HANG_GUARD,
+            )
+            .await;
+        }
+
+        let rows: [(&str, Option<(&str, &str)>); 6] = [
+            ("https://bitbucket.org/ws/..", None),
+            ("https://bitbucket.org/../repo.git", None),
+            ("git@bitbucket.org:ws/..git", None),
+            ("https://bitbucket.org/./repo", None),
+            (
+                "https://bitbucket.org/ws/my.repo.git",
+                Some(("ws", "my.repo")),
+            ),
+            ("https://bitbucket.org/ws/....git", Some(("ws", "..."))),
+        ];
+        let mut wrong = Vec::new();
+        for (i, (remote, want)) in rows.into_iter().enumerate() {
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("gd-bb-dot-seg-{i}-"))
+                .tempdir()
+                .expect("create temp dir");
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let repo_s = repo.to_string_lossy().into_owned();
+            run(&repo_s, &["init", "-q"]).await;
+            run(&repo_s, &["remote", "add", "origin", remote]).await;
+            let got = workspace_slug(&repo_s).await;
+            let ok = match (&got, want) {
+                (Err(AppError::Bitbucket(_)), None) => true,
+                (Ok((w, s)), Some((ww, ws))) => w == ww && s == ws,
+                _ => false,
+            };
+            if !ok {
+                wrong.push(format!("{remote}: {got:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// Bitbucket Cloud's PR payload has no mergeability field and its only

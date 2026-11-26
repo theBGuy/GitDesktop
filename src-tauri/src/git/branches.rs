@@ -6634,9 +6634,9 @@ fn previous_branch_names(subjects: &[String], branch: &str) -> Vec<String> {
 pub(crate) struct RenamedCopy {
     pub remote: String,
     pub upstream_branch: String,
-    /// True when the local `refs/remotes/<remote>/HEAD` names a ref that exists (the predicate
-    /// having answered, it does not name the upstream); false when that symref is absent
-    /// or dangling, so the remote's default is unmeasured.
+    /// True when the local `refs/remotes/<remote>/HEAD` names a `refs/` ref that exists (the
+    /// predicate having answered, it does not name the upstream); false otherwise (absent,
+    /// dangling or outside `refs/`), so the remote's default is unmeasured.
     pub default_measured: bool,
 }
 
@@ -6682,8 +6682,10 @@ pub(crate) async fn renamed_copy_of(
     }
     // `symbolic-ref` prints a dangling target with exit 0, so only a target that exists as
     // that exact ref measures the default; a failed read leaves it unmeasured. Never
-    // `rev-parse`: it also resolves a branch or tag spelled like the target.
-    let default_measured = match target.filter(|t| !t.is_empty()) {
+    // `rev-parse`: it also resolves a branch or tag spelled like the target. Only a `refs/`
+    // target reaches the argv: a root ref (`FETCH_HEAD`) never measures, and a
+    // hand-written one can't be read as an option.
+    let default_measured = match target.filter(|t| t.starts_with("refs/")) {
         Some(remote_head) => run_git_raw(
             Some(repo_path),
             &["show-ref", "--verify", "--quiet", &remote_head],
@@ -8037,6 +8039,21 @@ pub(crate) mod tests {
             renamed_copy_of(&repo, "new").await.unwrap(),
             copy("old", false),
             "a branch named like the dangling target measures nothing"
+        );
+        run(&repo, &["fetch", "-q", "origin"]).await;
+        run(
+            &repo,
+            &["symbolic-ref", "refs/remotes/origin/HEAD", "FETCH_HEAD"],
+        )
+        .await;
+        assert!(
+            git_ok(&repo, &["show-ref", "--verify", "--quiet", "FETCH_HEAD"]).await,
+            "the old argv would measure FETCH_HEAD"
+        );
+        assert_eq!(
+            renamed_copy_of(&repo, "new").await.unwrap(),
+            copy("old", false),
+            "a root ref target is unmeasured"
         );
         pin_remote_head(&repo, Some("dflt")).await;
         // Validation refuses before any spawn, so a non-repository answers too.

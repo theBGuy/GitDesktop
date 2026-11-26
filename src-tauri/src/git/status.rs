@@ -393,7 +393,7 @@ pub(crate) fn mirror_refusal(config: &PushConfig, target: PushRemote<'_>) -> App
     };
     if remote_is_mirror(&config.0, remote) {
         return Err(AppError::PushRemoteIsMirror {
-            remote: remote.to_string(),
+            remote: crate::git::remote::redact_url_userinfo(remote),
         });
     }
     Ok(())
@@ -1456,6 +1456,26 @@ mod tests {
             mirror_verdict(not_mirror, PushRemote::Named("origin"))
                 .unwrap_or_else(|e| panic!("{not_mirror:?} must not refuse: {e:?}"));
         }
+    }
+
+    /// A URL push remote's userinfo never reaches the mirror refusal, field or message.
+    #[test]
+    fn mirror_refusal_redacts_a_url_push_remote() {
+        let Err(err) = mirror_verdict(
+            "remote.pushDefault\nhttps://user:secret@h/o/r\0remote.https://user:secret@h/o/r.mirror\ntrue\0",
+            PushRemote::Bare { head: None },
+        ) else {
+            panic!("a mirror URL push remote is refused");
+        };
+        assert!(
+            matches!(&err, AppError::PushRemoteIsMirror { remote } if remote == "https://***@h/o/r"),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "\"https://***@h/o/r\" is a mirror remote, so GitDesktop won't push to it. Push from a terminal instead."
+        );
+        assert!(!err.to_string().contains("secret"));
     }
 
     /// A bare push's remote, in git's own order: pushRemote, pushDefault, the branch's own
