@@ -1,6 +1,6 @@
 use tauri::State;
 
-use crate::error::{AppError, AppResult};
+use crate::error::{AppError, AppResult, PushMultiRefCause};
 use crate::git::branches::{
     push_destination_fields, read_refs_with_push_destination, validate_ref_name,
 };
@@ -239,6 +239,98 @@ fn remote_is_mirror(config: &[ConfigEntry], remote: &str) -> bool {
 /// every check of that decision.
 pub(crate) struct PushConfig(Vec<ConfigEntry>);
 
+impl PushConfig {
+    /// `branch`'s configured push remote ([`configured_push_remote`]) with the key that
+    /// won: `branch.<b>.pushRemote` whenever it is set, empty included, else
+    /// `remote.pushDefault`. None when neither key is set.
+    pub(crate) fn push_remote_setting(&self, branch: &str) -> Option<(String, &str)> {
+        let value = configured_push_remote(&self.0, Some(branch))?;
+        let own = format!("branch.{branch}.pushRemote");
+        let key = if config_last(&self.0, &own).is_some() {
+            own
+        } else {
+            "remote.pushDefault".to_string()
+        };
+        Some((key, value))
+    }
+
+    /// The remote git routes a bare push of `head` to ([`bare_push_remote`]); None when
+    /// the winning value is empty, where git has no push destination at all.
+    pub(crate) fn bare_push_remote(&self, head: Option<&str>) -> Option<&str> {
+        Some(bare_push_remote(&self.0, head)).filter(|r| !r.is_empty())
+    }
+
+    /// Why a bare push to `remote` can send more refs than HEAD's branch: `remote`'s own
+    /// non-empty `remote.<r>.push` refspecs, which git uses ahead of push.default, else
+    /// `push.default=matching` (git compares the value case-sensitively); None otherwise.
+    pub(crate) fn multi_ref_cause(&self, remote: &str) -> Option<PushMultiRefCause> {
+        if config_values(&self.0, &format!("remote.{remote}.push"))
+            .any(|refspec| !refspec.trim().is_empty())
+        {
+            return Some(PushMultiRefCause::Refspecs);
+        }
+        (config_last(&self.0, "push.default") == Some("matching"))
+            .then_some(PushMultiRefCause::Matching)
+    }
+
+    /// [`triangular_simple_destination`] over this listing.
+    pub(crate) fn triangular_simple_destination(
+        &self,
+        name: &str,
+        upstream_remote: &str,
+    ) -> (Option<String>, Option<String>) {
+        triangular_simple_destination(&self.0, name, upstream_remote)
+    }
+
+    /// Whether `remote.<r>.fetch` is exactly git's standard refspec for `remote`, the one
+    /// layout under which `refs/remotes/<r>/<b>` is branch `b`'s tracking ref. Any other
+    /// entry beside it (a branch refspec, a negative `^` one) can move or hide that ref.
+    pub(crate) fn has_standard_fetch_refspec(&self, remote: &str) -> bool {
+        let standard = format!("refs/heads/*:refs/remotes/{remote}/*");
+        let mut fetch = config_values(&self.0, &format!("remote.{remote}.fetch"));
+        matches!(
+            (fetch.next(), fetch.next()),
+            (Some(refspec), None) if refspec.trim().trim_start_matches('+') == standard
+        )
+    }
+
+    /// Every `remote.<r>.fetch` value in config order, joined with `\n` and nothing after
+    /// the last: the text `config --get-all` prints, minus its final newline. A valueless
+    /// entry is an empty line; unset is empty.
+    pub(crate) fn fetch_entries(&self, remote: &str) -> String {
+        config_values(&self.0, &format!("remote.{remote}.fetch"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every other remote's `remote.<r>.fetch` values, in config order and joined like
+    /// [`Self::fetch_entries`]. The remote name runs from `remote.` to the key's LAST dot,
+    /// so a dotted name stays whole; a key with no subsection names no remote.
+    pub(crate) fn other_fetch_entries(&self, remote: &str) -> String {
+        self.0
+            .iter()
+            .filter(|(k, _)| {
+                k.strip_prefix("remote.")
+                    .and_then(|rest| rest.rsplit_once('.'))
+                    .is_some_and(|(name, var)| var == "fetch" && name != remote)
+            })
+            .map(|(_, v)| v.as_deref().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// `branch.<b>.remote`, the last value set; None when unset.
+    pub(crate) fn branch_remote(&self, branch: &str) -> Option<&str> {
+        config_last(&self.0, &format!("branch.{branch}.remote"))
+    }
+
+    /// A listing parsed from `git config -z --list` text, for pure tests.
+    #[cfg(test)]
+    pub(crate) fn from_listing(text: &str) -> Self {
+        PushConfig(parse_config_list(text))
+    }
+}
+
 /// The push config listing, strict: a failed listing is that error, never "no mirror".
 pub(crate) async fn push_config_strict(repo_path: &str) -> AppResult<PushConfig> {
     let out = run_git(
@@ -301,7 +393,7 @@ pub(crate) fn mirror_refusal(config: &PushConfig, target: PushRemote<'_>) -> App
     };
     if remote_is_mirror(&config.0, remote) {
         return Err(AppError::PushRemoteIsMirror {
-            remote: remote.to_string(),
+            remote: crate::git::remote::redact_url_userinfo(remote),
         });
     }
     Ok(())
@@ -363,13 +455,13 @@ fn triangular_simple_destination(
 
 /// Where a bare push lands once the push config is read, from the atoms' destination:
 /// `push.default=matching` resolves `%(push)` like `current` but only updates branches
-/// both ends already have, so it never creates one; triangular `simple` lands where the
-/// atoms resolve nothing. The remote must be a configured one (a pushRemote can name a
-/// URL) and no mirror (every app push to one is refused, [`refuse_mirror_push`]); a
-/// failed listing claims nothing. Still out of reach, counted on the owner's 109 repos:
-/// a push remote's own push refspecs (0), several pushurls (0), narrow or remapped fetch
-/// refspecs (1, a fixture), a git without the `%(push)` atoms, force pushes (their own
-/// confirm), and presence as last-fetch remote-tracking state (no network read here).
+/// both ends already have, so it never creates one and claims nothing; triangular `simple`
+/// lands where the atoms resolve nothing. The checks are that the remote is a
+/// configured one (a pushRemote can name a URL) and no mirror (every app push to one is
+/// refused, [`refuse_mirror_push`]); a failed listing claims nothing. It does not detect
+/// several push URLs, a single push URL that names another repository, the remote's own
+/// push refspecs on the atoms arm (the triangular arm claims nothing under them), or a
+/// remapped fetch refspec, so a named destination may still be one of those shapes.
 fn configured_destination(
     config: Option<&[ConfigEntry]>,
     name: &str,
@@ -1366,6 +1458,26 @@ mod tests {
         }
     }
 
+    /// A URL push remote's userinfo never reaches the mirror refusal, field or message.
+    #[test]
+    fn mirror_refusal_redacts_a_url_push_remote() {
+        let Err(err) = mirror_verdict(
+            "remote.pushDefault\nhttps://user:secret@h/o/r\0remote.https://user:secret@h/o/r.mirror\ntrue\0",
+            PushRemote::Bare { head: None },
+        ) else {
+            panic!("a mirror URL push remote is refused");
+        };
+        assert!(
+            matches!(&err, AppError::PushRemoteIsMirror { remote } if remote == "https://***@h/o/r"),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "\"https://***@h/o/r\" is a mirror remote, so GitDesktop won't push to it. Push from a terminal instead."
+        );
+        assert!(!err.to_string().contains("secret"));
+    }
+
     /// A bare push's remote, in git's own order: pushRemote, pushDefault, the branch's own
     /// remote, then the only remote or `origin`; a detached HEAD skips the two branch keys.
     #[test]
@@ -1514,6 +1626,241 @@ mod tests {
         git(&work, &["branch", "-m", "feat/x", "feat/y"]).await;
         commit_one(&work, "work.txt").await;
         work
+    }
+
+    /// The configured push remote names the key that won: a set `pushRemote`, empty
+    /// included, decides alone; otherwise `remote.pushDefault`.
+    #[test]
+    fn push_remote_setting_names_the_winning_key() {
+        let on = |text: &str| {
+            PushConfig::from_listing(text)
+                .push_remote_setting("feat")
+                .map(|(k, v)| (k, v.to_string()))
+        };
+        let pair = |k: &str, v: &str| Some((k.to_string(), v.to_string()));
+        assert_eq!(on(""), None);
+        assert_eq!(on("branch.other.pushremote\nx\0"), None);
+        assert_eq!(
+            on("remote.pushdefault\nfork\0"),
+            pair("remote.pushDefault", "fork")
+        );
+        assert_eq!(
+            on("remote.pushdefault\nfork\0branch.feat.pushremote\nmine\0"),
+            pair("branch.feat.pushRemote", "mine")
+        );
+        assert_eq!(
+            on("remote.pushdefault\nfork\0branch.feat.pushremote\n\0"),
+            pair("branch.feat.pushRemote", "")
+        );
+        assert_eq!(on("remote.pushdefault\n\0"), pair("remote.pushDefault", ""));
+    }
+
+    /// A multi-ref bare push: the remote's refspecs outrank matching, an empty refspec
+    /// and another remote's refspec claim nothing, and git's value compare is exact.
+    #[test]
+    fn multi_ref_cause_reads_the_remotes_refspecs_then_matching() {
+        use crate::error::PushMultiRefCause::{Matching, Refspecs};
+        let on = |text: &str| PushConfig::from_listing(text).multi_ref_cause("origin");
+        assert_eq!(on(""), None);
+        assert_eq!(on("push.default\nsimple\0"), None);
+        assert_eq!(on("push.default\nMatching\0"), None);
+        assert_eq!(on("push.default\nmatching\0"), Some(Matching));
+        assert_eq!(
+            on("push.default\nmatching\0push.default\ncurrent\0"),
+            None,
+            "the last value wins"
+        );
+        assert_eq!(
+            on("remote.origin.push\nrefs/heads/a:refs/heads/a\0"),
+            Some(Refspecs)
+        );
+        assert_eq!(on("remote.origin.push\n \0"), None);
+        assert_eq!(on("remote.fork.push\nrefs/heads/a:refs/heads/a\0"), None);
+        assert_eq!(
+            on("push.default\nmatching\0remote.origin.push\nrefs/heads/a:refs/heads/a\0"),
+            Some(Refspecs)
+        );
+        assert_eq!(
+            on("push.default\nmatching\0remote.origin.push\n \0"),
+            Some(Matching)
+        );
+    }
+
+    /// Only git's standard layout for that remote counts, forced or not, and only as the
+    /// remote's one fetch refspec.
+    #[test]
+    fn has_standard_fetch_refspec_reads_the_remotes_own_layout() {
+        let on = |text: &str| PushConfig::from_listing(text).has_standard_fetch_refspec("fork");
+        assert!(on("remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0"));
+        assert!(on("remote.fork.fetch\nrefs/heads/*:refs/remotes/fork/*\0"));
+        assert!(!on(""));
+        assert!(!on(
+            "remote.fork.fetch\n+refs/heads/*:refs/remotes/team/*\0"
+        ));
+        assert!(!on(
+            "remote.origin.fetch\n+refs/heads/*:refs/remotes/fork/*\0"
+        ));
+        assert!(!on(
+            "remote.fork.fetch\n+refs/heads/main:refs/remotes/fork/main\0"
+        ));
+        assert!(!on(
+            "remote.fork.fetch\n+refs/heads/main:refs/remotes/fork/other\0remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0"
+        ));
+        assert!(!on(
+            "remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0remote.fork.fetch\n^refs/heads/main\0"
+        ));
+        assert!(on(
+            "remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0remote.origin.fetch\n^refs/heads/main\0"
+        ));
+    }
+
+    /// The values in config order, joined by newlines: a valueless or empty value is an
+    /// empty line and a value holding a newline spans two; the subsection is exact and other
+    /// remotes' values never appear.
+    #[test]
+    fn fetch_entries_lists_the_remotes_values_one_per_line() {
+        let on = |text: &str| PushConfig::from_listing(text).fetch_entries("origin");
+        assert_eq!(on(""), "");
+        assert_eq!(
+            on("remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0"),
+            ""
+        );
+        assert_eq!(
+            on("remote.Origin.fetch\n+refs/heads/a:refs/remotes/o/a\0"),
+            ""
+        );
+        assert_eq!(
+            on("remote.origin.fetch\n+refs/heads/*:refs/remotes/origin/*\0"),
+            "+refs/heads/*:refs/remotes/origin/*"
+        );
+        assert_eq!(
+            on(concat!(
+                "remote.origin.fetch\n+refs/heads/a:refs/remotes/origin/a\0",
+                "remote.fork.fetch\n+refs/heads/*:refs/remotes/fork/*\0",
+                "REMOTE.origin.FETCH\nrefs/heads/b:refs/remotes/origin/b\0",
+                "remote.origin.fetch\0",
+                "remote.origin.fetch\n\0",
+                "remote.origin.fetch\n+refs/heads/nl\nrefs/heads/second:x\0",
+                "remote.origin.fetch\nrefs/heads/trail  \0",
+            )),
+            concat!(
+                "+refs/heads/a:refs/remotes/origin/a\n",
+                "refs/heads/b:refs/remotes/origin/b\n",
+                "\n",
+                "\n",
+                "+refs/heads/nl\nrefs/heads/second:x\n",
+                "refs/heads/trail  ",
+            )
+        );
+        let spans: Vec<String> = on("remote.origin.fetch\n+refs/heads/nl\nrefs/heads/second:x\0")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(spans, ["+refs/heads/nl", "refs/heads/second:x"]);
+    }
+
+    #[test]
+    fn other_fetch_entries_lists_every_other_remotes_values() {
+        let listing = PushConfig::from_listing(concat!(
+            "remote.origin.fetch\n+refs/heads/*:refs/remotes/origin/*\0",
+            "remote.up.stream.fetch\n+refs/heads/*:refs/remotes/up.stream/*\0",
+            "remote.fetch\nrefs/heads/none:refs/remotes/none\0",
+            "remote.Origin.fetch\n+refs/heads/a:refs/remotes/Origin/a\0",
+            "remote.origin.url\n/srv/o.git\0",
+            "remote.second.fetch\0",
+            "REMOTE.second.FETCH\nrefs/heads/b:refs/remotes/second/b\0",
+        ));
+        assert_eq!(
+            listing.other_fetch_entries("origin"),
+            concat!(
+                "+refs/heads/*:refs/remotes/up.stream/*\n",
+                "+refs/heads/a:refs/remotes/Origin/a\n",
+                "\n",
+                "refs/heads/b:refs/remotes/second/b",
+            )
+        );
+        assert_eq!(
+            listing.other_fetch_entries("up"),
+            concat!(
+                "+refs/heads/*:refs/remotes/origin/*\n",
+                "+refs/heads/*:refs/remotes/up.stream/*\n",
+                "+refs/heads/a:refs/remotes/Origin/a\n",
+                "\n",
+                "refs/heads/b:refs/remotes/second/b",
+            )
+        );
+        assert_eq!(
+            listing.other_fetch_entries("up.stream"),
+            concat!(
+                "+refs/heads/*:refs/remotes/origin/*\n",
+                "+refs/heads/a:refs/remotes/Origin/a\n",
+                "\n",
+                "refs/heads/b:refs/remotes/second/b",
+            )
+        );
+        let alone =
+            PushConfig::from_listing("remote.origin.fetch\n+refs/heads/*:refs/remotes/origin/*\0");
+        assert_eq!(alone.other_fetch_entries("origin"), "");
+        assert_eq!(
+            PushConfig::from_listing("").other_fetch_entries("origin"),
+            ""
+        );
+    }
+
+    /// A bare push's remote is None only when the winning value is empty.
+    #[test]
+    fn bare_push_remote_is_none_only_for_an_empty_winner() {
+        let on = |text: &str, head: Option<&str>| {
+            PushConfig::from_listing(text)
+                .bare_push_remote(head)
+                .map(str::to_string)
+        };
+        assert_eq!(on("remote.pushdefault\n\0", Some("feat")), None);
+        assert_eq!(on("branch.feat.pushremote\n\0", Some("feat")), None);
+        assert_eq!(
+            on(
+                "remote.pushdefault\n\0branch.feat.pushremote\nfork\0",
+                Some("feat")
+            ),
+            Some("fork".into())
+        );
+        assert_eq!(
+            on(
+                "remote.origin.url\nu\0branch.feat.remote\norigin\0",
+                Some("feat")
+            ),
+            Some("origin".into())
+        );
+        assert_eq!(on("remote.pushdefault\nfork\0", None), Some("fork".into()));
+        assert_eq!(on("remote.pushdefault\n\0", None), None);
+    }
+
+    /// An empty `remote.pushDefault` gives a bare push no destination, so the status read
+    /// claims none.
+    #[tokio::test]
+    async fn an_empty_push_default_claims_no_push_destination() {
+        let (_guard, base) = temp_base("empty-pd");
+        let work = renamed_branch_fixture(&base, "w").await;
+        if !all_unset(
+            &work,
+            "the empty pushDefault check",
+            &["branch.topic.pushRemote", "remote.origin.push"],
+        )
+        .await
+        {
+            return;
+        }
+        git(&work, &["config", "remote.pushDefault", ""]).await;
+        git(
+            &work,
+            &["switch", "-q", "-c", "topic", "--track", "origin/main"],
+        )
+        .await;
+        commit_one(&work, "topic.txt").await;
+        let head = status_core(&work).await.unwrap().branch;
+        assert_eq!(head.upstream_branch.as_deref(), Some("main"));
+        assert_eq!(head.push_remote, None);
+        assert_eq!(head.push_branch, None);
     }
 
     async fn commit_one(repo: &str, file: &str) {

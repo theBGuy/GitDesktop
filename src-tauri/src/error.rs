@@ -119,6 +119,83 @@ pub enum AppError {
     /// frontend's `mayHaveLanded` tells the two apart under one kind.
     #[error("{0}")]
     WriteTimedOut(String),
+    /// A push that names no remote refused before any spawn because the configured push
+    /// remote (`key`, the winning one of `branch.<b>.pushRemote` / `remote.pushDefault`)
+    /// is empty, an invalid name or not a remote of this repository.
+    #[error("{}", push_remote_unusable_message(branch, key, value))]
+    PushRemoteUnusable {
+        branch: String,
+        key: String,
+        value: String,
+    },
+    /// A push carrying the create-only lease refused because `remote` already holds
+    /// `dest` at another commit; the same commit is not refused. Only `branch` is named as
+    /// not pushed: a tag the same push follows can still land.
+    #[error("{remote} already has a branch named {dest}, and it points at a different commit, so {branch} wasn't pushed.")]
+    PushDestinationExists {
+        branch: String,
+        remote: String,
+        dest: String,
+    },
+    /// A push pinned to the branch it was pressed on, refused because HEAD moved off
+    /// it; `expected` is that branch's short name, or `HEAD` for a detached HEAD.
+    #[error("{}", push_head_moved_message(expected))]
+    PushHeadMoved { expected: String },
+    /// A push pinned to the tip its confirm showed, refused because the branch moved.
+    #[error(
+        "{branch} changed after you confirmed, so nothing was pushed. Review it and push again."
+    )]
+    PushTipMoved { branch: String },
+    /// A pinned bare FORCE push of `branch` refused before any spawn because git's own
+    /// routing would also send other refs: `push.default=matching`, or `remote` (git's
+    /// bare push remote) carrying `remote.<r>.push` refspecs.
+    #[error("{}", push_force_multi_ref_message(branch, remote, *cause))]
+    PushForceMultiRef {
+        branch: String,
+        remote: String,
+        cause: PushMultiRefCause,
+    },
+}
+
+/// Why a bare push would send more than one ref; serialized as `cause`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushMultiRefCause {
+    /// `push.default=matching`.
+    Matching,
+    /// The push remote's own `remote.<r>.push` refspecs.
+    Refspecs,
+}
+
+impl PushMultiRefCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PushMultiRefCause::Matching => "matching",
+            PushMultiRefCause::Refspecs => "refspecs",
+        }
+    }
+}
+
+fn push_force_multi_ref_message(branch: &str, remote: &str, cause: PushMultiRefCause) -> String {
+    match cause {
+        PushMultiRefCause::Matching => format!("push.default is \"matching\" in this repository, so a force push could also rewrite other matching branches. Nothing was pushed. Force-push {branch} from a terminal, naming the branch."),
+        PushMultiRefCause::Refspecs => format!("{remote} has push refspecs of its own, so a force push could rewrite other branches too. Nothing was pushed. Force-push {branch} from a terminal, naming the branch."),
+    }
+}
+
+fn push_remote_unusable_message(branch: &str, key: &str, value: &str) -> String {
+    if value.is_empty() {
+        format!("{key} is set but empty, so \"{branch}\" has no push destination and nothing was pushed. Unset {key}, or set it to the name of one of this repository's remotes.")
+    } else {
+        format!("\"{branch}\" is set to push to \"{value}\" ({key}), which GitDesktop can't use as a push remote, so nothing was pushed. Set {key} to the name of one of this repository's remotes, or unset it.")
+    }
+}
+
+fn push_head_moved_message(expected: &str) -> String {
+    if expected == "HEAD" {
+        "HEAD is no longer detached, so nothing was pushed.".to_string()
+    } else {
+        format!("HEAD is no longer on {expected}, so nothing was pushed.")
+    }
 }
 
 fn git_message(code: i32, stderr: &str) -> String {
@@ -201,6 +278,11 @@ impl Serialize for AppError {
             // Same kind as `Timeout`, so the label stays "Timed out" and the network
             // rewrite (forge kinds only) never replaces the sentence.
             AppError::WriteTimedOut(_) => "timeout",
+            AppError::PushRemoteUnusable { .. } => "pushRemoteUnusable",
+            AppError::PushDestinationExists { .. } => "pushDestinationExists",
+            AppError::PushHeadMoved { .. } => "pushHeadMoved",
+            AppError::PushTipMoved { .. } => "pushTipMoved",
+            AppError::PushForceMultiRef { .. } => "pushForceMultiRef",
         };
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("kind", kind)?;
@@ -289,6 +371,35 @@ impl Serialize for AppError {
                 map.serialize_entry("mergeBase", &d.merge_base)?;
                 map.serialize_entry("forkPoint", &d.fork_point)?;
                 map.serialize_entry("commits", &d.commits)?;
+            }
+            AppError::PushRemoteUnusable { branch, key, value } => {
+                map.serialize_entry("branch", branch)?;
+                map.serialize_entry("key", key)?;
+                map.serialize_entry("value", value)?;
+            }
+            AppError::PushDestinationExists {
+                branch,
+                remote,
+                dest,
+            } => {
+                map.serialize_entry("branch", branch)?;
+                map.serialize_entry("remote", remote)?;
+                map.serialize_entry("dest", dest)?;
+            }
+            AppError::PushHeadMoved { expected } => {
+                map.serialize_entry("expected", expected)?;
+            }
+            AppError::PushTipMoved { branch } => {
+                map.serialize_entry("branch", branch)?;
+            }
+            AppError::PushForceMultiRef {
+                branch,
+                remote,
+                cause,
+            } => {
+                map.serialize_entry("branch", branch)?;
+                map.serialize_entry("remote", remote)?;
+                map.serialize_entry("cause", cause.as_str())?;
             }
             _ => {}
         }
@@ -536,6 +647,98 @@ mod tests {
         assert_eq!(keys, ["kind", "message"]);
         assert_eq!(map["kind"], "timeout");
         assert_eq!(map["message"], "x");
+    }
+
+    /// The TS union reads `branch`, `key` and `value` by key; both sentences are pinned.
+    #[test]
+    fn push_remote_unusable_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::PushRemoteUnusable {
+            branch: "feat".to_string(),
+            key: "branch.feat.pushRemote".to_string(),
+            value: "nope".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"pushRemoteUnusable","message":"\"feat\" is set to push to \"nope\" (branch.feat.pushRemote), which GitDesktop can't use as a push remote, so nothing was pushed. Set branch.feat.pushRemote to the name of one of this repository's remotes, or unset it.","branch":"feat","key":"branch.feat.pushRemote","value":"nope"}"#
+        );
+        let empty = AppError::PushRemoteUnusable {
+            branch: "feat".to_string(),
+            key: "remote.pushDefault".to_string(),
+            value: String::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&empty).unwrap(),
+            r#"{"kind":"pushRemoteUnusable","message":"remote.pushDefault is set but empty, so \"feat\" has no push destination and nothing was pushed. Unset remote.pushDefault, or set it to the name of one of this repository's remotes.","branch":"feat","key":"remote.pushDefault","value":""}"#
+        );
+    }
+
+    /// The TS union reads `branch`, `remote` and `dest` by key.
+    #[test]
+    fn push_destination_exists_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::PushDestinationExists {
+            branch: "feat".to_string(),
+            remote: "fork".to_string(),
+            dest: "feat".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"pushDestinationExists","message":"fork already has a branch named feat, and it points at a different commit, so feat wasn't pushed.","branch":"feat","remote":"fork","dest":"feat"}"#
+        );
+    }
+
+    /// The TS union reads `expected`; a detached pin gets its own sentence.
+    #[test]
+    fn push_head_moved_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::PushHeadMoved {
+            expected: "feat".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"pushHeadMoved","message":"HEAD is no longer on feat, so nothing was pushed.","expected":"feat"}"#
+        );
+        let detached = AppError::PushHeadMoved {
+            expected: "HEAD".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&detached).unwrap(),
+            r#"{"kind":"pushHeadMoved","message":"HEAD is no longer detached, so nothing was pushed.","expected":"HEAD"}"#
+        );
+    }
+
+    /// The TS union reads `branch`.
+    #[test]
+    fn push_tip_moved_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::PushTipMoved {
+            branch: "feat".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"pushTipMoved","message":"feat changed after you confirmed, so nothing was pushed. Review it and push again.","branch":"feat"}"#
+        );
+    }
+
+    /// The TS union reads `branch`, `remote` and `cause`; both causes' sentences are pinned.
+    #[test]
+    fn push_force_multi_ref_serializes_to_the_pinned_wire_shape() {
+        use super::PushMultiRefCause;
+        let matching = AppError::PushForceMultiRef {
+            branch: "feat".to_string(),
+            remote: "origin".to_string(),
+            cause: PushMultiRefCause::Matching,
+        };
+        assert_eq!(
+            serde_json::to_string(&matching).unwrap(),
+            r#"{"kind":"pushForceMultiRef","message":"push.default is \"matching\" in this repository, so a force push could also rewrite other matching branches. Nothing was pushed. Force-push feat from a terminal, naming the branch.","branch":"feat","remote":"origin","cause":"matching"}"#
+        );
+        let refspecs = AppError::PushForceMultiRef {
+            branch: "feat".to_string(),
+            remote: "fork".to_string(),
+            cause: PushMultiRefCause::Refspecs,
+        };
+        assert_eq!(
+            serde_json::to_string(&refspecs).unwrap(),
+            r#"{"kind":"pushForceMultiRef","message":"fork has push refspecs of its own, so a force push could rewrite other branches too. Nothing was pushed. Force-push feat from a terminal, naming the branch.","branch":"feat","remote":"fork","cause":"refspecs"}"#
+        );
     }
 
     /// `DISPLAY_LEADS` (src/lib/error-summary.ts) matches these leads byte-for-byte

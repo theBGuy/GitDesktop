@@ -1193,15 +1193,25 @@ describe("a row push while a sibling worktree pushes the branch", () => {
     return { user, start };
   }
 
-  it("Push to the upstream toasts the elsewhere message and starts nothing", async () => {
+  // The sibling's push paints the row read-only and holds its push items, so
+  // the press never reaches the fire-time refusal.
+  it("paints the row and holds Push to the upstream, starting nothing", async () => {
     reads.branches.push(trackedRow("feat", { upstreamAhead: 1 }));
     const { user, start } = await withPushFrom(SIBLING);
     await start();
     await openList(user);
+    await waitFor(() =>
+      expect(
+        document.querySelector(
+          '[data-row="feat"] [aria-label="Pushing from another worktree"]',
+        ),
+      ).not.toBeNull(),
+    );
     await openRowMenu(user, "feat");
-    await user.click(menuItem("Push to origin/feat"));
+    const item = menuItem("Push to origin/feat (another worktree is pushing)");
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    await user.click(item);
     await settle();
-    expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE);
     expect(pushSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -1216,15 +1226,16 @@ describe("a row push while a sibling worktree pushes the branch", () => {
     expect(info).not.toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE);
   });
 
-  it("Publish branch refuses before its fork-PR check", async () => {
+  it("holds Publish branch, so its fork-PR check never starts", async () => {
     reads.branches.push(branchRow({ name: "feat" }));
     const { user, start } = await withPushFrom(SIBLING);
     await start();
     await openList(user);
     await openRowMenu(user, "feat");
-    await user.click(menuItem("Publish branch"));
+    const item = menuItem("Publish branch (another worktree is pushing)");
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    await user.click(item);
     await settle();
-    expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE);
     expect(forgeDetectForkPrForBranch).not.toHaveBeenCalled();
     expect(useConfirm.getState().request).toBeNull();
     expect(pushSpy).toHaveBeenCalledTimes(1);
@@ -1308,6 +1319,7 @@ const FORK_MATCH: ForkPrMatch = {
   headRefName: "feat",
   headRepoOwner: "someone",
   headRepoName: "keep",
+  headRepoHost: "example.test",
   maintainerCanModify: true,
   aheadCount: 1,
 };

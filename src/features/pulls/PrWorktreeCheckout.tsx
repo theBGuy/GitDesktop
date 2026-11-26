@@ -81,7 +81,7 @@ import {
 } from "@/lib/git/worktree-default-path";
 import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
-import type { PrNoun } from "@/lib/pulls/pr-state";
+import { type PrNoun, prRefForNoun } from "@/lib/pulls/pr-state";
 import { useConfirm } from "@/lib/stores/confirm";
 import { landedIn } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
@@ -98,16 +98,21 @@ import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 export const CHECKOUT_SPLIT_CLASS = "inline-flex shrink-0 items-stretch";
 
 /** The caret's accessible name: it is its own tab stop beside the plain half. */
-export const checkoutOptionsLabel = (n: number) => `Checkout options for #${n}`;
+export const checkoutOptionsLabel = (
+  n: number,
+  noun: PrNoun = "pull request",
+) => `Checkout options for ${prRefForNoun(noun, n)}`;
 
 /** The caret where the loaded header's will stand, held for `reason`: the loading
  *  frame mirrors the live split control. */
 export function HeldCheckoutCaret({
   number,
   reason,
+  prNoun,
 }: {
   number: number;
   reason: string;
+  prNoun?: PrNoun;
 }) {
   return (
     <DisabledReasonButton
@@ -115,7 +120,7 @@ export function HeldCheckoutCaret({
       size="icon-xs"
       disabled
       reason={reason}
-      aria-label={checkoutOptionsLabel(number)}
+      aria-label={checkoutOptionsLabel(number, prNoun)}
       wrapperClassName="-ml-px"
     >
       <CaretDownIcon />
@@ -128,11 +133,12 @@ export function HeldCheckoutCaret({
 export function checkoutRunningReason(
   running: PendingPrWrite | undefined,
   ownPr: boolean,
+  noun: PrNoun = "pull request",
 ): string | undefined {
   if (running === undefined) return undefined;
   return ownPr || running.target == null
     ? "Checking out…"
-    : `Checking out #${running.target}…`;
+    : `Checking out ${prRefForNoun(noun, running.target)}…`;
 }
 
 /** The short form of each forge's PR noun. */
@@ -148,7 +154,9 @@ export function plainCheckoutTarget(
   number: number,
   noun: PrNoun,
 ): string {
-  return plainCheckoutBranch(pr) ?? `${PR_SHORT[noun]} #${number}`;
+  return (
+    plainCheckoutBranch(pr) ?? `${PR_SHORT[noun]} ${prRefForNoun(noun, number)}`
+  );
 }
 
 /** Base UI activates on keydown without a repeat or modifier check, so a key
@@ -227,13 +235,15 @@ function openablePath(
 
 type SuccessKind = "create" | "update" | "current" | "reset";
 
-const SUCCESS_COPY: Record<SuccessKind, (n: number, short: string) => string> =
-  {
-    create: (n) => `Checked out #${n} in a worktree`,
-    update: (_n, short) => `Worktree updated to the ${short}`,
-    current: () => "Worktree already up to date.",
-    reset: (_n, short) => `Worktree reset to the ${short}`,
-  };
+const SUCCESS_COPY: Record<
+  SuccessKind,
+  (ref: string, short: string) => string
+> = {
+  create: (ref) => `Checked out ${ref} in a worktree`,
+  update: (_ref, short) => `Worktree updated to the ${short}`,
+  current: () => "Worktree already up to date.",
+  reset: (_ref, short) => `Worktree reset to the ${short}`,
+};
 
 const DISCARD_LABEL: Record<"listed" | "more", (n: number) => string> = {
   listed: (n) => `Discard ${n} commit${n === 1 ? "" : "s"} and reset`,
@@ -415,7 +425,7 @@ export function PrWorktreeCheckout({
 
   function leftBeforeReset(p: Pin): false {
     toast.info(
-      `You left #${p.number} before its worktree could be reset, so nothing was discarded.`,
+      `You left ${prRefForNoun(prNoun, p.number)} before its worktree could be reset, so nothing was discarded.`,
     );
     return false;
   }
@@ -424,7 +434,7 @@ export function PrWorktreeCheckout({
    *  item is named, not Update: the reopened body depends on the branch match. */
   function dismissedBeforeReset(p: Pin): false {
     toast.info(
-      `The worktree for #${p.number} has commits that aren't on the ${prNoun}, so nothing was updated or discarded. Choose Check out in a worktree… again to review the reset.`,
+      `The worktree for ${prRefForNoun(prNoun, p.number)} has commits that aren't on the ${prNoun}, so nothing was updated or discarded. Choose Check out in a worktree… again to review the reset.`,
     );
     return false;
   }
@@ -593,7 +603,8 @@ export function PrWorktreeCheckout({
             written?.head === headBefore
           )
             outcome = "current";
-          toast.success(SUCCESS_COPY[outcome](p.number, PR_SHORT[prNoun]), {
+          const ref = prRefForNoun(prNoun, p.number);
+          toast.success(SUCCESS_COPY[outcome](ref, PR_SHORT[prNoun]), {
             action: openWorktreeAction(openablePath(written, target)),
           });
           if (ownsPopover(p)) setPopoverOpen(false);
@@ -705,7 +716,7 @@ export function PrWorktreeCheckout({
                 size="icon-xs"
                 disabled={staleReason !== undefined}
                 reason={staleReason}
-                aria-label={checkoutOptionsLabel(prNumber)}
+                aria-label={checkoutOptionsLabel(prNumber, prNoun)}
                 wrapperClassName="-ml-px"
               />
             }
@@ -762,7 +773,7 @@ export function PrWorktreeCheckout({
               className="flex w-[360px] max-w-(--available-width) flex-col gap-2 rounded-none bg-popover p-3 text-xs text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-none"
             >
               <Popover.Title className="text-xs font-semibold">
-                Check out #{prNumber} in a worktree
+                {`Check out ${prRefForNoun(prNoun, prNumber)} in a worktree`}
               </Popover.Title>
               {existing ? (
                 <>

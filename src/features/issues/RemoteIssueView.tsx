@@ -1409,6 +1409,7 @@ export function RemoteIssueView({
           selfRepo={
             lens === "origin" ? (forge.data?.repo ?? undefined) : undefined
           }
+          provider={forge.data?.provider}
         />
       ),
     });

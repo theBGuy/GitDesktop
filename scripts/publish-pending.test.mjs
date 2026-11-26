@@ -14,6 +14,7 @@ import {
   PUBLISH_REPO_KEY,
   pendingMutationEntries,
   pendingPublishesFor,
+  publishHoldsBranch,
   publishRepoKey,
   tagPushKey,
 } from "../src/lib/git/queries/pr-writes.ts";
@@ -35,9 +36,45 @@ test("a pending publish of this repo reads back its provider and name", () => {
         [entry(publishRepoKey(REPO), { provider: "github", name })],
         REPO,
       ),
-      [{ provider: "github", name }],
+      [{ provider: "github", name, branch: null }],
     );
   }
+});
+
+test("the publishing checkout's branch reads back; any other value is unknown", () => {
+  const read = (branch) =>
+    pendingPublishesFor(
+      [entry(publishRepoKey(REPO), { provider: "github", name: "h", branch })],
+      REPO,
+    )[0].branch;
+  assert.equal(read("release"), "release");
+  for (const branch of [null, undefined, 7, ["release"]])
+    assert.equal(read(branch), null, `branch ${JSON.stringify(branch)}`);
+});
+
+test("a publish holds the branch it recorded, else the viewer's current one", () => {
+  const p = (branch) => ({ provider: "github", name: "h", branch });
+  // Recorded: only that branch, ignoring case, whatever the viewer's HEAD.
+  assert.equal(publishHoldsBranch([p("release")], "release", "topic"), true);
+  assert.equal(publishHoldsBranch([p("Release")], "release", "topic"), true);
+  // Folded per code point, as the backend folds: a capital sigma is the medial
+  // small one, never the final one, wherever it sits.
+  const sigma = (s) => s.replaceAll("S", "\u03a3").replaceAll("s", "\u03c3");
+  assert.equal(publishHoldsBranch([p(sigma("AS"))], sigma("as"), "x"), true);
+  assert.equal(publishHoldsBranch([p(sigma("as"))], sigma("AS"), "x"), true);
+  assert.equal(publishHoldsBranch([p(sigma("AS"))], "a\u03c2", "x"), false);
+  assert.equal(publishHoldsBranch([p("a\u03c2")], sigma("AS"), "x"), false);
+  assert.equal(publishHoldsBranch([p("release")], "topic", "topic"), false);
+  // Unknown: the viewer's current branch.
+  assert.equal(publishHoldsBranch([p(null)], "topic", "topic"), true);
+  assert.equal(publishHoldsBranch([p(null)], "release", "topic"), false);
+  // No publish, or no branch to ask about, holds nothing.
+  assert.equal(publishHoldsBranch([], "topic", "topic"), false);
+  assert.equal(publishHoldsBranch([p(null)], null, null), false);
+  assert.equal(
+    publishHoldsBranch([p("main"), p("release")], "release", "x"),
+    true,
+  );
 });
 
 test("only the projection's fields ride out, for every provider", () => {
@@ -57,7 +94,7 @@ test("only the projection's fields ride out, for every provider", () => {
         ],
         REPO,
       ),
-      [{ provider, name: "harbor" }],
+      [{ provider, name: "harbor", branch: null }],
     );
   }
 });
@@ -114,8 +151,8 @@ test("two pending publishes of one repo both read back, in cache order", () => {
       REPO,
     ),
     [
-      { provider: "github", name: "harbor" },
-      { provider: "gitlab", name: "acme/harbor" },
+      { provider: "github", name: "harbor", branch: null },
+      { provider: "gitlab", name: "acme/harbor", branch: null },
     ],
   );
 });
@@ -135,7 +172,7 @@ test("entries arrive pre-filtered to pending; a paused one still holds", () => {
     },
   ];
   assert.deepEqual(pendingPublishesFor(pendingMutationEntries(cache), REPO), [
-    { provider: "bitbucket", name: "harbor" },
+    { provider: "bitbucket", name: "harbor", branch: null },
   ]);
 });
 
@@ -697,7 +734,7 @@ const WT_A = "C:/work/harbor";
 const WT_B = "C:/work/harbor-feature";
 const ID = "C:/work/harbor/.git";
 const OTHER_ID = "C:/work/anchor/.git";
-const ID_VARS = { provider: "github", name: "harbor" };
+const ID_VARS = { provider: "github", name: "harbor", branch: null };
 
 test("the identity rides the key as a third element", () => {
   assert.deepEqual(publishRepoKey(WT_A, ID), ["publish-repo", WT_A, ID]);
@@ -752,6 +789,6 @@ test("identity-matched reads keep the hostile-shape and order rules", () => {
       WT_B,
       ID,
     ),
-    [ID_VARS, { provider: "gitlab", name: "h" }],
+    [ID_VARS, { provider: "gitlab", name: "h", branch: null }],
   );
 });

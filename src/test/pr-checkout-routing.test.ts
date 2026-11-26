@@ -192,7 +192,7 @@ describe("plainCheckoutTarget", () => {
     ["bitbucket", true, "ws", "pull request", "ws/feat/x"],
     ["gitlab", false, null, "merge request", "feat/x"],
     // No name the engine is sure to use: the PR by number instead.
-    ["gitlab", true, null, "merge request", "MR #7"],
+    ["gitlab", true, null, "merge request", "MR !7"],
     ["bitbucket", false, null, "pull request", "PR #7"],
   ])("%s cross=%j owner=%j (%s) → %j", (provider, cross, owner, noun, want) => {
     expect(plainCheckoutTarget(facts(provider, cross, owner), 7, noun)).toBe(

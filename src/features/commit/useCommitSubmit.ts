@@ -11,6 +11,7 @@ import {
 import { headBranchPin } from "@/lib/git/api";
 import { coAuthorTrailers } from "@/lib/git/co-authors";
 import {
+  pendingRemoteRenamesNow,
   refuseWhilePinnedBranchPushes,
   repoKeys,
   useCommit,
@@ -22,6 +23,42 @@ import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { commitDraftKey, useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useGenerateCommitMessage } from "./useGenerateCommitMessage";
+
+/** Points the live commit fields at `branchName`'s saved draft. While a remote
+ *  rename of the shown branch runs, the status poll reports HEAD under the new
+ *  name before the rename settles: the old name's draft moves with it then (the
+ *  settle's own move finds nothing left to carry), unless a draft is saved under
+ *  the new name, which stays until the settle (the act can still fail). Exported
+ *  for the rename tests. */
+export function useBranchCommitDraft(
+  repoPath: string,
+  branchName: string | null,
+) {
+  const queryClient = useQueryClient();
+  const loadCommitDraft = useUiStore((s) => s.loadCommitDraft);
+  const migrateCommitDraft = useUiStore((s) => s.migrateCommitDraft);
+  useEffect(() => {
+    if (!branchName) return;
+    // Read at run time: the other commit surface may have moved it already.
+    const { activeDraftKey: active, commitDrafts } = useUiStore.getState();
+    const newKey = commitDraftKey(repoPath, branchName);
+    const renaming = pendingRemoteRenamesNow(queryClient, repoPath).find(
+      (p) => {
+        const oldKey = commitDraftKey(repoPath, p.oldName);
+        return (
+          p.newName === branchName &&
+          commitDrafts[newKey] === undefined &&
+          // The fields show the old name's draft, or another key's (a
+          // repository round trip) while the old name's draft is saved.
+          (active === oldKey ||
+            (active !== newKey && commitDrafts[oldKey] !== undefined))
+        );
+      },
+    );
+    if (renaming) migrateCommitDraft(repoPath, renaming.oldName, branchName);
+    loadCommitDraft(newKey);
+  }, [repoPath, branchName, queryClient, loadCommitDraft, migrateCommitDraft]);
+}
 
 /** Why an amend holds, for the surfaces' banner: the commit moved, then the branch;
  *  `"none"` while it can run, or when not amending. */
@@ -98,7 +135,6 @@ export function useCommitSubmit(
   const clearAmending = useUiStore((s) => s.clearAmending);
   const restoreCommitDraft = useUiStore((s) => s.restoreCommitDraft);
   const activeDraftKey = useUiStore((s) => s.activeDraftKey);
-  const loadCommitDraft = useUiStore((s) => s.loadCommitDraft);
   const commitAiGenerated = useUiStore((s) => s.commitAiGenerated);
   const { generate, cancel, generating } = useGenerateCommitMessage(repoPath);
   const aiEnabled = useAiEnabled();
@@ -144,9 +180,7 @@ export function useCommitSubmit(
   // message instead of clearing it. Idempotent (loadCommitDraft no-ops on the
   // active key), so the two surfaces running it together costs nothing — and the
   // dialog's copy keeps the key current while the box is Activity-hidden.
-  useEffect(() => {
-    if (branchName) loadCommitDraft(commitDraftKey(repoPath, branchName));
-  }, [repoPath, branchName, loadCommitDraft]);
+  useBranchCommitDraft(repoPath, branchName);
   // A "require pull request" rule locks the branch against direct commits.
   const locked = branchName
     ? requiresPullRequest(rulesConfig, branchName)

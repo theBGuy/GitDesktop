@@ -1028,9 +1028,35 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   just the one you're on. Basing on a remote branch (e.g. \`origin/epic/…\`) starts from the
   remote tip and leaves the new branch with **no upstream**, so its first push publishes it
   under its own name — pairs with pushing a branch without switching to it (below).
-  Renaming changes only the local name: a branch already on a remote keeps its name there
-  (the dialog notes it when that applies). Names under \`gd/session/\` are reserved
-  for agent sessions.
+  Renaming changes only the local name unless you tick the dialog's **Also rename on
+  _remote_** box. The box appears for a branch that tracks a branch of the same name on
+  one of the repository's remotes and starts unticked when you open the dialog (reopened
+  while a rename runs, it shows that rename, ticked and held). It's held, with the reason
+  beside it, when that branch is the remote's default branch, when the branch is marked
+  **Keep local**, when Git's push settings send the branch to another remote, and while
+  another branch is being renamed on its remote. Offline the box can't be ticked; a box
+  already ticked renames only here until you're back online, and the line under it says
+  so. Ticked, the dialog checks the remote before anything is renamed, and **Rename** is
+  held with the reason when, for example, the remote has commits the branch doesn't (pull
+  first), already has the new name, or can't be reached. The check also lists the open
+  pull or merge requests that use the old name, in the repository and, for a fork, in its
+  parent, each with what the rename does to it (a GitHub pull request or GitLab merge
+  request is closed; a Bitbucket pull request stays open and loses its source branch).
+  When there are any, or one of those repositories couldn't be checked for them, the
+  button reads **Rename anyway** and {{key:enter}} in the name field doesn't rename; a
+  lookup that fails outright holds the button with the reason instead. Pressing **Rename**
+  or **Rename anyway** looks for open requests once more. **Rename** goes ahead only when
+  the answer is still clear, and **Rename anyway** only when nothing has turned up that
+  the dialog hadn't listed. Otherwise, or when that look fails, nothing is renamed and the
+  dialog shows the answer it got (if the dialog is closed or showing another branch by
+  then, a notice says the branch wasn't renamed). The rename pushes the new name, then
+  deletes the old one only if it hasn't moved since the check; a result that stops partway
+  says what is where, and how to finish when the old name is left on the remote. You can
+  close the dialog while it runs, and the notice still reports the result. Once the rename
+  has started, the branch's row in the branch menu shows **Renaming on _remote_** and holds
+  what a push of the branch would hold until it ends; **Rename branch…** stays available
+  and reopens the dialog on the running rename.
+  Names under \`gd/session/\` are reserved for agent sessions.
   Deleting asks first and removes the branch only at the commit it had when the
   confirmation opened; a branch that changed since is kept. The notice that follows names
   the commit the branch pointed at (**Deleted _name_ (was _abc1234_)**) with a **Restore**
@@ -1178,35 +1204,50 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   own, so several can run at once.
 - **Push a branch without switching to it** — the outbound counterpart: a branch ahead
   of the remote it tracks offers **Push to _its remote/…_** in its context menu — so a
-  branch tracking a fork's _upstream_ is pushed there, not to origin. An unpushed or
-  upstream-deleted branch offers **Publish**; on a repo with several remotes you pick the
-  destination (one **Publish to _…_** item per remote). A branch tracking a differently
+  branch tracking a fork's _upstream_ is pushed there, not to origin. When Git's
+  \`branch.<name>.pushRemote\` or \`remote.pushDefault\` names another remote, the item
+  pushes there instead and names it (**Push to _fork/…_**); a setting that names no usable
+  remote leaves a plain **Push**, which says why when pressed. A branch whose push goes
+  to another remote this way has the item whether or not it's ahead of what it tracks,
+  held as diverged when it's both ahead and behind. An unpushed or upstream-deleted
+  branch offers **Publish**; on a repo with several remotes you pick the destination
+  (one **Publish to _…_** item per remote). A branch tracking a differently
   named branch also offers **Publish as _origin/…_** (**Push to _origin/…_ and track it**
   when the remote already has its name), which pushes it under its own name and tracks
-  that. When the tracked branch is the remote's default branch, as for a branch still
-  tracking the branch it was started from, that item takes the place of a push into the
-  default branch and isn't held while the branch is behind it. On a branch marked **Keep
-  local**, these items stay in the menu, held with **(kept local)** on the label, and
-  {{kbd:push-to-origin}} says why instead of pushing. None of them checks the branch out
-  or touches your working tree, so they work even for a branch checked out in another
-  worktree.
+  that; one whose push settings send it to another remote doesn't offer it. When the
+  tracked branch is the remote's default branch, as for a branch still tracking the
+  branch it was started from, that item takes the place of a push into the default branch
+  and isn't held while the branch is behind it. On a branch marked **Keep local**, these
+  items stay in the menu, held with **(kept local)** on the label, and {{kbd:push-to-origin}}
+  says why instead of pushing. None of them checks the branch out or touches your working
+  tree, so they work even for a branch checked out in another worktree.
   A publish that would create the branch on the remote asks first, from these items and
   from {{kbd:push-to-origin}} alike: a prompt names the branch and its destination, with
   **Cancel** focused, and the list closes for it if it was open. A branch the remote
-  already has (as of the last fetch) just pushes and starts tracking it. Otherwise the
-  list stays open while the push runs, so you can keep switching and browsing, and the
-  branch's row shows a spinner naming where the push is going: **Preparing to push to
-  _…_** while GitDesktop checks whether the push creates the branch there, **Publishing
-  to _…_** only when it does, and **Pushing to _…_** otherwise. A push from the sync bar
-  may not name one, since git's own push settings decide where it lands.
+  already has (as of the last fetch) just pushes and starts tracking it; when the remote
+  has a branch of that name this clone hasn't fetched, at another commit, the publish
+  stops, says so, and leaves that branch alone. Otherwise the list stays open while the
+  push runs, so you can keep switching and browsing, and the branch's row shows a spinner
+  naming where the push is going: **Preparing to push to _…_** while GitDesktop checks
+  whether the push creates the branch there, **Publishing to _…_** when it does, and
+  **Pushing to _…_** otherwise; a push that your push settings route away from the
+  branch's upstream reads **Pushing to _…_** either way. A push from the sync bar may not
+  name one, since git's own
+  push settings decide where it lands. The row also shows **Preparing to push** while the
+  sync bar checks where to publish the branch, and **Pushing from another worktree** while
+  another worktree of the repository pushes it, and holds its push items with the reason
+  until that finishes.
   {{kbd:push-to-origin}} is the keyboard shortcut for pushing to **origin** specifically:
   with the **branches** list open it targets the **highlighted** branch, otherwise the
   **current** one, and pushes or publishes it to origin. A branch that tracks a different
-  remote, has diverged, or has nothing to push says so in a short message; for those, use
-  the branch's context menu. One that tracks a branch with a different name says so too:
-  push the current branch with **Push** in the sync bar, or a highlighted one from its
-  context menu. If a branch or what it tracks just changed outside the app, the shortcut
-  may ask you to press it again while the branch list catches up.
+  remote, has diverged, or has nothing to push says so in a short message, and so does one
+  whose push settings send it to another remote, naming where it goes; for those, use
+  the branch's context menu. The exception is a branch that tracks another remote while
+  its push settings send it to origin: it is pushed to origin, unless it has diverged. One
+  that tracks a branch with a different name says so too: push the current branch with
+  **Push** in the sync bar, or a highlighted one from its context menu. If a branch or
+  what it tracks just changed outside the app, the shortcut may ask you to press it again
+  while the branch list catches up.
 - **While a push runs, its branch is held.** The pushing branch can't be renamed, deleted,
   archived, reset or updated until the push finishes, and **Clean up branches…**, which
   could remove it, waits too; while it's the current branch it can't be rebased or given a
@@ -1215,7 +1256,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   pull request's merge, **Update branch**, **Finish merge** and **Finish update** are
   turned away with the reason too while the branch they would move is pushing. The
   hold also applies when another worktree of the same repository is the one pushing
-  the branch, and the message then says so. A plain commit isn't held, and pushes
+  the branch, and the message then says so. While **Publish repository…** pushes the
+  current branch, that branch can't be renamed, deleted or archived either, and a rename
+  that would also rename on the remote waits for any publish of the repository. A plain
+  commit isn't held, and pushes
   started from a terminal{{ai}} or the MCP server{{/ai}} aren't seen. One push runs
   at a time, and anything that would wait behind it holds with the reason: another push or
   publish, merging into the current branch, updating the current branch, deleting a branch
@@ -1228,7 +1272,13 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or {{secondaryclick}} to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for
-  everyone (protected names are blocked, and it can't be undone from the app).
+  everyone (protected names are blocked; it removes the branch only at the commit the app
+  had read for it when the confirmation opened, so a branch that changed on the remote
+  since is kept; and it can't be undone from the app). It's refused, with nothing deleted,
+  when the remote has more than one push address, or a push address GitDesktop can't match
+  to the repository it fetches from. It's also refused when GitDesktop can't confirm from
+  your clone's fetch settings that the listed branch came from the remote's branch of the
+  same name (a pull request fetched as \`origin/pr/5\`, for example).
 - The **Merge** dialog previews the result before you commit to it — *fast-forward*, *already
   up to date*, *clean merge*, or *which files will conflict* — worked out in memory without
   touching your files.
@@ -1442,7 +1492,7 @@ The branch's own items read **Rename branch…** and **Delete branch…**, so th
 can't be confused; a deleted worktree leaves its branch behind, and **Delete branch…**
 un-disables once the worktree is gone. A branch with a pull request shows a chip under its
 name whose icon marks the pull request's state, and its context menu adds
-**View pull request #…** (**View merge request #…** on GitLab; **View local pull request**
+**View pull request #…** (**View merge request !…** on GitLab; **View local pull request**
 for a local one) to jump straight to it. The dropdown's own action rows say why when one
 of them is unavailable. When you're in a linked worktree the switcher reminds you that a
 branch checkout lands *there* (not the main workspace) and offers a one-click
@@ -1465,11 +1515,16 @@ right on the **Push** and **Pull** buttons.
 - **Pull** ({{kbd:pull}}) is fast-forward only by design — it won't create surprise merge
   commits; the menu's caret offers rebase and merge for reconciling a diverged branch.
 - **Push** ({{kbd:push}}) sends your commits. For a branch with no upstream yet, you'll
-  see **Publish branch** instead. A push that would create the branch on the remote asks
-  first, naming the branch and where it's going: **Cancel** has the focus, so
-  {{key:enter}} backs out, and **Publish** sends it. A branch the remote already has (as
-  of the last fetch) just pushes, without asking. Afterwards the message says "Published"
-  only when that fetch showed the branch was new to the remote, and "Pushed" otherwise.
+  see **Publish branch** instead, which sends it to the remote Git's push settings name
+  for it (\`branch.<name>.pushRemote\`, else \`remote.pushDefault\`), else to \`origin\`;
+  when neither is set and its \`branch.<name>.remote\` names a remote the repository
+  doesn't have, it stops with \`unknown remote: <name>\` instead.
+  A push that would create the branch on the remote asks first, naming the branch and
+  where it's going: **Cancel** has the focus, so {{key:enter}} backs out, and **Publish**
+  sends it. A branch the remote already has (as of the last fetch) just pushes, without
+  asking; one this clone hasn't fetched, at another commit, stops the publish with the
+  reason, leaving that branch alone. Afterwards the message says "Published" only when
+  that fetch showed the branch was new to the remote, and "Pushed" otherwise.
   When the branch tracks a remote branch with a different name (after renaming a pushed
   branch, say) and Git would refuse a plain push, **Push** opens a small menu: push to
   the branch it tracks, or publish under its own name and track that, which asks the
@@ -1594,7 +1649,13 @@ force push using \`--force-with-lease --force-if-includes\`** — which refuses 
 work someone else pushed unless your branch already includes it, even when auto-fetch has
 already updated your view of the remote. On a Git older than 2.30, or a branch with no
 reflog for the check to read, the push falls back to \`--force-with-lease\` alone, and the
-success toast says so. When the remote has moved since your last look, the blocked
+success toast says so. In a fresh clone, where Git has no fetch history for the check to
+read, it pushes under a lease pinned to the remote tip from your last fetch instead, and
+the toast says that too. If the branch changes after you confirm and before the push
+starts, nothing is pushed and the toast says why. Where Git's \`push.default\` is
+\`matching\`, or the remote has push refspecs of its own, the force push is refused
+instead, since it could rewrite other branches too, and the message says to force-push
+the branch from a terminal. When the remote has moved since your last look, the blocked
 push explains it in plain words, with Git's full output one click away under **Details**.
 (Anywhere a failure toast also offers to open what was created, such as **View on
 GitHub** after a promote whose follow-up step failed, **Details** carries that link too.)
@@ -2234,7 +2295,9 @@ things follow from that (**GitHub** only — the fork model here is GitHub's):
   seconds; the offer takes the prompt's place as soon as the pull request turns up. A
   **Publish** pressed after those 10 seconds, before the pull request turns up, goes
   ahead without the offer, and so does a publish whose check itself fails (for example
-  when GitHub's API can't be reached or the GitHub CLI is signed out). Offline,
+  when GitHub's API can't be reached or the GitHub CLI is signed out). If the check finds
+  that pull request after such a publish, a notice names it, says the publish made a
+  separate copy, and links to it with **View pull request**. Offline,
   **Publish** waits for the connection.
 
 ## Review comments
@@ -2365,6 +2428,15 @@ your fork's parent, upstream's state takes the line's place first: **Fetching up
 branches…** while the parent's branches load, **Couldn't fetch upstream:** with the reason
 when the fetch fails, and **Couldn't read upstream branches:** with the reason and a
 **Retry** when the branches can't be read.
+
+When a branch you renamed in this clone still tracks its old name on \`origin\`, and that
+name isn't \`origin\`'s default branch, **Create** also looks for a pull request open from
+the old name into the base you picked and shows it. When there is none (and the old name
+isn't the base), **Create** stops before pushing and says how to publish the branch under
+its own name: from the sync bar's **Push** menu when it shows one for the branch you're
+on, from the branch's own menu in the branch list when that has a **Publish as
+_origin/…_** or **Push to _origin/…_ and track it** item, and otherwise by pushing it to
+\`origin\` from a terminal; for an ordinary branch name the message gives the command.
 
 On GitHub and GitLab the description takes pasted or attached images the same way the
 comment box does; if GitHub creates the pull request but an image doesn't upload, a notice

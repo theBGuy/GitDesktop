@@ -126,8 +126,10 @@ pub struct Branch {
     /// "no upstream" for pushed-ness decisions.
     pub upstream_gone: bool,
     /// The remote of the branch's upstream (`%(upstream:remotename)`), e.g.
-    /// `origin` — null when untracked. Authoritative source for which remote a
-    /// push targets; the UI must never re-derive it from the upstream string.
+    /// `origin` — null when untracked. The tracking remote, which a push follows only as
+    /// its third choice: a named remote, else a configured push remote, else this one
+    /// while the upstream is live, else `origin`. The destination comes from
+    /// `named_push_remote` / `named_push_branch`.
     pub upstream_remote: Option<String>,
     /// The upstream's ref on its remote (`%(upstream:remoteref)`, e.g.
     /// `refs/heads/main`); None when untracked. Cross-name decisions read this,
@@ -141,6 +143,16 @@ pub struct Branch {
     /// `refs/remotes/<remote>/HEAD` symref targets `%(upstream)`. False whenever that is
     /// unknown (no or a dangling HEAD symref), gone, local `.`, or not a branch.
     pub upstream_is_remote_default: bool,
+    /// The live upstream has another name, which the branch's reflog shows it was renamed
+    /// from, and that upstream is not measured as the remote's default. Read by the
+    /// switcher's PR chip only; nothing decides a create from it.
+    pub renamed_from_upstream: bool,
+    /// Where a push of this branch naming no remote lands (remote and branch there, both
+    /// set or both None): None when refused or when the routing could not be read.
+    pub named_push_remote: Option<String>,
+    pub named_push_branch: Option<String>,
+    /// That push is refused for a routing reason.
+    pub named_push_refused: bool,
 }
 
 /// A branch that exists on a remote but not (yet) as a local branch — offered in
@@ -154,6 +166,8 @@ pub struct RemoteBranch {
     pub remote: String,
     /// ISO-8601 committer date of the branch tip (for recency sorting).
     pub last_commit_date: String,
+    /// The tracking ref's commit id as of the last fetch.
+    pub tip: String,
 }
 
 /// How far a local branch sits from a base branch (the default branch), for

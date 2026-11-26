@@ -25,6 +25,7 @@ import { test } from "node:test";
  *  they touch (the boundary in the header). */
 const ROSTER = [
   "gitPush",
+  "gitRenameBranchRemote",
   "gitPushTag",
   "gitMergeRemotePr",
   "gitFinishRemotePrResolve",
@@ -67,6 +68,12 @@ const ARMED = {
     bothLenses: true,
   },
   usePushTag: { file: `${Q}tags-releases.ts`, gate: null, prChecks: false },
+  // Armed only when the new name was pushed.
+  useRenameBranchOnRemote: {
+    file: `${Q}branches.ts`,
+    gate: 'if (data.status === "renamed" || data.status === "oldKept")',
+    prChecks: false,
+  },
   useMergeRemotePr: {
     file: `${Q}pr-resolve.ts`,
     gate: 'if (data.status === "pushed")',
@@ -181,6 +188,11 @@ const LIST_REREAD = {
   useClosePr: { file: `${Q}pr-actions.ts`, gate: null },
   useReopenPr: { file: `${Q}pr-actions.ts`, gate: null },
   useDeleteRemoteBranch: { file: `${Q}branches.ts`, gate: null },
+  // Only a remote rename that deleted the old branch closes its head's PRs.
+  useRenameBranchOnRemote: {
+    file: `${Q}branches.ts`,
+    gate: 'if (data.status === "renamed")',
+  },
   useIssueLifecycleMutation: {
     file: `${Q}issues.ts`,
     gate: "if (recheckListLater)",
@@ -726,7 +738,10 @@ test("an exclusion that arms the recheck, or a renamed hook, fails the check", (
 
 test("the remote-branch delete must schedule the PR-list re-read", () => {
   const sources = mutate(realSources(), `${Q}branches.ts`, (text) =>
-    text.replace("recheckListsLater(queryClient", "noop(queryClient"),
+    text.replace(
+      "onSuccess: () => recheckListsLater(queryClient",
+      "onSuccess: () => noop(queryClient",
+    ),
   );
   assert.ok(
     checkPushRecheckFamily(sources).some((p) =>
@@ -1001,7 +1016,8 @@ test("dropping a list re-read gate fails the check", () => {
     );
   }
   const gates = Object.values(LIST_REREAD).filter((e) => e.gate !== null);
-  assert.equal(gates.length, 1);
+  // The issue lifecycle helper's flag and the remote rename's renamed status.
+  assert.equal(gates.length, 2);
   const sidestep = mutateUnit(
     realSources(),
     `${Q}issues.ts`,

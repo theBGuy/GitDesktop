@@ -953,6 +953,13 @@ describe("merge dialog: two commits", () => {
   const SQUASH_RESET = "Reset to default, squash commit message";
   const MERGE_RESET = "Reset to default, merge commit message";
 
+  it("titles a merge request by its !N", () => {
+    setup({ host: "GitLab", plan: twoCommits("S", "M") });
+    expect(
+      screen.getByRole("dialog", { name: "Merge merge request !42?" }),
+    ).toBeInTheDocument();
+  });
+
   it("names each row's controls and sends only the edited row", async () => {
     const { user } = setup({ host: "GitLab", plan: twoCommits("S", "M") });
     expect(
@@ -1153,7 +1160,7 @@ describe("merge dialog: confirm holds and targets", () => {
       plan: squash({ title: TITLE, body: "" }),
     });
     expect(
-      screen.getByRole("heading", { name: "Auto-merge merge request #42?" }),
+      screen.getByRole("heading", { name: "Auto-merge merge request !42?" }),
     ).toBeInTheDocument();
     await pressEdit(user);
     await user.type(titleBox(), "!");

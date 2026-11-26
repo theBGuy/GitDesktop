@@ -78,6 +78,7 @@ import { useForgeGhHost } from "@/lib/git/host";
 import {
   forgeFeatureReady,
   useBranchAhead,
+  useBranches,
   useCreatePr,
   useDefaultBranch,
   useForgeStatus,
@@ -108,6 +109,8 @@ import {
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
+import { withCrossNameGuidance } from "@/lib/pulls/cross-name-create";
+import { prRefForNoun } from "@/lib/pulls/pr-state";
 import {
   applyRepoLens,
   useLensGate,
@@ -209,7 +212,7 @@ const LANE_HINT: {
   creating: (lane) =>
     `A ${lane.noun} for this branch is already being created.`,
   created: (lane) =>
-    `A ${lane.noun} for this branch was just created — #${lane.number}.`,
+    `A ${lane.noun} for this branch was just created — ${prRefForNoun(lane.noun, lane.number)}.`,
 };
 
 function laneHintFor(lane: PrCreate): string {
@@ -425,6 +428,9 @@ export function CreatePrDialog({
   const createFailedRef = useRef(false);
 
   const currentName = status.data?.branch?.name ?? null;
+  // The picker's own list read (one shared query): the create catch asks it
+  // whether the head is checked out.
+  const branches = useBranches(repoPath);
   // Branch options with per-branch worktree chips; drops the app-internal
   // `gd/session/*` branches (submitting one would even PUSH it) and archived
   // branches, the same rules as BranchSwitcher. `keep` retains the seeded
@@ -564,7 +570,7 @@ export function CreatePrDialog({
             : duplicateOf(recheck.data, value.base, createLens);
         if (duplicate) {
           toast.error(
-            `A ${prNoun} for this branch already exists — #${duplicate.number}.`,
+            `A ${prNoun} for this branch already exists — ${prRefForNoun(prNoun, duplicate.number)}.`,
             {
               description: duplicate.url,
               action: { label: "View", onClick: () => openUrl(duplicate.url) },
@@ -776,7 +782,7 @@ export function CreatePrDialog({
           });
         else
           toast.success(
-            `Opened ${prNoun}${number === null ? "" : ` #${number}`}${where}`,
+            `Opened ${prNoun}${number === null ? "" : ` ${prRefForNoun(prNoun, number)}`}${where}`,
             {
               description: url || undefined,
               action: view && { label: view.label, onClick: view.onClick },
@@ -821,16 +827,23 @@ export function CreatePrDialog({
         const awayRepo = landedIn(repoPath).live
           ? null
           : repoNameFromPath(repoPath);
+        // A renamed copy's refusal names the control this head's routing
+        // offers. Every toast form and the notification carry this one sentence.
+        const guided = withCrossNameGuidance(e, {
+          head: status.data?.branch,
+          branches: branches.data,
+          remoteNames: remotes.data,
+        });
         if (outcome === "error") {
-          if (mayHaveLanded(e)) {
-            if (awayRepo) toastErrorWithNote(e, `In ${awayRepo}`);
-            else toastError(e);
+          if (mayHaveLanded(guided)) {
+            if (awayRepo) toastErrorWithNote(guided, `In ${awayRepo}`);
+            else toastError(guided);
           } else {
             // A failed push says so; the notification's title is the same
             // sentence.
-            const sentence = prCreateFailedSentence(prNoun, value.head, e);
+            const sentence = prCreateFailedSentence(prNoun, value.head, guided);
             toastErrorWithNote(
-              e,
+              guided,
               awayRepo
                 ? `In ${awayRepo}, ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}.`
                 : `${sentence}.`,
@@ -841,10 +854,10 @@ export function CreatePrDialog({
             repoPath,
             head: value.head,
             noun: prNoun,
-            error: e,
+            error: guided,
           });
-        } else if (awayRepo) toastErrorWithNote(e, `In ${awayRepo}`);
-        else toastError(e);
+        } else if (awayRepo) toastErrorWithNote(guided, `In ${awayRepo}`);
+        else toastError(guided);
       } finally {
         // The lane is also the duplicate-create admission guard, so the watcher
         // arms only once this flow's last step is done — armed at the forge's
@@ -1824,7 +1837,7 @@ export function CreatePrDialog({
                 title={existingPr.title}
               >
                 <ArrowSquareOutIcon data-icon="inline-start" />
-                View {prNoun} #{existingPr.number}
+                View {prNoun} {prRefForNoun(prNoun, existingPr.number)}
                 {existingPr.isDraft ? " (draft)" : ""}
               </Button>
             )}

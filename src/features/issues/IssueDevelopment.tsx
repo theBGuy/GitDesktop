@@ -26,14 +26,18 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
-import { useCreateLinkedBranch, useIssueDevelopment } from "@/lib/git/queries";
+import {
+  useCreateLinkedBranch,
+  useForgeStatus,
+  useIssueDevelopment,
+} from "@/lib/git/queries";
 import type { IssueDetails, RemoteLens } from "@/lib/git/types";
 import {
   pendingWriteReason,
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
-import { prPill } from "@/lib/pulls/pr-state";
+import { prPill, prRef } from "@/lib/pulls/pr-state";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
@@ -87,6 +91,7 @@ export function IssueDevelopment({
   reserve?: boolean;
 }) {
   const dev = useIssueDevelopment(repoPath, number, lens);
+  const provider = useForgeStatus(repoPath).data?.provider;
   const createBranch = useCreateLinkedBranch(repoPath, lens);
   const openPr = useUiStore((s) => s.openPr);
   const repoName = useUiStore((s) => s.repoName);
@@ -210,13 +215,15 @@ export function IssueDevelopment({
             type="button"
             onClick={() => openLinkedPr(pr.number)}
             className="flex w-full cursor-pointer items-center gap-1.5 text-left text-xs hover:underline"
-            title={`#${pr.number} ${pr.title}`}
+            title={`${prRef(provider, pr.number)} ${pr.title}`}
           >
             <Icon className={cn("size-3.5 shrink-0", tone)} />
             {/* The glyph's state in words for a reader; the trailing space keeps
                 it from running into the number in the accessible name. */}
             <span className="sr-only">{`${word} `}</span>
-            <span className="text-muted-foreground">#{pr.number}</span>
+            <span className="text-muted-foreground">
+              {prRef(provider, pr.number)}
+            </span>
             <span className="min-w-0 flex-1 truncate">{pr.title}</span>
           </button>
         );

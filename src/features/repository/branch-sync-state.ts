@@ -41,16 +41,10 @@ export function remoteHasBranch(
   return list?.some((r) => r.remote === remote && r.name === branch);
 }
 
-// The create decision is out of reach by design for: narrow or remapped fetch
-// refspecs and a git without the %(push) atoms (no destination git resolves), a
-// push remote with its own push refspecs (git's bare push runs as configured),
-// several pushurls (the first is named; the push goes to all), force pushes (their
-// own confirm), and presence, which is remote-tracking refs as of the last fetch.
-// Measured on the owner's 109 repos: push refspecs 0, several pushurls 0, narrow
-// fetch 1 (a fixture); stale presence can't be measured without a network read.
-// A mirror push remote is not on this list: Rust refuses every push to one
-// (pushRemoteIsMirror) before git runs. It claims a create only from facts git
-// reports, with no network read.
+// The push-destination contract and its out-of-contract classes live on
+// `resolve_push_target` (git/remote.rs). This file claims a create only from
+// facts git reports (remote-tracking refs as of the last fetch), with no network
+// read.
 
 /** The bare-push create decision. A resolved destination that the remote is
  *  not known to have → true (ask); known present → false; an UNRESOLVED
@@ -312,6 +306,56 @@ export function destinationSlug(
   slugOf: (url: string) => string | null,
 ): string | null {
   return url !== null && forgeShapedUrl(url) ? slugOf(url) : null;
+}
+
+/** The lowercased host of a forge-shaped URL (see {@link forgeShapedUrl}),
+ *  without user or port; a bracketed IPv6 literal keeps its brackets, as Rust
+ *  `remote_host` spells it. Null for anything it can't read. */
+export function forgeUrlHost(url: string): string | null {
+  const u = url.trim();
+  if (!forgeShapedUrl(u)) return null;
+  // An http(s) authority ends at the first `/`, `?` or `#`, an ssh one at `/`,
+  // an scp one at the first `:`, as Rust `split_remote_url` cuts them; the user
+  // part ends at the last `@`. An scp `@[` before the first `/` reads null here.
+  const scheme = /^(?:https?:\/\/([^/?#]*)|ssh:\/\/([^/]*))/i.exec(u);
+  if (!scheme && u.split("/")[0].includes("@[")) return null;
+  const span = scheme ? (scheme[1] ?? scheme[2]) : u.slice(0, u.indexOf(":"));
+  const authority = span.slice(span.lastIndexOf("@") + 1);
+  const host = authority.startsWith("[")
+    ? /^\[[^\]/]+\]/.exec(authority)?.[0]
+    : authority.split(":")[0];
+  return host ? host.toLowerCase() : null;
+}
+
+/** Whether publishing `branch` to the remote behind `pushUrl` updates the fork
+ *  pull request `match` describes (its head repository and head branch) rather
+ *  than creating a separate copy: then the fork guard has nothing to warn about.
+ *  Host and slug compare case-insensitively; a null or unparsable URL, or an
+ *  empty `headRepoHost`, answers false, so the guard shows. */
+export function publishUpdatesForkPr(
+  match: {
+    headRepoOwner: string;
+    headRepoName: string;
+    headRefName: string;
+    headRepoHost: string;
+  },
+  pushUrl: string | null,
+  branch: string,
+  slugOf: (url: string) => string | null,
+): boolean {
+  if (branch !== match.headRefName) return false;
+  const slug = destinationSlug(pushUrl, slugOf);
+  if (slug === null || pushUrl === null) return false;
+  const host = forgeUrlHost(pushUrl);
+  // Typed required, but a wire match from a backend that doesn't fill it yet
+  // arrives without it: anything but a non-empty string is not exempt.
+  const headHost: unknown = match.headRepoHost;
+  if (typeof headHost !== "string" || headHost === "") return false;
+  if (host === null || host !== headHost.toLowerCase()) return false;
+  return (
+    slug.toLowerCase() ===
+    `${match.headRepoOwner}/${match.headRepoName}`.toLowerCase()
+  );
 }
 
 /** One run of prompt text; `mono` marks a ref, remote or slug. */

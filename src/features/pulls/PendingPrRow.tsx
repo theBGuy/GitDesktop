@@ -2,6 +2,7 @@ import { GitPullRequestIcon } from "@phosphor-icons/react";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { clipTitleFromText } from "@/lib/clip-title";
+import { prRefForNoun } from "@/lib/pulls/pr-state";
 import type { PrCreate } from "@/lib/stores/pr-create";
 
 /** The one spelling of "this hold is a settled fact": the forge answered the
@@ -24,8 +25,8 @@ const PHASE_META: {
   creating: (create) => `Creating ${create.noun}…`,
   created: (create) =>
     isHeldOpen(create)
-      ? `#${create.number} · opened, not in this view yet`
-      : `#${create.number} · updating list…`,
+      ? `${prRefForNoun(create.noun, create.number)} · opened, not in this view yet`
+      : `${prRefForNoun(create.noun, create.number)} · updating list…`,
 };
 
 /**

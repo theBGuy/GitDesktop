@@ -99,8 +99,10 @@ pub(crate) fn slug_from_remote_url(remote: &str, url: &str) -> AppResult<String>
 }
 
 /// Whether a slug is safe to interpolate into a `gh api` endpoint and to pass as
-/// `gh -R <slug>` argv: gh expands `{…}` in an endpoint and splits it on `?`/`#`
+/// `gh -R <slug>` argv: gh expands `{…}` and the colon forms `:owner`, `:repo` and
+/// `:branch` (at a word boundary) in an endpoint and splits it on `?`/`#`
 /// (query/fragment), a leading `-` reads as a flag, and `.`/`..` traverse the path.
+/// Other user values ride `-f` fields, never the path.
 fn valid_github_slug(slug: &str) -> bool {
     let Some((owner, repo)) = slug.split_once('/') else {
         return false;

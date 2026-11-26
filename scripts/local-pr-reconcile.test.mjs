@@ -44,6 +44,7 @@ test("(a) head gone on the record the read was made for: closed", () => {
   const next = applyReconcileVerdict(pr(), read, "closed", NOW);
   assert.equal(next.status, "closed");
   assert.equal(next.head, "feat/a");
+  assert.equal(next.closedAt, NOW);
 });
 
 test("(b) head gone but the record was migrated to a new head: unchanged", () => {
@@ -72,6 +73,18 @@ test("(e) a record already closed or merged is never rewritten", () => {
     assert.equal(applyReconcileVerdict(cur, read, "closed", NOW), cur);
     assert.equal(applyReconcileVerdict(cur, read, "merged", NOW), cur);
   }
+  const closedAt = "2026-10-02T00:00:00.000Z";
+  const dated = pr({ status: "closed", closedAt });
+  const back = applyReconcileVerdict(dated, read, "closed", NOW);
+  assert.equal(back, dated);
+  assert.equal(back.closedAt, closedAt);
+});
+
+test("(g) a stale closedAt on an open record is replaced by now", () => {
+  const cur = pr({ closedAt: "2026-10-02T00:00:00.000Z" });
+  const next = applyReconcileVerdict(cur, read, "closed", NOW);
+  assert.equal(next.status, "closed");
+  assert.equal(next.closedAt, NOW);
 });
 
 test("(f) the evaluation key changes when the head or base changes", () => {

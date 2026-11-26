@@ -21,6 +21,7 @@ import { ConfirmDialogHost } from "@/components/confirm-dialog-host";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import {
   checkoutRunningReason,
+  HeldCheckoutCaret,
   PrWorktreeCheckout,
   type PrWorktreeCheckoutHandle,
   resolveTarget,
@@ -223,12 +224,15 @@ function setup(
   return { user, rerender, client };
 }
 
-const caret = () =>
-  screen.getByRole("button", { name: "Checkout options for #7" });
+const caret = (ref = "#7") =>
+  screen.getByRole("button", { name: `Checkout options for ${ref}` });
 const folder = () => screen.getByLabelText("Folder") as HTMLInputElement;
 
-async function openFromMenu(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(caret());
+async function openFromMenu(
+  user: ReturnType<typeof userEvent.setup>,
+  ref?: string,
+) {
+  await user.click(caret(ref));
   await user.click(
     await screen.findByRole("menuitem", { name: /Check out in a worktree/ }),
   );
@@ -633,8 +637,11 @@ const REVIEW_TREE = "D:/elsewhere/demo-review";
 
 /** Opens from the menu once the worktree list has landed: the body latches
  *  the match the popover opens with. */
-async function openLoadedFromMenu(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(caret());
+async function openLoadedFromMenu(
+  user: ReturnType<typeof userEvent.setup>,
+  ref?: string,
+) {
+  await user.click(caret(ref));
   const item = await screen.findByRole("menuitem", {
     name: /Check out in a worktree/,
   });
@@ -2336,7 +2343,7 @@ describe("checkout routing", () => {
   it("a merge request's reset names the MR and retries native", async () => {
     vi.mocked(nativePrCheckoutWorktree).mockRejectedValueOnce(diverged());
     const { user } = setup({ provider: "gitlab", prNoun: "merge request" });
-    await openFromMenu(user);
+    await openFromMenu(user, "!7");
     await user.click(screen.getByRole("button", { name: "Check out" }));
     const dialog = await screen.findByRole("dialog", {
       name: "Reset this worktree to the MR?",
@@ -2368,12 +2375,126 @@ describe("checkout routing", () => {
       crossRepository: false,
       headRepositoryOwner: null,
     });
-    await openLoadedFromMenu(user);
+    await openLoadedFromMenu(user, "!7");
     expect(
       await screen.findByText("This merge request already has a worktree."),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Update to MR" }),
+    ).toBeInTheDocument();
+  });
+
+  it("a merge request's number reads !N on the caret, popover and toast", async () => {
+    const { user } = setup({ provider: "gitlab", prNoun: "merge request" });
+    await user.click(
+      screen.getByRole("button", { name: "Checkout options for !7" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Check out in a worktree/ }),
+    );
+    expect(
+      await screen.findByText("Check out !7 in a worktree"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Check out" }));
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith(
+        "Checked out !7 in a worktree",
+        expect.anything(),
+      ),
+    );
+  });
+
+  it("a merge request left before its reset names it !N", async () => {
+    let reject!: (e: unknown) => void;
+    vi.mocked(nativePrCheckoutWorktree).mockImplementationOnce(
+      () =>
+        new Promise((_, rej) => {
+          reject = rej;
+        }),
+    );
+    const { user } = setup({ provider: "gitlab", prNoun: "merge request" });
+    await user.click(
+      screen.getByRole("button", { name: "Checkout options for !7" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Check out in a worktree/ }),
+    );
+    await waitFor(() => expect(document.activeElement).toBe(folder()));
+    await user.click(screen.getByRole("button", { name: "Check out" }));
+    await waitFor(() =>
+      expect(nativePrCheckoutWorktree).toHaveBeenCalledTimes(1),
+    );
+    act(() => useUiStore.setState({ repoPath: "C:/repos/other" }));
+    await act(async () => reject(diverged()));
+    await waitFor(() =>
+      expect(toastInfo).toHaveBeenCalledWith(
+        "You left !7 before its worktree could be reset, so nothing was discarded.",
+      ),
+    );
+  });
+
+  it("a merge request's dismissed reset names it !N", async () => {
+    withReviewTree();
+    let reject!: (e: unknown) => void;
+    vi.mocked(nativePrCheckoutWorktree).mockImplementationOnce(
+      () =>
+        new Promise((_, rej) => {
+          reject = rej;
+        }),
+    );
+    const { user } = setup({
+      provider: "gitlab",
+      prNoun: "merge request",
+      crossRepository: false,
+      headRepositoryOwner: null,
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Checkout options for !7" }),
+    );
+    const item = await screen.findByRole("menuitem", {
+      name: /Check out in a worktree/,
+    });
+    await waitFor(() => expect(listUserWorktrees).toHaveBeenCalled());
+    await act(async () => undefined);
+    await user.click(item);
+    await user.click(
+      await screen.findByRole("button", { name: "Update to MR" }),
+    );
+    await waitFor(() =>
+      expect(nativePrCheckoutWorktree).toHaveBeenCalledTimes(1),
+    );
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Update to MR" })).toBeNull(),
+    );
+    await act(async () => reject(diverged({ path: REVIEW_TREE })));
+    await waitFor(() =>
+      expect(toastInfo).toHaveBeenCalledWith(
+        "The worktree for !7 has commits that aren't on the merge request, so nothing was updated or discarded. Choose Check out in a worktree… again to review the reset.",
+      ),
+    );
+  });
+
+  it("the running reason and held caret read !N for a merge request", () => {
+    const running = {
+      kind: "checkout",
+      target: 9,
+      lens: "origin",
+      stack: null,
+      members: null,
+      paused: false,
+    } as const;
+    expect(checkoutRunningReason(running, false, "merge request")).toBe(
+      "Checking out !9…",
+    );
+    expect(checkoutRunningReason(running, false, "pull request")).toBe(
+      "Checking out #9…",
+    );
+    render(
+      <HeldCheckoutCaret number={7} reason="Held" prNoun="merge request" />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Checkout options for !7" }),
     ).toBeInTheDocument();
   });
 

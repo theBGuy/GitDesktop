@@ -438,6 +438,10 @@ describe("CreatePrDialog opened with nothing handed in, own repository", () => {
     await user.click(await screen.findByRole("option", { name: "feat" }));
     expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
     expect(mergeField()).toHaveTextContent("feat");
+    // The popup's close returns focus a frame later; a steal after that
+    // still fails the second read.
+    await waitFor(() => expect(document.activeElement).toBe(mergeField()));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
     expect(document.activeElement).toBe(mergeField());
   });
 

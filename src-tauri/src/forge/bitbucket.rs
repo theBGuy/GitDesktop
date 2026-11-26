@@ -190,7 +190,15 @@ pub(super) async fn workspace_slug(repo_path: &str) -> AppResult<(String, String
     // Bitbucket repo paths are exactly `workspace/slug` (no nested groups).
     let mut parts = path.splitn(2, '/');
     match (parts.next(), parts.next()) {
-        (Some(w), Some(s)) if !w.is_empty() && !s.is_empty() => Ok((w.to_string(), s.to_string())),
+        // A `.` or `..` part would resolve away in the request URL and read another API path.
+        (Some(w), Some(s))
+            if !w.is_empty()
+                && !s.is_empty()
+                && !matches!(w, "." | "..")
+                && !matches!(s, "." | "..") =>
+        {
+            Ok((w.to_string(), s.to_string()))
+        }
         _ => Err(AppError::Bitbucket(format!(
             "unexpected Bitbucket repository path: {path}"
         ))),
@@ -1247,6 +1255,16 @@ pub(crate) async fn pr_checkout_source(
         )
     })?;
     let (src_ws, src_slug) = src.trim().split_once('/').unwrap_or_default();
+    // A `.` or `..` part would resolve away in the request URL and read another API path.
+    if [src_ws.trim(), src_slug.trim()]
+        .iter()
+        .any(|v| matches!(*v, "." | ".."))
+    {
+        return Err(http::bb_unreadable(
+            "the pull request's source repository",
+            format!("unreadable repository name {src}"),
+        ));
+    }
     let repo = format!(
         "repositories/{}/{}",
         encode_query_value(src_ws.trim()),
@@ -1398,13 +1416,7 @@ pub async fn prs_for_branch(repo_path: &str, head: &str) -> AppResult<Vec<PrInfo
     }
     let creds = http::load_credentials().await?;
     let (ws, slug) = workspace_slug(repo_path).await?;
-    let query = format!(r#"source.branch.name="{head}" AND state="OPEN""#);
-    let path = format!(
-        "repositories/{}/{}/pullrequests?q={}&pagelen=50",
-        encode_query_value(&ws),
-        encode_query_value(&slug),
-        encode_query_value(&query),
-    );
+    let path = source_branch_path(&ws, &slug, head);
     let page: BbPage<BbPr> = http::bb_get_json(
         &creds,
         &path,
@@ -1413,6 +1425,462 @@ pub async fn prs_for_branch(repo_path: &str, head: &str) -> AppResult<Vec<PrInfo
     )
     .await?;
     Ok(page.values.into_iter().map(from_bb_pr).collect())
+}
+
+/// The read of `ws/slug`'s open pull requests whose source branch is `head` (quotes and
+/// backslashes already refused).
+fn source_branch_path(ws: &str, slug: &str, head: &str) -> String {
+    let query = format!(r#"source.branch.name="{head}" AND state="OPEN""#);
+    format!(
+        "repositories/{}/{}/pullrequests?q={}&pagelen={SOURCE_BRANCH_PAGELEN}",
+        encode_query_value(ws),
+        encode_query_value(slug),
+        encode_query_value(&query),
+    )
+}
+
+/// The remote-branch lookup's repository scope: open pull requests in origin's repository
+/// sourced from its own `head`, read through [`lookup_scope_read`].
+pub(crate) async fn repository_open_prs(
+    repo_path: &str,
+    head: &str,
+) -> AppResult<crate::forge::ScopeRead> {
+    if head.is_empty() || head.starts_with('-') {
+        return Err(AppError::InvalidArgument(format!("invalid branch: {head}")));
+    }
+    if head.contains('"') || head.contains('\\') {
+        return Err(AppError::InvalidArgument(format!(
+            "unexpected characters in branch name: {head}"
+        )));
+    }
+    let creds = http::load_credentials().await?;
+    let (ws, slug) = workspace_slug(repo_path).await?;
+    let path = source_branch_path(&ws, &slug, head);
+    let page: BbLookupPage =
+        http::bb_get_json(&creds, &path, "pull requests", BbOpKind::Read).await?;
+    Ok(repository_scope_from_page(page, head, &format!("{ws}/{slug}")))
+}
+
+/// The repository scope from the page one read answered ([`lookup_scope_read`]). Pure.
+fn repository_scope_from_page(
+    page: BbLookupPage,
+    head: &str,
+    own: &str,
+) -> crate::forge::ScopeRead {
+    lookup_scope_read(page, |rows| {
+        crate::forge::repository_scope_rows(rows.into_iter().map(from_bb_pr).collect(), head, own)
+    })
+}
+
+/// A lookup read's page: `values` is required, so a `{}` answer is unreadable rather than
+/// an empty page, and each row parses on its own. [`BbPage`] keeps its lenient default.
+#[derive(Deserialize)]
+struct BbLookupPage {
+    values: Vec<serde_json::Value>,
+    #[serde(default)]
+    next: Option<String>,
+}
+
+/// A lookup page's rows, and how many wouldn't parse or carry no id, source branch or
+/// source repository: such a row can't be shown as, or ruled out as, this branch's. A
+/// `null` source repository (a deleted fork) is no repository the lookup asks for, so it
+/// is skipped uncounted; an absent one still counts. Pure.
+fn lookup_rows(values: Vec<serde_json::Value>) -> (Vec<BbPr>, usize) {
+    let mut dropped = 0;
+    let mut rows = Vec::new();
+    for value in values {
+        if value
+            .get("source")
+            .and_then(|source| source.get("repository"))
+            .is_some_and(serde_json::Value::is_null)
+        {
+            continue;
+        }
+        match serde_json::from_value::<BbPr>(value) {
+            Ok(p)
+                if p.id != 0
+                    && !branch_name(&p.source).is_empty()
+                    && !endpoint_repo(&p.source).is_empty() =>
+            {
+                rows.push(p)
+            }
+            _ => dropped += 1,
+        }
+    }
+    (rows, dropped)
+}
+
+/// One lookup scope from one page: the rows `keep` kept, incomplete when the RAW page
+/// filled, Bitbucket named a next page, or a row was dropped. Pure.
+fn lookup_scope_read(
+    page: BbLookupPage,
+    keep: impl FnOnce(Vec<BbPr>) -> Vec<crate::forge::RemoteBranchPull>,
+) -> crate::forge::ScopeRead {
+    let raw = page.values.len();
+    let more = page.next.is_some();
+    let (rows, dropped) = lookup_rows(page.values);
+    crate::forge::ScopeRead::paged_more(keep(rows), raw, SOURCE_BRANCH_PAGELEN, more).dropping(
+        dropped,
+        || {
+            http::bb_unreadable(
+                "pull requests",
+                format!("could not parse {dropped} of the Bitbucket pull request rows"),
+            )
+        },
+    )
+}
+
+/// The fork field of `repositories/<ws>/<slug>`: the parent embed Bitbucket sends for a
+/// fork.
+#[derive(Deserialize)]
+struct BbForkOf {
+    #[serde(default)]
+    parent: Option<BbForkParent>,
+}
+
+/// A fork's parent as `(workspace, slug)`: `Ok(None)` for a repository that is not a fork,
+/// an `Err` for a parent whose `full_name` isn't `workspace/slug` (a `.` or `..` part
+/// included). Pure.
+fn bb_fork_parent(repo: &BbForkOf) -> AppResult<Option<(String, String)>> {
+    let Some(parent) = repo.parent.as_ref() else {
+        return Ok(None);
+    };
+    match parent.full_name.as_deref().and_then(|f| f.split_once('/')) {
+        // A `.` or `..` part would resolve away in the request URL and read another API path.
+        Some((ws, slug))
+            if !ws.is_empty()
+                && !slug.is_empty()
+                && !slug.contains('/')
+                && !matches!(ws, "." | "..")
+                && !matches!(slug, "." | "..") =>
+        {
+            Ok(Some((ws.to_string(), slug.to_string())))
+        }
+        _ => Err(AppError::Bitbucket(
+            "Couldn't read which repository this fork was forked from.".into(),
+        )),
+    }
+}
+
+/// `pagelen` of the source-branch pull request reads (the endpoint's maximum).
+pub(crate) const SOURCE_BRANCH_PAGELEN: usize = 50;
+
+/// Open PRs in the repository origin was forked from whose source is `head` on THIS fork.
+/// Not a fork: none. The BBQL values are quoted, so a `"` or `\` in any of them is refused
+/// as `prs_for_branch` refuses it.
+pub(crate) async fn parent_open_prs(
+    repo_path: &str,
+    head: &str,
+) -> AppResult<crate::forge::ScopeRead> {
+    if head.is_empty() || head.starts_with('-') {
+        return Err(AppError::InvalidArgument(format!("invalid branch: {head}")));
+    }
+    let (ws, slug) = workspace_slug(repo_path).await?;
+    let own = format!("{ws}/{slug}");
+    if [head, own.as_str()]
+        .iter()
+        .any(|v| v.contains('"') || v.contains('\\'))
+    {
+        return Err(AppError::InvalidArgument(format!(
+            "unexpected characters in branch or repository name: {head}, {own}"
+        )));
+    }
+    let creds = http::load_credentials().await?;
+    let base = format!(
+        "repositories/{}/{}",
+        encode_query_value(&ws),
+        encode_query_value(&slug),
+    );
+    let repo: BbForkOf = http::bb_get_json(&creds, &base, "repository", BbOpKind::Read).await?;
+    let Some((parent_ws, parent_slug)) = bb_fork_parent(&repo)? else {
+        return Ok(crate::forge::ScopeRead::default());
+    };
+    let query = format!(
+        r#"source.branch.name="{head}" AND source.repository.full_name="{own}" AND state="OPEN""#
+    );
+    let path = format!(
+        "repositories/{}/{}/pullrequests?q={}&pagelen={SOURCE_BRANCH_PAGELEN}",
+        encode_query_value(&parent_ws),
+        encode_query_value(&parent_slug),
+        encode_query_value(&query),
+    );
+    let page: BbLookupPage =
+        http::bb_get_json(&creds, &path, "pull requests", BbOpKind::Read).await?;
+    Ok(parent_scope_read(
+        page,
+        &own,
+        head,
+        &format!("{parent_ws}/{parent_slug}"),
+    ))
+}
+
+/// The parent scope from the page one read answered ([`lookup_scope_read`]). Pure.
+fn parent_scope_read(
+    page: BbLookupPage,
+    own: &str,
+    head: &str,
+    parent: &str,
+) -> crate::forge::ScopeRead {
+    lookup_scope_read(page, |rows| fork_pr_rows(rows, own, head, parent))
+}
+
+/// The parent scope's rows: sourced from `own` (`workspace/slug`, compared ignoring case)
+/// on the branch `head`, so another fork's same-named branch never counts. Pure.
+fn fork_pr_rows(
+    rows: Vec<BbPr>,
+    own: &str,
+    head: &str,
+    parent: &str,
+) -> Vec<crate::forge::RemoteBranchPull> {
+    rows.into_iter()
+        .filter(|p| endpoint_repo(&p.source).eq_ignore_ascii_case(own))
+        .filter(|p| branch_name(&p.source) == head)
+        .map(|p| crate::forge::RemoteBranchPull {
+            number: p.id,
+            url: html_href(&p.links),
+            title: p.title,
+            is_draft: p.draft,
+            scope: crate::forge::PullScope::Parent,
+            repo: parent.to_string(),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod remote_branch_pull_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn parent_of(body: serde_json::Value) -> AppResult<Option<(String, String)>> {
+        bb_fork_parent(&serde_json::from_value(body).unwrap())
+    }
+
+    /// Not a fork is none; a fork whose parent isn't `workspace/slug` is an `Err`, so the
+    /// scope reads unchecked, never empty.
+    #[test]
+    fn bb_fork_parent_is_unknown_without_a_usable_parent() {
+        assert_eq!(
+            parent_of(json!({"parent": {"full_name": "up/repo"}})).unwrap(),
+            Some(("up".to_string(), "repo".to_string()))
+        );
+        assert_eq!(parent_of(json!({})).unwrap(), None);
+        assert_eq!(parent_of(json!({"parent": null})).unwrap(), None);
+        for body in [
+            json!({"parent": {}}),
+            json!({"parent": {"full_name": null}}),
+            json!({"parent": {"full_name": "noslash"}}),
+            json!({"parent": {"full_name": "/repo"}}),
+            json!({"parent": {"full_name": "up/"}}),
+            json!({"parent": {"full_name": "a/b/c"}}),
+            json!({"parent": {"full_name": "../repo"}}),
+            json!({"parent": {"full_name": "up/.."}}),
+            json!({"parent": {"full_name": "./repo"}}),
+            json!({"parent": {"full_name": "up/."}}),
+        ] {
+            assert!(
+                matches!(parent_of(body.clone()), Err(AppError::Bitbucket(_))),
+                "{body}"
+            );
+        }
+        for (full_name, slug) in [("up/re.po", "re.po"), ("up/...", "...")] {
+            assert_eq!(
+                parent_of(json!({"parent": {"full_name": full_name}})).unwrap(),
+                Some(("up".to_string(), slug.to_string())),
+                "{full_name}"
+            );
+        }
+    }
+
+    /// The parent scope keeps only this fork's rows on the branch (the repository compared
+    /// ignoring case); another fork's same-named branch and another branch are dropped.
+    #[test]
+    fn fork_pr_rows_keep_only_this_forks_rows() {
+        let row = |id: u64, repo: &str, branch: &str| -> BbPr {
+            serde_json::from_value(json!({
+                "id": id, "title": format!("t{id}"), "draft": id == 2,
+                "links": {"html": {"href": format!("https://bitbucket.org/up/repo/pull-requests/{id}")}},
+                "source": {"branch": {"name": branch}, "repository": {"full_name": repo}},
+                "destination": {"branch": {"name": "main"}, "repository": {"full_name": "up/repo"}}
+            }))
+            .unwrap()
+        };
+        let rows = vec![
+            row(1, "me/fork", "feat"),
+            row(2, "Me/Fork", "feat"),
+            row(3, "other/fork", "feat"),
+            row(4, "me/fork", "other"),
+            row(5, "me/fork", "Feat"),
+        ];
+        let kept = fork_pr_rows(rows, "me/fork", "feat", "up/repo");
+        let numbers: Vec<u64> = kept.iter().map(|r| r.number).collect();
+        assert_eq!(numbers, [1, 2]);
+        assert!(kept
+            .iter()
+            .all(|r| r.scope == crate::forge::PullScope::Parent && r.repo == "up/repo"));
+        assert!(!kept[0].is_draft && kept[1].is_draft);
+        assert_eq!(kept[0].url, "https://bitbucket.org/up/repo/pull-requests/1");
+    }
+
+    /// A full page of other forks' rows keeps no item and leaves the scope incomplete: the
+    /// page is judged on the raw rows.
+    #[test]
+    fn a_full_parent_page_of_other_forks_is_incomplete() {
+        let rows = |n: usize| -> BbLookupPage {
+            let values = (1..=n as u64)
+                .map(|id| {
+                    json!({
+                        "id": id, "title": "t", "links": {"html": {"href": "u"}},
+                        "source": {"branch": {"name": "feat"}, "repository": {"full_name": "other/fork"}},
+                        "destination": {"branch": {"name": "main"}, "repository": {"full_name": "up/repo"}}
+                    })
+                })
+                .collect();
+            BbLookupPage { values, next: None }
+        };
+        let read = parent_scope_read(rows(SOURCE_BRANCH_PAGELEN), "me/fork", "feat", "up/repo");
+        assert!(read.rows.is_empty());
+        assert!(
+            matches!(&read.incomplete, Some(AppError::Command(m))
+                if m == "GitDesktop read only the first 50 matches."),
+            "{:?}",
+            read.incomplete
+        );
+        let short = parent_scope_read(
+            rows(SOURCE_BRANCH_PAGELEN - 1),
+            "me/fork",
+            "feat",
+            "up/repo",
+        );
+        assert!(short.incomplete.is_none());
+        // A short page that names a next page is incomplete too.
+        let mut more = rows(1);
+        more.next = Some("https://api.bitbucket.org/2.0/next".into());
+        let read = parent_scope_read(more, "me/fork", "feat", "up/repo");
+        assert!(
+            matches!(&read.incomplete, Some(AppError::Command(m))
+                if m == "GitDesktop read only the first page of matches."),
+            "{:?}",
+            read.incomplete
+        );
+    }
+
+    /// The repository scope keeps only this repository's rows on the branch, judges the
+    /// page on its raw rows, counts a row without a source repository, and skips one whose
+    /// source repository is `null`.
+    #[test]
+    fn the_repository_scope_keeps_only_this_repositorys_rows() {
+        let row = |id: u64, source: serde_json::Value| {
+            json!({
+                "id": id, "title": format!("t{id}"), "draft": false,
+                "links": {"html": {"href": format!("u{id}")}},
+                "source": source,
+                "destination": {"branch": {"name": "main"}, "repository": {"full_name": "o/r"}}
+            })
+        };
+        let from = |repo: &str| json!({"branch": {"name": "feat"}, "repository": {"full_name": repo}});
+        let page = |values: Vec<serde_json::Value>, next: Option<&str>| BbLookupPage {
+            values,
+            next: next.map(str::to_string),
+        };
+        let numbers = |read: &crate::forge::ScopeRead| {
+            read.rows.iter().map(|r| r.number).collect::<Vec<_>>()
+        };
+        // Own repository kept, another fork's same-named branch dropped, a null source
+        // repository skipped without counting.
+        let read = repository_scope_from_page(
+            page(
+                vec![
+                    row(1, from("o/r")),
+                    row(2, from("other/fork")),
+                    row(3, json!({"branch": {"name": "feat"}, "repository": null})),
+                ],
+                None,
+            ),
+            "feat",
+            "o/r",
+        );
+        assert_eq!(numbers(&read), [1]);
+        assert!(read.incomplete.is_none(), "{:?}", read.incomplete);
+        assert!(read
+            .rows
+            .iter()
+            .all(|r| r.scope == crate::forge::PullScope::Repository && r.repo == "o/r"));
+        // An absent source repository is counted as unreadable.
+        let read = repository_scope_from_page(
+            page(vec![row(1, from("o/r")), row(4, json!({"branch": {"name": "feat"}}))], None),
+            "feat",
+            "o/r",
+        );
+        assert_eq!(numbers(&read), [1]);
+        assert!(
+            matches!(&read.incomplete, Some(AppError::Bitbucket(m))
+                if m.ends_with("could not parse 1 of the Bitbucket pull request rows")),
+            "{:?}",
+            read.incomplete
+        );
+        // A full page of other forks' rows keeps nothing and is incomplete.
+        let forks = (1..=SOURCE_BRANCH_PAGELEN as u64)
+            .map(|id| row(id, from("other/fork")))
+            .collect::<Vec<_>>();
+        let read = repository_scope_from_page(page(forks, None), "feat", "o/r");
+        assert!(read.rows.is_empty());
+        assert!(
+            matches!(&read.incomplete, Some(AppError::Command(m))
+                if m == "GitDesktop read only the first 50 matches."),
+            "{:?}",
+            read.incomplete
+        );
+        // A short page that names a next page is incomplete, without a count.
+        let read = repository_scope_from_page(
+            page(vec![row(1, from("o/r"))], Some("https://api.bitbucket.org/2.0/next")),
+            "feat",
+            "o/r",
+        );
+        assert_eq!(numbers(&read), [1]);
+        assert!(
+            matches!(&read.incomplete, Some(AppError::Command(m))
+                if m == "GitDesktop read only the first page of matches."),
+            "{:?}",
+            read.incomplete
+        );
+    }
+
+    /// A lookup page needs its `values`: `{}` is unreadable, never an empty page.
+    #[test]
+    fn a_lookup_page_without_values_is_unreadable() {
+        assert!(serde_json::from_value::<BbLookupPage>(json!({})).is_err());
+        assert!(serde_json::from_value::<BbLookupPage>(json!({"values": null})).is_err());
+        let page: BbLookupPage = serde_json::from_value(json!({"values": []})).unwrap();
+        assert!(page.values.is_empty() && page.next.is_none());
+    }
+
+    /// A row that won't parse or has no id, source branch or source repository key is
+    /// counted, so a short page of them never reads as "checked, none"; a `null` source
+    /// repository is skipped (lookup_rows).
+    #[test]
+    fn lookup_rows_count_rows_without_identity() {
+        let row = |source: serde_json::Value| json!({"id": 3, "title": "t", "links": {"html": {"href": "u"}}, "source": source});
+        let page = BbLookupPage {
+            values: vec![
+                row(json!({"branch": {"name": "feat"}, "repository": {"full_name": "me/fork"}})),
+                row(json!({"branch": {"name": "feat"}})),
+                row(json!({"repository": {"full_name": "me/fork"}})),
+                row(json!(null)),
+                json!({"title": "no id", "source": {"branch": {"name": "feat"},
+                    "repository": {"full_name": "me/fork"}}}),
+                json!(42),
+            ],
+            next: None,
+        };
+        let read = parent_scope_read(page, "me/fork", "feat", "up/repo");
+        assert_eq!(read.rows.iter().map(|r| r.number).collect::<Vec<_>>(), [3]);
+        assert!(
+            matches!(&read.incomplete, Some(AppError::Bitbucket(m))
+                if m.ends_with("could not parse 5 of the Bitbucket pull request rows")),
+            "{:?}",
+            read.incomplete
+        );
+    }
 }
 
 // ── Pull-request poll (notifications + remote pr-sync) ─────────────────────────
@@ -7110,6 +7578,54 @@ mod tests {
                 "https://bitbucket.org/thebguy1/dispatch-demo"
             );
         }
+    }
+
+    /// A `.` or `..` origin part is refused before any request is built; a `.` inside a
+    /// name stays legal. A fresh temp repo per row (`git_remote_url`'s TTL cache).
+    #[tokio::test]
+    async fn workspace_slug_refuses_a_dot_segment() {
+        async fn run(repo: &str, args: &[&str]) {
+            let _ = crate::git::runner::run_git(
+                Some(repo),
+                args,
+                crate::git::runner::TEST_GIT_HANG_GUARD,
+            )
+            .await;
+        }
+
+        let rows: [(&str, Option<(&str, &str)>); 6] = [
+            ("https://bitbucket.org/ws/..", None),
+            ("https://bitbucket.org/../repo.git", None),
+            ("git@bitbucket.org:ws/..git", None),
+            ("https://bitbucket.org/./repo", None),
+            (
+                "https://bitbucket.org/ws/my.repo.git",
+                Some(("ws", "my.repo")),
+            ),
+            ("https://bitbucket.org/ws/....git", Some(("ws", "..."))),
+        ];
+        let mut wrong = Vec::new();
+        for (i, (remote, want)) in rows.into_iter().enumerate() {
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("gd-bb-dot-seg-{i}-"))
+                .tempdir()
+                .expect("create temp dir");
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let repo_s = repo.to_string_lossy().into_owned();
+            run(&repo_s, &["init", "-q"]).await;
+            run(&repo_s, &["remote", "add", "origin", remote]).await;
+            let got = workspace_slug(&repo_s).await;
+            let ok = match (&got, want) {
+                (Err(AppError::Bitbucket(_)), None) => true,
+                (Ok((w, s)), Some((ww, ws))) => w == ww && s == ws,
+                _ => false,
+            };
+            if !ok {
+                wrong.push(format!("{remote}: {got:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// Bitbucket Cloud's PR payload has no mergeability field and its only

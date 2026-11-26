@@ -49,6 +49,11 @@ const KIND_LABELS: Record<AppError["kind"], string> = {
   command: "Command failed",
   io: "I/O error",
   timeout: "Timed out",
+  pushRemoteUnusable: "Push blocked",
+  pushDestinationExists: "Push blocked",
+  pushHeadMoved: "Push blocked",
+  pushTipMoved: "Push blocked",
+  pushForceMultiRef: "Push blocked",
 };
 
 /** The lowercase lead a kind's Rust `#[error]` attribute writes ahead of its

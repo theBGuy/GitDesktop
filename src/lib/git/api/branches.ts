@@ -5,6 +5,9 @@ import type {
   BranchRewriteStatus,
   MergePreview,
   RemoteBranch,
+  RemoteBranchPulls,
+  RemoteRenameCheck,
+  RemoteRenameOutcome,
 } from "../types";
 
 export const gitBranches = (repoPath: string) =>
@@ -67,6 +70,51 @@ export const gitRenameBranch = (
     newName,
   });
 
+/** Whether `oldName` can also be renamed on `remote`: local checks first, then
+ *  one live read of the remote. `newName` is null while there is none. */
+export const gitRemoteRenameCheck = (
+  repoPath: string,
+  oldName: string,
+  newName: string | null,
+  remote: string,
+) =>
+  invoke<RemoteRenameCheck>("git_remote_rename_check", {
+    repoPath,
+    oldName,
+    newName,
+    remote,
+  });
+
+/** Renames `oldName` here, pushes `newName` to `remote` and deletes
+ *  `remote`/`oldName` under a lease on `expectedOldTip` (the check's tip). */
+export const gitRenameBranchRemote = (
+  repoPath: string,
+  oldName: string,
+  newName: string,
+  remote: string,
+  expectedOldTip: string | null,
+) =>
+  invoke<RemoteRenameOutcome>("git_rename_branch_remote", {
+    repoPath,
+    oldName,
+    newName,
+    remote,
+    expectedOldTip,
+  });
+
+/** Open pull or merge requests headed on `branch` of `remote`, in that
+ *  repository and its parent. */
+export const forgePrsOnRemoteBranch = (
+  repoPath: string,
+  remote: string,
+  branch: string,
+) =>
+  invoke<RemoteBranchPulls>("forge_prs_on_remote_branch", {
+    repoPath,
+    remote,
+    branch,
+  });
+
 /** What a local branch delete did. `tip` is the commit the branch pointed at
  *  when it was deleted (a lowercase full id); `keptLocal` and `upstream` are the
  *  Keep local mark and upstream the delete removed, read under its own lock.
@@ -99,13 +147,22 @@ export const gitDeleteBranch = async (
   return out.status === "deleted" ? { ...out, ...deleteFactsOf(out) } : out;
 };
 
-/** Deletes `name` on `remote` (`git push <remote> --delete`). Idempotent when
- *  the remote ref is already gone. */
+/** Deletes `name` on `remote`, leased on `expectedTip` (a full commit id): a
+ *  remote branch that moved since is not deleted and, once the backend's
+ *  refusals pass, one already gone answers Ok. The backend refuses an absent
+ *  or empty tip rather than delete unleased. */
 export const gitDeleteRemoteBranch = (
   repoPath: string,
   remote: string,
   name: string,
-) => invoke<void>("git_delete_remote_branch", { repoPath, remote, name });
+  expectedTip: string | undefined,
+) =>
+  invoke<void>("git_delete_remote_branch", {
+    repoPath,
+    remote,
+    name,
+    expectedTip: expectedTip ?? null,
+  });
 
 export const gitDefaultBranch = (repoPath: string) =>
   invoke<string | null>("git_default_branch", { repoPath });

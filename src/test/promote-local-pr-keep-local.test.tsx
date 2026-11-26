@@ -26,7 +26,7 @@ import {
 import { forgePrComment, forgeStatus, gitBranches } from "@/lib/git/api";
 import { prChecksRecheck, repoKeys } from "@/lib/git/queries";
 import { recheckRunsAfterPush } from "@/lib/git/queries/push-writes";
-import type { Branch } from "@/lib/git/types";
+import type { Branch, ForgeStatus } from "@/lib/git/types";
 import { OFFLINE_WRITE_REASON } from "@/lib/offline-writes";
 import { type LocalPr, updateLocalPr } from "@/lib/pulls/local";
 import { usePrCreateStore } from "@/lib/stores/pr-create";
@@ -63,6 +63,11 @@ vi.mock("@/lib/git/queries/push-writes", async (importOriginal) => {
     await importOriginal<typeof import("@/lib/git/queries/push-writes")>();
   return { ...real, recheckRunsAfterPush: vi.fn(real.recheckRunsAfterPush) };
 });
+// A landed promote sets the origin lens, which persists.
+vi.mock("@/lib/repo-lens/store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/repo-lens/store")>()),
+  saveRepoLens: vi.fn(async () => undefined),
+}));
 vi.mock("@/lib/pulls/local", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/pulls/local")>()),
   updateLocalPr: vi.fn(),
@@ -429,4 +434,84 @@ describe("PromoteLocalPrDialog when the create fails and the reopen lands", () =
       expect(await failCreate(rejection, away)).toBe(note);
     },
   );
+});
+
+describe("PromoteLocalPrDialog on GitLab names the merge request !N", () => {
+  const url = "https://gitlab.com/me/project/-/merge_requests/12";
+
+  function gitlab() {
+    vi.mocked(forgeStatus).mockResolvedValue({
+      provider: "gitlab",
+      installed: true,
+      authenticated: true,
+      repo: "me/project",
+      host: "gitlab.com",
+      login: "me",
+      capabilities: {},
+      implemented: {},
+    } as unknown as ForgeStatus);
+    vi.mocked(gitBranches).mockResolvedValue([
+      row("main", false),
+      row("feat", false),
+    ]);
+    vi.mocked(updateLocalPr).mockResolvedValue({ ...PR, status: "closed" });
+    forgePrCreate.mockResolvedValue({ number: 12, url });
+  }
+
+  /** Every comment body the dialog wrote onto the local PR. */
+  function linkedBodies(): string[] {
+    return vi
+      .mocked(updateLocalPr)
+      .mock.calls.flatMap((call) =>
+        (call as unknown[]).filter(
+          (a): a is (p: LocalPr) => LocalPr => typeof a === "function",
+        ),
+      )
+      .flatMap((mutate) => mutate(PR).comments.map((c) => c.body));
+  }
+
+  it("the success toast and the back-link read !12", async () => {
+    gitlab();
+    const success = vi.spyOn(toast, "success").mockImplementation(() => "");
+    const user = userEvent.setup();
+    renderDialog();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /Publish to GitLab/ }),
+      ).toBeInTheDocument(),
+    );
+    await user.click(publishButton());
+    await waitFor(() =>
+      expect(success).toHaveBeenCalledWith(
+        "Opened merge request !12",
+        expect.anything(),
+      ),
+    );
+    expect(linkedBodies()).toContain(
+      `Promoted to GitLab merge request [!12](${url}).`,
+    );
+  });
+
+  it("a failed carry-over titles the merge request !12", async () => {
+    gitlab();
+    vi.mocked(forgePrComment).mockRejectedValueOnce(new Error("refused"));
+    const error = vi.spyOn(toast, "error").mockImplementation(() => "");
+    const user = userEvent.setup();
+    renderDialog({
+      pr: {
+        ...PR,
+        comments: [{ id: "c1", body: "Carry me", createdAt: PR.createdAt }],
+      },
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /Publish to GitLab/ }),
+      ).toBeInTheDocument(),
+    );
+    await user.click(publishButton());
+    await waitFor(() => expect(error).toHaveBeenCalled());
+    expect(String(error.mock.calls[0][0])).toMatch(
+      /^Created merge request !12, but carrying over comments failed: /,
+    );
+  });
 });

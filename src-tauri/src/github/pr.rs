@@ -3969,7 +3969,10 @@ fn build_divergence_compare_path(slug: &str, refs: &RawDivergenceRefs) -> AppRes
                 AppError::InvalidArgument("cross-repository PR carries no head owner".into())
             })?;
         validate_compare_branch(owner)?;
-        format!("{owner}:{}", refs.head_ref_name)
+        // `%3A`, never a literal colon: `gh api` rewrites `:owner`/`:repo`/`:branch`
+        // at a word boundary anywhere in the path, so a head like `repo-fix` would
+        // be sent as the current repo's name.
+        format!("{owner}%3A{}", refs.head_ref_name)
     } else {
         refs.head_ref_name.clone()
     };
@@ -4057,6 +4060,9 @@ pub struct ForkPrMatch {
     pub head_ref_name: String,
     pub head_repo_owner: String,
     pub head_repo_name: String,
+    /// The host of origin's URL as [`crate::forge::remote_host`] spells it, the forge the
+    /// head repository lives on; empty when origin names none, which exempts no destination.
+    pub head_repo_host: String,
     /// "Allow edits by maintainers"; unknown degrades to `false`, so the caller
     /// disables the push-to-fork route rather than promising a push that would 403.
     pub maintainer_can_modify: bool,
@@ -4124,22 +4130,55 @@ fn is_object_id(s: &str) -> bool {
     (7..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Whether `oid` sits OUTSIDE origin's own graph — the evidence that a fork PR's
-/// head is distinctive contributor work rather than a commit origin already has.
-/// `rev-list -1 <oid> --not --remotes=origin` prints the oid when no origin
-/// remote-tracking ref reaches it, and nothing when one does.
+/// The tips of origin's remote-tracking refs, read before the forge call: the publish
+/// this check guards updates them meanwhile, and a tip it moved must not veto the match.
+/// `None` when the read failed or answered a line that is not an object id.
+async fn origin_tracking_tips(repo_path: &str) -> Option<Vec<String>> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/remotes/origin/",
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()
+    .filter(|o| o.code == 0)?;
+    out.stdout_lossy()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| is_object_id(line).then(|| line.to_string()))
+        .collect()
+}
+
+/// Whether `oid` sits OUTSIDE origin's graph as `tips` snapshot it — the evidence that a
+/// fork PR's head is distinctive contributor work rather than a commit origin already has.
+/// `rev-list -1 <oid> --stdin` with one `^<tip>` line per tip prints the oid when no tip
+/// reaches it, and nothing when one does; no tips at all reach nothing.
 ///
 /// Positive proof only: a spawn failure or non-zero exit answers `false`, leaving
 /// the candidate suppressed — a false positive would offer a push to someone
 /// else's fork, while a dropped match is a pre-accepted miss.
-async fn oid_outside_origin_graph(repo_path: &str, oid: &str) -> bool {
-    run_git_raw(
+async fn oid_outside_origin_graph(repo_path: &str, oid: &str, tips: &[String]) -> bool {
+    let excluded: String = tips.iter().map(|tip| format!("^{tip}\n")).collect();
+    run_git_raw_input(
         Some(repo_path),
-        &["rev-list", "-1", oid, "--not", "--remotes=origin"],
+        &["rev-list", "-1", oid, "--stdin"],
+        Some(&excluded),
         DEFAULT_TIMEOUT,
     )
     .await
     .is_ok_and(|o| o.code == 0 && !o.stdout_lossy().trim().is_empty())
+}
+
+/// The fork PR's head host from origin's URL ([`ForkPrMatch::head_repo_host`]). Pure.
+fn fork_head_host(origin_url: Option<&str>) -> String {
+    origin_url
+        .and_then(crate::forge::remote_host)
+        .unwrap_or_default()
 }
 
 /// The one match a set of surviving candidates anchors, or `None` when they
@@ -4210,6 +4249,9 @@ pub(crate) async fn detect_fork_pr_for_branch(
     if !is_object_id(&local_oid) {
         return Ok(None);
     }
+    let Some(origin_tips) = origin_tracking_tips(repo_path).await else {
+        return Ok(None);
+    };
 
     let Ok(slug) = crate::github::gh_origin_slug(repo_path).await else {
         return Ok(None);
@@ -4274,6 +4316,10 @@ pub(crate) async fn detect_fork_pr_for_branch(
     let Some(present) = batch_check_present(&out.stdout_lossy(), candidates.len()) else {
         return Ok(None);
     };
+    let origin_url = crate::git::remote::git_remote_url(repo_path.to_string(), "origin".into())
+        .await
+        .ok();
+    let head_repo_host = fork_head_host(origin_url.as_deref());
 
     let mut survivors: Vec<ForkPrMatch> = Vec::new();
     for ((pr, head_repo_owner, head_repo_name), is_present) in
@@ -4304,7 +4350,7 @@ pub(crate) async fn detect_fork_pr_for_branch(
         // `refs/remotes/origin/*` (`+refs/pull/*/head:refs/remotes/origin/pr/*` and
         // kin) — accepted, since that fail-open lands on pre-feature behavior and a
         // code fix would have to guess at namespace conventions.
-        if !oid_outside_origin_graph(repo_path, &pr.head_ref_oid).await {
+        if !oid_outside_origin_graph(repo_path, &pr.head_ref_oid, &origin_tips).await {
             continue;
         }
         let ahead_count = run_git_raw(
@@ -4328,6 +4374,7 @@ pub(crate) async fn detect_fork_pr_for_branch(
             head_ref_name: pr.head_ref_name,
             head_repo_owner,
             head_repo_name,
+            head_repo_host: head_repo_host.clone(),
             maintainer_can_modify: pr.maintainer_can_modify.unwrap_or(false),
             ahead_count,
         });
@@ -10709,17 +10756,37 @@ fn rest_pull_to_pr_info(p: GhPrRestPull) -> PrInfo {
     }
 }
 
-/// Build the REST endpoint for the upstream-lens duplicate probe:
-/// `repos/<parent_slug>/pulls?head=<fork_owner>:<head>&state=open`. `fork_owner` and
-/// `head` are the only untrusted VALUES, so each is percent-encoded via
-/// [`encode_query_value`](crate::forge::encode_query_value) — a legal-but-hostile
-/// refname like `feat&state=all` can't inject a query parameter. The `:` separator
-/// stays LITERAL (GitHub's filter needs a real colon); `parent_slug` is a validated
-/// `owner/repo` path. Pure — unit-tested.
-fn upstream_pulls_endpoint(parent_slug: &str, fork_owner: &str, head: &str) -> String {
-    let owner = crate::forge::encode_query_value(fork_owner);
-    let head = crate::forge::encode_query_value(head);
-    format!("repos/{parent_slug}/pulls?head={owner}:{head}&state=open")
+/// The `gh api` argv reading open requests in `repo_slug` headed on `owner`'s `head`,
+/// `per_page` rows when given. The filter rides raw `-f` fields under an explicit GET,
+/// never the endpoint path: gh rewrites `:owner`, `:repo` and `:branch` inside a path, and
+/// encodes a field's value itself, so `owner` and `head` go in unencoded. Pure.
+fn pulls_by_head_args(
+    repo_slug: &str,
+    owner: &str,
+    head: &str,
+    per_page: Option<usize>,
+) -> Vec<String> {
+    let mut args = vec![
+        "api".to_string(),
+        "--method".into(),
+        "GET".into(),
+        format!("repos/{repo_slug}/pulls"),
+        "-f".into(),
+        format!("head={owner}:{head}"),
+        "-f".into(),
+        "state=open".into(),
+    ];
+    if let Some(n) = per_page {
+        args.push("-f".into());
+        args.push(format!("per_page={n}"));
+    }
+    args
+}
+
+/// The upstream-lens duplicate probe's read of `parent_slug`'s requests headed on
+/// `fork_owner`'s `head`. Pure.
+fn upstream_pulls_args(parent_slug: &str, fork_owner: &str, head: &str) -> Vec<String> {
+    pulls_by_head_args(parent_slug, fork_owner, head, None)
 }
 
 /// The projection for the branch duplicate probe. `isCrossRepository` is load-bearing:
@@ -10750,13 +10817,9 @@ pub async fn gh_prs_for_branch(
         let parent_slug = crate::github::gh_lens_slug(&repo_path, Some("upstream")).await?;
         let origin_slug = crate::github::gh_lens_slug(&repo_path, None).await?;
         let fork_owner = crate::github::fork_owner_of(&origin_slug);
-        let endpoint = upstream_pulls_endpoint(&parent_slug, fork_owner, &head);
-        let out = run_gh(
-            Some(&repo_path),
-            &["api", "--method", "GET", &endpoint],
-            GH_TIMEOUT,
-        )
-        .await?;
+        let args = upstream_pulls_args(&parent_slug, fork_owner, &head);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run_gh(Some(&repo_path), &argv, GH_TIMEOUT).await?;
         let pulls: Vec<GhPrRestPull> = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
             gh_unreadable(
                 "pull requests",
@@ -10770,23 +10833,731 @@ pub async fn gh_prs_for_branch(
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let out = run_gh(
         Some(&repo_path),
-        &[
-            "pr",
-            "list",
-            "--repo",
-            &slug,
-            "--head",
-            &head,
-            "--state",
-            "open",
-            "--json",
-            PRS_FOR_BRANCH_FIELDS,
-        ],
+        &prs_for_branch_argv(&slug, &head),
         GH_TIMEOUT,
     )
     .await?;
-    serde_json::from_str(&out.stdout_lossy())
+    parse_prs_for_branch(&out.stdout_lossy())
+}
+
+/// The duplicate probe's open-PR list argv for `head` in `slug`.
+fn prs_for_branch_argv<'a>(slug: &'a str, head: &'a str) -> [&'a str; 10] {
+    [
+        "pr",
+        "list",
+        "--repo",
+        slug,
+        "--head",
+        head,
+        "--state",
+        "open",
+        "--json",
+        PRS_FOR_BRANCH_FIELDS,
+    ]
+}
+
+fn parse_prs_for_branch(stdout: &str) -> AppResult<Vec<PrInfo>> {
+    serde_json::from_str(stdout)
         .map_err(|e| gh_unreadable("pull requests", format!("could not parse gh pr list: {e}")))
+}
+
+/// Rows per page the remote-branch lookup asks GitHub for.
+pub(crate) const LOOKUP_PAGE: usize = 100;
+
+/// The lookup's `pulls` read for requests in `repo_slug` headed on `owner`'s `head`, a
+/// page of [`LOOKUP_PAGE`]: the owner filter runs on the server, so other owners'
+/// same-named branches never take a slot. Pure.
+fn lookup_pulls_args(repo_slug: &str, owner: &str, head: &str) -> Vec<String> {
+    pulls_by_head_args(repo_slug, owner, head, Some(LOOKUP_PAGE))
+}
+
+/// The REST rows of a lookup read and how many of them wouldn't parse.
+fn parse_lookup_rows<T: serde::de::DeserializeOwned>(
+    rows: Vec<serde_json::Value>,
+) -> (Vec<T>, usize) {
+    let total = rows.len();
+    let parsed: Vec<T> = rows
+        .into_iter()
+        .filter_map(|row| serde_json::from_value(row).ok())
+        .collect();
+    let dropped = total - parsed.len();
+    (parsed, dropped)
+}
+
+/// One lookup read of `args` on `host`, handed to [`lookup_scope_read`].
+async fn lookup_pulls_read(
+    repo_path: &str,
+    host: &str,
+    args: &[String],
+    keep: impl FnOnce(Vec<serde_json::Value>) -> (Vec<crate::forge::RemoteBranchPull>, usize),
+) -> AppResult<crate::forge::ScopeRead> {
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_gh_on_host(Some(repo_path), Some(host), &argv, GH_TIMEOUT).await?;
+    lookup_scope_read(&out.stdout_lossy(), keep)
+}
+
+/// A lookup read's answer as one scope: the rows `keep` kept, incomplete when the RAW
+/// page filled or a row was dropped as unreadable. Pure.
+fn lookup_scope_read(
+    stdout: &str,
+    keep: impl FnOnce(Vec<serde_json::Value>) -> (Vec<crate::forge::RemoteBranchPull>, usize),
+) -> AppResult<crate::forge::ScopeRead> {
+    let rows: Vec<serde_json::Value> = serde_json::from_str(stdout).map_err(|e| {
+        gh_unreadable(
+            "pull requests",
+            format!("could not parse gh api pulls: {e}"),
+        )
+    })?;
+    let raw = rows.len();
+    let (kept, dropped) = keep(rows);
+    Ok(
+        crate::forge::ScopeRead::paged(kept, raw, LOOKUP_PAGE).dropping(dropped, || {
+            gh_unreadable(
+                "pull requests",
+                format!("could not parse {dropped} of the gh api pulls rows"),
+            )
+        }),
+    )
+}
+
+/// The repository the lookup reads, as `repos/<slug>` names it: GitHub answers an old
+/// name or owner with the moved repository, so these spellings, never the URL's, build
+/// both scopes' reads. `parent` is the fork's parent, None when it is not a fork; its
+/// `Err` holds the gh message of an unreadable fork answer and fails the parent scope alone.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct GhLookupRepo {
+    full_name: String,
+    owner: String,
+    parent: Result<Option<String>, String>,
+}
+
+/// Reads `repos/<slug>` on `host` for both lookup scopes.
+pub(crate) async fn gh_lookup_repo_on_host(
+    repo_path: &str,
+    host: &str,
+    slug: &str,
+) -> AppResult<GhLookupRepo> {
+    let out = run_gh_on_host(
+        Some(repo_path),
+        Some(host),
+        &["api", &format!("repos/{slug}")],
+        GH_TIMEOUT,
+    )
+    .await?;
+    let repo: GhRepoForkOf = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the repository",
+            format!("could not parse gh api repos: {e}"),
+        )
+    })?;
+    gh_lookup_repo(&repo)
+}
+
+/// The canonical name and owner of a `repos/<slug>` answer, validated as a parent's name
+/// is, then the fork decision [`gh_fork_parent`] makes. Pure.
+fn gh_lookup_repo(repo: &GhRepoForkOf) -> AppResult<GhLookupRepo> {
+    let full_name = repo.full_name.as_deref().filter(|f| valid_full_name(f));
+    let owner = repo
+        .owner
+        .as_ref()
+        .and_then(|o| o.login.as_deref())
+        .filter(|o| crate::forge::validate_owner(o).is_ok());
+    let (Some(full_name), Some(owner)) = (full_name, owner) else {
+        return Err(gh_unreadable(
+            "the repository",
+            "the answer carried no usable full_name or owner.login".into(),
+        ));
+    };
+    Ok(GhLookupRepo {
+        full_name: full_name.to_string(),
+        owner: owner.to_string(),
+        parent: gh_fork_parent(repo).map_err(|e| e.to_string()),
+    })
+}
+
+/// `owner/name`, each part valid as GitHub spells it.
+fn valid_full_name(full: &str) -> bool {
+    full.split_once('/').is_some_and(|(owner, name)| {
+        crate::forge::validate_owner(owner).is_ok()
+            && crate::forge::validate_repo_name(name).is_ok()
+    })
+}
+
+/// The repository scope's endpoint: requests in the canonical repository headed on its
+/// canonical owner's `head`. Pure.
+fn repository_pulls_args(repo: &GhLookupRepo, head: &str) -> Vec<String> {
+    lookup_pulls_args(&repo.full_name, &repo.owner, head)
+}
+
+/// Open PRs in the repository itself headed on `head`, read on `host`, the host the
+/// caller resolved from the remote's own URL: `run_gh` pins origin's host and would read
+/// the repository on the wrong one.
+pub(crate) async fn gh_open_prs_on_host(
+    repo_path: &str,
+    host: &str,
+    repo: &GhLookupRepo,
+    head: &str,
+) -> AppResult<crate::forge::ScopeRead> {
+    let args = repository_pulls_args(repo, head);
+    lookup_pulls_read(repo_path, host, &args, |rows| {
+        repository_rows_headed_on(rows, head, &repo.full_name)
+    })
+    .await
+}
+
+/// A REST `pulls` item as the repository scope reads it. The repositories stay loose
+/// values so a missing id is counted, not a parse failure of the row.
+#[derive(Deserialize)]
+struct GhLookupPull {
+    number: u64,
+    html_url: String,
+    #[serde(default)]
+    title: String,
+    head: GhLookupSide,
+    #[serde(default)]
+    base: Option<GhLookupSide>,
+    #[serde(default)]
+    draft: bool,
+}
+
+#[derive(Deserialize)]
+struct GhLookupSide {
+    #[serde(rename = "ref", default)]
+    ref_name: Option<String>,
+    #[serde(default)]
+    repo: Option<serde_json::Value>,
+}
+
+impl GhLookupSide {
+    /// The branch name, None when the row carries none (absent, null or empty).
+    fn branch(&self) -> Option<&str> {
+        self.ref_name.as_deref().filter(|r| !r.is_empty())
+    }
+}
+
+/// The repository scope's rows: headed on `head` exactly, from the repository itself,
+/// told by `head.repo.id == base.repo.id` (ids survive a rename or transfer; names don't).
+/// A null head repository is a deleted fork's and is skipped; a row without a head branch,
+/// and a matching row with either id missing, are counted with the rows that won't parse.
+/// `repo` labels the kept rows. Pure.
+fn repository_rows_headed_on(
+    rows: Vec<serde_json::Value>,
+    head: &str,
+    repo: &str,
+) -> (Vec<crate::forge::RemoteBranchPull>, usize) {
+    let id_of = |r: &serde_json::Value| r.get("id").and_then(serde_json::Value::as_u64);
+    let (pulls, unparsed) = parse_lookup_rows::<GhLookupPull>(rows);
+    let mut missing_ids = 0;
+    let mut kept = Vec::new();
+    for p in pulls {
+        let Some(branch) = p.head.branch() else {
+            missing_ids += 1;
+            continue;
+        };
+        if branch != head {
+            continue;
+        }
+        let Some(head_repo) = p.head.repo.as_ref().filter(|r| !r.is_null()) else {
+            continue;
+        };
+        let base_id = p
+            .base
+            .as_ref()
+            .and_then(|b| b.repo.as_ref())
+            .and_then(id_of);
+        let (Some(head_id), Some(base_id)) = (id_of(head_repo), base_id) else {
+            missing_ids += 1;
+            continue;
+        };
+        if head_id != base_id {
+            continue;
+        }
+        kept.push(crate::forge::RemoteBranchPull {
+            number: p.number,
+            title: p.title,
+            url: p.html_url,
+            is_draft: p.draft,
+            scope: crate::forge::PullScope::Repository,
+            repo: repo.to_string(),
+        });
+    }
+    (kept, unparsed + missing_ids)
+}
+
+/// The fields the lookup reads from `repos/<slug>`. `fork` stays an `Option` so an answer
+/// without it reads as unreadable, never as "not a fork".
+#[derive(Deserialize)]
+struct GhRepoForkOf {
+    #[serde(default)]
+    full_name: Option<String>,
+    #[serde(default)]
+    owner: Option<GhRepoOwner>,
+    #[serde(default)]
+    fork: Option<bool>,
+    #[serde(default)]
+    parent: Option<GhRepoForkParent>,
+}
+
+#[derive(Deserialize)]
+struct GhRepoOwner {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GhRepoForkParent {
+    #[serde(default)]
+    full_name: Option<String>,
+}
+
+/// The parent scope's endpoint: requests in the fork's parent headed on the fork's
+/// canonical owner's `head`. None when the repository is not a fork. Pure.
+fn parent_pulls_args(repo: &GhLookupRepo, head: &str) -> Option<Vec<String>> {
+    let parent = repo.parent.as_ref().ok()?.as_deref()?;
+    Some(lookup_pulls_args(parent, &repo.owner, head))
+}
+
+/// Open PRs in the repository `repo` was forked from whose head is `head` on this fork,
+/// read on `host`. Not a fork: none. An unreadable fork answer fails this scope only.
+pub(crate) async fn gh_parent_open_prs_on_host(
+    repo_path: &str,
+    host: &str,
+    repo: &GhLookupRepo,
+    head: &str,
+) -> AppResult<crate::forge::ScopeRead> {
+    let parent = match &repo.parent {
+        Ok(parent) => parent.as_deref(),
+        Err(message) => return Err(AppError::Gh(message.clone())),
+    };
+    let (Some(parent), Some(args)) = (parent, parent_pulls_args(repo, head)) else {
+        return Ok(crate::forge::ScopeRead::default());
+    };
+    lookup_pulls_read(repo_path, host, &args, |rows| {
+        parent_rows_headed_on(rows, head, parent)
+    })
+    .await
+}
+
+/// The parent slug of a fork: `Ok(None)` for a repository that is not one, an `Err` for an
+/// answer without `fork` or a fork whose `parent.full_name` isn't a valid `owner/name`.
+fn gh_fork_parent(repo: &GhRepoForkOf) -> AppResult<Option<String>> {
+    match repo.fork {
+        None => Err(gh_unreadable(
+            "the repository",
+            "the answer carried no fork marker".into(),
+        )),
+        Some(false) => Ok(None),
+        Some(true) => {
+            let parent = repo.parent.as_ref().and_then(|p| p.full_name.as_deref());
+            match parent.and_then(|p| p.split_once('/').map(|(o, n)| (p, o, n))) {
+                Some((full, owner, name))
+                    if crate::forge::validate_owner(owner).is_ok()
+                        && crate::forge::validate_repo_name(name).is_ok() =>
+                {
+                    Ok(Some(full.to_string()))
+                }
+                _ => Err(AppError::Gh(
+                    "Couldn't read which repository this fork was forked from.".into(),
+                )),
+            }
+        }
+    }
+}
+
+/// A REST `pulls` item as the parent scope reads it.
+#[derive(Deserialize)]
+struct GhLookupParentPull {
+    number: u64,
+    html_url: String,
+    #[serde(default)]
+    title: String,
+    head: GhLookupSide,
+    #[serde(default)]
+    draft: bool,
+}
+
+/// The parent scope's rows: the server's `head=<owner>:<head>` filter is the fork filter,
+/// so this keeps rows headed on `head`, and counts the rows that won't parse or carry no
+/// head branch instead of failing the whole list. Pure.
+fn parent_rows_headed_on(
+    rows: Vec<serde_json::Value>,
+    head: &str,
+    parent: &str,
+) -> (Vec<crate::forge::RemoteBranchPull>, usize) {
+    let (pulls, unparsed) = parse_lookup_rows::<GhLookupParentPull>(rows);
+    let mut no_branch = 0;
+    let mut kept = Vec::new();
+    for p in pulls {
+        match p.head.branch() {
+            None => no_branch += 1,
+            Some(branch) if branch == head => kept.push(crate::forge::RemoteBranchPull {
+                number: p.number,
+                title: p.title,
+                url: p.html_url,
+                is_draft: p.draft,
+                scope: crate::forge::PullScope::Parent,
+                repo: parent.to_string(),
+            }),
+            Some(_) => {}
+        }
+    }
+    (kept, unparsed + no_branch)
+}
+
+#[cfg(test)]
+mod remote_branch_pull_tests {
+    use super::*;
+
+    fn fork_of(body: serde_json::Value) -> AppResult<Option<String>> {
+        gh_fork_parent(&serde_json::from_value(body).unwrap())
+    }
+
+    /// A fork with a usable parent names it; not a fork is none; a fork without a usable
+    /// parent, or an answer without the marker, is an `Err` and so an unchecked scope.
+    #[test]
+    fn gh_fork_parent_is_unknown_without_a_usable_parent() {
+        use serde_json::json;
+        assert_eq!(
+            fork_of(json!({"fork": true, "parent": {"full_name": "up/repo"}})).unwrap(),
+            Some("up/repo".to_string())
+        );
+        assert_eq!(fork_of(json!({"fork": false})).unwrap(), None);
+        assert_eq!(
+            fork_of(json!({"fork": false, "parent": {"full_name": "up/repo"}})).unwrap(),
+            None
+        );
+        for body in [
+            json!({"fork": true}),
+            json!({"fork": true, "parent": null}),
+            json!({"fork": true, "parent": {}}),
+            json!({"fork": true, "parent": {"full_name": "noslash"}}),
+            json!({"fork": true, "parent": {"full_name": "own{er}/repo"}}),
+            json!({"fork": true, "parent": {"full_name": "a/b/c"}}),
+            json!({"parent": {"full_name": "up/repo"}}),
+            json!({"fork": null}),
+        ] {
+            assert!(
+                matches!(fork_of(body.clone()), Err(AppError::Gh(_))),
+                "{body}"
+            );
+        }
+    }
+
+    /// The lookup reads under an explicit GET with the filter in raw `-f` fields and a full
+    /// page of [`LOOKUP_PAGE`]; the endpoint path carries no value gh could rewrite (its
+    /// `:owner`/`:repo`/`:branch` placeholders) or a `#` could cut.
+    #[test]
+    fn lookup_pulls_args_keep_the_filter_out_of_the_path() {
+        assert_eq!(LOOKUP_PAGE, 100);
+        assert_eq!(
+            lookup_pulls_args("o/r", "o", "feat/x"),
+            [
+                "api",
+                "--method",
+                "GET",
+                "repos/o/r/pulls",
+                "-f",
+                "head=o:feat/x",
+                "-f",
+                "state=open",
+                "-f",
+                "per_page=100"
+            ]
+        );
+        for (owner, head) in [
+            ("theBGuy", "branch-x"),
+            ("theBGuy", "repo/x"),
+            ("theBGuy", "owner"),
+            ("theBGuy", "repo-fix"),
+            ("ev&il{x}", "feat&state=all#{branch}"),
+        ] {
+            let args = lookup_pulls_args("o/r", owner, head);
+            assert_eq!(
+                args[..4],
+                ["api", "--method", "GET", "repos/o/r/pulls"],
+                "{head}"
+            );
+            assert_eq!(args[5], format!("head={owner}:{head}"), "{head}");
+            assert_eq!(args.len(), 10, "{head}");
+        }
+    }
+
+    /// The repository scope keeps a request on the branch exactly when its head and base
+    /// repositories share an id, under any `full_name` spelling (a renamed or moved
+    /// repository answers with its new one). Another repository's id, another head and a
+    /// deleted fork (null or absent head repository) are skipped uncounted; a matching row
+    /// with either id missing, and a row that won't parse, are counted.
+    #[test]
+    fn repository_rows_keep_this_repositorys_own_heads() {
+        use serde_json::json;
+        let row = |n: u64,
+                   head: &str,
+                   head_repo: serde_json::Value,
+                   base_repo: serde_json::Value| {
+            json!({"number": n, "html_url": format!("https://github.com/vercel/next.js/pull/{n}"),
+                "title": format!("t{n}"), "head": {"ref": head, "repo": head_repo},
+                "base": {"ref": "main", "repo": base_repo}, "draft": n == 2})
+        };
+        let own = |name: &str| json!({"id": 7, "full_name": name});
+        let rows = vec![
+            row(1, "feat", own("zeit/next.js"), own("vercel/next.js")),
+            row(2, "feat", own("someone/else"), own("vercel/next.js")),
+            row(
+                3,
+                "feat",
+                json!({"id": 8, "full_name": "vercel/next.js"}),
+                own("vercel/next.js"),
+            ),
+            row(4, "feat", json!(null), own("vercel/next.js")),
+            json!({"number": 5, "html_url": "u", "head": {"ref": "feat"}, "base": {"repo": own("x")}}),
+            row(6, "Feat", own("vercel/next.js"), own("vercel/next.js")),
+            row(7, "other", own("vercel/next.js"), own("vercel/next.js")),
+            row(
+                8,
+                "feat",
+                json!({"full_name": "vercel/next.js"}),
+                own("vercel/next.js"),
+            ),
+            row(
+                9,
+                "feat",
+                own("vercel/next.js"),
+                json!({"full_name": "vercel/next.js"}),
+            ),
+            json!({"number": 10, "html_url": "u", "head": {"ref": "feat", "repo": own("v/n")}}),
+            row(11, "feat", json!({"id": "7"}), own("vercel/next.js")),
+            row(12, "other", json!({}), json!(null)),
+            json!({"number": "x"}),
+            json!(42),
+            json!({"number": 13, "html_url": "u", "head": {"repo": own("v/n")}}),
+            json!({"number": 14, "html_url": "u", "head": {"ref": null, "repo": own("v/n")}}),
+            row(15, "", own("vercel/next.js"), own("vercel/next.js")),
+        ];
+        let (kept, dropped) = repository_rows_headed_on(rows, "feat", "vercel/next.js");
+        assert_eq!(kept.iter().map(|r| r.number).collect::<Vec<_>>(), [1, 2]);
+        assert!(kept
+            .iter()
+            .all(|r| r.scope == crate::forge::PullScope::Repository && r.repo == "vercel/next.js"));
+        assert!(!kept[0].is_draft && kept[1].is_draft);
+        assert_eq!(kept[0].url, "https://github.com/vercel/next.js/pull/1");
+        // 8, 9, 10 and 11 match the branch with an id missing; 13, 14 and 15 carry no
+        // head branch; "x" and 42 won't parse.
+        assert_eq!(dropped, 9);
+    }
+
+    /// The parent scope keeps rows on the branch and counts a row with no head branch
+    /// (absent, null or empty) with the rows that won't parse.
+    #[test]
+    fn parent_rows_count_a_row_without_a_head_branch() {
+        use serde_json::json;
+        let row = |n: u64, head: serde_json::Value| {
+            json!({"number": n, "html_url": format!("https://github.com/up/r/pull/{n}"),
+                "title": "t", "head": head})
+        };
+        let rows = vec![
+            row(1, json!({"ref": "feat"})),
+            row(2, json!({"ref": "other"})),
+            row(3, json!({})),
+            row(4, json!({"ref": null})),
+            row(5, json!({"ref": ""})),
+            json!({"number": "x"}),
+        ];
+        let (kept, dropped) = parent_rows_headed_on(rows, "feat", "up/r");
+        assert_eq!(kept.iter().map(|r| r.number).collect::<Vec<_>>(), [1]);
+        assert_eq!(kept[0].scope, crate::forge::PullScope::Parent);
+        assert_eq!(dropped, 4);
+    }
+
+    fn lookup_repo(body: serde_json::Value) -> AppResult<GhLookupRepo> {
+        gh_lookup_repo(&serde_json::from_value(body).unwrap())
+    }
+
+    /// `repos/<slug>` gives the canonical name and owner (whatever the URL spelled) and
+    /// the fork decision; an answer without a usable name or owner is an `Err`.
+    #[test]
+    fn the_repository_answer_gives_the_canonical_name_owner_and_parent() {
+        use serde_json::json;
+        let moved = json!({"full_name": "vercel/next.js", "owner": {"login": "vercel"},
+            "fork": false});
+        assert_eq!(
+            lookup_repo(moved).unwrap(),
+            GhLookupRepo {
+                full_name: "vercel/next.js".into(),
+                owner: "vercel".into(),
+                parent: Ok(None),
+            }
+        );
+        let fork = json!({"full_name": "me/next.js", "owner": {"login": "me"}, "fork": true,
+            "parent": {"full_name": "vercel/next.js"}});
+        assert_eq!(
+            lookup_repo(fork).unwrap().parent,
+            Ok(Some("vercel/next.js".to_string()))
+        );
+        // An unreadable fork answer keeps the repository scope and fails the parent alone.
+        for body in [
+            json!({"full_name": "o/r", "owner": {"login": "o"}}),
+            json!({"full_name": "o/r", "owner": {"login": "o"}, "fork": true}),
+        ] {
+            let repo = lookup_repo(body.clone()).expect("the repository scope stays readable");
+            assert_eq!(repo.full_name, "o/r", "{body}");
+            assert!(repo.parent.is_err(), "{body}");
+            assert_eq!(parent_pulls_args(&repo, "feat"), None, "{body}");
+        }
+        let unusable = [
+            json!({"owner": {"login": "o"}, "fork": false}),
+            json!({"full_name": null, "owner": {"login": "o"}, "fork": false}),
+            json!({"full_name": "noslash", "owner": {"login": "o"}, "fork": false}),
+            json!({"full_name": "o/r{x}", "owner": {"login": "o"}, "fork": false}),
+            json!({"full_name": "o/r", "fork": false}),
+            json!({"full_name": "o/r", "owner": null, "fork": false}),
+            json!({"full_name": "o/r", "owner": {}, "fork": false}),
+            json!({"full_name": "o/r", "owner": {"login": "o{x}"}, "fork": false}),
+        ];
+        for body in unusable {
+            assert!(
+                matches!(lookup_repo(body.clone()), Err(AppError::Gh(_))),
+                "{body}"
+            );
+        }
+    }
+
+    /// Both scopes' endpoints spell the canonical repository and owner, never the URL's.
+    #[test]
+    fn the_lookup_endpoints_use_the_canonical_spelling() {
+        // The remote URL names zeit/next.js; GitHub answers with the moved repository.
+        let repo = GhLookupRepo {
+            full_name: "vercel/next.js".into(),
+            owner: "vercel".into(),
+            parent: Ok(None),
+        };
+        assert_eq!(
+            repository_pulls_args(&repo, "feat/x"),
+            lookup_pulls_args("vercel/next.js", "vercel", "feat/x")
+        );
+        assert_eq!(
+            repository_pulls_args(&repo, "feat/x")[5],
+            "head=vercel:feat/x"
+        );
+        assert_eq!(parent_pulls_args(&repo, "feat/x"), None);
+        let fork = GhLookupRepo {
+            full_name: "newme/next.js".into(),
+            owner: "newme".into(),
+            parent: Ok(Some("vercel/next.js".into())),
+        };
+        assert_eq!(
+            parent_pulls_args(&fork, "feat"),
+            Some(lookup_pulls_args("vercel/next.js", "newme", "feat"))
+        );
+        assert_eq!(
+            parent_pulls_args(&fork, "feat").unwrap()[3],
+            "repos/vercel/next.js/pulls"
+        );
+    }
+
+    /// An unreadable fork parent leaves the parent scope unchecked with its reason, before
+    /// any gh call: never "checked, none".
+    #[tokio::test]
+    async fn an_unreadable_parent_is_an_unchecked_parent_scope() {
+        let repo = GhLookupRepo {
+            full_name: "me/fork".into(),
+            owner: "me".into(),
+            parent: Err("no fork marker".into()),
+        };
+        let read = gh_parent_open_prs_on_host("unused", "github.com", &repo, "feat").await;
+        assert!(
+            matches!(&read, Err(AppError::Gh(m)) if m == "no fork marker"),
+            "{read:?}"
+        );
+    }
+
+    /// A full page of other repositories' rows keeps no item and leaves the scope
+    /// incomplete: the page is judged on the raw rows.
+    #[test]
+    fn a_full_page_of_other_repositories_is_incomplete() {
+        use serde_json::json;
+        let rows: Vec<serde_json::Value> = (1..=LOOKUP_PAGE as u64)
+            .map(|n| {
+                json!({"number": n, "html_url": "u", "title": "t",
+                    "head": {"ref": "feat", "repo": {"id": 1000 + n}},
+                    "base": {"ref": "main", "repo": {"id": 7}}})
+            })
+            .collect();
+        let stdout = serde_json::to_string(&rows).unwrap();
+        let read = lookup_scope_read(&stdout, |rows| {
+            repository_rows_headed_on(rows, "feat", "o/r")
+        })
+        .unwrap();
+        assert!(read.rows.is_empty());
+        assert!(
+            matches!(&read.incomplete, Some(AppError::Command(m))
+                if m == "GitDesktop read only the first 100 matches."),
+            "{:?}",
+            read.incomplete
+        );
+        let short = serde_json::to_string(&rows[..LOOKUP_PAGE - 1]).unwrap();
+        let read = lookup_scope_read(&short, |rows| {
+            repository_rows_headed_on(rows, "feat", "o/r")
+        })
+        .unwrap();
+        assert!(read.incomplete.is_none());
+        assert!(matches!(
+            lookup_scope_read("{}", |rows| repository_rows_headed_on(rows, "feat", "o/r")),
+            Err(AppError::Gh(_))
+        ));
+    }
+
+    /// The parent scope keeps rows headed on the branch and counts an unparsable row.
+    #[test]
+    fn parent_rows_keep_the_branch_and_survive_a_malformed_row() {
+        use serde_json::json;
+        let row = |n: u64, head: &str| {
+            json!({"number": n, "html_url": format!("https://github.com/up/repo/pull/{n}"),
+                "title": format!("t{n}"), "base": {"ref": "main"}, "head": {"ref": head},
+                "draft": n == 2})
+        };
+        let rows = vec![
+            row(1, "feat"),
+            row(2, "feat"),
+            row(3, "other"),
+            json!({"number": "x"}),
+            json!(42),
+        ];
+        let (kept, dropped) = parent_rows_headed_on(rows, "feat", "up/repo");
+        assert_eq!(dropped, 2);
+        assert_eq!(
+            kept,
+            [1, 2]
+                .map(|n| crate::forge::RemoteBranchPull {
+                    number: n,
+                    title: format!("t{n}"),
+                    url: format!("https://github.com/up/repo/pull/{n}"),
+                    is_draft: n == 2,
+                    scope: crate::forge::PullScope::Parent,
+                    repo: "up/repo".into(),
+                })
+                .to_vec()
+        );
+    }
+
+    /// One argv serves both readers, slug and head where the caller put them.
+    #[test]
+    fn prs_for_branch_argv_takes_slug_and_head() {
+        assert_eq!(
+            prs_for_branch_argv("o/r", "feat"),
+            [
+                "pr",
+                "list",
+                "--repo",
+                "o/r",
+                "--head",
+                "feat",
+                "--state",
+                "open",
+                "--json",
+                PRS_FOR_BRANCH_FIELDS
+            ]
+        );
+    }
 }
 
 /// Pushes `head` to origin, then opens a PR from `head` into `base`. Returns the new
@@ -11048,15 +11819,15 @@ mod tests {
         rollup_state_to_ci, scrape_pr_ref, split_commit_message, stack_members_from,
         stack_members_from_output, PrStackProbe,
         map_gh_mergeability, stack_memberships_from, stack_write_args, stack_write_outcome_from,
-        PR_LIST_FIELDS, PR_VIEW_FIELDS, PRS_FOR_BRANCH_FIELDS, upstream_pulls_endpoint, GhPrFile,
+        PR_LIST_FIELDS, PR_VIEW_FIELDS, PRS_FOR_BRANCH_FIELDS, upstream_pulls_args, GhPrFile,
         EMPTY_BLOB_SHA, head_owner_login,
         GhPrRestComment,
         GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
         GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
         GhMergeabilityRow, PrMergeability, PrPollInfo, PrStackInfo, PrStackMember,
         ForgeTimelineEventOut,
-        batch_check_present, build_divergence_compare_path, oid_outside_origin_graph,
-        select_fork_pr_match, validate_branch,
+        batch_check_present, build_divergence_compare_path, fork_head_host,
+        oid_outside_origin_graph, origin_tracking_tips, select_fork_pr_match, validate_branch,
         ForkPrMatch, RawDivergenceRefs, RawForkPr, RawLogin, RawPr, RawReview,
     };
     use crate::error::AppError;
@@ -14211,7 +14982,7 @@ mod tests {
                 &divergence_refs("main", "feature/x", Some("contrib"))
             )
             .expect("valid refs"),
-            "repos/octo/proj/compare/main...contrib:feature/x"
+            "repos/octo/proj/compare/main...contrib%3Afeature/x"
         );
         // A cross-repo PR with an absent or empty owner refuses: a bare head would
         // resolve against the BASE repo and count divergence against a same-named
@@ -14233,6 +15004,33 @@ mod tests {
             build_divergence_compare_path("octo/proj", &same_repo).expect("valid refs"),
             "repos/octo/proj/compare/main...dev"
         );
+    }
+
+    /// Heads `gh api`'s legacy `:owner`/`:repo`/`:branch` rewrite would replace
+    /// after a literal colon, plus an ordinary name.
+    const COLON_PLACEHOLDER_HEADS: [&str; 5] =
+        ["repo-fix", "owner", "branch-x", "repo/x", "feature"];
+
+    #[test]
+    fn divergence_compare_path_encodes_the_fork_colon() {
+        for head in COLON_PLACEHOLDER_HEADS {
+            let fork = build_divergence_compare_path(
+                "octo/proj",
+                &divergence_refs("main", head, Some("contrib")),
+            )
+            .expect("valid refs");
+            assert_eq!(
+                fork.strip_prefix("repos/octo/proj/compare/main...contrib%3A"),
+                Some(head),
+                "{fork}"
+            );
+            let same_repo =
+                build_divergence_compare_path("octo/proj", &divergence_refs("main", head, None))
+                    .expect("valid refs");
+            for path in [&fork, &same_repo] {
+                assert!(!path.contains(':'), "a literal colon reached {path}");
+            }
+        }
     }
 
     #[test]
@@ -14322,6 +15120,7 @@ mod tests {
             head_ref_name: "feat".to_string(),
             head_repo_owner: owner.to_string(),
             head_repo_name: "proj".to_string(),
+            head_repo_host: "github.com".to_string(),
             maintainer_can_modify: false,
             ahead_count,
         };
@@ -14390,9 +15189,20 @@ mod tests {
         run(&repo_s, &["commit", "-qm", "c2"]).await;
         let local_oid = run(&repo_s, &["rev-parse", "HEAD"]).await.trim().to_string();
 
+        let outside = |oid: String, tips: Vec<String>| {
+            let repo_s = repo_s.clone();
+            async move { oid_outside_origin_graph(&repo_s, &oid, &tips).await }
+        };
+        let tips = || async { origin_tracking_tips(&repo_s).await.expect("tips read") };
+
+        // A folder git can't read as a repository gives no snapshot, never an empty one.
+        let not_repo = dir.path().to_string_lossy().into_owned();
+        assert_eq!(origin_tracking_tips(&not_repo).await, None);
+
         // Before any origin ref exists there is nothing to exclude, so both oids read
         // as outside origin's graph — the pre-fetch repo keeps its candidates.
-        assert!(oid_outside_origin_graph(&repo_s, &upstream_oid).await);
+        assert_eq!(tips().await, Vec::<String>::new());
+        assert!(outside(upstream_oid.clone(), tips().await).await);
 
         // origin/main reaches c1 (and only c1).
         run(
@@ -14401,11 +15211,11 @@ mod tests {
         )
         .await;
         assert!(
-            !oid_outside_origin_graph(&repo_s, &upstream_oid).await,
+            !outside(upstream_oid.clone(), tips().await).await,
             "a commit origin already has is upstream's work, never a match anchor"
         );
         assert!(
-            oid_outside_origin_graph(&repo_s, &local_oid).await,
+            outside(local_oid.clone(), tips().await).await,
             "a commit no origin ref reaches is a legitimate candidate"
         );
 
@@ -14416,17 +15226,61 @@ mod tests {
         )
         .await;
         assert!(
-            oid_outside_origin_graph(&repo_s, &local_oid).await,
+            outside(local_oid.clone(), tips().await).await,
             "only origin's refs decide this"
         );
 
-        // Once origin advances onto c2, the same oid stops being distinctive.
+        // origin advancing onto c2 after the snapshot (the guarded publish's own push)
+        // leaves the snapshot's verdict standing; a fresh snapshot sees the move.
+        let before = tips().await;
         run(
             &repo_s,
             &["update-ref", "refs/remotes/origin/main", &local_oid],
         )
         .await;
-        assert!(!oid_outside_origin_graph(&repo_s, &local_oid).await);
+        assert!(
+            outside(local_oid.clone(), before).await,
+            "a tip that moved after the snapshot must not veto the match"
+        );
+        assert!(!outside(local_oid.clone(), tips().await).await);
+    }
+
+    /// The fork match's head host is origin's host as `remote_host` spells it, the
+    /// spelling the frontend's `forgeUrlHost` compares against; no origin host is empty.
+    #[test]
+    fn the_fork_head_host_is_origins_remote_host() {
+        for (url, host) in [
+            (Some("https://host:8443/o/r.git"), "host"),
+            (Some("git@host:o/r.git"), "host"),
+            (Some("ssh://git@host:22/o/r.git"), "host"),
+            (Some("https://GitHub.COM/o/r"), "github.com"),
+            (Some("git@GitHub.COM:o/r.git"), "github.com"),
+            (Some("https://[2001:DB8::1]:8443/o/r"), "[2001:db8::1]"),
+            (Some("ssh://git@[2001:db8::1]:22/o/r"), "[2001:db8::1]"),
+            (Some("git@[2001:db8::1]:o/r.git"), "[2001:db8::1]"),
+            (None, ""),
+        ] {
+            assert_eq!(fork_head_host(url), host, "{url:?}");
+        }
+    }
+
+    /// The fork match crosses IPC with `headRepoHost` in camelCase.
+    #[test]
+    fn the_fork_match_wire_shape_carries_the_head_host() {
+        let m = ForkPrMatch {
+            number: 1,
+            title: String::new(),
+            url: String::new(),
+            head_ref_name: "feat".into(),
+            head_repo_owner: "me".into(),
+            head_repo_name: "proj".into(),
+            head_repo_host: "github.com".into(),
+            maintainer_can_modify: true,
+            ahead_count: 0,
+        };
+        let wire = serde_json::to_value(&m).unwrap();
+        assert_eq!(wire["headRepoHost"], "github.com");
+        assert!(wire.get("head_repo_host").is_none(), "{wire}");
     }
 
     /// The no-lens arm resolves purely from `origin` — real repo, no `gh` spawn —
@@ -17291,31 +18145,38 @@ github.acme.com
         }
     }
 
+    /// The upstream probe's filter rides raw `-f` fields under an explicit GET, so a
+    /// hostile refname can't add a query parameter and gh's `:owner`/`:repo`/`:branch`
+    /// rewrite never reaches it: the endpoint path is the slug alone.
     #[test]
-    fn upstream_pulls_endpoint_encodes_hostile_refnames() {
-        // Plain refname: nothing to escape but the reserved `:` separator stays literal.
+    fn upstream_pulls_args_keep_hostile_refnames_out_of_the_path() {
         assert_eq!(
-            upstream_pulls_endpoint("biomejs/biome", "PhoenixMputu", "feat/x"),
-            "repos/biomejs/biome/pulls?head=PhoenixMputu:feat%2Fx&state=open",
+            upstream_pulls_args("biomejs/biome", "PhoenixMputu", "feat/x"),
+            [
+                "api",
+                "--method",
+                "GET",
+                "repos/biomejs/biome/pulls",
+                "-f",
+                "head=PhoenixMputu:feat/x",
+                "-f",
+                "state=open"
+            ],
         );
-        // A legal refname carrying `&` can't inject a second query parameter — the
-        // `&` is encoded, so `state=all` lands inside the head VALUE, not as a param.
-        let ep = upstream_pulls_endpoint("o/r", "me", "feat&state=all");
-        assert_eq!(ep, "repos/o/r/pulls?head=me:feat%26state%3Dall&state=open");
-        // Exactly one `&` (the real separator) and one `state=` (the real filter).
-        assert_eq!(ep.matches('&').count(), 1);
-        assert_eq!(ep.matches("state=").count(), 1);
-        // `%` and space are escaped too (no half-open percent-escape, no raw space).
-        assert_eq!(
-            upstream_pulls_endpoint("o/r", "me", "a b%c"),
-            "repos/o/r/pulls?head=me:a%20b%25c&state=open",
-        );
-        // A hostile FORK OWNER is encoded the same way (defense in depth, though a
-        // real login is alphanumeric).
-        assert_eq!(
-            upstream_pulls_endpoint("o/r", "ev&il", "b"),
-            "repos/o/r/pulls?head=ev%26il:b&state=open",
-        );
+        for head in [
+            "feat&state=all",
+            "a b%c",
+            "branch-x",
+            "repo/x",
+            "owner",
+            "x#y",
+        ] {
+            let args = upstream_pulls_args("o/r", "me", head);
+            assert_eq!(args[3], "repos/o/r/pulls", "{head}");
+            assert_eq!(args[5], format!("head=me:{head}"), "{head}");
+            assert_eq!(args.len(), 8, "{head}");
+        }
+        assert_eq!(upstream_pulls_args("o/r", "ev&il", "b")[5], "head=ev&il:b");
     }
 
     #[test]

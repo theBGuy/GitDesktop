@@ -544,17 +544,42 @@ export const publishRepoKey = (repo: string, identity?: string) =>
     ? ([...PUBLISH_REPO_KEY, repo] as const)
     : ([...PUBLISH_REPO_KEY, repo, identity] as const);
 
-/** One publish in flight: where it goes and the name it creates there. */
+/** One publish in flight: where it goes, the name it creates there, and the
+ *  branch its checkout had checked out at the press (null when unknown). */
 export interface PendingPublish {
   provider: "github" | "gitlab" | "bitbucket";
   name: string;
+  branch: string | null;
 }
+
+/** Whether a publish among `publishes` holds a rename, delete or archive of
+ *  `branch`: the backend refuses those for the branch the publish pushes,
+ *  matched ignoring case. A publish that recorded no branch holds the viewer's
+ *  current branch instead. */
+export function publishHoldsBranch(
+  publishes: readonly PendingPublish[],
+  branch: string | null,
+  currentName: string | null,
+): boolean {
+  if (branch === null) return false;
+  const folded = foldPerCodePoint(branch);
+  return publishes.some((p) =>
+    p.branch === null
+      ? branch === currentName
+      : foldPerCodePoint(p.branch) === folded,
+  );
+}
+
+/** Lowercases each code point alone, as the backend's `char::to_lowercase` does:
+ *  `String.prototype.toLowerCase` folds a final capital sigma by its context. */
+const foldPerCodePoint = (s: string) =>
+  [...s].map((c) => c.toLowerCase()).join("");
 
 /** The publishes of the repository among `entries`, which the caller has already
  *  narrowed to pending ones: keyed under `repo`'s own path, or under any path
  *  whose key carries `identity` (an absent identity never matches an absent one).
  *  Variables without a known provider and a string name are dropped, so a
- *  malformed entry holds nothing. */
+ *  malformed entry holds nothing; a branch that isn't a string reads as unknown. */
 export function pendingPublishesFor(
   entries: readonly PendingMutationEntry[],
   repo: string,
@@ -570,14 +595,18 @@ export function pendingPublishesFor(
     )
       continue;
     if (typeof e.vars !== "object" || e.vars === null) continue;
-    const { provider, name } = e.vars as Record<string, unknown>;
+    const { provider, name, branch } = e.vars as Record<string, unknown>;
     if (
       (provider === "github" ||
         provider === "gitlab" ||
         provider === "bitbucket") &&
       typeof name === "string"
     )
-      out.push({ provider, name });
+      out.push({
+        provider,
+        name,
+        branch: typeof branch === "string" ? branch : null,
+      });
   }
   return out;
 }

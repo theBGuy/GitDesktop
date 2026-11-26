@@ -48,9 +48,15 @@ import {
 import { diffSectionStats } from "@/lib/git/diff-split";
 import { repoKeys } from "@/lib/git/queries";
 import { repoIdentity } from "@/lib/git/repo-identity";
-import { type DiffStatEntry, prHeadSha } from "@/lib/git/types";
+import {
+  type DiffStatEntry,
+  type ForgeProvider,
+  type ForgeStatus,
+  prHeadSha,
+} from "@/lib/git/types";
 import { emitNotification } from "@/lib/notifications/emit";
 import { listLocalPrs, reloadLocalPrs, updateLocalPr } from "@/lib/pulls/local";
+import { PR_NOUN, type PrNoun, prRef } from "@/lib/pulls/pr-state";
 import {
   listReviews,
   type PersistedReview,
@@ -204,6 +210,26 @@ function targetRef(event: PrAutomationEvent): string {
   return event.target.type === "remote"
     ? String(event.target.number)
     : event.target.id;
+}
+
+/** The provider from the forge status the cache already holds: a print never
+ *  spawns a probe, so an unloaded status reads as GitHub. */
+function cachedProvider(repoPath: string): ForgeProvider | null | undefined {
+  return queryClient.getQueryData<ForgeStatus>([
+    "repo",
+    repoPath,
+    "forge-status",
+  ])?.provider;
+}
+
+/** A remote PR's `#N` / `!N`, from the cached provider. */
+function cachedPrRef(repoPath: string, number: number): string {
+  return prRef(cachedProvider(repoPath), number);
+}
+
+/** What the repo's forge calls a remote PR, from the cached provider. */
+export function cachedPrNoun(repoPath: string): PrNoun {
+  return PR_NOUN[cachedProvider(repoPath) ?? "github"];
 }
 
 function modeLabel(mode: ReviewMode): "security audit" | "review" {
@@ -786,6 +812,12 @@ async function runOneAction({
   // Wall-clock start, mirrored into the persisted history record so an automated review
   // carries a real duration.
   const runStartedMs = Date.now();
+  // Read before the generation: a run can outlast the forge-status cache entry once
+  // the user leaves the repository, and the print would then fall back to `#`.
+  const remoteRef =
+    event.kind !== "commit" && event.target.type === "remote"
+      ? cachedPrRef(event.repoPath, event.target.number)
+      : undefined;
   // Per-action, so a second mode's run never inherits the first's text or verdict.
   const progress: RunProgress = { text: "", timedOut: false };
   // Let-box so the rerun closure carries THIS run's own key (assigned right
@@ -910,7 +942,13 @@ async function runOneAction({
       neutralizeRefs: true,
       text,
     });
-    const { resultId, delivered } = await deliver(event, action, body, text);
+    const { resultId, delivered } = await deliver(
+      event,
+      action,
+      body,
+      text,
+      remoteRef,
+    );
     // Seed the review-history store so the next run (manual or auto) builds on these
     // findings and this headSha joins the heads pr-sync treats as covered. Best-effort.
     if (event.kind === "pr-open" || event.kind === "pr-sync") {
@@ -1419,14 +1457,22 @@ export function runAutomationNow(
       const preview = await resolveTarget(false);
       if (!preview) return;
 
+      // One cache read names both the number and the noun; a local PR is a
+      // pull request on every forge.
+      const provider =
+        target.kind === "remote" ? cachedProvider(repoPath) : undefined;
       const reference =
         target.kind === "remote"
-          ? `#${target.number} · ${preview.title}`
+          ? `${prRef(provider, target.number)} · ${preview.title}`
           : preview.title;
+      const noun: PrNoun =
+        target.kind === "remote"
+          ? PR_NOUN[provider ?? "github"]
+          : "pull request";
       const modeList = modes.map((m) => ACTION_LABELS[m]).join(" and ");
       const ok = await useConfirm.getState().ask({
-        title: "Run automations on this pull request?",
-        body: `${reference} — runs ${modeList}. The result is posted as a comment on the pull request.`,
+        title: `Run automations on this ${noun}?`,
+        body: `${reference} — runs ${modeList}. The result is posted as a comment on the ${noun}.`,
         confirmLabel: "Run",
       });
       if (!ok) return;
@@ -1900,12 +1946,14 @@ async function generateReviewText(
 /** Delivers one finished review to wherever its event's output belongs. `resultId` is
  *  the stored result's id for a COMMIT event, the only arm whose output has a record
  *  to point at. `delivered` is false only when the output landed nowhere (a local PR
- *  deleted mid-run), so the history record is never stamped posted for it. */
+ *  deleted mid-run), so the history record is never stamped posted for it. A remote
+ *  PR's `remoteRef` is read by the caller at run start. */
 async function deliver(
   event: AutomationEvent,
   mode: ReviewMode,
   body: string,
   rawText: string,
+  remoteRef: string | undefined,
 ): Promise<{ resultId?: string; delivered: boolean }> {
   const label = modeLabel(mode);
 
@@ -1980,14 +2028,15 @@ async function deliver(
     await queryClient.invalidateQueries({
       queryKey: ["repo", event.repoPath, "pr", "origin", event.target.number],
     });
-    toast.success(`AI ${label} posted on #${event.target.number}`);
     const prNumber = event.target.number;
+    const ref = remoteRef ?? cachedPrRef(event.repoPath, prNumber);
+    toast.success(`AI ${label} posted on ${ref}`);
     emitNotification({
       source: "automations",
       row: {
         kind: "review-posted",
         tone: "success",
-        title: `AI ${label} posted on #${prNumber}`,
+        title: `AI ${label} posted on ${ref}`,
         subtitle: `"${event.title}"`,
         repoPath: event.repoPath,
         repoName: repoNameFromPath(event.repoPath),
@@ -2002,7 +2051,7 @@ async function deliver(
         dedupeKey: `automation-review:${event.repoPath}:remote:origin:${prNumber}:${mode}`,
       },
       os: {
-        title: `AI ${label} posted on #${prNumber}`,
+        title: `AI ${label} posted on ${ref}`,
         body: event.title,
         focus: "unfocused",
       },

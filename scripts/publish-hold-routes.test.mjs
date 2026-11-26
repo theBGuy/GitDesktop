@@ -52,6 +52,10 @@ const CALLEES = {
     hook: "useDeleteRemoteBranch",
     file: `${Q}branches.ts`,
   },
+  gitRenameBranchRemote: {
+    hook: "useRenameBranchOnRemote",
+    file: `${Q}branches.ts`,
+  },
 };
 
 const HOOKS = Object.values(CALLEES).map((c) => c.hook);
@@ -64,6 +68,7 @@ const ROUTES = {
   [`${R}BranchSwitcher.tsx`]: ["useDeleteRemoteBranch", "usePush"],
   [`${R}SyncControls.tsx`]: ["usePush"],
   [`${R}ForkPrPublishGuard.tsx`]: ["usePush"],
+  [`${R}RenameBranchDialog.tsx`]: ["useRenameBranchOnRemote"],
   "features/pulls/CreatePrDialog.tsx": ["useCreatePr"],
   "features/pulls/PromoteLocalPrDialog.tsx": ["useCreatePr"],
   "features/tags/TagDetailView.tsx": ["useDeleteTagOnOrigin", "usePushTag"],
@@ -128,10 +133,35 @@ const EXCLUDED = {
     reason:
       "a Vitest harness whose push never reaches the backend; it starts pushes only to test the local delete's and the branch update's fire-time holds",
   },
+  "test/branch-switcher-publish-hold.test.tsx": {
+    hooks: ["usePublishRepo"],
+    reason:
+      "a Vitest harness whose publish never reaches the backend; it starts one only to test the rename, delete and dialog publish holds",
+  },
+  "test/branch-row-remote-rename.test.tsx": {
+    hooks: ["usePush", "useRenameBranchOnRemote"],
+    reason:
+      "a Vitest harness whose remote rename and pushes never reach the backend; it starts them only to test the branch rows' push-family paint and holds",
+  },
+  "test/rename-branch-remote.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts another branch's push only to test the rename dialog's push hold",
+  },
+  "test/sync-bar-push-routing.test.tsx": {
+    hooks: ["useRenameBranchOnRemote"],
+    reason:
+      "a Vitest harness whose remote rename never reaches the backend; it starts one only to test the sync bar's Push hold",
+  },
   "test/sync-controls-holds.test.tsx": {
     hooks: ["usePush"],
     reason:
       "a Vitest harness whose push never reaches the backend; it starts a sibling worktree's push only to test the sync bar's fire-time sibling hold",
+  },
+  "test/branch-push-routing.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts a sibling worktree's push only to test the branch list's foreign-push paint and hold",
   },
 };
 
@@ -185,6 +215,34 @@ const HANDLERS = [
     order: ["refuseWhilePublishing(", "closeForkGuard("],
   },
   { file: `${R}ForkPrPublishGuard.tsx`, name: "pushToFork", refusals: 2 },
+  {
+    file: `${R}RenameBranchDialog.tsx`,
+    member: "onSubmit",
+    // One ahead of the local rename of the checked-out branch, one ahead of
+    // every remote step.
+    refusals: 2,
+    order: [
+      "remoteStep && refuseWhileOffline()",
+      "remoteStep && refuseWhilePushRuns(",
+      "held && refuseWhilePublishing(",
+      "renameBranch.mutateAsync(",
+      "if (refuseWhilePublishing(queryClient, repoPath)) return;",
+      "renameOnRemote.mutateAsync(",
+    ],
+  },
+  {
+    file: `${R}RenameBranchDialog.tsx`,
+    member: "onSubmit",
+    // The press-time refusals again after the lookup's re-read, in order.
+    refusals: 0,
+    order: [
+      "if (refuseWhilePublishing(queryClient, repoPath)) return;",
+      "refuseWhileOffline() ||",
+      "toast.info(PROMOTION_BLOCKS_CHECKOUT);\n        return release();",
+      "refuseWhilePushRuns(queryClient, repoPath) ||",
+      "renameOnRemote.mutateAsync(",
+    ],
+  },
   {
     file: "features/pulls/CreatePrDialog.tsx",
     member: "onSubmit",
@@ -240,7 +298,7 @@ const HANDLERS = [
 const RENDER_PINS = {
   [`${R}BranchSwitcher.tsx`]: {
     need: [
-      "const publishActive = usePendingPublishes(repoPath).length > 0;",
+      "const publishActive = pendingPublishes.length > 0;",
       // The publish arm comes first, ahead of the push arms.
       "const pushItemSuffix = (() => {switch (true) {case branch.keepLocal: return KEPT_LOCAL_SUFFIX; case publishActive: return ` (${PUBLISH_HOLD_ITEM_REASON})`; case rowPushing:",
       "const pushItemDisabled = branch.keepLocal || rowPushing || rowUpdating || pushActive || busy || !!offlineHold || publishActive;",
@@ -251,7 +309,7 @@ const RENDER_PINS = {
       "heldReason={(() => {switch (true) {case pushActive: return branchPushHoldReason(pushPaused); case publishActive: return PUBLISH_HOLD_REASON; default: return offlineHold;",
       // The row says "Publishing" only for a push recorded as a create, never
       // while the pre-push detection is still deciding.
-      "if (rowDetecting) return branchPreparingLabel(publishDetect?.remote ?? null);",
+      "if (rowDetection !== undefined) return branchPreparingLabel(rowDetection.remote);",
     ],
     stale: [],
   },
@@ -694,11 +752,15 @@ export function checkPublishHoldRoutes(sources) {
       if (!flat.includes(need))
         problems.push(`${label(h)}: missing \`${need}\``);
     if (h.order) {
-      const [first, then] = h.order;
-      const a = body.indexOf(first);
-      const b = body.indexOf(then);
-      if (a < 0 || b < 0 || a > b)
-        problems.push(`${label(h)}: \`${first}\` must precede \`${then}\``);
+      const at = h.order.map((entry) => body.indexOf(entry));
+      h.order.forEach((entry, i) => {
+        if (at[i] < 0) problems.push(`${label(h)}: missing \`${entry}\``);
+      });
+      for (let i = 1; i < h.order.length; i++)
+        if (at[i - 1] >= 0 && at[i] >= 0 && at[i - 1] > at[i])
+          problems.push(
+            `${label(h)}: \`${h.order[i - 1]}\` must precede \`${h.order[i]}\``,
+          );
     }
   }
 
@@ -816,6 +878,30 @@ test("disarming any one handler's refusals fails the check", () => {
   }
 });
 
+test("the rename dialog's whole order is pinned, its remote write included", () => {
+  const file = `${R}RenameBranchDialog.tsx`;
+  const h = HANDLERS.find((x) => x.file === file && x.member === "onSubmit");
+  const withBody = (edit) =>
+    mutate(realSources(), file, (text) => {
+      const body = handlerBody(text, h);
+      assert.ok(body.includes("\n"), body);
+      return text.replace(body, edit(body));
+    });
+  failsWith(
+    withBody((body) => body.replace("renameOnRemote.mutateAsync(", "(")),
+    `${label(h)}: missing \`renameOnRemote.mutateAsync(\``,
+  );
+  failsWith(
+    withBody((body) =>
+      body
+        .replace("renameBranch.mutateAsync(", "LOCAL_SLOT")
+        .replace("renameOnRemote.mutateAsync(", "renameBranch.mutateAsync(")
+        .replace("LOCAL_SLOT", "renameOnRemote.mutateAsync("),
+    ),
+    `${label(h)}: \`if (refuseWhilePublishing(queryClient, repoPath)) return;\` must precede \`renameOnRemote.mutateAsync(\``,
+  );
+});
+
 test("dropping PublishDialog's identity-loading return fails the check", () => {
   const sources = mutate(realSources(), `${R}PublishDialog.tsx`, (text) =>
     text.replace("if (identityLoading) return;", ""),
@@ -917,11 +1003,11 @@ test("the push and publish copy pins fail on their old spellings", () => {
   failsWith(
     mutate(realSources(), `${R}BranchSwitcher.tsx`, (text) =>
       text.replace(
-        "branchPreparingLabel(publishDetect?.remote ?? null)",
-        "branchPublishLabel(publishDetect?.remote ?? null)",
+        "branchPreparingLabel(rowDetection.remote)",
+        "branchPublishLabel(rowDetection.remote)",
       ),
     ),
-    "if (rowDetecting)",
+    "if (rowDetection !== undefined)",
   );
   // Any feature file calling it, not only the switcher; a comment naming it is
   // not a call (push-writes.ts's own call is outside features/).

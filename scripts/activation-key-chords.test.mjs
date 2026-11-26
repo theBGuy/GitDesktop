@@ -292,6 +292,13 @@ const OWNS_CHORD = [
     reason: `${MODAL_NO_OWNER} (the release dialog owns only its generate chord)`,
   },
   {
+    file: "src/features/repository/RenameBranchDialog.tsx",
+    site: "form:inline",
+    count: 1,
+    reason:
+      "in the Rename anyway state every Enter from the name field is swallowed, chorded or not, since a chorded Enter can still submit implicitly, and a held Enter's repeats are swallowed in every state; a generate chord rebound to Enter with Ctrl, Alt or Meta still runs, a bare-Enter one stays with the field while the confirm is up, and other app chords are inert under the modal",
+  },
+  {
     file: "src/features/repo-settings/TopicsField.tsx",
     site: "button:onChipKeyDown",
     count: 1,
