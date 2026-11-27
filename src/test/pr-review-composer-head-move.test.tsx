@@ -834,6 +834,8 @@ describe("over the real diff (AC-A10's D13 case, AC-A11)", () => {
     await waitFor(() => expectHeld(DIFF_ROWS_HELD_REASON), {
       timeout: 10_000,
     });
+    // The diff read keeps its own retry policy: one retry, a second later.
+    diffs.push(() => Promise.reject(new Error("boom")));
     diffs.push(() => Promise.reject(new Error("boom")));
     await moveHead(client, BASE);
     await waitFor(() => expectHeld(HEAD_PENDING_REVIEW_REASON.failed(NOUN)), {
