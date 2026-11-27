@@ -1739,6 +1739,7 @@ test("B26 realGitBinDir takes <prefix>\\bin from a libexec/git-core path", () =>
     "/usr/libexec/git-core",
     "\\\\server\\libexec\\git-core",
     "\\\\?\\C:\\Git\\libexec\\git-core",
+    "\\\\.\\share\\Git\\libexec\\git-core",
     "C:/Git/libexec/other",
     "C:/Git\n/libexec/git-core",
     "C:/Gi\tt/libexec/git-core",

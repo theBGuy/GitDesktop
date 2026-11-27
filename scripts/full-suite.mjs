@@ -21,13 +21,13 @@
 // Run: node scripts/full-suite.mjs <rust|vitest|all> [extra args...]
 // Port: 27483, or GD_FULL_SUITE_PORT (machine configuration: only sessions
 // that all see the same value serialize against each other).
-// On Windows, when `git --exec-path` names a <prefix>\bin holding git.exe, the
-// rust step's PATH starts with that folder, so tests spawn git.exe directly:
-// the Git\cmd shim costs a second process per git call (full --lib suite
-// 378 s through the shim, 329-336 s direct; lane RS 1b, 2026-11-27). Local
-// default runs therefore use the direct-git topology; GD_FULL_SUITE_KEEP_PATH=1
-// keeps PATH, e.g. to run the cmd\git.exe shim topology proc_tree's guards
-// exist for.
+// On Windows, when the PATH git's `--exec-path` is <prefix>\libexec\git-core
+// and <prefix>\bin holds git.exe, the rust step's PATH starts with that folder,
+// so tests spawn git.exe directly: the Git\cmd shim costs a second process per
+// git call (PR #746, a quiet full --lib suite: 380 s via the shim, 335 s
+// direct). Local default runs therefore use the direct-git topology;
+// GD_FULL_SUITE_KEEP_PATH=1 keeps PATH, e.g. to run the cmd\git.exe shim
+// topology proc_tree's guards exist for.
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
@@ -153,9 +153,10 @@ export function withPathFirst(env, dir) {
  * The git Rust's `agent::find_executable` picks from a PATH value, as an
  * absolute path: entries in order, split on `;` outside double quotes with
  * the quotes dropped, `git.com` before `git.exe` in each (Rust follows
- * PATHEXT; this is its default order). Rust's split_paths yields empty
- * entries and relative ones too; both are skipped here, which cannot change
- * the answer once `<dir>` leads the new PATH. Null when no entry holds either.
+ * PATHEXT; this is its default order). Entries win32.isAbsolute rejects
+ * (empty, `x`, `.`, `C:x`) are skipped, since Rust would resolve them against
+ * the test binary's cwd, not this one; a git found only there keeps PATH.
+ * Null when no entry holds either file.
  */
 export function firstGitOnPath(pathValue, isFileFn = isFile) {
   const entries = [];
