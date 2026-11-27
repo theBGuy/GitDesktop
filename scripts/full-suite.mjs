@@ -21,17 +21,25 @@
 // Run: node scripts/full-suite.mjs <rust|vitest|all> [extra args...]
 // Port: 27483, or GD_FULL_SUITE_PORT (machine configuration: only sessions
 // that all see the same value serialize against each other).
+// On Windows, when `git --exec-path` names a <prefix>\bin holding git.exe, the
+// rust step's PATH starts with that folder, so tests spawn git.exe directly:
+// the Git\cmd shim costs a second process per git call (full --lib suite
+// 378 s through the shim, 329-336 s direct; lane RS 1b, 2026-11-27). Local
+// default runs therefore use the direct-git topology; GD_FULL_SUITE_KEEP_PATH=1
+// keeps PATH, e.g. to run the cmd\git.exe shim topology proc_tree's guards
+// exist for.
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -61,6 +69,189 @@ export function portFromEnv(value) {
   return port;
 }
 
+/** GD_FULL_SUITE_KEEP_PATH: "1" keeps PATH; unset, empty or "0" does not. */
+export function keepPathFromEnv(value) {
+  if (value === undefined || value === "" || value === "0") return false;
+  if (value === "1") return true;
+  throw new Error(
+    `GD_FULL_SUITE_KEEP_PATH must be 0 or 1, got ${JSON.stringify(value)}`,
+  );
+}
+
+/** True only for an existing regular file; any stat error reads as false. */
+export function isFile(file) {
+  try {
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// A drive root (`C:\`) or a UNC share root (`\\server\share\`); device
+// namespaces (`\\?\`, `\\.\`) and rooted paths without a drive are refused.
+const GIT_PREFIX_ROOT = /^(?:[A-Za-z]:\\|\\\\(?![?.]\\)[^\\]+\\[^\\]+\\)$/;
+
+/** `<prefix>\bin` from git's `<prefix>/libexec/git-core`, or why there is none. */
+export function realGitBinDir(execPathOutput, exists = isFile) {
+  const trimmed = String(execPathOutput ?? "").trim();
+  const notExecPath = {
+    reason: `git --exec-path printed ${JSON.stringify(trimmed)}, not a <prefix>/libexec/git-core path`,
+  };
+  // Code points 0-31 (newlines included) never belong in a folder name.
+  const hasControl = [...trimmed].some((c) => c.charCodeAt(0) < 0x20);
+  if (trimmed === "" || hasControl) return notExecPath;
+  const path = win32.normalize(trimmed).replace(/[\\/]+$/, "");
+  const { root } = win32.parse(path);
+  if (!GIT_PREFIX_ROOT.test(root)) return notExecPath;
+  const segments = path.slice(root.length).split("\\");
+  const [libexec, core] = segments.slice(-2);
+  if (
+    segments.length < 2 ||
+    libexec.toLowerCase() !== "libexec" ||
+    core.toLowerCase() !== "git-core"
+  ) {
+    return notExecPath;
+  }
+  const dir = win32.join(root, ...segments.slice(0, -2), "bin");
+  // Rust's split_paths would read a `;` inside the entry as two entries.
+  if (dir.includes(";")) {
+    return { reason: `${JSON.stringify(dir)} contains ';'` };
+  }
+  if (!exists(win32.join(dir, "git.exe"))) {
+    return { reason: `no git.exe in ${dir}` };
+  }
+  return { dir };
+}
+
+/**
+ * The key a win32 child reads for `name`: of the case-variant keys present,
+ * only the lexicographically first reaches it (undefined when none does).
+ */
+function envKey(env, name) {
+  const upper = name.toUpperCase();
+  return Object.keys(env)
+    .filter((key) => key.toUpperCase() === upper)
+    .sort()[0];
+}
+
+/**
+ * A copy of `env` whose one PATH key puts `dir` first: the name a win32 child
+ * reads is kept and every other case variant dropped.
+ */
+export function withPathFirst(env, dir) {
+  const key = envKey(env, "PATH") ?? "Path";
+  const old = env[key];
+  const next = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (name.toUpperCase() !== "PATH") next[name] = value;
+  }
+  next[key] = old ? `${dir};${old}` : dir;
+  return next;
+}
+
+/**
+ * The git Rust's `agent::find_executable` picks from a PATH value, as an
+ * absolute path: entries in order, split on `;` outside double quotes with
+ * the quotes dropped, `git.com` before `git.exe` in each (Rust follows
+ * PATHEXT; this is its default order). Rust's split_paths yields empty
+ * entries and relative ones too; both are skipped here, which cannot change
+ * the answer once `<dir>` leads the new PATH. Null when no entry holds either.
+ */
+export function firstGitOnPath(pathValue, isFileFn = isFile) {
+  const entries = [];
+  let entry = "";
+  let quoted = false;
+  for (const c of String(pathValue ?? "")) {
+    if (c === '"') quoted = !quoted;
+    else if (c === ";" && !quoted) {
+      entries.push(entry);
+      entry = "";
+    } else entry += c;
+  }
+  entries.push(entry);
+  for (const dir of entries) {
+    if (!win32.isAbsolute(dir)) continue;
+    for (const name of ["git.com", "git.exe"]) {
+      const candidate = win32.join(dir, name);
+      if (isFileFn(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+/** Maps `git --exec-path`'s spawnSync result to the probe's answer. */
+export function probeResult(result, git) {
+  if (result.error) {
+    return { ok: false, detail: result.error.code ?? String(result.error) };
+  }
+  if (result.status === null) {
+    return { ok: false, detail: `signal ${result.signal}` };
+  }
+  if (result.status !== 0) {
+    return { ok: false, detail: `exit ${result.status}` };
+  }
+  return { ok: true, stdout: result.stdout, git };
+}
+
+/**
+ * `git --exec-path` of the git the Rust tests would pick from `env`'s PATH,
+ * spawned by its absolute path, so neither the cwd nor libuv's own search
+ * can substitute another git.
+ */
+export function probeGitExecPath({
+  env,
+  cwd,
+  isFileFn = isFile,
+  spawnFn = spawnSync,
+}) {
+  const key = envKey(env, "PATH");
+  const git = firstGitOnPath(key === undefined ? "" : env[key], isFileFn);
+  if (git === null) {
+    return { ok: false, detail: "no git.com or git.exe on PATH" };
+  }
+  const result = spawnFn(git, ["--exec-path"], {
+    env,
+    cwd,
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return probeResult(result, git);
+}
+
+/**
+ * The rust step's env and its log line. Win32 only, and it never throws or
+ * fails a run: any problem keeps PATH (env null) and says why.
+ */
+export function rustStepEnv({ env, platform, keepPath, probe, exists }) {
+  if (platform !== "win32") return { env: null, line: null };
+  const keep = (why) => ({
+    env: null,
+    line: `${PREFIX}rust step keeps PATH (${why})`,
+  });
+  if (keepPath) return keep("GD_FULL_SUITE_KEEP_PATH=1");
+  // A set GIT_EXEC_PATH is what `git --exec-path` prints, not the running git.
+  const execKey = envKey(env, "GIT_EXEC_PATH");
+  if (execKey !== undefined && env[execKey]) {
+    return keep("GIT_EXEC_PATH is set");
+  }
+  try {
+    const result = probe();
+    if (!result?.ok) return keep(`git --exec-path failed: ${result?.detail}`);
+    const found = realGitBinDir(result.stdout, exists);
+    if (found.reason) return keep(found.reason);
+    return {
+      env: withPathFirst(env, found.dir),
+      line: `${PREFIX}rust step puts ${found.dir} first on PATH (from ${result.git} --exec-path)`,
+    };
+  } catch (err) {
+    return keep(
+      `could not resolve the real git: ${err?.code ?? err?.message ?? err}`,
+    );
+  }
+}
+
 export function sidecarPath(port, dir = tmpdir()) {
   return join(dir, `gitdesktop-full-suite-${port}.json`);
 }
@@ -72,13 +263,20 @@ function vitestEntry(repoRoot) {
 /**
  * The children a mode runs, in order. Vitest runs through node itself, never
  * the pnpm shim: on Windows the shim's pid would be the recorded child, and
- * the child check would watch the shim instead of the suite.
+ * the child check would watch the shim instead of the suite. A non-null
+ * rustEnv becomes the rust step's env; no other step ever carries one.
  */
-export function commandsFor(mode, extraArgs = [], repoRoot = REPO_ROOT) {
+export function commandsFor(
+  mode,
+  extraArgs = [],
+  repoRoot = REPO_ROOT,
+  rustEnv = null,
+) {
   const rust = {
     suite: "rust",
     file: "cargo",
     args: ["test", "--manifest-path", "src-tauri/Cargo.toml", ...extraArgs],
+    ...(rustEnv ? { env: rustEnv } : {}),
   };
   const vitest = {
     suite: "vitest",
@@ -462,6 +660,7 @@ export async function runUnderLock({
             cwd,
             stdio: posix ? ["ignore", "inherit", "inherit"] : "inherit",
             detached: posix,
+            ...(step.env ? { env: step.env } : {}),
           });
         } catch (err) {
           settle({ spawnError: err });
@@ -526,6 +725,9 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     repoRoot = REPO_ROOT,
     exists,
     probeCargo,
+    platform = process.platform,
+    probeGitExecPath: probeGit = probeGitExecPath,
+    run = runUnderLock,
     ...lockOptions
   } = deps;
   const [mode, ...extra] = argv;
@@ -546,18 +748,37 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   if (env.GD_FULL_SUITE_PORT) {
     log(`${PREFIX}using port ${port} from GD_FULL_SUITE_PORT`);
   }
+  let keepPath;
+  try {
+    keepPath = keepPathFromEnv(env.GD_FULL_SUITE_KEEP_PATH);
+  } catch (err) {
+    log(`${PREFIX}${err.message}`);
+    return 2;
+  }
   const problem = preflight(mode, { repoRoot, exists, probeCargo });
   if (problem) {
     log(`${PREFIX}${problem}`);
     return 2;
   }
-  return runUnderLock({
+  if (steps.some((step) => step.suite === "rust")) {
+    const rust = rustStepEnv({
+      env,
+      platform,
+      keepPath,
+      probe: () => probeGit({ env, cwd: repoRoot }),
+      exists: exists ?? isFile,
+    });
+    if (rust.line) log(rust.line);
+    if (rust.env) steps = commandsFor(mode, extra, repoRoot, rust.env);
+  }
+  return run({
     ...lockOptions,
     steps,
     suite: mode,
     cwd: repoRoot,
     port,
     log,
+    platform,
   });
 }
 

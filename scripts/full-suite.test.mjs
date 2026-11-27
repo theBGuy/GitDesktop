@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -26,17 +27,25 @@ import {
   bindPort,
   commandsFor,
   DEFAULT_PORT,
+  firstGitOnPath,
+  isFile,
   isGroupAlive,
   isPidAlive,
+  keepPathFromEnv,
   killGroup,
   MAX_HOLD_MS,
   main,
   orphanBlocks,
   portFromEnv,
   preflight,
+  probeGitExecPath,
+  probeResult,
   readSidecar,
+  realGitBinDir,
   runUnderLock,
+  rustStepEnv,
   sidecarPath,
+  withPathFirst,
 } from "./full-suite.mjs";
 
 const SCRIPT = fileURLToPath(new URL("./full-suite.mjs", import.meta.url));
@@ -1111,6 +1120,14 @@ test("B13 commandsFor maps each mode to its argv", () => {
   assert.throws(() => commandsFor("all", extra, rootDir));
   assert.throws(() => commandsFor("bogus", [], rootDir));
   assert.throws(() => commandsFor(undefined, [], rootDir));
+  // A rustEnv rides the rust step only.
+  const rustEnv = { Path: "C:\\git\\bin" };
+  const [rustStep] = commandsFor("rust", [], rootDir, rustEnv);
+  assert.equal(rustStep.env, rustEnv);
+  const [allRust, allVitest] = commandsFor("all", [], rootDir, rustEnv);
+  assert.equal(allRust.env, rustEnv);
+  assert.equal("env" in allVitest, false);
+  assert.equal("env" in commandsFor("vitest", [], rootDir, rustEnv)[0], false);
 });
 
 test("B14 all runs every step and resolves the first failure", async () => {
@@ -1621,6 +1638,478 @@ test("B24 a group that ignores SIGTERM is SIGKILLed before the port is released"
   const exited = await bounded(contender.exit, `contender on port ${port}`);
   assert.equal(exited.code, 0, contender.err);
   assert.equal(existsSync(ran), true);
+});
+
+const GIT_BIN = "C:\\Program Files\\Git\\mingw64\\bin";
+const EXEC_PATH = "C:/Program Files/Git/mingw64/libexec/git-core\n";
+const KEEP_LINE =
+  "full-suite: rust step keeps PATH (GD_FULL_SUITE_KEEP_PATH=1)";
+const GIT_SHIM = "C:\\Program Files\\Git\\cmd\\git.exe";
+const PUT_LINE = `full-suite: rust step puts ${GIT_BIN} first on PATH (from ${GIT_SHIM} --exec-path)`;
+const notExecPath = (trimmed) =>
+  `git --exec-path printed ${JSON.stringify(trimmed)}, not a <prefix>/libexec/git-core path`;
+const pathKeys = (env) => Object.keys(env).filter((k) => /^path$/i.test(k));
+
+/**
+ * main's deps: probeCargo, probeGitExecPath and run are recording spies, bind
+ * throws if reached, and exists, platform and env are fixed stubs.
+ */
+function mainSeams(extra = {}) {
+  const calls = { cargo: 0, probe: [], runs: [] };
+  const lines = [];
+  const deps = {
+    env: { Path: "C:\\a" },
+    repoRoot: join("C:", "repo"),
+    platform: "win32",
+    exists: () => true,
+    probeCargo: () => {
+      calls.cargo += 1;
+      return true;
+    },
+    probeGitExecPath: (args) => {
+      calls.probe.push(args);
+      return { ok: true, stdout: EXEC_PATH, git: GIT_SHIM };
+    },
+    run: async (options) => {
+      calls.runs.push(options);
+      return 0;
+    },
+    bind: async () => {
+      throw new Error("bind must not be reached");
+    },
+    log: (line) => lines.push(line),
+    ...extra,
+  };
+  return { deps, calls, lines };
+}
+
+const pathLines = (lines) => lines.filter((l) => l.includes("PATH ("));
+
+test("B25 keepPathFromEnv accepts only unset, empty, 0 and 1", async () => {
+  assert.equal(keepPathFromEnv(undefined), false);
+  assert.equal(keepPathFromEnv(""), false);
+  assert.equal(keepPathFromEnv("0"), false);
+  assert.equal(keepPathFromEnv("1"), true);
+  for (const bad of ["true", "yes", " 1", "2", "01"]) {
+    assert.throws(() => keepPathFromEnv(bad), /GD_FULL_SUITE_KEEP_PATH/, bad);
+  }
+  for (const platform of ["win32", "linux"]) {
+    const { deps, calls, lines } = mainSeams({
+      env: { GD_FULL_SUITE_KEEP_PATH: "yes" },
+      platform,
+    });
+    assert.equal(await main(["all"], deps), 2, platform);
+    assert.equal(calls.cargo, 0, platform);
+    assert.equal(calls.probe.length, 0, platform);
+    assert.equal(calls.runs.length, 0, platform);
+    assert.equal(lines.length, 1, `${platform}: ${lines}`);
+    assert.match(lines[0], /^full-suite: GD_FULL_SUITE_KEEP_PATH/);
+  }
+});
+
+test("B26 realGitBinDir takes <prefix>\\bin from a libexec/git-core path", () => {
+  const yes = () => true;
+  for (const out of [
+    EXEC_PATH,
+    "C:\\Program Files\\Git\\mingw64\\libexec\\git-core",
+    "C:/Program Files/Git/mingw64/libexec/git-core/",
+    "C:\\Program Files\\Git\\mingw64\\libexec\\git-core\\\r\n",
+    "C:\\Program Files\\Git\\mingw64\\LIBEXEC\\Git-Core",
+  ]) {
+    assert.deepEqual(realGitBinDir(out, yes), { dir: GIT_BIN }, out);
+  }
+  assert.deepEqual(
+    realGitBinDir("C:/Program Files/Git/clangarm64/libexec/git-core", yes),
+    { dir: "C:\\Program Files\\Git\\clangarm64\\bin" },
+  );
+  assert.deepEqual(realGitBinDir("C:\\libexec\\git-core", yes), {
+    dir: "C:\\bin",
+  });
+  assert.deepEqual(
+    realGitBinDir("\\\\server\\share\\Git\\mingw64\\libexec\\git-core", yes),
+    { dir: "\\\\server\\share\\Git\\mingw64\\bin" },
+  );
+  for (const out of [
+    "/usr/lib/git-core\n",
+    "libexec/git-core",
+    "",
+    "C:/",
+    "C:/libexec",
+    "/portable/libexec/git-core",
+    "/usr/libexec/git-core",
+    "\\\\server\\libexec\\git-core",
+    "\\\\?\\C:\\Git\\libexec\\git-core",
+    "C:/Git/libexec/other",
+    "C:/Git\n/libexec/git-core",
+    "C:/Gi\tt/libexec/git-core",
+  ]) {
+    let probed = 0;
+    const result = realGitBinDir(out, () => {
+      probed += 1;
+      return true;
+    });
+    assert.deepEqual(result, { reason: notExecPath(out.trim()) }, out);
+    assert.equal(probed, 0, out);
+  }
+  let semicolonProbed = 0;
+  assert.deepEqual(
+    realGitBinDir("C:/a;b/libexec/git-core", () => {
+      semicolonProbed += 1;
+      return true;
+    }),
+    { reason: `${JSON.stringify("C:\\a;b\\bin")} contains ';'` },
+  );
+  assert.equal(semicolonProbed, 0);
+  const asked = [];
+  assert.deepEqual(
+    realGitBinDir(EXEC_PATH, (file) => {
+      asked.push(file);
+      return false;
+    }),
+    { reason: `no git.exe in ${GIT_BIN}` },
+  );
+  assert.deepEqual(asked, [`${GIT_BIN}\\git.exe`]);
+});
+
+test("B27 withPathFirst leaves one PATH key, the name a win32 child reads", () => {
+  const dir = "C:\\git\\bin";
+  const input = { Path: "C:\\a", X: "1" };
+  const before = structuredClone(input);
+  const result = withPathFirst(input, dir);
+  assert.deepEqual(result, { Path: `${dir};C:\\a`, X: "1" });
+  assert.deepEqual(pathKeys(result), ["Path"]);
+  assert.deepEqual(input, before);
+  assert.notEqual(result, input);
+  assert.deepEqual(withPathFirst({ PATH: "C:\\b" }, dir), {
+    PATH: `${dir};C:\\b`,
+  });
+  const both = { Path: "C:\\a", PATH: "C:\\b" };
+  const bothBefore = structuredClone(both);
+  const merged = withPathFirst(both, dir);
+  assert.deepEqual(pathKeys(merged), ["PATH"]);
+  assert.equal(merged.PATH, `${dir};C:\\b`);
+  assert.deepEqual(both, bothBefore);
+  assert.deepEqual(withPathFirst({ Path: "" }, dir), { Path: dir });
+  assert.deepEqual(withPathFirst({ X: "1" }, dir), { X: "1", Path: dir });
+});
+
+test("B28 rustStepEnv probes only on win32 without the opt-out", () => {
+  let probes = 0;
+  const probe = (answer) => () => {
+    probes += 1;
+    return answer;
+  };
+  const good = probe({ ok: true, stdout: EXEC_PATH, git: GIT_SHIM });
+  const base = { env: { Path: "C:\\a" }, keepPath: false, exists: () => true };
+  for (const platform of ["linux", "darwin"]) {
+    assert.deepEqual(rustStepEnv({ ...base, platform, probe: good }), {
+      env: null,
+      line: null,
+    });
+  }
+  assert.equal(probes, 0);
+  assert.deepEqual(
+    rustStepEnv({ ...base, platform: "win32", keepPath: true, probe: good }),
+    { env: null, line: KEEP_LINE },
+  );
+  assert.equal(probes, 0);
+  assert.deepEqual(
+    rustStepEnv({
+      ...base,
+      platform: "win32",
+      probe: probe({ ok: false, detail: "ENOENT" }),
+    }),
+    {
+      env: null,
+      line: "full-suite: rust step keeps PATH (git --exec-path failed: ENOENT)",
+    },
+  );
+  assert.deepEqual(
+    rustStepEnv({
+      ...base,
+      platform: "win32",
+      probe: probe({ ok: true, stdout: "/usr/lib/git-core\n" }),
+    }),
+    {
+      env: null,
+      line: `full-suite: rust step keeps PATH (${notExecPath("/usr/lib/git-core")})`,
+    },
+  );
+  assert.deepEqual(rustStepEnv({ ...base, platform: "win32", probe: good }), {
+    env: { Path: `${GIT_BIN};C:\\a` },
+    line: PUT_LINE,
+  });
+  const probed = probes;
+  // A set GIT_EXEC_PATH is what git would print, so it is never probed.
+  for (const key of ["GIT_EXEC_PATH", "git_exec_path"]) {
+    const env = {
+      Path: "C:\\a",
+      [key]: "D:/OtherGit/mingw64/libexec/git-core",
+    };
+    assert.deepEqual(
+      rustStepEnv({ ...base, env, platform: "win32", probe: good }),
+      {
+        env: null,
+        line: "full-suite: rust step keeps PATH (GIT_EXEC_PATH is set)",
+      },
+      key,
+    );
+  }
+  assert.equal(probes, probed);
+  const emptyExecPath = { Path: "C:\\a", GIT_EXEC_PATH: "" };
+  assert.deepEqual(
+    rustStepEnv({
+      ...base,
+      env: emptyExecPath,
+      platform: "win32",
+      probe: good,
+    }),
+    { env: { ...emptyExecPath, Path: `${GIT_BIN};C:\\a` }, line: PUT_LINE },
+  );
+  assert.equal(probes, probed + 1);
+  // Neither a throwing probe nor a throwing file check escapes.
+  const boom = Object.assign(new Error("denied"), { code: "EACCES" });
+  const resolveFailed =
+    "full-suite: rust step keeps PATH (could not resolve the real git: EACCES)";
+  assert.deepEqual(
+    rustStepEnv({
+      ...base,
+      platform: "win32",
+      probe: () => {
+        throw boom;
+      },
+    }),
+    { env: null, line: resolveFailed },
+  );
+  assert.deepEqual(
+    rustStepEnv({
+      ...base,
+      platform: "win32",
+      probe: good,
+      exists: () => {
+        throw boom;
+      },
+    }),
+    { env: null, line: resolveFailed },
+  );
+});
+
+test("B31 isFile is true only for a regular file", () => {
+  const dir = caseDir("b31");
+  const fakeExe = join(dir, "Git", "bin", "git.exe");
+  mkdirSync(fakeExe, { recursive: true });
+  const real = join(dir, "real.exe");
+  writeFileSync(real, "");
+  assert.equal(isFile(fakeExe), false);
+  assert.equal(isFile(real), true);
+  assert.equal(isFile(join(dir, "missing.exe")), false);
+  // A directory named git.exe is no git: map the win32 candidate into dir.
+  const underDir = (file) => isFile(join(dir, ...file.slice(3).split("\\")));
+  assert.deepEqual(realGitBinDir("C:/Git/libexec/git-core", underDir), {
+    reason: "no git.exe in C:\\Git\\bin",
+  });
+});
+
+test("B32 firstGitOnPath walks PATH in order, git.com before git.exe", () => {
+  const files = new Set([
+    "C:\\one\\git.exe",
+    "C:\\two\\git.com",
+    "C:\\two\\git.exe",
+    "C:\\a;b\\git.exe",
+  ]);
+  const asked = [];
+  const has = (file) => {
+    asked.push(file);
+    return files.has(file);
+  };
+  assert.equal(firstGitOnPath("C:\\one;C:\\two", has), "C:\\one\\git.exe");
+  assert.deepEqual(asked, ["C:\\one\\git.com", "C:\\one\\git.exe"]);
+  assert.equal(firstGitOnPath("C:\\two;C:\\one", has), "C:\\two\\git.com");
+  assert.equal(firstGitOnPath('"C:\\a;b";C:\\two', has), "C:\\a;b\\git.exe");
+  asked.length = 0;
+  assert.equal(firstGitOnPath(";;C:\\none;;C:\\two;", has), "C:\\two\\git.com");
+  assert.deepEqual(asked, [
+    "C:\\none\\git.com",
+    "C:\\none\\git.exe",
+    "C:\\two\\git.com",
+  ]);
+  asked.length = 0;
+  assert.equal(firstGitOnPath("rel\\dir;.;C:\\one", has), "C:\\one\\git.exe");
+  assert.deepEqual(asked, ["C:\\one\\git.com", "C:\\one\\git.exe"]);
+  assert.equal(firstGitOnPath("C:\\none;C:\\other", has), null);
+  assert.equal(firstGitOnPath("", has), null);
+});
+
+test("B33 probeResult maps every spawnSync outcome", () => {
+  const git = "C:\\g\\git.exe";
+  assert.deepEqual(probeResult({ error: { code: "ETIMEDOUT" } }, git), {
+    ok: false,
+    detail: "ETIMEDOUT",
+  });
+  assert.deepEqual(probeResult({ status: null, signal: "SIGTERM" }, git), {
+    ok: false,
+    detail: "signal SIGTERM",
+  });
+  assert.deepEqual(probeResult({ status: 3 }, git), {
+    ok: false,
+    detail: "exit 3",
+  });
+  assert.deepEqual(probeResult({ status: 0, stdout: "x" }, git), {
+    ok: true,
+    stdout: "x",
+    git,
+  });
+});
+
+test("B34 probeGitExecPath spawns the PATH git by its absolute path", () => {
+  const spawned = [];
+  const spawnFn = (file, args, options) => {
+    spawned.push({ file, args, options });
+    return { status: 0, stdout: "out" };
+  };
+  const env = { PATH: "C:\\none;C:\\g", X: "1" };
+  const result = probeGitExecPath({
+    env,
+    cwd: "C:\\repo",
+    isFileFn: (file) => file === "C:\\g\\git.exe",
+    spawnFn,
+  });
+  assert.deepEqual(result, { ok: true, stdout: "out", git: "C:\\g\\git.exe" });
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].file, "C:\\g\\git.exe");
+  assert.deepEqual(spawned[0].args, ["--exec-path"]);
+  assert.equal(spawned[0].options.env, env);
+  assert.equal(spawned[0].options.cwd, "C:\\repo");
+  // The PATH key is read case-insensitively, as a win32 child reads it.
+  const mixedCase = probeGitExecPath({
+    env: { Path: "C:\\g" },
+    cwd: "C:\\repo",
+    isFileFn: (file) => file === "C:\\g\\git.exe",
+    spawnFn,
+  });
+  assert.deepEqual(mixedCase, {
+    ok: true,
+    stdout: "out",
+    git: "C:\\g\\git.exe",
+  });
+  assert.equal(spawned.length, 2);
+  spawned.length = 1;
+  // No git on PATH: answered without a spawn, through the real isFile.
+  assert.deepEqual(
+    probeGitExecPath({ env: { PATH: caseDir("b34") }, cwd: tmpdir(), spawnFn }),
+    { ok: false, detail: "no git.com or git.exe on PATH" },
+  );
+  assert.equal(spawned.length, 1);
+});
+
+test("B29 main gives the rust step alone its PATH, logged once", async () => {
+  const rust = mainSeams();
+  assert.equal(await main(["rust"], rust.deps), 0);
+  assert.equal(rust.calls.runs.length, 1);
+  const [rustRun] = rust.calls.runs;
+  assert.equal(rustRun.steps[0].env.Path, `${GIT_BIN};C:\\a`);
+  assert.equal(rustRun.platform, "win32");
+  assert.deepEqual(pathLines(rust.lines), [PUT_LINE]);
+  assert.deepEqual(rust.calls.probe, [
+    { env: rust.deps.env, cwd: rust.deps.repoRoot },
+  ]);
+
+  const all = mainSeams();
+  assert.equal(await main(["all"], all.deps), 0);
+  const [allRun] = all.calls.runs;
+  assert.equal(allRun.steps[0].env.Path, `${GIT_BIN};C:\\a`);
+  assert.equal("env" in allRun.steps[1], false);
+  assert.deepEqual(pathLines(all.lines), [PUT_LINE]);
+
+  const vitest = mainSeams();
+  assert.equal(await main(["vitest"], vitest.deps), 0);
+  assert.equal(vitest.calls.probe.length, 0);
+  assert.deepEqual(pathLines(vitest.lines), []);
+  assert.equal(vitest.calls.runs[0].platform, "win32");
+
+  const kept = mainSeams({
+    env: { Path: "C:\\a", GD_FULL_SUITE_KEEP_PATH: "1" },
+  });
+  assert.equal(await main(["all"], kept.deps), 0);
+  assert.equal(kept.calls.probe.length, 0);
+  assert.ok(kept.calls.runs[0].steps.every((step) => !("env" in step)));
+  assert.deepEqual(pathLines(kept.lines), [KEEP_LINE]);
+
+  const failing = mainSeams({
+    probeGitExecPath: () => ({ ok: false, detail: "ETIMEDOUT" }),
+    run: async (options) => {
+      failing.calls.runs.push(options);
+      return 9;
+    },
+  });
+  assert.equal(await main(["rust"], failing.deps), 9);
+  assert.equal(failing.calls.runs.length, 1);
+  assert.equal("env" in failing.calls.runs[0].steps[0], false);
+  assert.deepEqual(pathLines(failing.lines), [
+    "full-suite: rust step keeps PATH (git --exec-path failed: ETIMEDOUT)",
+  ]);
+
+  const linux = mainSeams({ platform: "linux" });
+  assert.equal(await main(["all"], linux.deps), 0);
+  assert.equal(linux.calls.probe.length, 0);
+  assert.ok(linux.calls.runs[0].steps.every((step) => !("env" in step)));
+  assert.deepEqual(pathLines(linux.lines), []);
+  assert.equal(linux.calls.runs[0].platform, "linux");
+});
+
+test("B30 runUnderLock hands a step its env; a step without one inherits", async () => {
+  assert.equal("GD_FULL_SUITE_ENV_PROBE" in process.env, false);
+  const dir = caseDir("b30");
+  // Exits 0 only when the variable holds the value named in its argv.
+  const step = (expected) => ({
+    suite: "rust",
+    file: NODE,
+    args: [
+      "-e",
+      "process.exit(process.env.GD_FULL_SUITE_ENV_PROBE === process.argv[1] ? 0 : 7)",
+      expected,
+    ],
+  });
+  const run = (one) =>
+    runUnderLock({
+      steps: [one],
+      suite: "rust",
+      cwd: tmpdir(),
+      port: 0,
+      sidecarDir: dir,
+      log: noop,
+    });
+  process.env.GD_FULL_SUITE_ENV_PROBE = "parent";
+  try {
+    const env = { ...process.env, GD_FULL_SUITE_ENV_PROBE: "on" };
+    assert.equal(await run({ ...step("on"), env }), 0);
+    assert.equal(await run(step("parent")), 0);
+  } finally {
+    delete process.env.GD_FULL_SUITE_ENV_PROBE;
+  }
+});
+
+test("B35 the default file checks refuse a directory named git.exe", {
+  skip: WIN32 ? false : "real win32 paths: realGitBinDir derives a win32 dir",
+}, async () => {
+  const dir = caseDir("b35");
+  mkdirSync(join(dir, "Git", "libexec", "git-core"), { recursive: true });
+  mkdirSync(join(dir, "Git", "bin", "git.exe"), { recursive: true });
+  const execPath = join(dir, "Git", "libexec", "git-core");
+  const bin = join(dir, "Git", "bin");
+  const reason = `no git.exe in ${bin}`;
+  assert.deepEqual(realGitBinDir(execPath), { reason });
+  // main's own fallback, with no exists dep given.
+  const seams = mainSeams({
+    probeGitExecPath: () => ({ ok: true, stdout: `${execPath}\n`, git: "g" }),
+  });
+  delete seams.deps.exists;
+  assert.equal(await main(["rust"], seams.deps), 0);
+  assert.deepEqual(pathLines(seams.lines), [
+    `full-suite: rust step keeps PATH (${reason})`,
+  ]);
+  assert.equal(seams.calls.runs.length, 1);
+  assert.equal("env" in seams.calls.runs[0].steps[0], false);
 });
 
 test("B18 no test here names DEFAULT_PORT as a port to bind", () => {
