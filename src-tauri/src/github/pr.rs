@@ -9686,7 +9686,7 @@ pub async fn review_submit(
 /// (HTTP 406 `too_large`). Matched generously within that family — but only that
 /// family — so a real too-large diff degrades to the files-API fallback while
 /// every other failure keeps propagating raw.
-pub(crate) fn is_diff_too_large(msg: &str) -> bool {
+fn is_diff_too_large(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     m.contains("too_large")
         || m.contains("exceeded the maximum number of files")
