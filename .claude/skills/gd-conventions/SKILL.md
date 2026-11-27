@@ -121,7 +121,10 @@ the length of the run; its exit code is the suite's.
   its children, which keep running and holding the lock with nobody reading
   them. Read its `full-suite:` lines (`waiting - …`, `lock acquired …`,
   `<suite> exited <code> after <n>s`); never work around a wait with a raw
-  run, and never set `GD_FULL_SUITE_PORT` to get past one. Don't force-stop a
+  run, and never set `GD_FULL_SUITE_PORT` to get past one. Before quoting a
+  chain's end time, grep its log for `full-suite: waiting`: a chain that
+  looked busy had run 0 tests while it waited 10 minutes on another
+  session's `all` run (measured, #729). Don't force-stop a
   full run mid-run except deliberately: its verdict is lost. On Windows a hard
   kill of the wrapper ends cargo and its test binary with it (measured), so no
   orphan outlives it there. On POSIX cargo and its test binary run in the
