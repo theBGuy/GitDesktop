@@ -18,7 +18,7 @@ import {
 } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, win32 } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -27,6 +27,7 @@ import {
   bindPort,
   commandsFor,
   DEFAULT_PORT,
+  exeSuffixes,
   firstGitOnPath,
   isFile,
   isGroupAlive,
@@ -1652,7 +1653,7 @@ const pathKeys = (env) => Object.keys(env).filter((k) => /^path$/i.test(k));
 
 /**
  * main's deps: probeCargo, probeGitExecPath and run are recording spies, bind
- * throws if reached, and exists, platform and env are fixed stubs.
+ * throws if reached, and exists, isGitFile, platform and env are fixed stubs.
  */
 function mainSeams(extra = {}) {
   const calls = { cargo: 0, probe: [], runs: [] };
@@ -1662,6 +1663,7 @@ function mainSeams(extra = {}) {
     repoRoot: join("C:", "repo"),
     platform: "win32",
     exists: () => true,
+    isGitFile: () => true,
     probeCargo: () => {
       calls.cargo += 1;
       return true;
@@ -1825,6 +1827,18 @@ test("B28 rustStepEnv probes only on win32 without the opt-out", () => {
       line: "full-suite: rust step keeps PATH (git --exec-path failed: ENOENT)",
     },
   );
+  // A probe that never spawned says why, without the spawn-failure lead.
+  assert.deepEqual(
+    rustStepEnv({
+      ...base,
+      platform: "win32",
+      probe: probe({ ok: false, reason: "no git.com or git.exe on PATH" }),
+    }),
+    {
+      env: null,
+      line: "full-suite: rust step keeps PATH (no git.com or git.exe on PATH)",
+    },
+  );
   assert.deepEqual(
     rustStepEnv({
       ...base,
@@ -1911,7 +1925,19 @@ test("B31 isFile is true only for a regular file", () => {
   });
 });
 
-test("B32 firstGitOnPath walks PATH in order, git.com before git.exe", () => {
+test("B36 exeSuffixes keeps PATHEXT's .com and .exe in order", () => {
+  assert.deepEqual(exeSuffixes(undefined), [".exe"]);
+  assert.deepEqual(exeSuffixes(".COM;.EXE;.BAT;.CMD"), [".com", ".exe"]);
+  assert.deepEqual(exeSuffixes(".EXE;.COM"), [".exe", ".com"]);
+  // Set but empty is not unset: Rust's fallback applies only to unset.
+  assert.deepEqual(exeSuffixes(""), []);
+  assert.deepEqual(exeSuffixes(".exe;;.Com"), [".exe", ".com"]);
+  assert.deepEqual(exeSuffixes(".BAT;.CMD"), []);
+});
+
+test("B32 firstGitOnPath walks PATH in order, each suffix in order", () => {
+  const cwd = "C:\\repo\\src-tauri";
+  const comExe = [".com", ".exe"];
   const files = new Set([
     "C:\\one\\git.exe",
     "C:\\two\\git.com",
@@ -1923,22 +1949,57 @@ test("B32 firstGitOnPath walks PATH in order, git.com before git.exe", () => {
     asked.push(file);
     return files.has(file);
   };
-  assert.equal(firstGitOnPath("C:\\one;C:\\two", has), "C:\\one\\git.exe");
+  const first = (path, suffixes = comExe, isFileFn = has) =>
+    firstGitOnPath(path, suffixes, cwd, isFileFn);
+  assert.equal(first("C:\\one;C:\\two"), "C:\\one\\git.exe");
   assert.deepEqual(asked, ["C:\\one\\git.com", "C:\\one\\git.exe"]);
-  assert.equal(firstGitOnPath("C:\\two;C:\\one", has), "C:\\two\\git.com");
-  assert.equal(firstGitOnPath('"C:\\a;b";C:\\two', has), "C:\\a;b\\git.exe");
+  assert.equal(first("C:\\two;C:\\one"), "C:\\two\\git.com");
   asked.length = 0;
-  assert.equal(firstGitOnPath(";;C:\\none;;C:\\two;", has), "C:\\two\\git.com");
+  assert.equal(first("C:\\two", [".exe", ".com"]), "C:\\two\\git.exe");
+  assert.deepEqual(asked, ["C:\\two\\git.exe"]);
+  assert.equal(first('"C:\\a;b";C:\\two'), "C:\\a;b\\git.exe");
+  // Empty and relative entries resolve against cwd, as Rust's is_file does.
+  asked.length = 0;
+  assert.equal(first(";C:\\none;C:\\two", [".exe"]), "C:\\two\\git.exe");
   assert.deepEqual(asked, [
-    "C:\\none\\git.com",
+    `${cwd}\\git.exe`,
     "C:\\none\\git.exe",
-    "C:\\two\\git.com",
+    "C:\\two\\git.exe",
   ]);
   asked.length = 0;
-  assert.equal(firstGitOnPath("rel\\dir;.;C:\\one", has), "C:\\one\\git.exe");
-  assert.deepEqual(asked, ["C:\\one\\git.com", "C:\\one\\git.exe"]);
-  assert.equal(firstGitOnPath("C:\\none;C:\\other", has), null);
-  assert.equal(firstGitOnPath("", has), null);
+  assert.equal(first("rel\\dir;.;C:\\one", [".exe"]), "C:\\one\\git.exe");
+  assert.deepEqual(asked, [
+    `${cwd}\\rel\\dir\\git.exe`,
+    `${cwd}\\git.exe`,
+    "C:\\one\\git.exe",
+  ]);
+  const only = (target) => (file) => file === target;
+  assert.equal(
+    first("tools;C:\\one", [".exe"], only(`${cwd}\\tools\\git.exe`)),
+    `${cwd}\\tools\\git.exe`,
+  );
+  for (const entry of ["", "."]) {
+    assert.equal(
+      first(entry, [".exe"], only(`${cwd}\\git.exe`)),
+      `${cwd}\\git.exe`,
+      JSON.stringify(entry),
+    );
+  }
+  asked.length = 0;
+  assert.equal(first("C:\\one", []), null);
+  assert.deepEqual(asked, []);
+  assert.equal(first("C:\\none;C:\\other"), null);
+  // A driveless rooted entry takes cwd's drive; a same-drive `C:x` is
+  // relative to cwd.
+  asked.length = 0;
+  assert.equal(first("\\Git\\cmd;C:x", [".exe"]), null);
+  assert.deepEqual(asked, ["C:\\Git\\cmd\\git.exe", `${cwd}\\x\\git.exe`]);
+  // No PATH variable has no entries; an empty one is one entry, the cwd.
+  asked.length = 0;
+  assert.equal(first(undefined), null);
+  assert.deepEqual(asked, []);
+  assert.equal(first("", [".exe"]), null);
+  assert.deepEqual(asked, [`${cwd}\\git.exe`]);
 });
 
 test("B33 probeResult maps every spawnSync outcome", () => {
@@ -1969,9 +2030,11 @@ test("B34 probeGitExecPath spawns the PATH git by its absolute path", () => {
     return { status: 0, stdout: "out" };
   };
   const env = { PATH: "C:\\none;C:\\g", X: "1" };
+  const rustCwd = "C:\\repo\\src-tauri";
   const result = probeGitExecPath({
     env,
     cwd: "C:\\repo",
+    rustCwd,
     isFileFn: (file) => file === "C:\\g\\git.exe",
     spawnFn,
   });
@@ -1985,6 +2048,7 @@ test("B34 probeGitExecPath spawns the PATH git by its absolute path", () => {
   const mixedCase = probeGitExecPath({
     env: { Path: "C:\\g" },
     cwd: "C:\\repo",
+    rustCwd,
     isFileFn: (file) => file === "C:\\g\\git.exe",
     spawnFn,
   });
@@ -1997,22 +2061,109 @@ test("B34 probeGitExecPath spawns the PATH git by its absolute path", () => {
   spawned.length = 1;
   // No git on PATH: answered without a spawn, through the real isFile.
   assert.deepEqual(
-    probeGitExecPath({ env: { PATH: caseDir("b34") }, cwd: tmpdir(), spawnFn }),
-    { ok: false, detail: "no git.com or git.exe on PATH" },
+    probeGitExecPath({
+      env: { PATH: caseDir("b34") },
+      cwd: tmpdir(),
+      rustCwd: caseDir("b34cwd"),
+      spawnFn,
+    }),
+    { ok: false, reason: "no git.exe on PATH" },
   );
   assert.equal(spawned.length, 1);
 });
 
+test("B37 probeGitExecPath follows PATHEXT and resolves PATH like Rust", () => {
+  const rustCwd = "C:\\repo\\src-tauri";
+  const noGit = (tried) => ({ ok: false, reason: `no ${tried} on PATH` });
+  const spawned = [];
+  const spawnFn = (file, args, options) => {
+    spawned.push({ file, options });
+    return { status: 0, stdout: "out" };
+  };
+  const probeAsking = (env, isFileFn = () => false) => {
+    const asked = [];
+    const result = probeGitExecPath({
+      env,
+      cwd: "C:\\elsewhere",
+      rustCwd,
+      isFileFn: (file) => {
+        asked.push(file);
+        return isFileFn(file);
+      },
+      spawnFn,
+    });
+    return { result, asked };
+  };
+  // The PATHEXT key is read case-insensitively, as a win32 child reads it.
+  const mixed = probeAsking({ Path: "C:\\g", PathExt: ".COM" });
+  assert.deepEqual(mixed.result, noGit("git.com"));
+  assert.deepEqual(mixed.asked, ["C:\\g\\git.com"]);
+  const ordered = probeAsking({ PATH: "C:\\g", PATHEXT: ".EXE;.COM" });
+  assert.deepEqual(ordered.result, noGit("git.exe or git.com"));
+  assert.deepEqual(ordered.asked, ["C:\\g\\git.exe", "C:\\g\\git.com"]);
+  const comExe = probeAsking({ PATH: "C:\\g", PATHEXT: ".COM;.EXE" });
+  assert.deepEqual(comExe.result, noGit("git.com or git.exe"));
+  // The reason names only the suffixes tried: unset PATHEXT means .exe.
+  const unsetExt = probeAsking({ PATH: "C:\\g" });
+  assert.deepEqual(unsetExt.result, noGit("git.exe"));
+  assert.deepEqual(unsetExt.asked, ["C:\\g\\git.exe"]);
+  const batOnly = probeAsking({ PATH: "C:\\g", PATHEXT: ".BAT" });
+  assert.deepEqual(batOnly.result, {
+    ok: false,
+    reason: "PATHEXT lists neither .com nor .exe",
+  });
+  assert.deepEqual(batOnly.asked, []);
+  // No PATH key means no PATH dirs, not one empty entry in rustCwd.
+  const noPath = probeAsking({ X: "1" }, () => true);
+  assert.deepEqual(noPath.result, noGit("git.exe"));
+  assert.deepEqual(noPath.asked, []);
+  assert.equal(spawned.length, 0);
+  // A relative entry is the test binary's, resolved against rustCwd.
+  const tools = `${rustCwd}\\tools\\git.exe`;
+  const relative = probeAsking({ PATH: "tools" }, (file) => file === tools);
+  assert.deepEqual(relative.result, { ok: true, stdout: "out", git: tools });
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].file, tools);
+  assert.equal(spawned[0].options.cwd, "C:\\elsewhere");
+});
+
 test("B29 main gives the rust step alone its PATH, logged once", async () => {
   const rust = mainSeams();
-  assert.equal(await main(["rust"], rust.deps), 0);
+  assert.equal(await main(["rust", "--lib", "x"], rust.deps), 0);
   assert.equal(rust.calls.runs.length, 1);
   const [rustRun] = rust.calls.runs;
   assert.equal(rustRun.steps[0].env.Path, `${GIT_BIN};C:\\a`);
+  // The rebuilt step keeps the caller's extra args.
+  assert.deepEqual(rustRun.steps[0].args, [
+    "test",
+    "--manifest-path",
+    "src-tauri/Cargo.toml",
+    "--lib",
+    "x",
+  ]);
   assert.equal(rustRun.platform, "win32");
   assert.deepEqual(pathLines(rust.lines), [PUT_LINE]);
   assert.deepEqual(rust.calls.probe, [
-    { env: rust.deps.env, cwd: rust.deps.repoRoot },
+    {
+      env: rust.deps.env,
+      cwd: rust.deps.repoRoot,
+      rustCwd: win32.resolve(rust.deps.repoRoot, "src-tauri"),
+      isFileFn: rust.deps.isGitFile,
+    },
+  ]);
+
+  // The git checks read isGitFile; exists belongs to preflight alone.
+  const noExists = mainSeams({
+    exists: () => {
+      throw new Error("exists must not check git");
+    },
+  });
+  assert.equal(await main(["rust"], noExists.deps), 0);
+  assert.deepEqual(pathLines(noExists.lines), [PUT_LINE]);
+  const noGitFile = mainSeams({ isGitFile: () => false });
+  assert.equal(await main(["rust"], noGitFile.deps), 0);
+  assert.deepEqual(pathLines(noGitFile.lines), [
+    `full-suite: rust step keeps PATH (no git.exe in ${GIT_BIN})`,
   ]);
 
   const all = mainSeams();
@@ -2100,11 +2251,11 @@ test("B35 the default file checks refuse a directory named git.exe", {
   const bin = join(dir, "Git", "bin");
   const reason = `no git.exe in ${bin}`;
   assert.deepEqual(realGitBinDir(execPath), { reason });
-  // main's own fallback, with no exists dep given.
+  // main's own fallback, with no isGitFile dep given.
   const seams = mainSeams({
     probeGitExecPath: () => ({ ok: true, stdout: `${execPath}\n`, git: "g" }),
   });
-  delete seams.deps.exists;
+  delete seams.deps.isGitFile;
   assert.equal(await main(["rust"], seams.deps), 0);
   assert.deepEqual(pathLines(seams.lines), [
     `full-suite: rust step keeps PATH (${reason})`,

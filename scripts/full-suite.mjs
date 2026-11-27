@@ -48,6 +48,7 @@ export const DEFAULT_PORT = 27483;
 export const MAX_HOLD_MS = 7_200_000;
 
 const PREFIX = "full-suite: ";
+const RUST_MANIFEST = "src-tauri/Cargo.toml";
 const GROUP_GRACE_MS = 5000;
 const GROUP_POLL_MS = 50;
 const MAX_PID = 2 ** 31 - 1;
@@ -150,15 +151,31 @@ export function withPathFirst(env, dir) {
 }
 
 /**
- * The git Rust's `agent::find_executable` picks from a PATH value, as an
- * absolute path: entries in order, split on `;` outside double quotes with
- * the quotes dropped, `git.com` before `git.exe` in each (Rust follows
- * PATHEXT; this is its default order). Entries win32.isAbsolute rejects
- * (empty, `x`, `.`, `C:x`) are skipped, since Rust would resolve them against
- * the test binary's cwd, not this one; a git found only there keeps PATH.
- * Null when no entry holds either file.
+ * The `.com`/`.exe` suffixes Rust's exe pass tries, lowercased in PATHEXT
+ * order; undefined (unset) means Rust's fallback list, while an empty value
+ * lists none.
  */
-export function firstGitOnPath(pathValue, isFileFn = isFile) {
+export function exeSuffixes(pathext) {
+  return (pathext === undefined ? ".EXE;.CMD;.BAT" : String(pathext))
+    .split(";")
+    .filter((ext) => ext !== "")
+    .map((ext) => ext.toLowerCase())
+    .filter((ext) => ext === ".exe" || ext === ".com");
+}
+
+/**
+ * The git Rust's `agent::find_executable` exe pass picks from a PATH value,
+ * as an absolute path, or null: entries in order, split on `;` outside double
+ * quotes with the quotes dropped, and in each entry `git<suffix>` for each
+ * suffix in the given order. Every entry, empty or relative included,
+ * resolves against `cwd`, the test binary's working directory (cargo's
+ * package root), the way Rust's `is_file` resolves a relative entry. An
+ * undefined value (no PATH variable) has no entries, while "" is one empty
+ * entry, as in Rust's `var_os` and `split_paths`. Outside win32.resolve's
+ * model, and so possibly not Rust's pick: another drive's `D:x`, and `\\?\`.
+ */
+export function firstGitOnPath(pathValue, suffixes, cwd, isFileFn = isFile) {
+  if (pathValue === undefined) return null;
   const entries = [];
   let entry = "";
   let quoted = false;
@@ -170,10 +187,10 @@ export function firstGitOnPath(pathValue, isFileFn = isFile) {
     } else entry += c;
   }
   entries.push(entry);
-  for (const dir of entries) {
-    if (!win32.isAbsolute(dir)) continue;
-    for (const name of ["git.com", "git.exe"]) {
-      const candidate = win32.join(dir, name);
+  for (const entry of entries) {
+    const dir = win32.resolve(cwd, entry);
+    for (const suffix of suffixes) {
+      const candidate = win32.join(dir, `git${suffix}`);
       if (isFileFn(candidate)) return candidate;
     }
   }
@@ -195,20 +212,36 @@ export function probeResult(result, git) {
 }
 
 /**
- * `git --exec-path` of the git the Rust tests would pick from `env`'s PATH,
- * spawned by its absolute path, so neither the cwd nor libuv's own search
- * can substitute another git.
+ * `git --exec-path` of the git the Rust tests would pick from `env`'s PATH and
+ * PATHEXT, a relative PATH entry resolving against `rustCwd` (the test
+ * binary's working directory), spawned by its absolute path, so neither the
+ * cwd nor libuv's own search can substitute another git. A PATHEXT listing
+ * neither `.com` nor `.exe`, or no such git on PATH, answers with a `reason`
+ * and spawns nothing. `rustCwd` is required: an empty or relative entry
+ * resolves against it.
  */
 export function probeGitExecPath({
   env,
   cwd,
+  rustCwd,
   isFileFn = isFile,
   spawnFn = spawnSync,
 }) {
+  const extKey = envKey(env, "PATHEXT");
+  const suffixes = exeSuffixes(extKey === undefined ? undefined : env[extKey]);
+  if (suffixes.length === 0) {
+    return { ok: false, reason: "PATHEXT lists neither .com nor .exe" };
+  }
   const key = envKey(env, "PATH");
-  const git = firstGitOnPath(key === undefined ? "" : env[key], isFileFn);
+  const git = firstGitOnPath(
+    key === undefined ? undefined : env[key],
+    suffixes,
+    rustCwd,
+    isFileFn,
+  );
   if (git === null) {
-    return { ok: false, detail: "no git.com or git.exe on PATH" };
+    const tried = suffixes.map((suffix) => `git${suffix}`).join(" or ");
+    return { ok: false, reason: `no ${tried} on PATH` };
   }
   const result = spawnFn(git, ["--exec-path"], {
     env,
@@ -239,7 +272,11 @@ export function rustStepEnv({ env, platform, keepPath, probe, exists }) {
   }
   try {
     const result = probe();
-    if (!result?.ok) return keep(`git --exec-path failed: ${result?.detail}`);
+    if (!result?.ok) {
+      return keep(
+        result?.reason ?? `git --exec-path failed: ${result?.detail}`,
+      );
+    }
     const found = realGitBinDir(result.stdout, exists);
     if (found.reason) return keep(found.reason);
     return {
@@ -276,7 +313,7 @@ export function commandsFor(
   const rust = {
     suite: "rust",
     file: "cargo",
-    args: ["test", "--manifest-path", "src-tauri/Cargo.toml", ...extraArgs],
+    args: ["test", "--manifest-path", RUST_MANIFEST, ...extraArgs],
     ...(rustEnv ? { env: rustEnv } : {}),
   };
   const vitest = {
@@ -725,6 +762,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     log = defaultLog,
     repoRoot = REPO_ROOT,
     exists,
+    isGitFile = isFile,
     probeCargo,
     platform = process.platform,
     probeGitExecPath: probeGit = probeGitExecPath,
@@ -762,12 +800,16 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     return 2;
   }
   if (steps.some((step) => step.suite === "rust")) {
+    // cargo runs the test binary in the package root, where Rust resolves a
+    // relative PATH entry.
+    const rustCwd = win32.resolve(repoRoot, win32.dirname(RUST_MANIFEST));
     const rust = rustStepEnv({
       env,
       platform,
       keepPath,
-      probe: () => probeGit({ env, cwd: repoRoot }),
-      exists: exists ?? isFile,
+      probe: () =>
+        probeGit({ env, cwd: repoRoot, rustCwd, isFileFn: isGitFile }),
+      exists: isGitFile,
     });
     if (rust.line) log(rust.line);
     if (rust.env) steps = commandsFor(mode, extra, repoRoot, rust.env);
