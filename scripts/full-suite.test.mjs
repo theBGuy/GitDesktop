@@ -1792,7 +1792,8 @@ test("B27 withPathFirst leaves one PATH key, the name a win32 child reads", () =
   assert.deepEqual(pathKeys(merged), ["PATH"]);
   assert.equal(merged.PATH, `${dir};C:\\b`);
   assert.deepEqual(both, bothBefore);
-  assert.deepEqual(withPathFirst({ Path: "" }, dir), { Path: dir });
+  // An empty PATH is one empty entry to Rust, so it stays after dir.
+  assert.deepEqual(withPathFirst({ Path: "" }, dir), { Path: `${dir};` });
   assert.deepEqual(withPathFirst({ X: "1" }, dir), { X: "1", Path: dir });
 });
 

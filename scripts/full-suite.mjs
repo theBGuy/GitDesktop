@@ -137,7 +137,8 @@ function envKey(env, name) {
 
 /**
  * A copy of `env` whose one PATH key puts `dir` first: the name a win32 child
- * reads is kept and every other case variant dropped.
+ * reads is kept and every other case variant dropped. An empty value keeps
+ * the one empty entry Rust's split_paths reads in it.
  */
 export function withPathFirst(env, dir) {
   const key = envKey(env, "PATH") ?? "Path";
@@ -146,7 +147,7 @@ export function withPathFirst(env, dir) {
   for (const [name, value] of Object.entries(env)) {
     if (name.toUpperCase() !== "PATH") next[name] = value;
   }
-  next[key] = old ? `${dir};${old}` : dir;
+  next[key] = old === undefined ? dir : `${dir};${old}`;
   return next;
 }
 
@@ -187,8 +188,8 @@ export function firstGitOnPath(pathValue, suffixes, cwd, isFileFn = isFile) {
     } else entry += c;
   }
   entries.push(entry);
-  for (const entry of entries) {
-    const dir = win32.resolve(cwd, entry);
+  for (const raw of entries) {
+    const dir = win32.resolve(cwd, raw);
     for (const suffix of suffixes) {
       const candidate = win32.join(dir, `git${suffix}`);
       if (isFileFn(candidate)) return candidate;
@@ -213,12 +214,11 @@ export function probeResult(result, git) {
 
 /**
  * `git --exec-path` of the git the Rust tests would pick from `env`'s PATH and
- * PATHEXT, a relative PATH entry resolving against `rustCwd` (the test
- * binary's working directory), spawned by its absolute path, so neither the
- * cwd nor libuv's own search can substitute another git. A PATHEXT listing
- * neither `.com` nor `.exe`, or no such git on PATH, answers with a `reason`
- * and spawns nothing. `rustCwd` is required: an empty or relative entry
- * resolves against it.
+ * PATHEXT, an empty or relative PATH entry resolving against the required
+ * `rustCwd` (the test binary's working directory), spawned by its absolute
+ * path, so neither the cwd nor libuv's own search can substitute another git.
+ * A PATHEXT listing neither `.com` nor `.exe`, or no such git on PATH,
+ * answers with a `reason` and spawns nothing.
  */
 export function probeGitExecPath({
   env,
