@@ -4,6 +4,12 @@ import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
+import {
+  LINE_COMPOSER_KEEP_ID,
+  useDiffRowsHeld,
+  useKeptDraft,
+} from "@/features/diff/editor-keep";
+import { DIFF_ROWS_HELD_REASON } from "@/features/diff/whitespace-mode";
 import { patchLines } from "@/lib/git/diff-split";
 import { useCreateReviewThread } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
@@ -87,7 +93,15 @@ export function ReviewComposer({
   headUnproven = false,
   rowsBehind = false,
 }: ReviewComposerProps) {
-  const [body, setBody] = useState("");
+  // Kept by the diff's line widget, so a remount of its rows reopens the
+  // composer with this text; a restored one takes focus only if it had it.
+  const {
+    text: body,
+    setText: setBody,
+    restored,
+    forget,
+    setBusy,
+  } = useKeptDraft(LINE_COMPOSER_KEEP_ID);
   const [pending, setPending] = useState(false);
   const createThread = useCreateReviewThread(repoPath, lens);
   const addDraft = useAddReviewDraft(repoPath, lens, number);
@@ -124,7 +138,10 @@ export function ReviewComposer({
   })();
   const offPatchReason =
     offPatch === null ? null : OFF_PATCH_REVIEW_REASON[offPatch];
+  // PR-wide holds outrank the file's own, so nobody is told to close an
+  // editor to unlock a submit that would stay held.
   const noun = PR_NOUN[provider];
+  const rowsHeld = useDiffRowsHeld();
   const heldReason = (() => {
     switch (true) {
       case headPending !== null:
@@ -133,6 +150,8 @@ export function ReviewComposer({
         return HEAD_COLD_REVIEW_REASON[headCold](noun);
       case headUnproven:
         return HEAD_UNPROVEN_REVIEW_REASON(noun);
+      case rowsHeld:
+        return DIFF_ROWS_HELD_REASON;
       case rowsBehind:
         return HEAD_PENDING_REVIEW_REASON.loading(noun);
       default:
@@ -155,6 +174,18 @@ export function ReviewComposer({
           ? "Can't read the current code for these lines here."
           : null;
   const canSuggest = suggestionDisabledReason === null;
+  // Rows a deferred render has not caught up yet load by themselves, so they
+  // read like the submits' wait; only held rows ask to close the editor.
+  const suggestionReason = (() => {
+    switch (true) {
+      case rowsHeld:
+        return DIFF_ROWS_HELD_REASON;
+      case rowsBehind:
+        return HEAD_PENDING_REVIEW_REASON.loading(noun);
+      default:
+        return suggestionDisabledReason;
+    }
+  })();
 
   function insertSuggestion() {
     if (!currentLines) return;
@@ -188,6 +219,7 @@ export function ReviewComposer({
     void createThread
       .mutateAsync({ number, path, line, side, startLine, body: body.trim() })
       .catch((e) => toastError(e));
+    forget();
     onClose();
   }
 
@@ -200,6 +232,9 @@ export function ReviewComposer({
     )
       return;
     setPending(true);
+    // In flight, the kept composer holds its rows: a rebuild under it would
+    // remount it mid-submit.
+    setBusy(true);
     try {
       await addDraft.mutateAsync({
         id: crypto.randomUUID(),
@@ -210,10 +245,13 @@ export function ReviewComposer({
         body: body.trim(),
         createdAt: new Date().toISOString(),
       });
-      onClose();
+      // A settle after the widget moved on (another line, or the same path
+      // in another pull request) leaves that composer and its range alone.
+      if (forget()) onClose();
     } catch (e) {
       toastError(e);
       setPending(false);
+      setBusy(false);
     }
   }
 
@@ -251,8 +289,11 @@ export function ReviewComposer({
           variant="ghost"
           size="xs"
           className="shrink-0 text-muted-foreground"
-          disabled={!canSuggest}
-          reason={suggestionDisabledReason}
+          // Held rows, or rows a deferred render has not caught up yet, draw
+          // an earlier text than `fileSection`, which the suggestion would
+          // prefill from.
+          disabled={!canSuggest || rowsHeld || rowsBehind}
+          reason={suggestionReason}
           onClick={insertSuggestion}
         >
           Add suggestion
@@ -269,7 +310,7 @@ export function ReviewComposer({
         value={body}
         onChange={setBody}
         onKeyDown={onKeyDown}
-        autoFocus
+        autoFocus={!restored}
         rows={3}
         textareaClassName="max-h-48 min-h-16 resize-y"
         mentions={mentions}

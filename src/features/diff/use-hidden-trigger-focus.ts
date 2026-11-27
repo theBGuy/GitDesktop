@@ -32,12 +32,13 @@ export function useHiddenTriggerFocus(): {
  * palette-driven flip — the picker and options gear leave the cluster),
  * dropping focus to `<body>`; land it on `controlsRef`'s silent landing spot
  * instead. Change-only (prev-ref guard), so a mount can never steal focus
- * from elsewhere. `heldFocusRef` narrows it to the true -> false edge while the
+ * from elsewhere; `active` may also name the mode (a string), any change of
+ * it counting. `heldFocusRef` narrows it to the true -> false edge while the
  * leaving control held focus (the caller keeps the flag), so an edge the user
  * didn't cause from that control never pulls focus off `<body>`.
  */
 export function useFocusOnControlsSwap(
-  active: boolean,
+  active: boolean | string,
   controlsRef: RefObject<HTMLElement | null>,
   heldFocusRef?: RefObject<boolean>,
 ) {

@@ -48,6 +48,7 @@ import type { FileDiff, ForgeStatus, RepoStatus } from "@/lib/git/types";
 import { type AppSettings, loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
+import { bodies, renderBody } from "./anchor-bodies";
 import { stubCanvas } from "./canvas-stub";
 import { unmockedCommands } from "./setup";
 
@@ -144,11 +145,14 @@ const newLine = (n: number) =>
 type PaneProps = Partial<ComponentProps<typeof DiffContent>>;
 
 /** An anchor whose row shows its own report key. */
-const anchor = (line: number): DiffLineAnchor => ({
-  side: "new",
-  line,
-  render: () => <span>{`new:${line}`}</span>,
-});
+const anchor = (line: number): DiffLineAnchor =>
+  bodies([
+    {
+      side: "new",
+      line,
+      render: () => <span>{`new:${line}`}</span>,
+    },
+  ])[0];
 
 /** A real DiffContent in a file slot; `last` is the slot's newest painted
  *  report, as its host reads it. */
@@ -173,6 +177,7 @@ function renderPane(props: PaneProps) {
             data={undefined}
             isPending={false}
             isError={false}
+            renderAnchor={renderBody}
             {...p}
           />
         )}
@@ -198,6 +203,28 @@ describe("the pane's painted report, arm by arm", () => {
     await waitFor(() =>
       expect(pane.last()).toMatchObject({ patch: SHORT, cut: null }),
     );
+  });
+
+  it("draws no row and reports no anchor for a kept placement whose items the host dropped", async () => {
+    const placed = { side: "new" as const, line: 2, items: ["T1"] };
+    const live = (items: string[]) => (a: DiffLineAnchor) =>
+      a.items.some((k) => items.includes(k)) ? <span>Thread T1</span> : null;
+    const pane = renderPane({
+      data: diff("n.txt", SHORT),
+      lineAnchors: [placed],
+      renderAnchor: live(["T1"]),
+    });
+    await waitFor(() => expect(pane.last()?.anchors).toEqual(["new:2"]));
+    expect(document.querySelector("[data-diff-anchor]")).not.toBeNull();
+    // The same placement, as a held row keeps it; the host no longer lists T1.
+    pane.rerender({
+      data: diff("n.txt", SHORT),
+      lineAnchors: [{ ...placed }],
+      renderAnchor: live([]),
+    });
+    await waitFor(() => expect(pane.last()?.anchors).toEqual([]));
+    expect(document.querySelector("[data-diff-anchor]")).toBeNull();
+    expect(screen.queryByText("Thread T1")).toBeNull();
   });
 
   it("reports the capped part until Show full diff draws the rest", async () => {

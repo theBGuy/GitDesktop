@@ -1,6 +1,8 @@
 import { CopyIcon } from "@phosphor-icons/react";
 import {
   type ComponentProps,
+  createContext,
+  use,
   useDeferredValue,
   useLayoutEffect,
   useMemo,
@@ -564,6 +566,21 @@ export function PrCommitDetail({
 /** One file's diff in the commit's pane slot: its section of the commit's
  *  patch, with the comments anchored to it and its own line composer, so a
  *  held file never shows the next one's. */
+/** True while the slot paints a deferred copy of its view that the live view
+ *  has moved past: the composer's section is already the live one, so the
+ *  rows under it are behind whatever the diff itself reports. */
+const SlotRowsBehindContext = createContext(false);
+
+function SlotLineComposer(props: ComponentProps<typeof CommitLineComposer>) {
+  const slotBehind = use(SlotRowsBehindContext);
+  return (
+    <CommitLineComposer
+      {...props}
+      rowsBehind={props.rowsBehind === true || slotBehind}
+    />
+  );
+}
+
 function PrCommitFileDiffSlot({
   repoPath,
   sha,
@@ -654,6 +671,9 @@ function PrCommitFileDiffSlot({
   const shownPending = modeStale ? view.pending : deferredPending;
   const shownNote = modeStale ? view.note : deferredNote;
   const shownSha = modeStale ? sha : deferredSha;
+  // Read through context, not the widget's deps, so a flip re-renders the
+  // composer alone (as the diff's own `rowsBehind` does).
+  const slotBehind = (shownData?.text ?? null) !== (view.data?.text ?? null);
   // The patch is in memory, never a placeholder: only the view can pend.
   useSlotRead(reportRead, {
     isPlaceholderData: false,
@@ -663,7 +683,7 @@ function PrCommitFileDiffSlot({
   // render inline wherever their row mounts (an expanded gap's included); the
   // list below takes the rest from the pane's painted report. Grouping +
   // range chips live in the shared hook.
-  const lineAnchors = useCommitLineAnchors(
+  const { anchors: lineAnchors, renderAnchor } = useCommitLineAnchors(
     comments,
     sections,
     path,
@@ -678,8 +698,8 @@ function PrCommitFileDiffSlot({
     if (!canComment) return undefined;
     return {
       enabled: true,
-      render: ({ side, line, fromLine, onClose }) => (
-        <CommitLineComposer
+      render: ({ side, line, fromLine, onClose, rowsBehind }) => (
+        <SlotLineComposer
           repoPath={repoPath}
           sha={sha}
           path={path}
@@ -691,6 +711,7 @@ function PrCommitFileDiffSlot({
           onClose={onClose}
           lens={lens}
           patchOnly
+          rowsBehind={rowsBehind}
         />
       ),
     };
@@ -698,27 +719,30 @@ function PrCommitFileDiffSlot({
   const lineWidget = useSlotWidget(widget);
   return (
     <div ref={setDiffRoot} className="contents">
-      <DiffContent
-        filePath={path}
-        data={shownData}
-        isPending={shownPending}
-        isError={false}
-        repoPath={repoPath}
-        previewRev={previewRev}
-        contentRevs={content?.revs}
-        imageRevs={content?.images}
-        // From the first paint, so the diff records it as on screen.
-        forgePatch={{
-          source: content?.source ?? null,
-          scope: `${lens}\0${shownSha}`,
-        }}
-        whitespaceControl
-        whitespaceNote={shownNote}
-        typechangeAnchors
-        anchorCommit={sha}
-        lineAnchors={lineAnchors}
-        lineWidget={lineWidget}
-      />
+      <SlotRowsBehindContext value={slotBehind}>
+        <DiffContent
+          filePath={path}
+          data={shownData}
+          isPending={shownPending}
+          isError={false}
+          repoPath={repoPath}
+          previewRev={previewRev}
+          contentRevs={content?.revs}
+          imageRevs={content?.images}
+          // From the first paint, so the diff records it as on screen.
+          forgePatch={{
+            source: content?.source ?? null,
+            scope: `${lens}\0${shownSha}`,
+          }}
+          whitespaceControl
+          whitespaceNote={shownNote}
+          typechangeAnchors
+          anchorCommit={sha}
+          lineAnchors={lineAnchors}
+          renderAnchor={renderAnchor}
+          lineWidget={lineWidget}
+        />
+      </SlotRowsBehindContext>
     </div>
   );
 }

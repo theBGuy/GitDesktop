@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { create } from "zustand";
 import { gitBranchTips } from "@/lib/git/api";
+import { branchTipPairs } from "@/lib/git/branch-tip-pairs";
 import { keepPreviousDataForRepo, useRepoIdentity } from "@/lib/git/queries";
 import { repoIdentityStrict } from "@/lib/git/repo-identity";
 import { readTipStates } from "./restore";
@@ -113,7 +114,7 @@ export function useDeletedNameTips(
   const sorted = [...new Set(names)].sort();
   return useQuery({
     queryKey: ["repo", repoPath, "deleted-name-tips", sorted] as const,
-    queryFn: () => gitBranchTips(repoPath, sorted),
+    queryFn: () => gitBranchTips(repoPath, sorted).then(branchTipPairs),
     enabled: enabled && sorted.length > 0,
     staleTime: 30_000,
     retry: false,

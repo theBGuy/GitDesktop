@@ -123,6 +123,7 @@ import type { CommitSummary } from "@/lib/git/types";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { OFFLINE_WRITE_REASON } from "@/lib/offline-writes";
+import { prRefForNoun } from "@/lib/pulls/pr-state";
 import { useLensGate } from "@/lib/repo-lens/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
@@ -1129,7 +1130,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
             title={existingPr.title}
           >
             <ArrowSquareOutIcon data-icon="inline-start" />
-            View {prNoun} #{existingPr.number}
+            View {prNoun} {prRefForNoun(prNoun, existingPr.number)}
             {existingPr.isDraft ? " (draft)" : ""}
           </Button>
         )}

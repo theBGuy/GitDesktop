@@ -13,13 +13,14 @@ import {
 import { COLD_START_NO_GH } from "@/lib/test-mode";
 import * as api from "../api";
 import { peekRepoIdentity } from "../repo-identity";
-import { useRepoIdentity } from "./core";
+import { repoKeys, useRepoIdentity } from "./core";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
 import {
   type PendingPublish,
   PUBLISH_REPO_KEY,
   pendingMutationEntries,
   pendingPublishesFor,
+  publishHoldsBranch,
   publishRepoKey,
 } from "./pr-writes";
 import { recheckRunsAfterPush } from "./push-writes";
@@ -72,24 +73,38 @@ function siblingRemotesOf(repo: string, identity: string | undefined) {
   };
 }
 
+interface PublishArgs {
+  provider: "github" | "gitlab" | "bitbucket";
+  name: string;
+  isPrivate: boolean;
+  description: string;
+  homepage: string;
+  topics: string[];
+  /** Bitbucket only — the workspace the repo is created under. */
+  workspace?: string;
+}
+
+/** The branch a publish of `repo` pushes, from this checkout's cached status at
+ *  the press; null while that is unread or HEAD is detached. */
+function publishingBranch(queryClient: QueryClient, repo: string) {
+  const head = queryClient.getQueryData<
+    Awaited<ReturnType<typeof api.gitStatus>>
+  >(repoKeys.status(repo))?.branch;
+  return head && !head.detached && typeof head.name === "string"
+    ? head.name
+    : null;
+}
+
 /** Publishing pushes the repo's commits to the new remote, so it arms the delayed
  *  run recheck like a push. */
 export function usePublishRepo(repo: string) {
   const queryClient = useQueryClient();
   const identity = useRepoIdentity(repo).data;
   const siblingRemotes = siblingRemotesOf(repo, identity);
-  return useRepoMutation(
+  const publish = useRepoMutation(
     repo,
-    async (args: {
-      provider: "github" | "gitlab" | "bitbucket";
-      name: string;
-      isPrivate: boolean;
-      description: string;
-      homepage: string;
-      topics: string[];
-      /** Bitbucket only — the workspace the repo is created under. */
-      workspace?: string;
-    }) => {
+    // `branch` only rides the variables, for the holds that read them.
+    async (args: PublishArgs & { branch: string | null }) => {
       try {
         return await api.forgePublishRepo(
           args.provider,
@@ -119,6 +134,14 @@ export function usePublishRepo(repo: string) {
       onSuccess: () => recheckRunsAfterPush(queryClient, repo),
     },
   );
+  // The publishing checkout's branch is recorded at the press, so every
+  // worktree's rename, delete and archive holds follow it, not their own HEAD.
+  const mutateAsync = (args: PublishArgs) =>
+    publish.mutateAsync({
+      ...args,
+      branch: publishingBranch(queryClient, repo),
+    });
+  return { ...publish, mutateAsync };
 }
 
 const NO_PENDING_PUBLISHES: PendingPublish[] = [];
@@ -152,16 +175,39 @@ export function activePublishOf(
   repo: string,
   identity?: string,
 ): PendingPublish | null {
-  return (
-    pendingPublishesFor(
-      pendingMutationEntries(
-        queryClient
-          .getMutationCache()
-          .findAll({ mutationKey: PUBLISH_REPO_KEY, status: "pending" }),
-      ),
-      repo,
-      identity ?? peekRepoIdentity(repo),
-    )[0] ?? null
+  return activePublishesOf(queryClient, repo, identity)[0] ?? null;
+}
+
+/** Every publish of the repository in flight right now; see
+ *  {@link activePublishOf}. */
+function activePublishesOf(
+  queryClient: QueryClient,
+  repo: string,
+  identity?: string,
+): PendingPublish[] {
+  return pendingPublishesFor(
+    pendingMutationEntries(
+      queryClient
+        .getMutationCache()
+        .findAll({ mutationKey: PUBLISH_REPO_KEY, status: "pending" }),
+    ),
+    repo,
+    identity ?? peekRepoIdentity(repo),
+  );
+}
+
+/** Fire-time twin of {@link publishHoldsBranch}: whether a publish in flight
+ *  right now holds a rename, delete or archive of `branch`. */
+export function publishHoldsBranchNow(
+  queryClient: QueryClient,
+  repo: string,
+  branch: string | null,
+  currentName: string | null,
+): boolean {
+  return publishHoldsBranch(
+    activePublishesOf(queryClient, repo),
+    branch,
+    currentName,
   );
 }
 

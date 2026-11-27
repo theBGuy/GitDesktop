@@ -7,7 +7,7 @@ import {
   type AutomationTrigger,
   recordAutomationActivity,
 } from "./history";
-import { triggerAutomations } from "./runner";
+import { cachedPrNoun, triggerAutomations } from "./runner";
 import { loadAutomations, repoAutomationsFor } from "./store";
 import { type ActionId, ALL_ACTION_IDS, effectiveActions } from "./types";
 
@@ -170,7 +170,7 @@ export function maybeCatchUpMissedOpen(
         skipped.push({
           candidate: c,
           code: "too-old",
-          detail: "Skipped — couldn't read when this pull request was opened",
+          detail: `Skipped — couldn't read when this ${cachedPrNoun(repoPath)} was opened`,
         });
         return false;
       }

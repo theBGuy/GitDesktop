@@ -1671,17 +1671,495 @@ pub async fn forge_prs_for_branch(
     head: String,
     lens: Option<String>,
 ) -> AppResult<Vec<crate::github::pr::PrInfo>> {
-    match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => {
-            reject_upstream_on_non_github(lens.as_deref())?;
-            gitlab::prs_for_branch(&repo_path, &head).await
-        }
-        Some((Provider::Bitbucket, _)) => {
-            reject_upstream_on_non_github(lens.as_deref())?;
-            bitbucket::prs_for_branch(&repo_path, &head).await
-        }
-        _ => github::prs_for_branch(&repo_path, &head, lens).await,
+    let provider = detect_non_github(&repo_path)
+        .await
+        .map(|(provider, _)| provider);
+    if matches!(provider, Some(Provider::GitLab | Provider::Bitbucket)) {
+        reject_upstream_on_non_github(lens.as_deref())?;
     }
+    prs_for_branch_heads(&repo_path, &head, |name| {
+        let (repo_path, lens) = (repo_path.clone(), lens.clone());
+        async move {
+            match provider {
+                Some(Provider::GitLab) => gitlab::prs_for_branch(&repo_path, &name).await,
+                Some(Provider::Bitbucket) => bitbucket::prs_for_branch(&repo_path, &name).await,
+                _ => github::prs_for_branch(&repo_path, &name, lens).await,
+            }
+        }
+    })
+    .await
+}
+
+/// [`forge_prs_for_branch`]'s lookup: `head` and the names [`pr_lookup_heads`] adds, each
+/// read by `read`.
+async fn prs_for_branch_heads<F, Fut>(
+    repo_path: &str,
+    head: &str,
+    read: F,
+) -> AppResult<Vec<crate::github::pr::PrInfo>>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<Vec<crate::github::pr::PrInfo>>>,
+{
+    prs_for_heads(pr_lookup_heads(repo_path, head, None).await, read).await
+}
+
+/// [`forge_prs_for_branch`]'s lookup over `heads`, each name read by `read` and the
+/// answers folded by [`fold_head_reads`].
+async fn prs_for_heads<F, Fut>(
+    heads: Vec<String>,
+    read: F,
+) -> AppResult<Vec<crate::github::pr::PrInfo>>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<Vec<crate::github::pr::PrInfo>>>,
+{
+    let mut reads = Vec::new();
+    for name in heads {
+        reads.push(read(name).await);
+    }
+    fold_head_reads(reads)
+}
+
+/// The head names' answers as one list: any rows found win over another name's failed
+/// read (the caller then offers View instead of a create that would refuse); no rows and
+/// a failure is that failure; otherwise none. Pure.
+fn fold_head_reads(
+    reads: Vec<AppResult<Vec<crate::github::pr::PrInfo>>>,
+) -> AppResult<Vec<crate::github::pr::PrInfo>> {
+    let mut found = Vec::new();
+    let mut first_error = None;
+    for read in reads {
+        match read {
+            Ok(rows) => found.push(rows),
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    let rows = unique_by_number(found);
+    match first_error {
+        Some(e) if rows.is_empty() => Err(e),
+        _ => Ok(rows),
+    }
+}
+
+/// Each head name's rows in lookup order, a request found under two names kept once, at
+/// its first sighting. Pure.
+fn unique_by_number(found: Vec<Vec<crate::github::pr::PrInfo>>) -> Vec<crate::github::pr::PrInfo> {
+    let mut seen = std::collections::HashSet::new();
+    found
+        .into_iter()
+        .flatten()
+        .filter(|row| seen.insert(row.number))
+        .collect()
+}
+
+/// The head names a pull request lookup for `head` asks under: `head`, then the name of
+/// the origin branch it is a renamed copy of, unless that name is `base`. Network-free: with
+/// no local remote HEAD the default stays unmeasured and does not exclude. A failed reflog
+/// or upstream read is logged and gives `[head]`; a lookup never fails over it.
+pub(crate) async fn pr_lookup_heads(
+    repo_path: &str,
+    head: &str,
+    base: Option<&str>,
+) -> Vec<String> {
+    let mut heads = vec![head.to_string()];
+    match crate::git::branches::renamed_copy_of(repo_path, head).await {
+        Ok(Some(copy))
+            if copy.remote == "origin" && Some(copy.upstream_branch.as_str()) != base =>
+        {
+            heads.push(copy.upstream_branch);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("gitdesktop: renamed-copy read for {head} failed (looked up as is): {e}")
+        }
+    }
+    heads
+}
+
+/// Open pull or merge requests on a remote branch, as a rename that deletes the branch
+/// there reads them. `unchecked` lists every scope that could not be read: a failure is
+/// never reported as "none open".
+#[derive(Debug, serde::Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RemoteBranchPulls {
+    /// The remote's URL names no host: nothing to look up.
+    NoForge,
+    /// A host the app cannot identify as a signed-in forge.
+    Unidentified { host: String },
+    Checked {
+        provider: &'static str,
+        items: Vec<RemoteBranchPull>,
+        unchecked: Vec<UncheckedScope>,
+    },
+}
+
+/// One open request headed on the branch; `repo` is the `owner/name` (or GitLab full path)
+/// it lives in.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteBranchPull {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub is_draft: bool,
+    pub scope: PullScope,
+    pub repo: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UncheckedScope {
+    pub scope: PullScope,
+    pub error: AppError,
+}
+
+/// Where a request was looked up: the repository the remote points at, or the one it was
+/// forked from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PullScope {
+    Repository,
+    Parent,
+}
+
+/// Which forge serves a remote, decided by [`remote_forge`].
+#[derive(Debug, PartialEq, Eq)]
+enum RemoteForge {
+    NoForge,
+    Unidentified(String),
+    /// `host` is the host both scopes read on ([`lookup_host`]).
+    GitHub {
+        host: String,
+    },
+    GitLab,
+    Bitbucket,
+}
+
+/// The host of a remote URL that names one, decided by its SHAPE before [`remote_host`]
+/// (which reads `C:/x` as host `c`): a `file:` URL, a drive path on Windows, and anything
+/// without `://` that is not scp form are paths. Scp form, git's rule: the first `:` comes
+/// before any `/`, is not a drive letter's (on Windows only: one ASCII letter then `:`,
+/// decided on the whole string before a `user@` is stripped), and leaves a host. Pure.
+fn forge_url_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+    {
+        return None;
+    }
+    if !url.contains("://") {
+        let colon = url.find(':')?;
+        if url.find('/').is_some_and(|slash| slash < colon) {
+            return None;
+        }
+        // git's `has_dos_drive_prefix` exists on Windows only; elsewhere `c:x` is host `c`.
+        if cfg!(windows) && colon == 1 && url.as_bytes()[0].is_ascii_alphabetic() {
+            return None;
+        }
+        let host = url[..colon].rsplit('@').next().unwrap_or_default();
+        if host.is_empty() {
+            return None;
+        }
+    }
+    remote_host(url)
+}
+
+/// The forge serving a remote at `url`, given glab's signed-in hosts and the host gh holds
+/// a stored login for (`gh_host_for_url`). gitlab.com, bitbucket.org and glab's hosts map
+/// to their forge; github.com is GitHub signed in or not; any other host is GitHub only
+/// with a stored gh login, else unidentified. Pure.
+fn remote_forge(url: &str, glab_hosts: &[String], gh_host: Option<&str>) -> RemoteForge {
+    let Some(host) = forge_url_host(url) else {
+        return RemoteForge::NoForge;
+    };
+    match provider_for_remote_host(&host, glab_hosts) {
+        Some(Provider::GitLab) => RemoteForge::GitLab,
+        Some(Provider::Bitbucket) => RemoteForge::Bitbucket,
+        _ => match lookup_host(gh_host, &host) {
+            Some(lookup) => RemoteForge::GitHub {
+                host: lookup.to_string(),
+            },
+            None => RemoteForge::Unidentified(host),
+        },
+    }
+}
+
+/// One scope's answered read: the rows it kept, and an error when it may not have seen
+/// every request (a full page, or rows that wouldn't parse), which leaves the scope
+/// unchecked beside its rows.
+#[derive(Debug, Default)]
+pub(crate) struct ScopeRead {
+    pub(crate) rows: Vec<RemoteBranchPull>,
+    pub(crate) incomplete: Option<AppError>,
+}
+
+impl ScopeRead {
+    /// `raw` rows answered a read that asked for `page` per page: a full page may hide more.
+    pub(crate) fn paged(rows: Vec<RemoteBranchPull>, raw: usize, page: usize) -> Self {
+        let incomplete = (raw >= page)
+            .then(|| AppError::Command(format!("GitDesktop read only the first {page} matches.")));
+        Self { rows, incomplete }
+    }
+
+    /// As [`Self::paged`], also incomplete when the forge said `more` pages follow; a short
+    /// page that names more gets a sentence without a count.
+    pub(crate) fn paged_more(
+        rows: Vec<RemoteBranchPull>,
+        raw: usize,
+        page: usize,
+        more: bool,
+    ) -> Self {
+        if more && raw < page {
+            let incomplete = AppError::Command(
+                "GitDesktop read only the first page of matches.".to_string(),
+            );
+            return Self {
+                rows,
+                incomplete: Some(incomplete),
+            };
+        }
+        Self::paged(rows, raw, page)
+    }
+
+    /// `dropped` rows wouldn't parse: `unreadable`'s error, which outranks a full page.
+    pub(crate) fn dropping(
+        mut self,
+        dropped: usize,
+        unreadable: impl FnOnce() -> AppError,
+    ) -> Self {
+        if dropped > 0 {
+            self.incomplete = Some(unreadable());
+        }
+        self
+    }
+}
+
+/// Fold the two scope reads into the answer: each read's rows, and each failed or
+/// incomplete read as an unchecked scope, so neither hides the other. Pure.
+fn fold_remote_branch_pulls(
+    provider: &'static str,
+    repository: AppResult<ScopeRead>,
+    parent: AppResult<ScopeRead>,
+) -> RemoteBranchPulls {
+    let mut items = Vec::new();
+    let mut unchecked = Vec::new();
+    for (scope, read) in [
+        (PullScope::Repository, repository),
+        (PullScope::Parent, parent),
+    ] {
+        match read {
+            Ok(read) => {
+                items.extend(read.rows);
+                if let Some(error) = read.incomplete {
+                    unchecked.push(UncheckedScope { scope, error });
+                }
+            }
+            Err(error) => unchecked.push(UncheckedScope { scope, error }),
+        }
+    }
+    RemoteBranchPulls::Checked {
+        provider,
+        items,
+        unchecked,
+    }
+}
+
+/// The `Repository` scope's rows: requests headed on `branch` exactly whose head lives in
+/// this repository, so a fork's same-named branch never counts. Pure.
+pub(crate) fn repository_scope_rows(
+    rows: Vec<crate::github::pr::PrInfo>,
+    branch: &str,
+    repo: &str,
+) -> Vec<RemoteBranchPull> {
+    rows.into_iter()
+        .filter(|row| !row.cross_repository && row.head_ref_name == branch)
+        .map(|row| RemoteBranchPull {
+            number: row.number,
+            title: row.title,
+            url: row.url,
+            is_draft: row.is_draft,
+            scope: PullScope::Repository,
+            repo: repo.to_string(),
+        })
+        .collect()
+}
+
+/// GitLab's repository scope from the rows a read of `page` per page answered: the page
+/// is judged on the raw rows, before the filter. Pure.
+fn repository_scope_read(
+    rows: Vec<crate::github::pr::PrInfo>,
+    branch: &str,
+    repo: &str,
+    page: usize,
+) -> ScopeRead {
+    let raw = rows.len();
+    ScopeRead::paged(repository_scope_rows(rows, branch, repo), raw, page)
+}
+
+/// GitLab and Bitbucket resolve their project from origin, so another remote is not read.
+fn origin_only(noun: &str) -> AppError {
+    AppError::Command(format!("GitDesktop looks up {noun} on origin only."))
+}
+
+/// Open pull or merge requests on `remote`'s branch `branch`, in the repository the remote
+/// points at and in the one it was forked from. The command's own `Err`s are an invalid
+/// `remote` or `branch` and a remote with no URL; every forge failure is an unchecked
+/// scope. GitLab and Bitbucket read origin only.
+#[tauri::command]
+pub async fn forge_prs_on_remote_branch(
+    repo_path: String,
+    remote: String,
+    branch: String,
+) -> AppResult<RemoteBranchPulls> {
+    Box::pin(open_prs_on_remote_branch(&repo_path, &remote, &branch)).await
+}
+
+/// [`forge_prs_on_remote_branch`]'s body, the entry an MCP tool calls when one is added.
+pub(crate) async fn open_prs_on_remote_branch(
+    repo_path: &str,
+    remote: &str,
+    branch: &str,
+) -> AppResult<RemoteBranchPulls> {
+    crate::git::branches::validate_ref_name(remote)?;
+    crate::git::branches::validate_ref_name(branch)?;
+    // Drop the cached URL and re-read it, so the forge decision and origin's reads in the
+    // GitLab and Bitbucket arms below answer for one fresh URL.
+    crate::git::remote::invalidate_remote_url_cache(repo_path, remote);
+    let url = crate::git::remote::git_remote_url(repo_path.to_string(), remote.to_string()).await?;
+    let Some(host) = forge_url_host(&url) else {
+        return Ok(RemoteBranchPulls::NoForge);
+    };
+    // Each read below is paid only when an earlier answer leaves it open.
+    let glab_hosts = if host == "github.com" || provider_for_host(&host).is_some() {
+        Vec::new()
+    } else {
+        glab::known_hosts().await
+    };
+    let gh_host = match provider_for_remote_host(&host, &glab_hosts) {
+        Some(Provider::GitLab | Provider::Bitbucket) => None,
+        _ => crate::github::runner::gh_host_for_url(&url).await,
+    };
+    let is_origin = remote == "origin";
+    let (provider, repository, parent): (&'static str, _, _) =
+        match remote_forge(&url, &glab_hosts, gh_host.as_deref()) {
+            RemoteForge::NoForge => return Ok(RemoteBranchPulls::NoForge),
+            RemoteForge::Unidentified(host) => return Ok(RemoteBranchPulls::Unidentified { host }),
+            RemoteForge::GitHub { host } => {
+                let (repository, parent) =
+                    Box::pin(github_scopes(repo_path, remote, &url, &host, branch)).await;
+                ("github", repository, parent)
+            }
+            RemoteForge::GitLab if !is_origin => (
+                "gitlab",
+                Err(origin_only("merge requests")),
+                Err(origin_only("merge requests")),
+            ),
+            RemoteForge::GitLab => {
+                let repository = Box::pin(async {
+                    let path = gitlab::project_path(repo_path).await?;
+                    let rows = gitlab::prs_for_branch(repo_path, branch).await?;
+                    Ok::<_, AppError>(repository_scope_read(
+                        rows,
+                        branch,
+                        &path,
+                        gitlab::SOURCE_BRANCH_PAGE,
+                    ))
+                });
+                let parent = Box::pin(gitlab::parent_open_mrs(repo_path, branch));
+                let (repository, parent) = tokio::join!(repository, parent);
+                ("gitlab", repository, parent)
+            }
+            RemoteForge::Bitbucket if !is_origin => (
+                "bitbucket",
+                Err(origin_only("pull requests")),
+                Err(origin_only("pull requests")),
+            ),
+            RemoteForge::Bitbucket => {
+                let repository = Box::pin(bitbucket::repository_open_prs(repo_path, branch));
+                let parent = Box::pin(bitbucket::parent_open_prs(repo_path, branch));
+                let (repository, parent) = tokio::join!(repository, parent);
+                ("bitbucket", repository, parent)
+            }
+        };
+    Ok(fold_remote_branch_pulls(provider, repository, parent))
+}
+
+/// GitHub's two scopes, both on `host`, the remote's own host as [`lookup_host`] spells
+/// it: `run_gh` pins origin's host and would read this remote's slug on the wrong one.
+async fn github_scopes(
+    repo_path: &str,
+    remote: &str,
+    url: &str,
+    host: &str,
+    branch: &str,
+) -> (AppResult<ScopeRead>, AppResult<ScopeRead>) {
+    let url_host = remote_host(url).unwrap_or_default();
+    // Pure, so a failed read fails twice alike: one `Err` per scope (`AppError` isn't Clone).
+    let slug_of = || crate::github::slug_from_remote_url(remote, url);
+    let slug = match slug_of() {
+        Ok(slug) => slug,
+        Err(e) => {
+            let again = slug_of().err().unwrap_or_else(|| gh_signed_out(&url_host));
+            return (Err(e), Err(again));
+        }
+    };
+    // GitHub answers an old name or owner with the moved repository, so both scopes read
+    // its canonical spelling from this one answer, never the URL's.
+    let repo = match Box::pin(crate::github::pr::gh_lookup_repo_on_host(
+        repo_path, host, &slug,
+    ))
+    .await
+    {
+        Ok(repo) => repo,
+        Err(e) => return failed_read_scopes(e),
+    };
+    let repository = Box::pin(crate::github::pr::gh_open_prs_on_host(
+        repo_path, host, &repo, branch,
+    ));
+    let parent = Box::pin(crate::github::pr::gh_parent_open_prs_on_host(
+        repo_path, host, &repo, branch,
+    ));
+    tokio::join!(repository, parent)
+}
+
+/// The host both GitHub scopes read on: gh's stored-login spelling, else github.com itself,
+/// which an env token (never counted by the stored-login probe) also signs in; a failed
+/// sign-in there is the read's own error. Any other host without a stored login: None. Pure.
+fn lookup_host<'a>(gh_host: Option<&'a str>, url_host: &str) -> Option<&'a str> {
+    gh_host.or_else(|| (url_host == "github.com").then_some("github.com"))
+}
+
+/// Both scopes of a repository read that failed: the same error on each. Pure.
+fn failed_read_scopes(e: AppError) -> (AppResult<ScopeRead>, AppResult<ScopeRead>) {
+    let twin = twin_read_error(&e);
+    (Err(e), Err(twin))
+}
+
+/// The same failure for the second scope of one read (`AppError` isn't Clone): the
+/// variants a gh read returns keep their kind; any other keeps its message as a gh error.
+fn twin_read_error(e: &AppError) -> AppError {
+    match e {
+        AppError::GhNotFound => AppError::GhNotFound,
+        AppError::Gh(m) => AppError::Gh(m.clone()),
+        AppError::Timeout(s) => AppError::Timeout(*s),
+        AppError::Command(m) => AppError::Command(m.clone()),
+        AppError::InvalidArgument(m) => AppError::InvalidArgument(m.clone()),
+        other => AppError::Gh(other.to_string()),
+    }
+}
+
+fn gh_signed_out(host: &str) -> AppError {
+    AppError::Gh(format!(
+        "The GitHub CLI has no sign-in for {host}. To sign in, run: gh auth login --hostname {host}"
+    ))
 }
 
 /// Full details for one merge/pull request's read view, behind the abstraction.
@@ -5358,6 +5836,37 @@ pub async fn forge_publish_repo(
     .await
 }
 
+// A `mod` item: the only test-only form gitlab.rs's source scans cut from this file.
+#[cfg(test)]
+mod publish_hook {
+    pub(super) type Hook = std::sync::Arc<
+        dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+    >;
+
+    tokio::task_local! {
+        /// Awaited in [`super::forge_publish_repo_core`] after the branch hold and its
+        /// refusal, before the provider call, and again once the provider call returned
+        /// while the hold is still in scope.
+        pub(super) static PUBLISH_HELD_HOOK: Hook;
+    }
+
+    pub(super) async fn reached() {
+        if let Ok(wait) = PUBLISH_HELD_HOOK.try_with(|hook| hook()) {
+            wait.await;
+        }
+    }
+
+    pub(super) async fn returned() {
+        reached().await;
+    }
+}
+
+#[cfg(not(test))]
+mod publish_hook {
+    pub(super) async fn reached() {}
+    pub(super) async fn returned() {}
+}
+
 /// The provider-dispatch core of [`forge_publish_repo`], taking a plain `&AppState` so
 /// the publishing refusal is testable off the Tauri runtime.
 #[allow(clippy::too_many_arguments)]
@@ -5373,11 +5882,19 @@ pub(crate) async fn forge_publish_repo_core(
     workspace: Option<String>,
 ) -> AppResult<String> {
     // Every provider pushes HEAD's branch, so it is refused before the remote repository
-    // is created; a detached HEAD leaves each provider's own refusal.
-    if let Some(b) = crate::git::branches::current_branch_name(&repo_path).await? {
-        crate::git::remote::refuse_publishing_branch(&repo_path, &b).await?;
-    }
-    match provider {
+    // is created; a detached HEAD leaves each provider's own refusal. The branch is held
+    // against rename, delete and archive, registered before the refusal and released when
+    // the provider call returns; a detached HEAD registers nothing.
+    let _publishing = match crate::git::branches::current_branch_name(&repo_path).await? {
+        Some(b) => {
+            let held = crate::git::branches::hold_publishing_branch(&repo_path, &b).await;
+            crate::git::remote::refuse_publishing_branch(&repo_path, &b).await?;
+            Some(held)
+        }
+        None => None,
+    };
+    publish_hook::reached().await;
+    let published = match provider {
         Provider::GitLab => {
             gitlab::publish_repo(state, &repo_path, &name, private, &description, &topics).await
         }
@@ -5407,7 +5924,9 @@ pub(crate) async fn forge_publish_repo_core(
             )
             .await
         }
-    }
+    };
+    publish_hook::returned().await;
+    published
 }
 
 /// Create a merge/pull request, behind the abstraction. Every arm pushes the head
@@ -5504,6 +6023,17 @@ pub(crate) async fn forge_pr_create_with_attachments(
         crate::git::status::PushRemote::Named("origin"),
     )
     .await?;
+    // A renamed copy of a non-base, non-default origin branch is refused before the
+    // dispatch, so this one site covers every forge and the MCP tool.
+    if let Some(copy) =
+        crate::git::branches::renamed_copy_refusing_create(&repo_path, &head, &base).await?
+    {
+        return Err(AppError::PushUpstreamNameMismatch {
+            branch: head,
+            remote: copy.remote,
+            remote_branch: copy.upstream_branch,
+        });
+    }
     let detected = detect_non_github(&repo_path).await;
     // The upstream lens (a fork contribution to the PARENT) is GitHub-only. Reject it
     // for GitLab/Bitbucket BEFORE any dispatch or remote work (`None`/`Some("origin")`
@@ -7277,10 +7807,15 @@ mod tests {
 
     /// An EMPTY title on a hostless-origin fixture: the GitHub arm refuses it locally.
     async fn pr_create_with_empty_title(repo: &str, head: &str) -> AppResult<()> {
+        pr_create_into(repo, head, "main").await
+    }
+
+    /// [`pr_create_with_empty_title`] into `base`.
+    async fn pr_create_into(repo: &str, head: &str, base: &str) -> AppResult<()> {
         forge_pr_create_core(
             &crate::state::AppState::default(),
             repo.to_string(),
-            "main".into(),
+            base.into(),
             head.into(),
             String::new(),
             String::new(),
@@ -7342,7 +7877,17 @@ mod tests {
             other => panic!("expected the session refusal, got {other:?}"),
         }
         let required = "a PR title is required";
-        is_local_refusal(pr_create_with_empty_title(&repo, "Feat/X").await, required, "case");
+        // Where refs can alias, Keep local holds for a case variant of the marked branch;
+        // on a case-sensitive disk the variant is another branch and reaches the provider.
+        let variant = pr_create_with_empty_title(&repo, "Feat/X").await;
+        if crate::git::branches::refs_can_alias(&repo).await {
+            match variant {
+                Err(AppError::BranchKeptLocal { branch }) => assert_eq!(branch, "feat/x"),
+                other => panic!("case: a folding store refuses the variant, got {other:?}"),
+            }
+        } else {
+            is_local_refusal(variant, required, "case");
+        }
         // An invalid head skips the guard and gets the provider's own wording.
         is_local_refusal(
             pr_create_with_empty_title(&repo, "feat x").await,
@@ -7378,6 +7923,913 @@ mod tests {
         keep_local_git(std::path::Path::new(&repo), &["config", "remote.origin.mirror", "false"]);
         let required = "a PR title is required";
         is_local_refusal(pr_create_with_empty_title(&repo, "feat/x").await, required, "twin");
+    }
+
+    /// A work repository whose `origin` is a bare repository behind a `file:///` URL (so
+    /// `detect_non_github` answers None before any host read; every create below carries
+    /// an empty title, so nothing is pushed), with `followRemoteHEAD=never` and only
+    /// push-minted tracking refs, so no `refs/remotes/origin/HEAD` exists until a row pins
+    /// one. Branches: `new` renamed from `old`; `feat` renamed from `main` (checked out);
+    /// `stacked` and `hotfix` created from `origin/develop` and `origin/release`;
+    /// `fromorigin` created from `origin/main`; `forkcopy` renamed from `other`, which
+    /// tracks `fork`.
+    fn renamed_copy_fixture() -> (tempfile::TempDir, String, String, String) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-forge-renamed-copy-")
+            .tempdir()
+            .unwrap();
+        let p = dir.path();
+        let work = p.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        keep_local_git(p, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
+        let bare = p.join("origin.git").to_string_lossy().replace('\\', "/");
+        let url = format!("file:///{}", bare.trim_start_matches('/'));
+        let git = |args: &[&str]| keep_local_git(&work, args);
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "core.logAllRefUpdates", "true"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "seed"]);
+        for (remote, mirror) in [("origin", "false"), ("fork", "false")] {
+            git(&["remote", "add", remote, &url]);
+            git(&["config", &format!("remote.{remote}.mirror"), mirror]);
+            git(&[
+                "config",
+                &format!("remote.{remote}.followRemoteHEAD"),
+                "never",
+            ]);
+        }
+        for branch in ["old", "develop", "release", "other"] {
+            git(&["branch", branch]);
+        }
+        git(&["push", "-q", "origin", "main", "old", "develop", "release"]);
+        git(&["push", "-q", "fork", "other"]);
+        git(&["branch", "-q", "-u", "origin/old", "old"]);
+        git(&["branch", "-m", "old", "new"]);
+        git(&["branch", "-q", "-u", "fork/other", "other"]);
+        git(&["branch", "-m", "other", "forkcopy"]);
+        git(&["branch", "-q", "--track", "stacked", "origin/develop"]);
+        git(&["branch", "-q", "--track", "hotfix", "origin/release"]);
+        git(&["branch", "-q", "--track", "fromorigin", "origin/main"]);
+        git(&["branch", "-q", "-u", "origin/main", "main"]);
+        git(&["branch", "-m", "main", "feat"]);
+        let work = work.to_string_lossy().into_owned();
+        (dir, work, bare, url)
+    }
+
+    fn pin_origin_head(work: &str, target: Option<&str>) {
+        use crate::git::runner::TestGitEnv;
+        let dir = std::path::Path::new(work);
+        match target {
+            Some(t) => keep_local_git(
+                dir,
+                &[
+                    "symbolic-ref",
+                    "refs/remotes/origin/HEAD",
+                    &format!("refs/remotes/origin/{t}"),
+                ],
+            ),
+            None => {
+                let _ = std::process::Command::new("git")
+                    .test_git_env()
+                    .current_dir(dir)
+                    .args(["symbolic-ref", "-d", "refs/remotes/origin/HEAD"])
+                    .output();
+            }
+        }
+        let present = std::process::Command::new("git")
+            .test_git_env()
+            .current_dir(dir)
+            .args(["symbolic-ref", "-q", "refs/remotes/origin/HEAD"])
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert_eq!(present, target.is_some(), "the remote-HEAD pin");
+    }
+
+    fn expect_renamed_copy_refusal(result: AppResult<()>, branch: &str, upstream: &str, row: &str) {
+        match result {
+            Err(AppError::PushUpstreamNameMismatch {
+                branch: b,
+                remote,
+                remote_branch,
+            }) => assert_eq!(
+                (b.as_str(), remote.as_str(), remote_branch.as_str()),
+                (branch, "origin", upstream),
+                "{row}"
+            ),
+            other => panic!("{row}: expected the renamed-copy refusal, got {other:?}"),
+        }
+    }
+
+    /// Create PR refuses a renamed copy of a non-base, non-default origin branch before the
+    /// dispatch (so one test covers every forge), measuring the default from the local
+    /// remote HEAD, else live; a failed live read fails the create with that read's error.
+    #[tokio::test]
+    async fn create_pr_refuses_a_renamed_copy_of_a_non_default_branch() {
+        let (_dir, work, bare, url) = renamed_copy_fixture();
+        let required = "a PR title is required";
+        pin_origin_head(&work, Some("main"));
+        expect_renamed_copy_refusal(
+            pr_create_into(&work, "new", "main").await,
+            "new",
+            "old",
+            "present",
+        );
+        for (head, base) in [
+            ("new", "old"),
+            ("stacked", "main"),
+            ("hotfix", "develop"),
+            ("feat", "main"),
+            ("feat", "develop"),
+            ("forkcopy", "main"),
+        ] {
+            let row = format!("present {head} into {base}");
+            is_local_refusal(pr_create_into(&work, head, base).await, required, &row);
+        }
+        pin_origin_head(&work, None);
+        // (i) the live read answers main, the upstream itself.
+        is_local_refusal(
+            pr_create_into(&work, "feat", "develop").await,
+            required,
+            "(i)",
+        );
+        keep_local_git(
+            std::path::Path::new(&bare),
+            &["symbolic-ref", "HEAD", "refs/heads/develop"],
+        );
+        expect_renamed_copy_refusal(
+            pr_create_into(&work, "feat", "develop").await,
+            "feat",
+            "main",
+            "(i) control",
+        );
+        keep_local_git(
+            std::path::Path::new(&bare),
+            &["symbolic-ref", "HEAD", "refs/heads/main"],
+        );
+        // (ii)
+        expect_renamed_copy_refusal(
+            pr_create_into(&work, "new", "main").await,
+            "new",
+            "old",
+            "(ii)",
+        );
+        // (iii) a failed live read is the create's error, and no push runs after it.
+        let missing = format!("{url}-missing");
+        keep_local_git(
+            std::path::Path::new(&work),
+            &["config", "remote.origin.url", &missing],
+        );
+        let spawned = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = {
+            let spawned = spawned.clone();
+            std::sync::Arc::new(move |args: &[&str]| {
+                spawned
+                    .lock()
+                    .unwrap()
+                    .push(args.first().copied().unwrap_or("").to_string());
+            })
+        };
+        let created = crate::git::runner::GIT_SPAWN_LOG
+            .scope(log, pr_create_into(&work, "new", "main"))
+            .await;
+        match created {
+            Err(AppError::Git { .. }) => {}
+            other => panic!("(iii): expected the live read's git error, got {other:?}"),
+        }
+        let verbs = spawned.lock().unwrap().clone();
+        assert!(!verbs.iter().any(|v| v == "push"), "(iii): {verbs:?}");
+        assert_eq!(
+            verbs.iter().filter(|v| *v == "ls-remote").count(),
+            1,
+            "(iii): {verbs:?}"
+        );
+        keep_local_git(
+            std::path::Path::new(&work),
+            &["config", "remote.origin.url", &url],
+        );
+        // (iv)
+        is_local_refusal(
+            pr_create_into(&work, "fromorigin", "develop").await,
+            required,
+            "(iv) start point",
+        );
+        is_local_refusal(
+            pr_create_into(&work, "feat", "main").await,
+            required,
+            "(iv) into its upstream",
+        );
+        // A head failing branch validation reaches its provider as today, whose own
+        // branch refusal answers word for word.
+        is_local_refusal(
+            pr_create_into(&work, "a~1", "main").await,
+            "invalid branch name: a~1",
+            "invalid head reaches the provider",
+        );
+    }
+
+    /// Lookups add the origin name a head is a renamed copy of, unless it is the base;
+    /// every other shape, and every failed read, looks up the head alone. Network-free.
+    #[tokio::test]
+    async fn pr_lookup_heads_adds_the_renamed_copys_upstream_name() {
+        let (dir, work, _bare, _url) = renamed_copy_fixture();
+        let heads = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        pin_origin_head(&work, Some("main"));
+        assert_eq!(
+            pr_lookup_heads(&work, "new", None).await,
+            heads(&["new", "old"])
+        );
+        assert_eq!(
+            pr_lookup_heads(&work, "new", Some("main")).await,
+            heads(&["new", "old"])
+        );
+        assert_eq!(
+            pr_lookup_heads(&work, "new", Some("old")).await,
+            heads(&["new"])
+        );
+        for head in [
+            "stacked",
+            "hotfix",
+            "feat",
+            "fromorigin",
+            "forkcopy",
+            "nosuch",
+            "a~1",
+        ] {
+            assert_eq!(
+                pr_lookup_heads(&work, head, None).await,
+                heads(&[head]),
+                "{head}"
+            );
+        }
+        let nowhere = dir.path().to_string_lossy().into_owned();
+        assert_eq!(
+            pr_lookup_heads(&nowhere, "new", None).await,
+            heads(&["new"])
+        );
+        // Unmeasured, the default's renamed copy is looked up under the default too.
+        pin_origin_head(&work, None);
+        assert_eq!(
+            pr_lookup_heads(&work, "feat", None).await,
+            heads(&["feat", "main"])
+        );
+    }
+
+    /// The branch lookup reads the names `pr_lookup_heads` adds: a request only the
+    /// renamed copy's origin name has is found. Network-free.
+    #[tokio::test]
+    async fn the_branch_lookup_reads_the_renamed_copys_origin_name() {
+        let (_dir, work, _bare, _url) = renamed_copy_fixture();
+        pin_origin_head(&work, Some("main"));
+        let found = prs_for_branch_heads(&work, "new", |name| async move {
+            Ok(if name == "old" {
+                vec![serde_json::from_value(serde_json::json!({
+                    "number": 7, "url": "u7", "title": "t", "baseRefName": "main",
+                    "headRefName": "old", "isDraft": false, "state": "OPEN",
+                    "isCrossRepository": false,
+                }))
+                .unwrap()]
+            } else {
+                Vec::new()
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(found.iter().map(|p| p.number).collect::<Vec<_>>(), [7]);
+    }
+
+    /// Which forge serves a remote, by URL shape first: a path is no forge, and so is a
+    /// drive spelling on Windows (`remote_host` alone reads `C:/x` as host `c`); an
+    /// ssh-config alias is an unidentified host, and an unknown host is GitHub only with a
+    /// stored gh login.
+    #[test]
+    fn remote_forge_decides_by_url_shape_then_host() {
+        let glab = vec!["git.corp.example".to_string()];
+        let github = |host: &str| RemoteForge::GitHub { host: host.into() };
+        // A drive letter is a path only on Windows; elsewhere git reads ssh to host `c`.
+        let drive = || {
+            if cfg!(windows) {
+                RemoteForge::NoForge
+            } else {
+                github("c")
+            }
+        };
+        let rows: [(&str, Option<&str>, RemoteForge); 24] = [
+            ("git@h:o/r.git", None, RemoteForge::Unidentified("h".into())),
+            ("C@h:o/r.git", None, RemoteForge::Unidentified("h".into())),
+            ("C:/x", Some("c"), drive()),
+            ("C:\\x", Some("c"), drive()),
+            ("c:/Users/me/repo.git", Some("c"), drive()),
+            ("../x.git", None, RemoteForge::NoForge),
+            ("/srv/x.git", None, RemoteForge::NoForge),
+            ("/srv/a:b/x.git", Some("srv"), RemoteForge::NoForge),
+            ("./dir:x", Some("dir"), RemoteForge::NoForge),
+            ("../x:y", Some("x"), RemoteForge::NoForge),
+            ("file:///x", Some("x"), RemoteForge::NoForge),
+            ("file://server/share", Some("server"), RemoteForge::NoForge),
+            ("FILE:///C:/x", Some("c"), RemoteForge::NoForge),
+            (
+                "github-work:org/repo",
+                None,
+                RemoteForge::Unidentified("github-work".into()),
+            ),
+            ("https://github.com/o/r.git", None, github("github.com")),
+            (
+                "git@github.com:o/r.git",
+                Some("github.com"),
+                github("github.com"),
+            ),
+            (
+                "https://gitlab.com/g/p.git",
+                Some("gitlab.com"),
+                RemoteForge::GitLab,
+            ),
+            ("git@bitbucket.org:w/r.git", None, RemoteForge::Bitbucket),
+            (
+                "https://git.corp.example/g/p.git",
+                None,
+                RemoteForge::GitLab,
+            ),
+            ("git@git.corp.example:g/p.git", None, RemoteForge::GitLab),
+            (
+                "https://ghe.corp.example/o/r.git",
+                Some("ghe.corp.example"),
+                github("ghe.corp.example"),
+            ),
+            (
+                "https://ghe.corp.example/o/r.git",
+                None,
+                RemoteForge::Unidentified("ghe.corp.example".into()),
+            ),
+            (
+                "git@host.example:org/repo",
+                None,
+                RemoteForge::Unidentified("host.example".into()),
+            ),
+            (
+                "ssh://git@host.example:2222/org/repo.git",
+                None,
+                RemoteForge::Unidentified("host.example".into()),
+            ),
+        ];
+        for (url, gh, expected) in rows {
+            assert_eq!(remote_forge(url, &glab, gh), expected, "{url} (gh {gh:?})");
+        }
+    }
+
+    fn pull(number: u64, scope: PullScope) -> RemoteBranchPull {
+        RemoteBranchPull {
+            number,
+            title: format!("t{number}"),
+            url: format!("https://example.test/{number}"),
+            is_draft: false,
+            scope,
+            repo: "o/r".into(),
+        }
+    }
+
+    /// A failed scope is always an unchecked entry carrying its error, never an empty list,
+    /// and never hides the other scope's rows.
+    #[test]
+    fn fold_keeps_each_scopes_rows_and_reports_each_failure() {
+        let err = || Err(AppError::Command("offline".into()));
+        let ok = |n: u64, s: PullScope| {
+            Ok(ScopeRead {
+                rows: vec![pull(n, s)],
+                incomplete: None,
+            })
+        };
+        let read = |r: RemoteBranchPulls| match r {
+            RemoteBranchPulls::Checked {
+                provider,
+                items,
+                unchecked,
+            } => (
+                provider,
+                items.iter().map(|i| i.number).collect::<Vec<_>>(),
+                unchecked
+                    .iter()
+                    .map(|u| {
+                        assert!(matches!(&u.error, AppError::Command(m) if m == "offline"));
+                        u.scope
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            other => panic!("expected checked, got {other:?}"),
+        };
+        use PullScope::{Parent, Repository};
+        assert_eq!(
+            read(fold_remote_branch_pulls(
+                "gitlab",
+                ok(1, Repository),
+                ok(2, Parent)
+            )),
+            ("gitlab", vec![1, 2], vec![])
+        );
+        assert_eq!(
+            read(fold_remote_branch_pulls("github", err(), ok(2, Parent))),
+            ("github", vec![2], vec![Repository])
+        );
+        assert_eq!(
+            read(fold_remote_branch_pulls("github", ok(1, Repository), err())),
+            ("github", vec![1], vec![Parent])
+        );
+        assert_eq!(
+            read(fold_remote_branch_pulls("bitbucket", err(), err())),
+            ("bitbucket", vec![], vec![Repository, Parent])
+        );
+        assert_eq!(
+            read(fold_remote_branch_pulls(
+                "github",
+                Ok(ScopeRead::default()),
+                Ok(ScopeRead::default())
+            )),
+            ("github", vec![], vec![])
+        );
+        // An incomplete read keeps its rows AND leaves its scope unchecked.
+        let partial = |n: u64, s: PullScope| {
+            Ok(ScopeRead {
+                rows: vec![pull(n, s)],
+                incomplete: Some(AppError::Command("offline".into())),
+            })
+        };
+        assert_eq!(
+            read(fold_remote_branch_pulls(
+                "gitlab",
+                partial(1, Repository),
+                ok(2, Parent)
+            )),
+            ("gitlab", vec![1, 2], vec![Repository])
+        );
+        assert_eq!(
+            read(fold_remote_branch_pulls(
+                "github",
+                ok(1, Repository),
+                partial(2, Parent)
+            )),
+            ("github", vec![1, 2], vec![Parent])
+        );
+    }
+
+    /// A read whose raw row count reaches the page it asked for keeps its rows and is
+    /// unchecked, on every forge's page size; a short page is complete.
+    #[test]
+    fn a_full_page_leaves_the_scope_unchecked_beside_its_rows() {
+        let pages = [
+            ("github", crate::github::pr::LOOKUP_PAGE, 100),
+            ("gitlab", gitlab::SOURCE_BRANCH_PAGE, 100),
+            ("bitbucket", bitbucket::SOURCE_BRANCH_PAGELEN, 50),
+        ];
+        for (provider, page, expected) in pages {
+            assert_eq!(page, expected, "{provider}");
+            let short = ScopeRead::paged(vec![pull(1, PullScope::Repository)], page - 1, page);
+            assert!(short.incomplete.is_none(), "{provider}");
+            let full = ScopeRead::paged(vec![pull(1, PullScope::Repository)], page, page);
+            match fold_remote_branch_pulls(provider, Ok(full), Ok(ScopeRead::default())) {
+                RemoteBranchPulls::Checked {
+                    items, unchecked, ..
+                } => {
+                    assert_eq!(items, [pull(1, PullScope::Repository)], "{provider}");
+                    assert_eq!(unchecked.len(), 1, "{provider}");
+                    assert_eq!(unchecked[0].scope, PullScope::Repository, "{provider}");
+                    let want = format!("GitDesktop read only the first {expected} matches.");
+                    assert!(
+                        matches!(&unchecked[0].error, AppError::Command(m) if *m == want),
+                        "{provider}: {:?}",
+                        unchecked[0].error
+                    );
+                }
+                other => panic!("{provider}: expected checked, got {other:?}"),
+            }
+        }
+        // Rows that wouldn't parse outrank a full page, and none dropped changes nothing.
+        let unreadable = || AppError::Gh("unreadable".into());
+        let both = ScopeRead::paged(Vec::new(), 100, 100).dropping(1, unreadable);
+        assert!(matches!(both.incomplete, Some(AppError::Gh(m)) if m == "unreadable"));
+        let none = ScopeRead::paged(Vec::new(), 3, 100).dropping(0, unreadable);
+        assert!(none.incomplete.is_none());
+    }
+
+    /// GitLab's repository scope: a full page of other repositories' rows keeps no item
+    /// and is incomplete, since the page is judged on the raw rows.
+    #[test]
+    fn a_full_repository_page_of_forks_is_incomplete() {
+        let fork_rows = |n: usize| -> Vec<crate::github::pr::PrInfo> {
+            (1..=n as u64)
+                .map(|number| {
+                    serde_json::from_value(serde_json::json!({
+                        "number": number, "url": "u", "title": "t", "baseRefName": "main",
+                        "headRefName": "feat", "isDraft": false, "state": "OPEN",
+                        "isCrossRepository": true,
+                    }))
+                    .unwrap()
+                })
+                .collect()
+        };
+        let page = gitlab::SOURCE_BRANCH_PAGE;
+        let read = repository_scope_read(fork_rows(page), "feat", "o/r", page);
+        assert!(read.rows.is_empty(), "gitlab");
+        let want = format!("GitDesktop read only the first {page} matches.");
+        assert!(
+            matches!(&read.incomplete, Some(AppError::Command(m)) if *m == want),
+            "gitlab: {:?}",
+            read.incomplete
+        );
+        let short = repository_scope_read(fork_rows(page - 1), "feat", "o/r", page);
+        assert!(short.incomplete.is_none(), "gitlab");
+    }
+
+    /// The second scope of a failed read carries the same kind and message.
+    #[test]
+    fn twin_read_error_keeps_the_kind_and_message() {
+        let twins = [
+            (AppError::GhNotFound, "ghNotFound"),
+            (AppError::Gh("no".into()), "gh"),
+            (AppError::Timeout(30), "timeout"),
+            (AppError::Command("c".into()), "command"),
+            (AppError::InvalidArgument("i".into()), "invalidArgument"),
+        ];
+        for (error, kind) in twins {
+            let twin = twin_read_error(&error);
+            assert_eq!(twin.to_string(), error.to_string());
+            let v = serde_json::to_value(&twin).unwrap();
+            assert_eq!(v["kind"], kind, "{error:?}");
+        }
+        let io = AppError::Io(std::io::Error::other("disk"));
+        assert!(matches!(twin_read_error(&io), AppError::Gh(m) if m == io.to_string()));
+    }
+
+    /// A request found under both head names is listed once, at its first sighting.
+    #[test]
+    fn unique_by_number_keeps_the_first_sighting() {
+        let row = |number: u64, title: &str| -> crate::github::pr::PrInfo {
+            serde_json::from_value(serde_json::json!({
+                "number": number, "url": format!("u{number}"), "title": title,
+                "baseRefName": "main", "headRefName": "feat", "isDraft": false,
+                "state": "OPEN", "isCrossRepository": false,
+            }))
+            .unwrap()
+        };
+        let rows = unique_by_number(vec![
+            vec![row(1, "a"), row(2, "first")],
+            vec![row(2, "second"), row(3, "c")],
+        ]);
+        let seen: Vec<(u64, &str)> = rows.iter().map(|r| (r.number, r.title.as_str())).collect();
+        assert_eq!(seen, [(1, "a"), (2, "first"), (3, "c")]);
+        assert!(unique_by_number(Vec::new()).is_empty());
+    }
+
+    /// A renamed copy's lookup asks under both names: one name's rows survive the other
+    /// name's failed read; no rows and a failure is the failure; nothing found is none.
+    #[tokio::test]
+    async fn the_head_lookup_keeps_one_names_rows_over_the_others_failure() {
+        let row = |number: u64, head: &str| -> crate::github::pr::PrInfo {
+            serde_json::from_value(serde_json::json!({
+                "number": number, "url": format!("u{number}"), "title": "t",
+                "baseRefName": "main", "headRefName": head, "isDraft": false,
+                "state": "OPEN", "isCrossRepository": false,
+            }))
+            .unwrap()
+        };
+        let heads = || vec!["new".to_string(), "old".to_string()];
+        let numbers = |r: AppResult<Vec<crate::github::pr::PrInfo>>| {
+            r.map(|rows| rows.iter().map(|p| p.number).collect::<Vec<_>>())
+        };
+        // Only the old name has the request.
+        let only_old = prs_for_heads(heads(), |name| async move {
+            Ok(if name == "old" {
+                vec![row(7, "old")]
+            } else {
+                Vec::new()
+            })
+        })
+        .await;
+        assert_eq!(numbers(only_old).unwrap(), [7]);
+        // The new name's read fails; the old name's row still comes back.
+        let new_fails = prs_for_heads(heads(), |name| async move {
+            if name == "new" {
+                Err(AppError::Gh("boom".into()))
+            } else {
+                Ok(vec![row(7, "old")])
+            }
+        })
+        .await;
+        assert_eq!(numbers(new_fails).unwrap(), [7]);
+        // No rows anywhere and one failure: the failure, never "none open".
+        let failed = prs_for_heads(heads(), |name| async move {
+            if name == "old" {
+                Err(AppError::Gh("boom".into()))
+            } else {
+                Ok(Vec::new())
+            }
+        })
+        .await;
+        assert!(matches!(failed, Err(AppError::Gh(m)) if m == "boom"));
+        let none = prs_for_heads(heads(), |_| async { Ok(Vec::new()) }).await;
+        assert!(none.unwrap().is_empty());
+        // Both names are asked, in order.
+        let asked = std::sync::Mutex::new(Vec::new());
+        let _ = prs_for_heads(heads(), |name| {
+            asked.lock().unwrap().push(name);
+            async { Ok(Vec::new()) }
+        })
+        .await;
+        assert_eq!(*asked.lock().unwrap(), ["new", "old"]);
+    }
+
+    /// github.com reads without a stored login (an env token signs gh in there); any other
+    /// host needs one.
+    #[test]
+    fn the_lookup_reads_github_com_without_a_stored_login() {
+        assert_eq!(lookup_host(None, "github.com"), Some("github.com"));
+        assert_eq!(
+            lookup_host(Some("GitHub.com"), "github.com"),
+            Some("GitHub.com")
+        );
+        assert_eq!(lookup_host(Some("ghe.test"), "ghe.test"), Some("ghe.test"));
+        assert_eq!(lookup_host(None, "ghe.test"), None);
+        assert_eq!(lookup_host(None, "github.com.evil.test"), None);
+        assert_eq!(lookup_host(None, ""), None);
+    }
+
+    /// A gh that isn't installed, met at the repository read, is `GhNotFound` on both
+    /// scopes of the answer.
+    #[test]
+    fn a_missing_gh_is_gh_not_found_on_both_scopes() {
+        let (repository, parent) = failed_read_scopes(AppError::GhNotFound);
+        let RemoteBranchPulls::Checked {
+            items, unchecked, ..
+        } = fold_remote_branch_pulls("github", repository, parent)
+        else {
+            panic!("a folded read is checked");
+        };
+        assert!(items.is_empty());
+        let scopes: Vec<PullScope> = unchecked
+            .iter()
+            .map(|u| {
+                assert!(matches!(u.error, AppError::GhNotFound), "{:?}", u.error);
+                u.scope
+            })
+            .collect();
+        assert_eq!(scopes, [PullScope::Repository, PullScope::Parent]);
+    }
+
+    /// The repository scope keeps only requests headed on the branch exactly from this
+    /// repository: a fork's same-named head and another head are dropped.
+    #[test]
+    fn repository_scope_rows_drop_forks_and_other_heads() {
+        let row = |number: u64, head: &str, cross: bool| -> crate::github::pr::PrInfo {
+            serde_json::from_value(serde_json::json!({
+                "number": number, "url": format!("u{number}"), "title": format!("t{number}"),
+                "baseRefName": "main", "headRefName": head, "isDraft": number == 4,
+                "state": "OPEN", "isCrossRepository": cross,
+            }))
+            .unwrap()
+        };
+        let rows = vec![
+            row(1, "feat", false),
+            row(2, "feat", true),
+            row(3, "Feat", false),
+            row(4, "feat", false),
+            row(5, "feat/x", false),
+        ];
+        assert_eq!(
+            repository_scope_rows(rows, "feat", "o/r"),
+            vec![
+                RemoteBranchPull {
+                    number: 1,
+                    title: "t1".into(),
+                    url: "u1".into(),
+                    is_draft: false,
+                    scope: PullScope::Repository,
+                    repo: "o/r".into(),
+                },
+                RemoteBranchPull {
+                    number: 4,
+                    title: "t4".into(),
+                    url: "u4".into(),
+                    is_draft: true,
+                    scope: PullScope::Repository,
+                    repo: "o/r".into(),
+                },
+            ]
+        );
+    }
+
+    /// The wire shape the TS mirror (`types/remote-rename.ts`) reads, key for key.
+    #[test]
+    fn remote_branch_pulls_wire_shape() {
+        let v = serde_json::to_value(RemoteBranchPulls::NoForge).unwrap();
+        assert_eq!(v, serde_json::json!({"status": "noForge"}));
+        let v = serde_json::to_value(RemoteBranchPulls::Unidentified {
+            host: "github-work".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"status": "unidentified", "host": "github-work"})
+        );
+        let mut draft = pull(9, PullScope::Parent);
+        draft.is_draft = true;
+        let v = serde_json::to_value(RemoteBranchPulls::Checked {
+            provider: "gitlab",
+            items: vec![draft],
+            unchecked: vec![UncheckedScope {
+                scope: PullScope::Repository,
+                error: AppError::Command("x".into()),
+            }],
+        })
+        .unwrap();
+        let keys = |o: &serde_json::Value| {
+            let mut k: Vec<String> = o.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&v), ["items", "provider", "status", "unchecked"]);
+        assert_eq!(v["status"], "checked");
+        assert_eq!(v["provider"], "gitlab");
+        let item = &v["items"][0];
+        assert_eq!(
+            keys(item),
+            ["isDraft", "number", "repo", "scope", "title", "url"]
+        );
+        assert!(item.get("is_draft").is_none());
+        assert_eq!(item["isDraft"], true);
+        assert_eq!(item["scope"], "parent");
+        assert_eq!(item["number"], 9);
+        let unchecked = &v["unchecked"][0];
+        assert_eq!(keys(unchecked), ["error", "scope"]);
+        assert_eq!(unchecked["scope"], "repository");
+        assert_eq!(unchecked["error"]["kind"], "command");
+    }
+
+    /// The command's own refusals and the hostless remotes answer before any forge is
+    /// asked: a `file://` origin and a path remote are no forge.
+    #[tokio::test]
+    async fn a_hostless_remote_is_no_forge_without_any_forge_read() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-forge-remote-pulls-")
+            .tempdir()
+            .unwrap();
+        let p = dir.path();
+        keep_local_git(p, &["init", "-q", "-b", "main"]);
+        let bare = p.join("x.git").to_string_lossy().replace('\\', "/");
+        let file_url = format!("file:///{}", bare.trim_start_matches('/'));
+        keep_local_git(p, &["remote", "add", "origin", &file_url]);
+        keep_local_git(p, &["remote", "add", "local", &bare]);
+        let repo = p.to_string_lossy().into_owned();
+        for remote in ["origin", "local"] {
+            assert!(
+                matches!(
+                    open_prs_on_remote_branch(&repo, remote, "feat").await,
+                    Ok(RemoteBranchPulls::NoForge)
+                ),
+                "{remote}"
+            );
+        }
+        assert!(matches!(
+            open_prs_on_remote_branch(&repo, "origin", "-feat").await,
+            Err(AppError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            open_prs_on_remote_branch(&repo, "-x", "feat").await,
+            Err(AppError::InvalidArgument(_))
+        ));
+        assert!(open_prs_on_remote_branch(&repo, "nosuch", "feat")
+            .await
+            .is_err());
+    }
+
+    /// The lookup reads the remote's URL uncached: a `set-url` made after a cached read
+    /// is the URL it answers for. Network-free: a non-origin gitlab.com remote makes no
+    /// forge call.
+    #[tokio::test]
+    async fn the_lookup_reads_the_remote_url_uncached() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-forge-remote-pulls-")
+            .tempdir()
+            .unwrap();
+        let p = dir.path();
+        keep_local_git(p, &["init", "-q", "-b", "main"]);
+        keep_local_git(p, &["remote", "add", "fork", "../x.git"]);
+        let repo = p.to_string_lossy().into_owned();
+        let cached = crate::git::remote::git_remote_url(repo.clone(), "fork".into())
+            .await
+            .unwrap();
+        assert_eq!(cached, "../x.git");
+        keep_local_git(p, &["remote", "set-url", "fork", "https://gitlab.com/o/r.git"]);
+        let read = open_prs_on_remote_branch(&repo, "fork", "feat").await;
+        assert!(
+            matches!(read, Ok(RemoteBranchPulls::Checked { provider: "gitlab", .. })),
+            "{read:?}"
+        );
+    }
+
+    /// The lookup re-seeds the cached URL it read, so origin's later cached reads (the
+    /// GitLab and Bitbucket arms' project and slug) answer for the same fresh URL.
+    /// Network-free: a path is no forge.
+    #[tokio::test]
+    async fn the_lookup_reseeds_the_cached_remote_url() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-forge-remote-pulls-")
+            .tempdir()
+            .unwrap();
+        let p = dir.path();
+        keep_local_git(p, &["init", "-q", "-b", "main"]);
+        keep_local_git(p, &["remote", "add", "origin", "../a.git"]);
+        let repo = p.to_string_lossy().into_owned();
+        let cached = crate::git::remote::git_remote_url(repo.clone(), "origin".into())
+            .await
+            .unwrap();
+        assert_eq!(cached, "../a.git");
+        keep_local_git(p, &["remote", "set-url", "origin", "../b.git"]);
+        let read = open_prs_on_remote_branch(&repo, "origin", "feat").await;
+        assert!(matches!(read, Ok(RemoteBranchPulls::NoForge)), "{read:?}");
+        let after = crate::git::remote::git_remote_url(repo.clone(), "origin".into())
+            .await
+            .unwrap();
+        assert_eq!(after, "../b.git");
+    }
+
+    /// A non-origin GitLab or Bitbucket remote answers both scopes unchecked with the
+    /// origin-only error. Their canonical hosts skip the glab host read and the gh login
+    /// probe, and the arm makes no forge call, so nothing leaves the machine.
+    #[tokio::test]
+    async fn a_non_origin_gitlab_or_bitbucket_remote_is_origin_only() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-forge-remote-pulls-")
+            .tempdir()
+            .unwrap();
+        let p = dir.path();
+        keep_local_git(p, &["init", "-q", "-b", "main"]);
+        keep_local_git(p, &["remote", "add", "fork", "https://gitlab.com/o/r.git"]);
+        keep_local_git(p, &["remote", "add", "bb", "https://bitbucket.org/o/r.git"]);
+        let repo = p.to_string_lossy().into_owned();
+        for (remote, provider, noun) in [
+            ("fork", "gitlab", "merge requests"),
+            ("bb", "bitbucket", "pull requests"),
+        ] {
+            match open_prs_on_remote_branch(&repo, remote, "feat").await {
+                Ok(RemoteBranchPulls::Checked {
+                    provider: got,
+                    items,
+                    unchecked,
+                }) => {
+                    assert_eq!(got, provider);
+                    assert!(items.is_empty(), "{remote}");
+                    let want = format!("GitDesktop looks up {noun} on origin only.");
+                    let scopes: Vec<PullScope> = unchecked
+                        .iter()
+                        .map(|u| {
+                            assert!(
+                                matches!(&u.error, AppError::Command(m) if *m == want),
+                                "{remote}: {:?}",
+                                u.error
+                            );
+                            u.scope
+                        })
+                        .collect();
+                    assert_eq!(scopes, [PullScope::Repository, PullScope::Parent]);
+                }
+                other => panic!("{remote}: expected checked, got {other:?}"),
+            }
+        }
+    }
+
+    /// The repository publish holds HEAD's branch from before its refusal until the
+    /// provider call returns, so a rename or delete of it is `Busy` meanwhile: sampled
+    /// before the provider call and again after it returned.
+    #[tokio::test]
+    async fn the_repository_publish_holds_its_branch_through_the_provider_call() {
+        let (_dir, repo) = keep_local_hostless_origin_repo();
+        let busy = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let hook: publish_hook::Hook = {
+            let (repo, busy) = (repo.clone(), busy.clone());
+            std::sync::Arc::new(move || {
+                let (repo, busy) = (repo.clone(), busy.clone());
+                Box::pin(async move {
+                    let held = crate::git::branches::refuse_while_publishing(&repo, "feat/x").await;
+                    busy.lock().unwrap().push(matches!(
+                        held,
+                        Err(AppError::Busy { ref holder }) if holder == "a repository publish"
+                    ));
+                })
+            })
+        };
+        let result = publish_hook::PUBLISH_HELD_HOOK
+            .scope(hook, publish_with_empty_name(&repo))
+            .await;
+        is_local_refusal(result, "a repository name is required", "after the hook");
+        assert_eq!(
+            *busy.lock().unwrap(),
+            [true, true],
+            "the branch must be held before the provider call and until it returns"
+        );
+        crate::git::branches::refuse_while_publishing(&repo, "feat/x")
+            .await
+            .expect("the hold is released once the publish returns");
     }
 
     /// Each write kind's line 1 is the approved sentence, word for word; line 2 names the

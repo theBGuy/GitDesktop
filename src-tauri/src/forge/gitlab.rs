@@ -1942,7 +1942,7 @@ pub async fn prs_for_branch(repo_path: &str, head: &str) -> AppResult<Vec<PrInfo
     }
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!(
-        "projects/{enc}/merge_requests?source_branch={}&state=opened&per_page=100",
+        "projects/{enc}/merge_requests?source_branch={}&state=opened&per_page={SOURCE_BRANCH_PAGE}",
         encode_query_value(head)
     );
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
@@ -1954,6 +1954,314 @@ pub async fn prs_for_branch(repo_path: &str, head: &str) -> AppResult<Vec<PrInfo
             )
         })?;
     Ok(mrs.into_iter().map(from_glab_mr).collect())
+}
+
+/// The fork fields of `projects/<origin>`: this project's id, and the parent embed GitLab
+/// sends for a fork (null otherwise), read loosely so its own shape is checked below.
+#[derive(Deserialize)]
+struct GlabForkIds {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    forked_from_project: Option<serde_json::Value>,
+    /// Sent only for a fork, which keeps it when the parent embed is withheld from an
+    /// account that can't read the parent. Only its presence is read, so any shape parses.
+    #[serde(default)]
+    mr_default_target_self: Option<serde_json::Value>,
+}
+
+/// An MR row of the parent-scope read, every field tolerant so one odd row is dropped
+/// alone; a row without an `iid` or a `source_project_id` can't be shown as this fork's.
+#[derive(Deserialize)]
+struct GlabParentMr {
+    #[serde(default)]
+    iid: Option<u64>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    web_url: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    title: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    draft: bool,
+    #[serde(default, deserialize_with = "null_to_default")]
+    source_branch: String,
+    #[serde(default)]
+    source_project_id: Option<u64>,
+}
+
+/// A fork's `(own id, parent id, parent full path)`: `Ok(None)` when origin is not a fork, an
+/// `Err` when this project's id or the parent's id or path is missing, or when a fork's
+/// parent embed is absent or null (a parent this account can't read). Pure.
+fn gl_fork_parent(project: &GlabForkIds) -> AppResult<Option<(u64, u64, String)>> {
+    let Some(parent) = project
+        .forked_from_project
+        .as_ref()
+        .filter(|v| !v.is_null())
+    else {
+        if project
+            .mr_default_target_self
+            .as_ref()
+            .is_some_and(|v| !v.is_null())
+        {
+            return Err(AppError::Glab(
+                "Couldn't read which project this fork was forked from.".into(),
+            ));
+        }
+        return Ok(None);
+    };
+    let parent_id = parent.get("id").and_then(serde_json::Value::as_u64);
+    let parent_path = parent
+        .get("path_with_namespace")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty());
+    match (project.id, parent_id, parent_path) {
+        (Some(own), Some(id), Some(path)) => Ok(Some((own, id, path.to_string()))),
+        _ => Err(AppError::Glab(
+            "Couldn't read which project this fork was forked from.".into(),
+        )),
+    }
+}
+
+/// Rows per page of the `source_branch` merge request reads.
+pub(crate) const SOURCE_BRANCH_PAGE: usize = 100;
+
+/// Open MRs in the project origin was forked from whose source branch is `head` on THIS
+/// fork. Not a fork: none.
+pub(crate) async fn parent_open_mrs(
+    repo_path: &str,
+    head: &str,
+) -> AppResult<crate::forge::ScopeRead> {
+    if head.is_empty() || head.starts_with('-') {
+        return Err(AppError::InvalidArgument(format!("invalid branch: {head}")));
+    }
+    let enc = encode_project(&project_path(repo_path).await?);
+    let out = run_glab(
+        Some(repo_path),
+        &["api", &format!("projects/{enc}")],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await?;
+    let project: GlabForkIds = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gl_unreadable(
+            "the project",
+            format!("could not parse the GitLab project: {e}"),
+        )
+    })?;
+    let Some((own_id, parent_id, parent_path)) = gl_fork_parent(&project)? else {
+        return Ok(crate::forge::ScopeRead::default());
+    };
+    let endpoint = format!(
+        "projects/{parent_id}/merge_requests?source_branch={}&state=opened&per_page={SOURCE_BRANCH_PAGE}",
+        encode_query_value(head)
+    );
+    let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gl_unreadable(
+            "merge requests",
+            format!("could not parse GitLab merge requests: {e}"),
+        )
+    })?;
+    Ok(parent_scope_read(rows, own_id, head, &parent_path))
+}
+
+/// The parent scope from the rows one read answered: incomplete when the RAW page filled
+/// or a row was dropped as unreadable. Pure.
+fn parent_scope_read(
+    rows: Vec<serde_json::Value>,
+    own_id: u64,
+    head: &str,
+    parent_path: &str,
+) -> crate::forge::ScopeRead {
+    let raw = rows.len();
+    let (kept, dropped) = fork_mr_rows(rows, own_id, head, parent_path);
+    crate::forge::ScopeRead::paged(kept, raw, SOURCE_BRANCH_PAGE).dropping(dropped, || {
+        gl_unreadable(
+            "merge requests",
+            format!("could not parse {dropped} of the GitLab merge request rows"),
+        )
+    })
+}
+
+/// The parent scope's rows: headed on `head` and sourced from the fork whose project id is
+/// `own_id`, so another fork's same-named branch never counts. Also returns how many rows
+/// wouldn't parse, carried no `source_project_id` key, or were this fork's without an
+/// `iid` or a source branch. A null `source_project_id` is skipped uncounted: a deleted
+/// source project's. Pure.
+fn fork_mr_rows(
+    rows: Vec<serde_json::Value>,
+    own_id: u64,
+    head: &str,
+    parent_path: &str,
+) -> (Vec<crate::forge::RemoteBranchPull>, usize) {
+    let mut dropped = 0;
+    let mut kept = Vec::new();
+    for row in rows {
+        if row.get("source_project_id").is_none() {
+            dropped += 1;
+            continue;
+        }
+        let Ok(m) = serde_json::from_value::<GlabParentMr>(row) else {
+            dropped += 1;
+            continue;
+        };
+        if m.source_project_id != Some(own_id) {
+            continue;
+        }
+        if m.source_branch.is_empty() {
+            dropped += 1;
+            continue;
+        }
+        if m.source_branch != head {
+            continue;
+        }
+        let Some(number) = m.iid else {
+            dropped += 1;
+            continue;
+        };
+        kept.push(crate::forge::RemoteBranchPull {
+            number,
+            title: m.title,
+            url: m.web_url,
+            is_draft: m.draft,
+            scope: crate::forge::PullScope::Parent,
+            repo: parent_path.to_string(),
+        });
+    }
+    (kept, dropped)
+}
+
+#[cfg(test)]
+mod remote_branch_pull_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn parent_of(body: serde_json::Value) -> AppResult<Option<(u64, u64, String)>> {
+        gl_fork_parent(&serde_json::from_value(body).unwrap())
+    }
+
+    /// Not a fork is none; a fork missing its own id, the parent's id or the parent's path
+    /// is an `Err`, so the scope reads unchecked, never empty.
+    #[test]
+    fn gl_fork_parent_is_unknown_without_ids() {
+        assert_eq!(
+            parent_of(
+                json!({"id": 7, "forked_from_project": {"id": 3, "path_with_namespace": "up/proj"}})
+            )
+            .unwrap(),
+            Some((7, 3, "up/proj".to_string()))
+        );
+        assert_eq!(parent_of(json!({"id": 7})).unwrap(), None);
+        assert_eq!(
+            parent_of(json!({"id": 7, "forked_from_project": null})).unwrap(),
+            None
+        );
+        for body in [
+            json!({"id": 7, "forked_from_project": {"path_with_namespace": "up/proj"}}),
+            json!({"id": 7, "forked_from_project": {"id": "3", "path_with_namespace": "up/proj"}}),
+            json!({"id": 7, "forked_from_project": {"id": 3}}),
+            json!({"id": 7, "forked_from_project": {"id": 3, "path_with_namespace": ""}}),
+            json!({"forked_from_project": {"id": 3, "path_with_namespace": "up/proj"}}),
+            json!({"id": 7, "forked_from_project": {}}),
+        ] {
+            assert!(
+                matches!(parent_of(body.clone()), Err(AppError::Glab(_))),
+                "{body}"
+            );
+        }
+    }
+
+    /// GitLab withholds the parent embed from an account that can't read the parent but
+    /// still sends the fork-only `mr_default_target_self`, so that shape is unknown, never
+    /// "not a fork"; with neither key the project is not a fork.
+    #[test]
+    fn a_fork_with_an_unreadable_parent_is_unknown() {
+        for body in [
+            json!({"id": 7, "mr_default_target_self": false}),
+            json!({"id": 7, "mr_default_target_self": true, "forked_from_project": null}),
+            json!({"id": 7, "mr_default_target_self": "false"}),
+            json!({"id": 7, "mr_default_target_self": 0}),
+        ] {
+            assert!(
+                matches!(parent_of(body.clone()), Err(AppError::Glab(_))),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            parent_of(json!({"id": 7, "mr_default_target_self": false,
+                "forked_from_project": {"id": 3, "path_with_namespace": "up/proj"}}))
+            .unwrap(),
+            Some((7, 3, "up/proj".to_string()))
+        );
+        assert_eq!(parent_of(json!({"id": 7})).unwrap(), None);
+        assert_eq!(
+            parent_of(json!({"id": 7, "mr_default_target_self": null})).unwrap(),
+            None
+        );
+    }
+
+    /// The parent scope keeps only this fork's rows on the branch; another fork's
+    /// same-named branch, another branch and a row without a source project are skipped,
+    /// and a row that won't parse, or is this fork's without an `iid` or a source branch,
+    /// is counted.
+    #[test]
+    fn fork_mr_rows_keep_only_this_forks_rows() {
+        let row = |iid: u64, source: serde_json::Value, branch: &str| {
+            json!({"iid": iid, "web_url": format!("https://gitlab.com/up/proj/-/merge_requests/{iid}"),
+                "title": format!("t{iid}"), "draft": iid == 2, "source_branch": branch,
+                "source_project_id": source})
+        };
+        let rows = vec![
+            row(1, json!(7), "feat"),
+            row(2, json!(7), "feat"),
+            row(3, json!(8), "feat"),
+            row(4, json!(7), "other"),
+            row(5, json!(null), "feat"),
+            json!({"web_url": "x", "source_branch": "feat", "source_project_id": 7}),
+            json!({"iid": "6", "source_branch": "feat", "source_project_id": 7}),
+            json!("not a row"),
+            row(7, json!(7), ""),
+            json!({"iid": 8, "source_branch": null, "source_project_id": 7}),
+            json!({"iid": 9, "source_project_id": 7}),
+            json!({"iid": 10, "source_project_id": 8}),
+            row(11, json!(null), ""),
+            json!({"iid": 12, "web_url": "x", "source_branch": "feat"}),
+        ];
+        let (kept, dropped) = fork_mr_rows(rows, 7, "feat", "up/proj");
+        let numbers: Vec<u64> = kept.iter().map(|r| r.number).collect();
+        assert_eq!(numbers, [1, 2]);
+        // No iid, an unparsable iid, not a row, three of this fork's without a branch, and
+        // a row with no `source_project_id` key (a null one is a deleted source: skipped).
+        assert_eq!(dropped, 7);
+        let (_, clean) = fork_mr_rows(vec![row(1, json!(7), "feat")], 7, "feat", "up/proj");
+        assert_eq!(clean, 0);
+        assert!(kept
+            .iter()
+            .all(|r| r.scope == crate::forge::PullScope::Parent && r.repo == "up/proj"));
+        assert!(!kept[0].is_draft && kept[1].is_draft);
+        assert_eq!(kept[0].url, "https://gitlab.com/up/proj/-/merge_requests/1");
+    }
+
+    /// A full page of other forks' rows keeps no item and leaves the scope incomplete: the
+    /// page is judged on the raw rows.
+    #[test]
+    fn a_full_parent_page_of_other_forks_is_incomplete() {
+        let rows = |n: usize| -> Vec<serde_json::Value> {
+            (1..=n as u64)
+                .map(|iid| json!({"iid": iid, "source_branch": "feat", "source_project_id": 8}))
+                .collect()
+        };
+        let read = parent_scope_read(rows(SOURCE_BRANCH_PAGE), 7, "feat", "up/proj");
+        assert!(read.rows.is_empty());
+        assert!(
+            matches!(&read.incomplete, Some(AppError::Command(m))
+                if m == "GitDesktop read only the first 100 matches."),
+            "{:?}",
+            read.incomplete
+        );
+        let short = parent_scope_read(rows(SOURCE_BRANCH_PAGE - 1), 7, "feat", "up/proj");
+        assert!(short.incomplete.is_none());
+        let unreadable = parent_scope_read(vec![json!(42)], 7, "feat", "up/proj");
+        assert!(matches!(unreadable.incomplete, Some(AppError::Glab(_))));
+    }
 }
 
 /// Map a GitLab GraphQL `PipelineStatusEnum` (the MR head pipeline's status) onto the

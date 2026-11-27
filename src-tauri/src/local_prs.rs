@@ -497,7 +497,9 @@ pub async fn add_comment(repo: &str, id: &str, body: &str) -> AppResult<Value> {
 
 /// Set the status of the PR with `id` under `repo` to `"open"` or `"closed"`.
 /// `"merged"` is rejected here — merging is a git operation the MCP server must never
-/// perform (it happens in GitDesktop). Returns the updated record.
+/// perform (it happens in GitDesktop). A close stamps `closedAt` only on the transition
+/// (an already-closed PR keeps its date, or its absence); a reopen clears it. Returns the
+/// updated record.
 pub async fn set_status(repo: &str, id: &str, status: &str) -> AppResult<Value> {
     if status != "open" && status != "closed" {
         return Err(AppError::Command(format!(
@@ -506,6 +508,13 @@ pub async fn set_status(repo: &str, id: &str, status: &str) -> AppResult<Value> 
     }
     let status = status.to_string();
     mutate_pr(repo, id, move |pr| {
+        if status == "closed" {
+            if pr.get("status").and_then(Value::as_str) != Some("closed") {
+                pr.insert("closedAt".to_string(), Value::String(now_iso()));
+            }
+        } else {
+            pr.remove("closedAt");
+        }
         pr.insert("status".to_string(), Value::String(status));
         Ok(())
     })
@@ -725,6 +734,65 @@ pub(crate) mod tests {
         assert_eq!(back["title"], "Title");
         assert_eq!(back["comments"][0]["body"], "looks good");
         assert_eq!(list(repo).unwrap().len(), 1);
+    }
+
+    // The serializing guard spans the awaits, as in the round-trip test above.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn set_status_stamps_and_clears_closed_at() {
+        let _serialized = store_dir_lock();
+        let (tmp, _unused) = tmp_store();
+        let _override = StoreDirOverride::set(tmp.path());
+        let repo = "C:/local-prs/closed-at/.git";
+        let created = create(repo, "Title", "", "main", "feature").await.unwrap();
+        let id = created["id"].as_str().unwrap().to_string();
+        assert!(created.get("closedAt").is_none());
+
+        let closed = set_status(repo, &id, "closed").await.unwrap();
+        let stamp = closed["closedAt"].as_str().expect("closedAt stamped");
+        assert_eq!(stamp.len(), "2026-06-20T20:45:33.666Z".len());
+        assert!(stamp.ends_with('Z'));
+        assert_eq!(get(repo, &id).unwrap()["closedAt"], stamp);
+
+        let reopened = set_status(repo, &id, "open").await.unwrap();
+        assert_eq!(reopened["status"], "open");
+        assert!(get(repo, &id).unwrap().get("closedAt").is_none());
+    }
+
+    // The serializing guard spans the awaits, as in the round-trip test above.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn closing_a_closed_pr_keeps_its_closed_at() {
+        let _serialized = store_dir_lock();
+        let (tmp, _unused) = tmp_store();
+        let _override = StoreDirOverride::set(tmp.path());
+        let repo = "C:/local-prs/closed-twice/.git";
+        const DATED: &str = "2026-01-01T00:00:00.000Z";
+
+        let dated = create(repo, "Dated", "", "main", "a").await.unwrap();
+        let dated = dated["id"].as_str().unwrap().to_string();
+        mutate_pr(repo, &dated, |pr| {
+            pr.insert("status".to_string(), json!("closed"));
+            pr.insert("closedAt".to_string(), json!(DATED));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        set_status(repo, &dated, "closed").await.unwrap();
+        assert_eq!(get(repo, &dated).unwrap()["closedAt"], DATED);
+
+        let undated = create(repo, "Undated", "", "main", "b").await.unwrap();
+        let undated = undated["id"].as_str().unwrap().to_string();
+        mutate_pr(repo, &undated, |pr| {
+            pr.insert("status".to_string(), json!("closed"));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        set_status(repo, &undated, "closed").await.unwrap();
+        let back = get(repo, &undated).unwrap();
+        assert_eq!(back["status"], "closed");
+        assert!(back.get("closedAt").is_none());
     }
 
     #[test]

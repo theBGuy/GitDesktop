@@ -180,11 +180,24 @@ export const gitPullRebaseDecidedAutostash = (
 export type PushGuard =
   | "leaseAndIncludes"
   | "leaseOnlyOldGit"
-  | "leaseOnlyNoReflog";
+  | "leaseOnlyNoReflog"
+  | "leasePinnedNoTrackingReflog";
+
+/** What the starter pinned and measured. `expectedBranch` is the branch HEAD
+ *  must still be on (`"HEAD"` = detached), checked before every spawn;
+ *  `expectedHead` (needs `expectedBranch`) is the full commit id HEAD must still
+ *  be at; `creates` = the starter found the destination absent, so the backend
+ *  leases the push to create-only. */
+export interface PushPins {
+  expectedBranch?: string;
+  expectedHead?: string;
+  creates?: boolean;
+}
 
 /** `remoteBranch` names the DESTINATION branch when it differs from the local
  *  one (pushing back to a fork PR's head); it requires both `branch` and
- *  `remote`, and never sets upstream. */
+ *  `remote`, and never sets upstream. An explicit `remote` always wins over the
+ *  branch's push configuration. */
 export const gitPush = (
   repoPath: string,
   setUpstream: boolean,
@@ -192,6 +205,7 @@ export const gitPush = (
   branch?: string,
   remote?: string,
   remoteBranch?: string,
+  pins?: PushPins,
 ) =>
   invoke<PushGuard>("git_push", {
     repoPath,
@@ -200,4 +214,7 @@ export const gitPush = (
     branch: branch ?? null,
     remote: remote ?? null,
     remoteBranch: remoteBranch ?? null,
+    expectedBranch: pins?.expectedBranch ?? null,
+    expectedHead: pins?.expectedHead ?? null,
+    creates: pins?.creates ?? false,
   });

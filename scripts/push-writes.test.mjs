@@ -43,6 +43,7 @@ const push = (overrides = {}) => ({
   fromHeader: false,
   foreign: false,
   creates: false,
+  renaming: false,
   ...overrides,
 });
 
@@ -90,8 +91,90 @@ test("a push of the repo reads back every field, mutationId and paused included"
       fromHeader: false,
       foreign: false,
       creates: true,
+      renaming: false,
     },
   ]);
+});
+
+const renameVars = {
+  oldName: "old",
+  newName: "new",
+  remote: "origin",
+  expectedOldTip: "abc123",
+};
+const renameState = (branch, overrides = {}) => ({
+  mutationId: 9,
+  branch,
+  startedOn: null,
+  remote: "origin",
+  remoteBranch: "new",
+  setUpstream: true,
+  paused: false,
+  fromHeader: false,
+  foreign: false,
+  creates: false,
+  renaming: true,
+  ...overrides,
+});
+
+test("a remote rename reads back as two states, its old name and its new one", () => {
+  const out = pendingBranchPushesFor(
+    [entry(renameVars, { mutationId: 9 })],
+    "/repo",
+  );
+  assert.deepEqual(out, [renameState("old"), renameState("new")]);
+});
+
+test("a remote rename keeps paused and the mutation id on both states", () => {
+  const out = pendingBranchPushesFor(
+    [entry(renameVars, { mutationId: 9, paused: true })],
+    "/repo",
+  );
+  assert.deepEqual(out, [
+    renameState("old", { paused: true }),
+    renameState("new", { paused: true }),
+  ]);
+});
+
+test("a sibling checkout's remote rename is foreign by identity", () => {
+  const entries = [
+    { key: branchPushKey("/wt", ID), vars: renameVars, mutationId: 9 },
+  ];
+  assert.deepEqual(pendingBranchPushesFor(entries, "/main", ID), [
+    renameState("old", { foreign: true }),
+    renameState("new", { foreign: true }),
+  ]);
+  assert.deepEqual(pendingBranchPushesFor(entries, "/main"), []);
+  assert.deepEqual(pendingBranchPushesFor(entries, "/main", "/nobody"), []);
+});
+
+test("a rename missing or mistyping a name or its remote reads as today's push", () => {
+  const malformed = [
+    { oldName: "old", newName: "new" },
+    { oldName: "old", newName: 3, remote: "origin" },
+    { oldName: null, newName: "new", remote: "origin" },
+    { newName: "new", remote: "origin" },
+  ];
+  const out = pendingBranchPushesFor(
+    malformed.map((v) => entry(v)),
+    "/repo",
+  );
+  assert.equal(out.length, 4);
+  for (const [i, p] of out.entries()) {
+    assert.equal(p.renaming, false, `row ${i}`);
+    assert.equal(p.branch, null, `row ${i}`);
+    assert.equal(p.remoteBranch, null, `row ${i}`);
+  }
+  // A remote field still reads as the push's remote, as for any push.
+  assert.equal(out[1].remote, "origin");
+});
+
+test("a real push still reads renaming false", () => {
+  const [out] = pendingBranchPushesFor(
+    [entry({ setUpstream: true, branch: "new", remote: "origin" })],
+    "/repo",
+  );
+  assert.equal(out.renaming, false);
 });
 
 test("another repo's push, another prefix, and a keyless entry are dropped", () => {
@@ -206,6 +289,7 @@ test("missing or mistyped fields read as null / false, never guessed", () => {
     fromHeader: false,
     foreign: false,
     creates: false,
+    renaming: false,
   });
 });
 
@@ -298,6 +382,27 @@ test('fromHeader is set by source "header" and nothing else', () => {
   );
 });
 
+test("label: a remote rename names its remote ahead of every other arm", () => {
+  const gone = { upstream: "origin/old", upstreamGone: true };
+  for (const row of [tracked, gone, { upstream: null, upstreamGone: false }])
+    for (const target of [null, { remote: "fork", branch: "x" }])
+      for (const branch of ["old", "new"])
+        assert.equal(
+          branchPushLabel(renameState(branch), row, target),
+          "Renaming on origin",
+        );
+  const [read] = pendingBranchPushesFor(
+    [entry({ ...renameVars, remote: "upstream" })],
+    "/repo",
+  );
+  assert.equal(branchPushLabel(read, tracked, null), "Renaming on upstream");
+  // The same destination without the rename mark keeps the push's label.
+  assert.equal(
+    branchPushLabel(renameState("new", { renaming: false }), tracked, null),
+    "Pushing to origin/new",
+  );
+});
+
 test("label: cross-name beats creates, setUpstream, untracked and tracked", () => {
   const p = push({
     remote: "fork",
@@ -305,18 +410,18 @@ test("label: cross-name beats creates, setUpstream, untracked and tracked", () =
     setUpstream: true,
     creates: true,
   });
-  assert.equal(branchPushLabel(p, tracked), "Pushing to fork/pr-head");
+  assert.equal(branchPushLabel(p, tracked, null), "Pushing to fork/pr-head");
   assert.equal(
-    branchPushLabel(p, { upstream: null, upstreamGone: false }),
+    branchPushLabel(p, { upstream: null, upstreamGone: false }, null),
     "Pushing to fork/pr-head",
   );
 });
 
 test("label: a cross-name entry without a remote falls through, never null/x", () => {
   const p = push({ remote: null, remoteBranch: "pr-head" });
-  assert.equal(branchPushLabel(p, tracked), "Pushing to origin/feature");
+  assert.equal(branchPushLabel(p, tracked, null), "Pushing to origin/feature");
   assert.equal(
-    branchPushLabel(p, { upstream: null, upstreamGone: false }),
+    branchPushLabel(p, { upstream: null, upstreamGone: false }, null),
     "Pushing",
   );
   // A mistyped remote is read as absent before the label sees it.
@@ -331,7 +436,10 @@ test("label: a cross-name entry without a remote falls through, never null/x", (
     ],
     "/repo",
   );
-  assert.equal(branchPushLabel(read, tracked), "Pushing to origin/feature");
+  assert.equal(
+    branchPushLabel(read, tracked, null),
+    "Pushing to origin/feature",
+  );
 });
 
 test("label: a recorded create publishes, whatever the row", () => {
@@ -341,13 +449,14 @@ test("label: a recorded create publishes, whatever the row", () => {
     { upstream: "origin/feature", upstreamGone: true },
   ]) {
     assert.equal(
-      branchPushLabel(push({ creates: true, remote: "origin" }), row),
+      branchPushLabel(push({ creates: true, remote: "origin" }), row, null),
       "Publishing to origin",
     );
     assert.equal(
       branchPushLabel(
         push({ creates: true, branch: null, remote: "fork" }),
         row,
+        null,
       ),
       "Publishing to fork",
     );
@@ -356,14 +465,18 @@ test("label: a recorded create publishes, whatever the row", () => {
 
 test("label: creates with no remote says Publishing branch", () => {
   assert.equal(
-    branchPushLabel(push({ creates: true }), tracked),
+    branchPushLabel(push({ creates: true }), tracked, null),
     "Publishing branch",
   );
   assert.equal(
-    branchPushLabel(push({ creates: true, setUpstream: true, branch: null }), {
-      upstream: null,
-      upstreamGone: false,
-    }),
+    branchPushLabel(
+      push({ creates: true, setUpstream: true, branch: null }),
+      {
+        upstream: null,
+        upstreamGone: false,
+      },
+      null,
+    ),
     "Publishing branch",
   );
   assert.equal(branchPublishLabel(null), "Publishing branch");
@@ -373,49 +486,112 @@ test("label: creates with no remote says Publishing branch", () => {
 test("label: setUpstream without creates never says Publishing", () => {
   // An update-and-track: the remote already has the branch.
   assert.equal(
-    branchPushLabel(push({ setUpstream: true, remote: "origin" }), tracked),
+    branchPushLabel(
+      push({ setUpstream: true, remote: "origin" }),
+      tracked,
+      null,
+    ),
     "Pushing to origin",
   );
   assert.equal(
-    branchPushLabel(push({ setUpstream: true, remote: "origin" }), {
-      upstream: null,
-      upstreamGone: false,
-    }),
+    branchPushLabel(
+      push({ setUpstream: true, remote: "origin" }),
+      {
+        upstream: null,
+        upstreamGone: false,
+      },
+      null,
+    ),
     "Pushing to origin",
   );
   assert.equal(
-    branchPushLabel(push({ setUpstream: true }), tracked),
+    branchPushLabel(push({ setUpstream: true }), tracked, null),
     "Pushing",
   );
 });
 
 test("label: an untracked or upstream-gone row without creates pushes to the remote", () => {
   assert.equal(
-    branchPushLabel(push({ remote: "upstream" }), {
-      upstream: null,
-      upstreamGone: false,
-    }),
+    branchPushLabel(
+      push({ remote: "upstream" }),
+      {
+        upstream: null,
+        upstreamGone: false,
+      },
+      null,
+    ),
     "Pushing to upstream",
   );
   assert.equal(
-    branchPushLabel(push({ remote: "origin" }), {
-      upstream: "origin/feature",
-      upstreamGone: true,
-    }),
+    branchPushLabel(
+      push({ remote: "origin" }),
+      {
+        upstream: "origin/feature",
+        upstreamGone: true,
+      },
+      null,
+    ),
     "Pushing to origin",
   );
   // No remote and no live upstream: no destination is assumed.
   assert.equal(
-    branchPushLabel(push(), { upstream: null, upstreamGone: false }),
+    branchPushLabel(push(), { upstream: null, upstreamGone: false }, null),
     "Pushing",
   );
 });
 
 test("label: a tracked row names its upstream", () => {
-  assert.equal(branchPushLabel(push(), tracked), "Pushing to origin/feature");
+  assert.equal(
+    branchPushLabel(push(), tracked, null),
+    "Pushing to origin/feature",
+  );
   // The push's own remote never overrides the row's upstream on this arm.
   assert.equal(
-    branchPushLabel(push({ remote: "other" }), tracked),
+    branchPushLabel(push({ remote: "other" }), tracked, null),
+    "Pushing to origin/feature",
+  );
+});
+
+test("label: a push to the row's routed destination names it", () => {
+  const fork = { remote: "fork", branch: "feature" };
+  // Named or unnamed remote that matches: the routed destination.
+  assert.equal(
+    branchPushLabel(push(), tracked, fork),
+    "Pushing to fork/feature",
+  );
+  assert.equal(
+    branchPushLabel(push({ remote: "fork" }), tracked, fork),
+    "Pushing to fork/feature",
+  );
+  // A push naming another remote, a retrack or a HEAD push: not this arm.
+  assert.equal(
+    branchPushLabel(push({ remote: "origin" }), tracked, fork),
+    "Pushing to origin/feature",
+  );
+  assert.equal(
+    branchPushLabel(push({ setUpstream: true, remote: "fork" }), tracked, fork),
+    "Pushing to fork",
+  );
+  assert.equal(
+    branchPushLabel(push({ branch: null }), tracked, fork),
+    "Pushing",
+  );
+  // Earlier arms still win: cross-name and a recorded create.
+  assert.equal(
+    branchPushLabel(
+      push({ remote: "fork", remoteBranch: "pr-head" }),
+      tracked,
+      fork,
+    ),
+    "Pushing to fork/pr-head",
+  );
+  assert.equal(
+    branchPushLabel(push({ creates: true, remote: "fork" }), tracked, fork),
+    "Publishing to fork",
+  );
+  // No target keeps the upstream arm.
+  assert.equal(
+    branchPushLabel(push(), tracked, null),
     "Pushing to origin/feature",
   );
 });
@@ -423,16 +599,23 @@ test("label: a tracked row names its upstream", () => {
 test("label: a HEAD push without creates names no destination", () => {
   // A bare `git push` follows pushRemote / pushDefault / push.default, so the
   // row's upstream may not be where it lands.
-  assert.equal(branchPushLabel(push({ branch: null }), tracked), "Pushing");
   assert.equal(
-    branchPushLabel(push({ branch: null, setUpstream: true }), tracked),
+    branchPushLabel(push({ branch: null }), tracked, null),
     "Pushing",
   );
   assert.equal(
-    branchPushLabel(push({ branch: null, remote: "origin" }), {
-      upstream: null,
-      upstreamGone: false,
-    }),
+    branchPushLabel(push({ branch: null, setUpstream: true }), tracked, null),
+    "Pushing",
+  );
+  assert.equal(
+    branchPushLabel(
+      push({ branch: null, remote: "origin" }),
+      {
+        upstream: null,
+        upstreamGone: false,
+      },
+      null,
+    ),
     "Pushing",
   );
 });
@@ -463,7 +646,7 @@ test("label partition: Publishing exactly for a recorded create that isn't cross
                 branch,
                 setUpstream,
               });
-              const label = branchPushLabel(p, row);
+              const label = branchPushLabel(p, row, null);
               const crossName = remote !== null && remoteBranch !== null;
               const at = JSON.stringify({ p, row, label });
               assert.equal(

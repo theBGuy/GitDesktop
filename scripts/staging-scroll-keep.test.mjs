@@ -706,14 +706,22 @@ function modeLineAnchorViolations(raw) {
 test("staging scroll keep: the viewer wires the layout-switch line anchor", () => {
   const raw = read(VIEWER);
   assert.deepEqual(modeLineAnchorViolations(raw), []);
-  const call =
-    "  useModeLineAnchor(scrollPaneRef, viewMode, deferredPath, diffFile);";
-  assert.equal(raw.split(call).length, 2, `one control anchor: ${call}`);
+  // The call as written, whatever the formatter's line breaks.
+  const calls =
+    raw.match(
+      /useModeLineAnchor\(\s*scrollPaneRef,\s*viewMode,\s*deferredPath,\s*diffFile,?\s*\);/g,
+    ) ?? [];
+  assert.equal(
+    calls.length,
+    1,
+    "one control anchor: the useModeLineAnchor call",
+  );
+  const [call] = calls;
   for (const to of [
     "",
-    `  // ${call.trim()}`,
-    "  useModeLineAnchor(scrollPaneRef, viewMode, deferredPath, undefined);",
-    "  useModeLineAnchor(scrollPaneRef, viewMode, diffFile, deferredPath);",
+    `/* ${call} */`,
+    "useModeLineAnchor(scrollPaneRef, viewMode, deferredPath, undefined);",
+    "useModeLineAnchor(scrollPaneRef, viewMode, diffFile, deferredPath);",
   ])
     assert.deepEqual(
       modeLineAnchorViolations(raw.replace(call, () => to)),

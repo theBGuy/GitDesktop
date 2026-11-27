@@ -70,6 +70,7 @@ function renderPane(patch: string) {
           truncated: false,
           cut: null,
           anchors: sectionIsBinary(section) ? [] : ["new:1"],
+          drawn: sectionIsBinary(section) ? [] : ["1"],
         }}
         pins={NO_PINS}
         lens="origin"

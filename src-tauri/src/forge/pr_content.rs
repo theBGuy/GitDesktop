@@ -412,7 +412,7 @@ fn whitespace_side(side: Option<&str>, name: &str) -> AppResult<Vec<u8>> {
 /// `--no-index` exits 1 when the files differ, and also when it can't read one (an
 /// `error:` on stderr, nothing on stdout), so an exit 1 counts only with a diff line
 /// printed. Any other code is a failure, the -1 of a git killed by a signal included.
-fn no_index_diff_ok(code: i32, stdout: &[u8]) -> bool {
+pub(crate) fn no_index_diff_ok(code: i32, stdout: &[u8]) -> bool {
     match code {
         0 => true,
         1 => stdout.split(|&b| b == b'\n').any(|line| {

@@ -943,6 +943,22 @@ describe("Compare duplicate PR probe", () => {
     ).toBeNull();
   });
 
+  it("names a GitLab merge request by its own sigil", async () => {
+    vi.mocked(forgeStatus).mockResolvedValue({
+      ...GITHUB,
+      provider: "gitlab",
+      host: "gitlab.com",
+    } as ForgeStatus);
+    vi.mocked(forgePrsForBranch).mockResolvedValue([
+      pr("feature-x", false),
+    ] as unknown as Awaited<ReturnType<typeof forgePrsForBranch>>);
+    useUiStore.setState({ compareBranch: "refs/remotes/origin/feature-x" });
+    renderPanel();
+    expect(
+      await screen.findByRole("button", { name: /View merge request !12/ }),
+    ).toBeInTheDocument();
+  });
+
   it("lets a cross-repository PR on the fork pick keep Create", async () => {
     vi.mocked(forgePrsForBranch).mockResolvedValue([
       pr("feature-x", true),

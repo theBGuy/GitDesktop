@@ -148,6 +148,14 @@ function Host({
   useLayoutEffect(() => onPins(pins.pinned));
   const { drawn, cut = null, mounts = true } = paint;
   const drawnLines = newSideLines(drawn?.text ?? "");
+  const drawnComments = comments.filter(
+    (c) =>
+      c.path === "x" &&
+      mounts &&
+      c.line != null &&
+      drawnLines.has(c.line) &&
+      !pins.pinned.has(c.id),
+  );
   const painted: PaintedView | null =
     drawn === null
       ? null
@@ -157,17 +165,8 @@ function Host({
           whitespaceHidden: drawn.whitespaceHidden === true,
           truncated: drawn.isTruncated,
           cut,
-          anchors: comments
-            .filter(
-              (c) =>
-                c.path === "x" &&
-                mounts &&
-                c.line != null &&
-                drawnLines.has(c.line) &&
-                !pins.pinned.has(c.id),
-            )
-            .map((c) => `new:${c.line}`)
-            .sort(),
+          anchors: drawnComments.map((c) => `new:${c.line}`).sort(),
+          drawn: drawnComments.map((c) => c.id).sort(),
         };
   return (
     <CommitComments
@@ -628,14 +627,14 @@ function InlineAnchors({
   comments: CommitCommentOut[];
   pinned?: ReadonlySet<string>;
 }) {
-  const anchors = useCommitLineAnchors(
+  const { anchors, renderAnchor } = useCommitLineAnchors(
     comments,
     splitUnifiedDiff(PLAIN),
     "x",
     undefined,
     pinned,
   );
-  return <div>{anchors.map((a) => a.render())}</div>;
+  return <div>{anchors.map((a) => renderAnchor(a))}</div>;
 }
 
 describe("inline commit comment anchors", () => {

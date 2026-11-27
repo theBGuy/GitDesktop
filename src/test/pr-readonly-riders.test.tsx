@@ -227,6 +227,7 @@ const LOCKED_FALLBACK =
 const S4 = " Your reply is kept; Cancel discards it.";
 const S5 = " Your edit is kept; Cancel discards it.";
 const S6 = `Edit — ${PR_ARCHIVED_READONLY_MESSAGE}`;
+const S7 = `Delete — ${PR_ARCHIVED_READONLY_MESSAGE}`;
 
 const GITLAB = {
   provider: "gitlab",
@@ -534,7 +535,7 @@ describe("own-comment edits hold on a proven archive", () => {
 
   it("disables the Edit row with the reason, and holds an open editor's Save", async () => {
     const client = new QueryClient();
-    const onSaveEdit = vi.fn();
+    const onSaveEdit = vi.fn(() => true);
     const ui = (reason: string | null) => (
       <QueryClientProvider client={client}>
         <Thread thread={own} onSaveEdit={onSaveEdit} editHeldReason={reason} />
@@ -577,6 +578,40 @@ describe("own-comment edits hold on a proven archive", () => {
     rerender(ui(null));
     expect(live?.isConnected).toBe(true);
     expect(live?.textContent).toBe("");
+  });
+
+  it("disables the Delete row with the reason, and leaves it live without one", async () => {
+    const client = new QueryClient();
+    const onDelete = vi.fn();
+    const ui = (reason: string | null) => (
+      <QueryClientProvider client={client}>
+        <Thread
+          thread={own}
+          onSaveEdit={() => true}
+          onDelete={onDelete}
+          editHeldReason={reason}
+        />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(ui(PR_ARCHIVED_READONLY_MESSAGE));
+    fireEvent.click(screen.getByRole("button", { name: "Comment actions" }));
+    const heldRow = await screen.findByRole("menuitem", { name: S7 });
+    expect(heldRow).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(heldRow);
+    expect(onDelete).not.toHaveBeenCalled();
+    fireEvent.keyDown(document.activeElement ?? document.body, {
+      key: "Escape",
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("menuitem", { name: S7 })).toBeNull(),
+    );
+
+    rerender(ui(null));
+    fireEvent.click(screen.getByRole("button", { name: "Comment actions" }));
+    const liveRow = await screen.findByRole("menuitem", { name: "Delete" });
+    expect(liveRow).not.toHaveAttribute("aria-disabled");
+    fireEvent.click(liveRow);
+    expect(onDelete).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -639,8 +674,10 @@ describe("the feed forwards the edit hold to both comment kinds", () => {
         canReact={false}
         onThreadReply={async () => undefined}
         onThreadResolve={async () => undefined}
-        onEditComment={() => undefined}
-        onEditThreadComment={() => undefined}
+        onEditComment={() => true}
+        onEditThreadComment={() => true}
+        onDeleteComment={() => undefined}
+        onDeleteThreadComment={() => undefined}
         editHeldReason={PR_ARCHIVED_READONLY_MESSAGE}
         onHideComment={() => undefined}
         onUnhideComment={() => undefined}
@@ -649,22 +686,39 @@ describe("the feed forwards the edit hold to both comment kinds", () => {
     );
   }
 
-  async function editRowIn(text: string) {
+  async function rowIn(text: string, label: RegExp) {
     const host = screen.getByText(text).closest(".group") as HTMLElement;
     fireEvent.click(
       within(host).getByRole("button", { name: "Comment actions" }),
     );
-    const item = await screen.findByRole("menuitem", { name: /^Edit/ });
+    const item = await screen.findByRole("menuitem", { name: label });
     const name = item.textContent;
     const disabled = item.getAttribute("aria-disabled");
     fireEvent.keyDown(document.activeElement ?? document.body, {
       key: "Escape",
     });
     await waitFor(() =>
-      expect(screen.queryByRole("menuitem", { name: /^Edit/ })).toBeNull(),
+      expect(screen.queryByRole("menuitem", { name: label })).toBeNull(),
     );
     return { name, disabled };
   }
+  const editRowIn = (text: string) => rowIn(text, /^Edit/);
+
+  it("holds the conversation comment's Delete and the review thread comment's Delete", async () => {
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <Feed />
+      </QueryClientProvider>,
+    );
+    expect(await rowIn("My comment", /^Delete/)).toEqual({
+      name: S7,
+      disabled: "true",
+    });
+    expect(await rowIn("My thread comment", /^Delete/)).toEqual({
+      name: S7,
+      disabled: "true",
+    });
+  });
 
   it("holds the conversation comment's Edit and the review thread comment's Edit", async () => {
     render(

@@ -17,14 +17,23 @@ import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { IMAGE_CAPTION_REASON } from "@/components/markdown/markdown-images";
+import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
 import {
   contentSourceKey,
   FORGE_CONTENT_BUDGET_BYTES,
 } from "@/features/diff/content-source";
 import { DiffContent, type LineWidget } from "@/features/diff/DiffSurface";
 import { HOLD_BOUND_MS } from "@/features/diff/diff-pane-slots";
+import {
+  LINE_COMPOSER_KEEP_ID,
+  useDiffRowsHeld,
+  useKeptDraft,
+} from "@/features/diff/editor-keep";
 import { ImagePanes } from "@/features/diff/ImageDiff";
-import { SHOW_FULL_COMPOSER_HELD } from "@/features/diff/whitespace-mode";
+import {
+  DIFF_ROWS_HELD_REASON,
+  SHOW_FULL_COMPOSER_HELD,
+} from "@/features/diff/whitespace-mode";
 import { ReviewThreadCard } from "@/features/pulls/ReviewThreads";
 import { type FileBytes, forgeFileAtSha, gitFileBase64 } from "@/lib/git/api";
 import {
@@ -36,6 +45,7 @@ import type { FileDiff, ReviewThreadOut } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
+import { bodies, renderBody } from "./anchor-bodies";
 import { stubCanvas } from "./canvas-stub";
 
 vi.mock("@/lib/git/api", async (importOriginal) => ({
@@ -1150,38 +1160,45 @@ describe("a PR host's image panes across a pair change", () => {
     expect(figures(pane)[0]).not.toBe(first);
   });
 
-  it.each([
-    ["rejects", false],
-    ["is paused", true],
-  ])(
-    "shows a new pair's read that %s as failed, with Retry, never the kept image",
-    async (_, offline) => {
-      const { pane } = await onScreen({
-        ...pairOf(NEW_SHA),
-        data: png(PNG_TEXT),
-      });
-      vi.mocked(forgeFileAtSha).mockImplementation(async () => {
-        throw new Error("read failed");
-      });
-      if (offline) onlineManager.setOnline(false);
-      try {
-        pane.update({ ...pairOf(NEW2_SHA), data: png(PNG_TEXT) });
-        // A rejected read is retried once, a second later, before it fails.
-        expect(
-          await screen.findByText(IMAGE_CAPTION_REASON.readFailed, undefined, {
-            timeout: 5_000,
-          }),
-        ).toBeInTheDocument();
-        expect(
-          screen.getByRole("button", { name: "Retry" }),
-        ).toBeInTheDocument();
-        expect(srcOf(pane, "New")).toBeUndefined();
-      } finally {
-        onlineManager.setOnline(true);
-      }
-    },
-    10_000,
-  );
+  it("shows a new pair's read that rejects as failed, with Retry, never the kept image", async () => {
+    const { pane } = await onScreen({
+      ...pairOf(NEW_SHA),
+      data: png(PNG_TEXT),
+    });
+    vi.mocked(forgeFileAtSha).mockImplementation(async () => {
+      throw new Error("read failed");
+    });
+    pane.update({ ...pairOf(NEW2_SHA), data: png(PNG_TEXT) });
+    // A rejected read is retried once, a second later, before it fails.
+    expect(
+      await screen.findByText(IMAGE_CAPTION_REASON.readFailed, undefined, {
+        timeout: 5_000,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(srcOf(pane, "New")).toBeUndefined();
+  }, 10_000);
+
+  it("shows a new pair's paused read as offline, with no Retry, never the kept image", async () => {
+    const { pane } = await onScreen({
+      ...pairOf(NEW_SHA),
+      data: png(PNG_TEXT),
+    });
+    vi.mocked(forgeFileAtSha).mockImplementation(async () => {
+      throw new Error("read failed");
+    });
+    onlineManager.setOnline(false);
+    try {
+      pane.update({ ...pairOf(NEW2_SHA), data: png(PNG_TEXT) });
+      expect(
+        await screen.findByText(offlinePendingMessage("this image")),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+      expect(srcOf(pane, "New")).toBeUndefined();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
 
   it("shows a new pair's failed side at once while the other side's first read keeps its kept image", async () => {
     const OLD2_SHA = "d".repeat(40);
@@ -1247,6 +1264,83 @@ describe("a binary-to-link typechange on an image path", () => {
     await waitFor(() => expect(linkLine(view)).not.toBeNull());
   });
 
+  function Composer() {
+    const kept = useKeptDraft(LINE_COMPOSER_KEEP_ID);
+    const held = useDiffRowsHeld();
+    return (
+      <div>
+        <textarea
+          aria-label="Link comment"
+          value={kept.text}
+          onChange={(e) => kept.setText(e.target.value)}
+        />
+        <span data-held={held ? DIFF_ROWS_HELD_REASON : ""} />
+      </div>
+    );
+  }
+  /** The link half grown to four lines, the last of them `tail`: line 4 sits
+   *  outside a composer on line 1 and its neighbours. */
+  const longLink = (tail: string, hash = "2222222") =>
+    LINK_TEXT.replace(
+      "@@ -0,0 +1 @@\n+target.png\n",
+      `@@ -0,0 +1,4 @@\n+target.png\n+two\n+three\n+${tail}\n`,
+    ).replace("0000000..2222222", `0000000..${hash}`);
+  const scoped = (text: string, scope = "pr-1"): PaneProps => ({
+    ...FORGE,
+    forgePatch: { source: { lens: "origin" }, scope },
+    filePath: "logo.png",
+    data: { filePath: "logo.png", text, isBinary: true, isTruncated: false },
+    typechangeAnchors: true,
+    lineWidget: { enabled: true, render: () => <Composer /> },
+  });
+  /** The link half's composer open on its line, with "kept link" typed. */
+  async function linkComposer(text = LINK_TEXT) {
+    vi.mocked(forgeFileAtSha).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    const pane = mountPane(scoped(text));
+    const num = await waitFor(() => {
+      const cell = linkLine(pane)?.closest(".diff-line-num");
+      expect(cell).toBeTruthy();
+      return cell as HTMLElement;
+    });
+    fireEvent.mouseOver(num);
+    fireEvent.mouseDown(
+      num.closest("tr")?.querySelector(".diff-add-widget") as HTMLElement,
+    );
+    const box = await screen.findByRole("textbox", { name: "Link comment" });
+    fireEvent.change(box, { target: { value: "kept link" } });
+    return { pane, box };
+  }
+
+  it("keeps the text half's composer and its text across a push under the same record", async () => {
+    const { pane } = await linkComposer(longLink("tail-old"));
+    expect(pane.container.textContent).toContain("tail-old");
+    // The push changes line 4, outside the composer's line and neighbours.
+    pane.update(scoped(longLink("tail-new", "3333333")));
+    await waitFor(() =>
+      expect(pane.container.textContent).toContain("tail-new"),
+    );
+    expect(pane.container.textContent).not.toContain("tail-old");
+    expect(screen.getByRole("textbox", { name: "Link comment" })).toHaveValue(
+      "kept link",
+    );
+    // Applied, not held: the composer's line submits stay open.
+    expect(pane.container.querySelector("[data-held]")).toHaveAttribute(
+      "data-held",
+      "",
+    );
+  });
+
+  it("keeps the text half's composer under the next record's placeholder paint", async () => {
+    const { pane, box } = await linkComposer();
+    // The previous record's halves, painted under the next record's scope.
+    pane.update({ ...scoped(LINK_TEXT, "pr-2"), dataIsPlaceholder: true });
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+    expect(box.isConnected).toBe(true);
+    expect(box).toHaveValue("kept link");
+  });
+
   it("keeps the image comparison on a host that doesn't", async () => {
     const view = renderTypechange(false, bytes("png"));
     // The comparison draws both sides, and the link half stays out.
@@ -1259,10 +1353,12 @@ describe("a binary-to-link typechange on an image path", () => {
 });
 
 describe("an image pair's forge reads that can't run", () => {
-  function renderPanes(oldRev: string) {
-    const client = new QueryClient({
+  function renderPanes(
+    oldRev: string,
+    client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
-    });
+    }),
+  ) {
     return render(
       <QueryClientProvider client={client}>
         <ImagePanes
@@ -1318,16 +1414,88 @@ describe("an image pair's forge reads that can't run", () => {
     expect(view.container.querySelector("figure")).toBeNull();
   });
 
-  it("shows a paused read as failed, with Retry", async () => {
+  it("shows a paused read as offline, with no Retry, and loads it on reconnect", async () => {
     onlineManager.setOnline(false);
     try {
       vi.mocked(forgeFileAtSha).mockResolvedValue(bytes("png"));
       const view = renderPanes(OLD_SHA);
       expect(
-        await screen.findAllByText(IMAGE_CAPTION_REASON.readFailed),
+        await screen.findAllByText(offlinePendingMessage("this image")),
       ).toHaveLength(2);
       expect(view.container.querySelector('[aria-busy="true"]')).toBeNull();
-      expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(2);
+      expect(screen.queryAllByRole("button", { name: "Retry" })).toHaveLength(
+        0,
+      );
+      act(() => onlineManager.setOnline(true));
+      await waitFor(() =>
+        expect(view.container.querySelectorAll("img")).toHaveLength(2),
+      );
+      expect(
+        screen.queryByText(offlinePendingMessage("this image")),
+      ).toBeNull();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
+
+  it("keeps focus off <body> when a Retry pressed offline parks its read", async () => {
+    vi.mocked(forgeFileAtSha).mockRejectedValue(new Error("read failed"));
+    renderPanes(OLD_SHA);
+    // A rejected read is retried once, a second later, before it fails.
+    // Each side reads through its own observer, so wait for both: a side
+    // still reading when the test goes offline would park instead.
+    await waitFor(
+      () =>
+        expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(
+          2,
+        ),
+      { timeout: 5_000 },
+    );
+    const [retry] = screen.getAllByRole("button", { name: "Retry" });
+    retry.focus();
+    onlineManager.setOnline(false);
+    try {
+      fireEvent.click(retry);
+      expect(
+        await screen.findByText(offlinePendingMessage("this image")),
+      ).toBeInTheDocument();
+      expect(retry.isConnected).toBe(false);
+      expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
+      expect(document.activeElement).not.toBe(document.body);
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  }, 10_000);
+
+  it("keeps a loaded side's image through a refresh parked offline", async () => {
+    vi.mocked(forgeFileAtSha).mockResolvedValue(bytes("png"));
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const view = renderPanes(OLD_SHA, client);
+    await waitFor(() =>
+      expect(view.container.querySelectorAll("img")).toHaveLength(2),
+    );
+    const images = [...view.container.querySelectorAll("img")];
+    onlineManager.setOnline(false);
+    try {
+      // A refetch parked offline never settles, so it is not awaited.
+      act(() => {
+        void client.invalidateQueries();
+      });
+      await act(async () => undefined);
+      expect(
+        client
+          .getQueryCache()
+          .getAll()
+          .map((q) => q.state.fetchStatus),
+      ).toEqual(["paused", "paused"]);
+      const after = [...view.container.querySelectorAll("img")];
+      expect(after).toHaveLength(2);
+      for (const [i, img] of after.entries()) expect(img).toBe(images[i]);
+      expect(
+        screen.queryByText(offlinePendingMessage("this image")),
+      ).toBeNull();
     } finally {
       onlineManager.setOnline(true);
     }
@@ -1406,7 +1574,7 @@ describe("an upgrade under a review thread card", () => {
       },
     ],
   };
-  const ANCHORS = [
+  const ANCHORS = bodies([
     {
       side: "new" as const,
       line: 2,
@@ -1419,7 +1587,7 @@ describe("an upgrade under a review thread card", () => {
         />
       ),
     },
-  ];
+  ]);
 
   it("lands focus from a thread card's button in the replaced rows on the diff's group", async () => {
     const land = deferredReads();
@@ -1439,6 +1607,7 @@ describe("an upgrade under a review thread card", () => {
           contentRevs={{ oldRev: OLD_SHA, newRev: NEW_SHA }}
           forgePatch={{ source: { lens: "origin" } }}
           lineAnchors={ANCHORS}
+          renderAnchor={renderBody}
         />
       </QueryClientProvider>,
     );
@@ -1637,5 +1806,214 @@ describe("a blank context line written without its space", () => {
     expect(screen.queryByText("No changes to show")).toBeNull();
     for (const n of [1, 2, 3, 4])
       expect(drawn(pane.container, n)).not.toBeNull();
+  });
+});
+
+describe("an arm change under an open line composer", () => {
+  /** A symlink whose target the PR changes: a text diff of one line. */
+  const RETARGET =
+    "diff --git a/link b/link\nindex 1111111..2222222 120000\n--- a/link\n+++ b/link\n" +
+    "@@ -1 +1 @@\n-old-target\n\\ No newline at end of file\n+new-target\n\\ No newline at end of file\n";
+  /** The same path pushed as a regular binary file: a typechange whose text
+   *  half is the removed link. */
+  const TO_BINARY =
+    "diff --git a/link b/link\ndeleted file mode 120000\nindex 1111111..0000000\n--- a/link\n+++ /dev/null\n" +
+    "@@ -1 +0,0 @@\n-old-target\n\\ No newline at end of file\n" +
+    "diff --git a/link b/link\nnew file mode 100644\nindex 0000000..3333333\nBinary files /dev/null and b/link differ\n";
+  /** Only a mode change left on the path: the header-only arm. */
+  const MODE_ONLY =
+    "diff --git a/link b/link\nold mode 100644\nnew mode 100755\n";
+
+  function HeldComposer({ onClose }: { onClose: () => void }) {
+    const kept = useKeptDraft(LINE_COMPOSER_KEEP_ID);
+    const held = useDiffRowsHeld();
+    return (
+      <div>
+        <textarea
+          aria-label="Arm comment"
+          value={kept.text}
+          onChange={(e) => kept.setText(e.target.value)}
+        />
+        <span data-held={held ? DIFF_ROWS_HELD_REASON : ""} />
+        <button
+          type="button"
+          onClick={() => {
+            kept.forget();
+            onClose();
+          }}
+        >
+          Close comment
+        </button>
+      </div>
+    );
+  }
+  const at = (text: string, isBinary: boolean, scope = "pr-1"): PaneProps => ({
+    forgePatch: { source: null, scope },
+    filePath: "link",
+    data: { filePath: "link", text, isBinary, isTruncated: false },
+    typechangeAnchors: true,
+    lineWidget: {
+      enabled: true,
+      render: ({ onClose }) => <HeldComposer onClose={onClose} />,
+    },
+  });
+  const heldReason = (view: { container: HTMLElement }) =>
+    view.container.querySelector("[data-held]")?.getAttribute("data-held");
+
+  /** The composer open on the new target's line, with "kept" typed. */
+  async function retargetComposer() {
+    const pane = mountPane(at(RETARGET, false));
+    const num = await waitFor(() => {
+      const cell = pane.container
+        .querySelector('span[data-line-new-num="1"]')
+        ?.closest(".diff-line-num");
+      expect(cell).toBeTruthy();
+      return cell as HTMLElement;
+    });
+    fireEvent.mouseOver(num);
+    fireEvent.mouseDown(
+      num.closest("tr")?.querySelector(".diff-add-widget") as HTMLElement,
+    );
+    const box = await screen.findByRole("textbox", { name: "Arm comment" });
+    fireEvent.change(box, { target: { value: "kept" } });
+    expect(heldReason(pane)).toBe("");
+    return { pane, box };
+  }
+  const settle = () => act(async () => new Promise((r) => setTimeout(r, 20)));
+
+  it.each([
+    ["a typechange to a binary file", TO_BINARY, true],
+    ["a header-only mode change", MODE_ONLY, false],
+  ])(
+    "keeps the text rows and the composer across %s until it closes",
+    async (_case, text, isBinary) => {
+      const { pane, box } = await retargetComposer();
+      pane.update(at(text, isBinary));
+      await settle();
+      // The outgoing rows stay drawn, the composer and its text with them, and
+      // its line submits hold.
+      expect(box.isConnected).toBe(true);
+      expect(box).toHaveValue("kept");
+      expect(
+        pane.container.querySelector('span[data-line-new-num="1"]'),
+      ).not.toBeNull();
+      expect(heldReason(pane)).toBe(DIFF_ROWS_HELD_REASON);
+      expect(screen.queryByText("Binary file added")).toBeNull();
+      // Closing it shows the new arm.
+      fireEvent.click(screen.getByRole("button", { name: "Close comment" }));
+      await settle();
+      expect(screen.queryByRole("textbox", { name: "Arm comment" })).toBeNull();
+      expect(
+        pane.container.querySelector('span[data-line-new-num="1"]'),
+      ).toBeNull();
+      if (isBinary) expect(screen.getByText("Binary file added")).toBeTruthy();
+      else expect(pane.rows().length).toBe(0);
+    },
+  );
+
+  it("drops the composer when the new arm belongs to another record", async () => {
+    const { pane } = await retargetComposer();
+    pane.update(at(TO_BINARY, true, "pr-2"));
+    await settle();
+    expect(screen.queryByRole("textbox", { name: "Arm comment" })).toBeNull();
+    expect(screen.getByText("Binary file added")).toBeTruthy();
+  });
+
+  it("keeps the SVG panes above held rows on the pair and source they drew", async () => {
+    const PUSHED_SHA = "c".repeat(40);
+    // Each rev reads its own bytes, so a pane drawn from another rev shows.
+    // Valid documents that differ in colour, so a swapped pane is a different image.
+    const square = (fill: string) =>
+      `<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="${fill}"/></svg>`;
+    const SVG_TEXT: Record<string, string> = {
+      [OLD_SHA]: square("red"),
+      [NEW_SHA]: square("blue"),
+      [PUSHED_SHA]: square("green"),
+    };
+    const svgOf = (rev: string | null | undefined) =>
+      bytes(SVG_TEXT[rev ?? ""] ?? square("black"));
+    vi.mocked(gitFileBase64)
+      .mockClear()
+      .mockImplementation(async (_repo, rev) => svgOf(rev));
+    vi.mocked(forgeFileAtSha)
+      .mockClear()
+      .mockImplementation(async (_repo, rev) => svgOf(rev));
+    const SVG_EDIT =
+      "diff --git a/icon.svg b/icon.svg\nindex 1111111..2222222 100644\n--- a/icon.svg\n+++ b/icon.svg\n" +
+      "@@ -1 +1 @@\n-<svg a/>\n+<svg b/>\n";
+    const SVG_MODE =
+      "diff --git a/icon.svg b/icon.svg\nold mode 100644\nnew mode 100755\n";
+    const svg = (
+      text: string,
+      revs: { old: string; new: string },
+      source: "local" | { lens: "origin" },
+    ): PaneProps => ({
+      forgePatch: { source, scope: "pr-1" },
+      imageRevs: revs,
+      filePath: "icon.svg",
+      data: { filePath: "icon.svg", text, isBinary: false, isTruncated: false },
+      lineWidget: {
+        enabled: true,
+        render: ({ onClose }) => <HeldComposer onClose={onClose} />,
+      },
+    });
+    const pane = mountPane(
+      svg(SVG_EDIT, { old: OLD_SHA, new: NEW_SHA }, "local"),
+    );
+    const num = await waitFor(() => {
+      const cell = pane.container
+        .querySelector('span[data-line-new-num="1"]')
+        ?.closest(".diff-line-num");
+      expect(cell).toBeTruthy();
+      return cell as HTMLElement;
+    });
+    fireEvent.mouseOver(num);
+    fireEvent.mouseDown(
+      num.closest("tr")?.querySelector(".diff-add-widget") as HTMLElement,
+    );
+    const box = await screen.findByRole("textbox", { name: "Arm comment" });
+    fireEvent.change(box, { target: { value: "kept" } });
+    // The pair's two panes, each as its own rev's bytes: the data URL the
+    // reads' mime-less answer draws under the path's extension.
+    const drawn = () =>
+      ["Old", "New"].map(
+        (alt) =>
+          pane.container
+            .querySelector(`img[alt="${alt}"]`)
+            ?.getAttribute("src") ?? null,
+      );
+    const dataUrl = (text: string) =>
+      `data:image/svg+xml;base64,${Buffer.from(text).toString("base64")}`;
+    const pair = [
+      dataUrl(SVG_TEXT[OLD_SHA] ?? ""),
+      dataUrl(SVG_TEXT[NEW_SHA] ?? ""),
+    ];
+    await waitFor(() => expect(drawn()).toEqual(pair));
+    // A mode-only push whose new head only the forge holds.
+    pane.update(
+      svg(SVG_MODE, { old: OLD_SHA, new: PUSHED_SHA }, { lens: "origin" }),
+    );
+    await settle();
+    expect(box).toHaveValue("kept");
+    expect(heldReason(pane)).toBe(DIFF_ROWS_HELD_REASON);
+    // The held pair stays drawn, neither blanked nor swapped for the pushed one.
+    expect(drawn()).toEqual(pair);
+    const readsOf = (fn: typeof gitFileBase64 | typeof forgeFileAtSha) =>
+      vi.mocked(fn).mock.calls.filter((c) => c.includes(PUSHED_SHA)).length;
+    // The panes read the held pair from the held source: the pushed head is
+    // never asked of the local store, nor read under the held text.
+    expect(readsOf(gitFileBase64)).toBe(0);
+    expect(readsOf(forgeFileAtSha)).toBe(0);
+    // Nor is the held local pair asked of the live forge source.
+    expect(
+      vi
+        .mocked(forgeFileAtSha)
+        .mock.calls.filter((c) => c.includes(OLD_SHA) || c.includes(NEW_SHA))
+        .length,
+    ).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: "Close comment" }));
+    await settle();
+    expect(screen.queryByRole("textbox", { name: "Arm comment" })).toBeNull();
+    expect(readsOf(gitFileBase64)).toBe(0);
   });
 });

@@ -60,8 +60,11 @@ export interface Branch {
    *  pushed-ness decisions. */
   upstreamGone: boolean;
   /** The remote of the branch's upstream (git's `%(upstream:remotename)`), e.g.
-   *  `origin` — null when untracked. Authoritative source for which remote a push
-   *  targets; the UI must never re-derive it from the upstream string. */
+   *  `origin` — null when untracked. A named push goes to it only when no push
+   *  remote is configured (the rule: explicit remote, else `pushRemote`, else
+   *  `pushDefault`, else this while the upstream is live, else origin), so the
+   *  destination comes from {@link Branch.namedPushRemote}; never re-derive it
+   *  from the upstream string. */
   upstreamRemote: string | null;
   /** The upstream's ref on its remote (`%(upstream:remoteref)`, e.g.
    *  `refs/heads/main`); null when untracked. Cross-name decisions read this,
@@ -73,6 +76,18 @@ export interface Branch {
   /** The live upstream is its remote's default branch; false for no, unknown,
    *  gone, a local `.` upstream, or none. */
   upstreamIsRemoteDefault: boolean;
+  /** Where a push of this branch naming no remote lands, as the backend's own
+   *  push routing resolves it: both names set together, or both null/absent
+   *  (unknown: an older backend or a failed routing read). */
+  namedPushRemote?: string | null;
+  namedPushBranch?: string | null;
+  /** The backend would refuse that push for a routing reason (an unusable push
+   *  remote, a mirror, a session destination). Absent = unknown. */
+  namedPushRefused?: boolean;
+  /** The branch was renamed from the differently named branch it still tracks
+   *  on its upstream remote (read from its reflog). Absent reads false. Its one
+   *  reader is the switcher's PR chip; Create PR takes the backend's refusal. */
+  renamedFromUpstream?: boolean;
 }
 
 /** A branch that exists on a remote but not locally — offered in the switcher so
@@ -84,6 +99,10 @@ export interface RemoteBranch {
   remote: string;
   /** ISO-8601 committer date of the branch tip (for recency sorting). */
   lastCommitDate: string;
+  /** The tracking ref's commit id as this list read it; a Delete leases on it.
+   *  The backend refuses a Delete whose tip is absent or empty: nothing is
+   *  deleted without a tip to lease on. */
+  tip?: string;
 }
 
 /**

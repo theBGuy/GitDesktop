@@ -66,6 +66,8 @@ const REVIEWED = {
     "no pending window: its labels render under settled gates, viewLabel reads the saved provider",
   "src/features/repository/RepoList.tsx":
     "no pending window: providers persist with the owner that gates the item",
+  "src/features/repository/RenameBranchDialog.tsx":
+    "no pending window: names the provider of a completed open-request lookup, never the forge probe",
   "src/features/accounts/SessionExpiryNotice.tsx": TYPED,
   "src/features/accounts/ReconnectDialog.tsx": TYPED,
   "src/components/markdown/markdown-link-card.tsx": TYPED,

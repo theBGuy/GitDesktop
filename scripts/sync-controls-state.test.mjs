@@ -1,10 +1,11 @@
 // Pins the sync bar's derivation: what each button is called, whether it is
 // held and why, and which hotkeys fire, across the loading and settled states.
 // The contract under test: nothing that acts on the branch is offered before
-// the status has measured it ("Publish branch" sends `-u origin`), holds are
-// ranked busy > offline > unknown read > the state's own description (save
-// the Pull-options caret, which offline never holds: its network items carry
-// their own offline holds), and every disabled control carries a reason.
+// the status has measured it ("Publish branch" sends `-u` to the branch's
+// routed remote), holds are ranked busy > offline > unknown read > the state's
+// own description (save the Pull-options caret, which offline never holds: its
+// network items carry their own offline holds), and every disabled control
+// carries a reason.
 //
 // The import below reaches straight into `src/` and relies on Node's default
 // type stripping (>= 23.6), which resolves no bundler aliases, so
@@ -27,6 +28,8 @@ import {
   REMOTES_FAILED_REASON,
   REMOTES_PENDING_REASON,
   rowNameMismatch,
+  rowPushItem,
+  rowPushTarget,
   rowSyncIndicator,
   SESSION_PULL_REASON,
   STATUS_PENDING_REASON,
@@ -1220,6 +1223,152 @@ test("rowNameMismatch: only a live upstream on a configured remote under another
   );
 });
 
+test("rowPushTarget: the backend's routing alone decides, never a remotes list", () => {
+  const routed = (over = {}) =>
+    rowFacts({ namedPushRemote: "fork", namedPushBranch: "feat", ...over });
+  // `fork` is in no list the caller holds: the backend named it, so it counts.
+  assert.deepEqual(rowPushTarget(routed()), {
+    kind: "to",
+    remote: "fork",
+    branch: "feat",
+    toUpstream: false,
+  });
+  assert.deepEqual(
+    rowPushTarget(
+      routed({ namedPushRemote: "origin", namedPushBranch: "main" }),
+    ),
+    { kind: "to", remote: "origin", branch: "main", toUpstream: true },
+  );
+  assert.equal(
+    rowPushTarget(
+      routed({
+        namedPushRemote: "origin",
+        namedPushBranch: "main",
+        upstreamGone: true,
+      }),
+    ).toUpstream,
+    false,
+  );
+  assert.deepEqual(rowPushTarget(routed({ namedPushRefused: true })), {
+    kind: "refused",
+  });
+  for (const [what, over] of [
+    ["no fields", {}],
+    ["no branch", { namedPushRemote: "fork" }],
+    ["null remote", { namedPushRemote: null, namedPushBranch: "feat" }],
+  ])
+    assert.deepEqual(rowPushTarget(rowFacts(over)), { kind: "unknown" }, what);
+});
+
+test("rowPushItem: offered when tracked and ahead, never into a different-name default", () => {
+  const same = { upstream: "origin/feat", upstreamBranch: "feat" };
+  const rows = [
+    ["in sync", same, "none"],
+    ["ahead", { ...same, upstreamAhead: 1 }, "live"],
+    [
+      "ahead and behind",
+      { ...same, upstreamAhead: 1, upstreamBehind: 1 },
+      "held",
+    ],
+    ["gone", { ...same, upstreamAhead: 1, upstreamGone: true }, "none"],
+    [
+      "removed remote",
+      {
+        upstream: "old/feat",
+        upstreamRemote: "old",
+        upstreamBranch: "feat",
+        upstreamAhead: 1,
+      },
+      "none",
+    ],
+    // The start point on the remote's default: only the publish is offered.
+    ["different-name default", { upstreamAhead: 1 }, "none"],
+    [
+      "same, routed to the upstream itself",
+      { upstreamAhead: 1, namedPushRemote: "origin", namedPushBranch: "main" },
+      "none",
+    ],
+    [
+      "different-name, not the default",
+      { upstreamAhead: 1, upstreamIsRemoteDefault: false },
+      "live",
+    ],
+    // A push routed off the upstream's remote copies the branch: no mismatch.
+    [
+      "different-name default, routed elsewhere",
+      { upstreamAhead: 1, namedPushRemote: "fork", namedPushBranch: "feat" },
+      "live",
+    ],
+  ];
+  for (const [what, over, want] of rows)
+    assert.equal(rowPushItem(rowFacts(over), REMOTES), want, what);
+});
+
+test("rowPushItem: a routed row's upstream counts never hide its item; diverged holds it", () => {
+  const fork = { namedPushRemote: "fork", namedPushBranch: "feat" };
+  // Tracks up/main, pushes to origin/main: a fork-sync branch.
+  const forkSync = {
+    upstream: "up/main",
+    upstreamRemote: "up",
+    upstreamBranch: "main",
+    namedPushRemote: "origin",
+    namedPushBranch: "main",
+  };
+  const rows = [
+    ["routed elsewhere, level", fork, "live"],
+    ["routed elsewhere, behind only", { ...fork, upstreamBehind: 2 }, "live"],
+    [
+      "routed elsewhere, ahead and behind",
+      { ...fork, upstreamAhead: 1, upstreamBehind: 1 },
+      "held",
+    ],
+    ["fork sync, level", forkSync, "live"],
+    ["fork sync, behind only", { ...forkSync, upstreamBehind: 3 }, "live"],
+    [
+      "fork sync, ahead and behind",
+      { ...forkSync, upstreamAhead: 1, upstreamBehind: 1 },
+      "held",
+    ],
+    ["routed but refused, level", { ...fork, namedPushRefused: true }, "none"],
+    ["routed, upstream gone", { ...fork, upstreamGone: true }, "none"],
+    [
+      "routed, untracked",
+      { ...fork, upstream: null, upstreamRemote: null, upstreamBranch: null },
+      "none",
+    ],
+    [
+      "routed, removed remote",
+      { ...fork, upstream: "old/main", upstreamRemote: "old" },
+      "none",
+    ],
+    [
+      "ordinary same-name tracked, level",
+      { upstream: "origin/feat", upstreamBranch: "feat" },
+      "none",
+    ],
+  ];
+  for (const [what, over, want] of rows)
+    assert.equal(rowPushItem(rowFacts(over), REMOTES), want, what);
+});
+
+test("rowPushItem: a route on the upstream's own remote keeps the ahead-only rule", () => {
+  // A pull request checkout: its upstream is no branch, its route origin/feat.
+  const pr = {
+    upstream: "origin/pull/7/head",
+    upstreamBranch: null,
+    namedPushRemote: "origin",
+    namedPushBranch: "feat",
+  };
+  const rows = [
+    ["level", pr, "none"],
+    ["ahead", { ...pr, upstreamAhead: 1 }, "live"],
+    ["behind only", { ...pr, upstreamBehind: 2 }, "none"],
+    ["diverged", { ...pr, upstreamAhead: 1, upstreamBehind: 1 }, "held"],
+  ];
+  for (const [what, over, want] of rows)
+    assert.equal(rowPushItem(rowFacts(over), REMOTES), want, what);
+});
+
 const START =
   "Not published. Tracks origin/main, where it started. Right-click to publish.";
 
@@ -1416,6 +1565,47 @@ test("rowSyncIndicator: a start point whose own name is on the remote points at 
       behind: 0,
       upstreamName: "origin/epic/x",
     },
+  );
+});
+
+test("rowSyncIndicator: a start point whose push goes to another remote advises nothing", () => {
+  const toFork = { namedPushRemote: "fork", namedPushBranch: "feat" };
+  for (const ownNameOnRemote of [true, false]) {
+    assert.deepEqual(
+      rowSyncIndicator(
+        rowFacts(toFork),
+        REMOTES,
+        "Right-click",
+        ownNameOnRemote,
+      ),
+      { kind: "none" },
+      `ownNameOnRemote=${ownNameOnRemote}`,
+    );
+    assert.deepEqual(
+      rowSyncIndicator(
+        rowFacts({ ...toFork, upstreamAhead: 1 }),
+        REMOTES,
+        "Right-click",
+        ownNameOnRemote,
+      ),
+      {
+        kind: "arrows",
+        label: "1 to push — vs origin/main",
+        ahead: 1,
+        behind: 0,
+        upstreamName: "origin/main",
+      },
+    );
+  }
+  // A push routed to the upstream itself keeps the start point's advice.
+  assert.deepEqual(
+    rowSyncIndicator(
+      rowFacts({ namedPushRemote: "origin", namedPushBranch: "main" }),
+      REMOTES,
+      "Right-click",
+      false,
+    ),
+    { kind: "startPoint", label: NOT_PUBLISHED_START },
   );
 });
 

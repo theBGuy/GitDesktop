@@ -7,6 +7,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
 import { SHOW_WHITESPACE_LABEL } from "@/features/diff/whitespace-mode";
@@ -106,11 +107,13 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
     filePath,
     diff,
     lineAnchors,
+    renderAnchor,
     paintsOtherCommit,
   }: {
     filePath: string;
     diff: { data?: FileDiff; isPlaceholderData: boolean };
     lineAnchors?: DiffLineAnchor[];
+    renderAnchor?: (anchor: DiffLineAnchor) => ReactNode;
     paintsOtherCommit?: boolean;
   }) {
     useReportPaneSettled(diff.data !== undefined && !diff.isPlaceholderData);
@@ -128,7 +131,7 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
     return (
       <div data-testid="inline-anchors">
         {drawn.map((a) => (
-          <div key={`${a.side}:${a.line}`}>{a.render()}</div>
+          <div key={`${a.side}:${a.line}`}>{renderAnchor?.(a)}</div>
         ))}
       </div>
     );

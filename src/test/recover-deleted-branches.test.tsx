@@ -632,6 +632,41 @@ describe("Recover lost work: deleted branches", () => {
     expect(held(footer())).toBe(false);
   });
 
+  it("keeps an own __proto__ tip already back after a refetch whose answer differs", async () => {
+    disk = [entry("1", "__proto__", TIP_A), entry("2", "feat/a", TIP_B)];
+    vi.mocked(gitBranches).mockResolvedValue([
+      branchRow("__proto__"),
+      branchRow("feat/a"),
+    ]);
+    const answer = (feat: string) =>
+      JSON.parse(`{"__proto__":"${TIP_A}","feat/a":"${feat}"}`);
+    vi.mocked(gitBranchTips)
+      .mockResolvedValueOnce(answer(TIP_C))
+      .mockResolvedValueOnce(answer(TIP_B));
+    const { client } = mount();
+    const already = "A branch named __proto__ is already at this commit.";
+    await waitFor(() =>
+      expect(within(section()).getByText(already)).toBeTruthy(),
+    );
+    // Another name's tip differs, so structural sharing rebuilds the answer.
+    await act(() =>
+      client.invalidateQueries({
+        queryKey: ["repo", REPO, "deleted-name-tips", ["__proto__", "feat/a"]],
+      }),
+    );
+    expect(gitBranchTips).toHaveBeenCalledTimes(2);
+    // The other row's note flips only once the refetched answer has rendered.
+    await waitFor(() =>
+      expect(
+        within(section()).getByText(
+          "A branch named feat/a is already at this commit.",
+        ),
+      ).toBeTruthy(),
+    );
+    expect(within(section()).getByText(already)).toBeTruthy();
+    expect(held(footer())).toBe(false);
+  });
+
   it("keeps a selection moved while a restore runs", async () => {
     disk = [
       entry("1", "feat/a", TIP_A),

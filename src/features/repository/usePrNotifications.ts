@@ -16,6 +16,7 @@ import {
   effectiveChecksScope,
 } from "@/lib/notifications/overrides";
 import { useRepoNotificationOverride } from "@/lib/notifications/queries";
+import { PR_NOUN, prRef } from "@/lib/pulls/pr-state";
 import type {
   NotificationOutcome,
   NotificationSource,
@@ -173,6 +174,9 @@ export function usePrNotifications(repoPath: string) {
 
     if (!before || !prefs) return;
     const login = gh.data?.login ?? null;
+    // The forge's own sigil and noun: a GitLab merge request reads `!12`.
+    const provider = gh.data?.provider;
+    const ref = (number: number) => prRef(provider, number);
     const repoName = repoNameFromPath(repoPath);
     // THIS repo's GitHub host, captured now so an author avatar in the global inbox
     // resolves against the row's own repo host, not the active repo's. Mirrors
@@ -263,8 +267,8 @@ export function usePrNotifications(repoPath: string) {
           passed ? "checks-passed" : "checks-failed",
           passed ? "success" : "danger",
           passed
-            ? `Checks passed on #${pr.number}`
-            : `Checks failed on #${pr.number}`,
+            ? `Checks passed on ${ref(pr.number)}`
+            : `Checks failed on ${ref(pr.number)}`,
           pr,
           `checks:${pr.number}:${pr.checksState}`,
         );
@@ -275,7 +279,7 @@ export function usePrNotifications(repoPath: string) {
           "prActivity",
           "pr-opened",
           "info",
-          `New pull request #${pr.number}`,
+          `New ${PR_NOUN[provider ?? "github"]} ${ref(pr.number)}`,
           pr,
           `opened:${pr.number}`,
           { authorLogin: pr.author },
@@ -287,7 +291,7 @@ export function usePrNotifications(repoPath: string) {
           "prActivity",
           merged ? "pr-merged" : "pr-closed",
           merged ? "merged" : "neutral",
-          `#${pr.number} was ${merged ? "merged" : "closed"}`,
+          `${ref(pr.number)} was ${merged ? "merged" : "closed"}`,
           pr,
           `state:${pr.number}:${pr.state}`,
         );
@@ -305,8 +309,8 @@ export function usePrNotifications(repoPath: string) {
             approved ? "pr-approved" : "pr-changes-requested",
             approved ? "success" : "warning",
             approved
-              ? `#${pr.number} was approved`
-              : `Changes requested on #${pr.number}`,
+              ? `${ref(pr.number)} was approved`
+              : `Changes requested on ${ref(pr.number)}`,
             pr,
             `decision:${pr.number}:${pr.reviewDecision}`,
             // A verdict IS a review — same `reviews(last:1)` source as the plain
@@ -323,7 +327,7 @@ export function usePrNotifications(repoPath: string) {
             "prReviews",
             "pr-review",
             "info",
-            `New review on #${pr.number}`,
+            `New review on ${ref(pr.number)}`,
             pr,
             `review:${pr.number}:${pr.reviewCount}`,
             { reviewId: pr.lastReviewId },
@@ -343,7 +347,7 @@ export function usePrNotifications(repoPath: string) {
             "prReviews",
             "pr-comment",
             "info",
-            `New comment on #${pr.number}`,
+            `New comment on ${ref(pr.number)}`,
             pr,
             `comment:${pr.number}:${pr.commentCount}`,
           );
@@ -362,7 +366,7 @@ export function usePrNotifications(repoPath: string) {
           "prReviews",
           "review-requested",
           "info",
-          `Review requested on #${pr.number}`,
+          `Review requested on ${ref(pr.number)}`,
           pr,
           // Per-viewer event — scope the dedupe to your login so a remove + re-add
           // of a DIFFERENT reviewer can't collide.

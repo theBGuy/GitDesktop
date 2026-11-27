@@ -194,7 +194,9 @@ describe("composer Previews load hosted images", () => {
 
   it("the pending comment's Edit editor (CommentEditor)", async () => {
     render(wrap(<Card />));
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit pending comment" }),
+    );
     const editor = screen.getByRole("textbox", {
       name: "Edit pending comment",
     });
@@ -291,7 +293,7 @@ function Anchors({
   comments: CommitCommentOut[];
   refs?: MarkdownRefs;
 }) {
-  const anchors = useCommitLineAnchors(
+  const { anchors, renderAnchor } = useCommitLineAnchors(
     comments,
     splitUnifiedDiff(PATCH),
     "x",
@@ -302,7 +304,7 @@ function Anchors({
     <div>
       <p>{`${anchors.length} anchors`}</p>
       {anchors.map((a) => (
-        <div key={a.line}>{a.render()}</div>
+        <div key={a.line}>{renderAnchor(a)}</div>
       ))}
     </div>
   );
@@ -413,7 +415,9 @@ describe("posted renders load hosted images", () => {
 
   it("a pending comment's card after Edit, Preview and Cancel", async () => {
     render(wrap(<Card />));
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit pending comment" }),
+    );
     await editorFocused(
       screen.getByRole("textbox", { name: "Edit pending comment" }),
     );

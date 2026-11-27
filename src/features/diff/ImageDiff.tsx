@@ -3,6 +3,7 @@ import { ImageLightbox, type LightboxImage } from "@/components/image-lightbox";
 import { IMAGE_CAPTION_REASON } from "@/components/markdown/markdown-images";
 import { Button } from "@/components/ui/button";
 import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
+import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
 import { formatBytes } from "@/lib/format-bytes";
 import type { FileBytes } from "@/lib/git/api";
 import { isAppError } from "@/lib/tauri/invoke";
@@ -13,6 +14,7 @@ import {
   useFileAtSource,
 } from "./content-source";
 import { useReportPaneSettled } from "./diff-pane-hold";
+import { type LineKeeper, SnapshotMark } from "./snapshot-mark";
 
 const IMAGE_MIME: Record<string, string> = {
   png: "image/png",
@@ -45,10 +47,17 @@ interface Size {
 
 type PaneKey = "old" | "new";
 
-/** Why a side's read failed: a refusal (a linked, non-regular or refused path,
- *  or an invalid rev) answers the same on every read, so only a failed read
- *  offers Retry. */
-type SideError = "notImage" | "readFailed";
+/** Why a side has no bytes to show: a refusal (a linked, non-regular or
+ *  refused path, or an invalid rev) answers the same on every read, and a read
+ *  parked offline resumes by itself on reconnect, so only a failed read offers
+ *  Retry. */
+type SideError = "notImage" | "readFailed" | "offline";
+
+const SIDE_ERROR_TEXT: Record<SideError, string> = {
+  notImage: IMAGE_CAPTION_REASON.notImage,
+  readFailed: IMAGE_CAPTION_REASON.readFailed,
+  offline: offlinePendingMessage("this image"),
+};
 
 interface Pane {
   key: PaneKey;
@@ -84,11 +93,11 @@ function sideRead(
 ): SideRead {
   if (read.data !== undefined) return { bytes: read.data };
   // A forge read that can't run is unavailable, never loading: a disabled one
-  // (no full sha) answers the same every time, a paused one (offline) may not.
+  // (no full sha) answers the same every time, a parked one (offline, a Retry
+  // pressed offline included) runs once the network is back.
   if (forge && read.isPending && read.fetchStatus === "idle")
     return { error: "notImage" };
-  if (forge && read.isPending && read.fetchStatus === "paused")
-    return { error: "readFailed" };
+  if (forge && read.fetchStatus === "paused") return { error: "offline" };
   if (read.isPending) return { pending: true };
   if (!read.isError) return { bytes: null };
   return {
@@ -227,7 +236,7 @@ function FailedSide({
       </figcaption>
       <div className="flex h-40 w-56 max-w-full flex-col items-center justify-center gap-2 border px-4">
         <p className="text-xs text-muted-foreground">
-          {IMAGE_CAPTION_REASON[error]}
+          {SIDE_ERROR_TEXT[error]}
         </p>
         {error === "readFailed" && (
           <Button
@@ -324,9 +333,9 @@ export function ImagePanes({
   revs: ImageRevs;
   /** A forge-patch host: each side reads from its source, by sha. */
   forgePatch?: ForgePatch;
-  /** Set where the panes sit above a diff's rows: called after every change of
-   *  their layout, so the reader's top line stays put. */
-  lineKeeper?: { readonly current: (() => void) | null };
+  /** Set where the panes sit above a diff's rows: read before and restored
+   *  after every change of their layout, so the reader's top line stays put. */
+  lineKeeper?: { readonly current: LineKeeper | null };
 }) {
   // A source not known yet reads nothing.
   const source = forgePatch === undefined ? "local" : forgePatch.source;
@@ -491,7 +500,7 @@ export function ImagePanes({
       ]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: it runs once per layout, which `layout` names
   useLayoutEffect(() => {
-    lineKeeper?.current?.();
+    lineKeeper?.current?.restore();
   }, [lineKeeper, layout]);
 
   // The root renders on every arm, pending included (empty and unpadded, so an
@@ -506,6 +515,8 @@ export function ImagePanes({
         !drawnHeld && "p-6",
       )}
     >
+      {/* Mounted on every arm, so the read precedes each layout change. */}
+      <SnapshotMark on={layout} read={() => lineKeeper?.current?.read()} />
       {content}
     </div>
   );

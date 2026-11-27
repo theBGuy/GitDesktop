@@ -13,6 +13,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -61,6 +62,7 @@ import {
   refreshFailed,
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
+import { useEditorCloseLanding } from "@/features/conversations/Thread";
 import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotkeys";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { JiraIssueSidebar } from "@/features/issues/JiraIssueSidebar";
@@ -835,7 +837,7 @@ export function JiraLabelsPopover({
  * permission is granted. Editing state is LOCAL, so a background refetch never
  * wipes an open draft.
  */
-function JiraCommentItem({
+export function JiraCommentItem({
   repoPath,
   link,
   issueKey,
@@ -890,6 +892,11 @@ function JiraCommentItem({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const landing = useEditorCloseLanding(editing);
+  function closeEditor() {
+    landing.arm();
+    setEditing(false);
+  }
 
   // Own-scoped perms apply to the viewer's own comment; ALL-scoped perms (project
   // admins) apply to anyone's — so the affordance shows for others' comments too.
@@ -899,6 +906,7 @@ function JiraCommentItem({
   // link-pending window — and while the caller's issue is stale — the menu is
   // simply absent; the comment still renders.
   const showMenu = link !== null && !stale && (canEdit || canDelete);
+  const authorId = useId();
   const edited =
     comment.updatedAt != null && comment.updatedAt !== comment.createdAt;
 
@@ -907,18 +915,19 @@ function JiraCommentItem({
     setEditing(true);
   }
 
-  async function saveEdit() {
+  async function saveEdit(): Promise<boolean> {
     const body = draft.trim();
     // An editor opened before the switch would pair this comment's id with the
     // newly selected `issueKey`, which Jira routes as a 404.
-    if (stale || editHold) return;
+    if (stale || editHold) return false;
     try {
       await edit.mutateAsync({ issueKey, commentId: comment.id, bodyMd: body });
     } catch (e) {
       toastError(e);
-      return;
+      return false;
     }
-    setEditing(false);
+    closeEditor();
+    return true;
   }
 
   async function doDelete() {
@@ -937,12 +946,24 @@ function JiraCommentItem({
   }
 
   return (
-    <div className="space-y-1">
+    // While no menu shows (stale, link pending, permissions withdrawn) an
+    // editor closing has nothing to return to and lands here: out of the Tab
+    // order (a pointer press can still focus it, so only then), named by its
+    // author and ringed when focus-visible.
+    <div
+      ref={landing.rootRef}
+      {...(!showMenu && {
+        tabIndex: -1,
+        role: "group",
+        "aria-labelledby": authorId,
+      })}
+      className="space-y-1 rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+    >
       <p className="flex items-center gap-2 text-xs">
         {comment.author && (
           <ForgeUserAvatar user={comment.author} ghHost={null} />
         )}
-        <span className="font-medium">
+        <span id={authorId} className="font-medium">
           {comment.author?.label ?? "unknown"}
         </span>
         <span className="text-muted-foreground">
@@ -956,6 +977,7 @@ function JiraCommentItem({
             <span className="flex-1" />
             <DropdownMenu>
               <DropdownMenuTrigger
+                ref={landing.triggerRef}
                 render={
                   <Button
                     variant="ghost"
@@ -989,8 +1011,8 @@ function JiraCommentItem({
           ariaLabel="Edit comment"
           value={draft}
           onChange={setDraft}
-          onSubmit={() => void saveEdit()}
-          onCancel={() => setEditing(false)}
+          onSubmit={saveEdit}
+          onCancel={closeEditor}
           canSubmit={
             draft.trim().length > 0 &&
             draft.trim() !== comment.bodyMd.trim() &&

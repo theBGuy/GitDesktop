@@ -20,8 +20,9 @@ export function headPendingKind(read: {
   return "loading";
 }
 
-// The reasons state the hold and promise nothing: a file whose section the push
-// changed drops the composer when the new diff lands.
+// The reasons state the hold and promise nothing: what the new diff does to an
+// open composer (restored on its line, or its file's earlier rows kept) is the
+// diff's call, in editor-keep.tsx.
 export const HEAD_PENDING_REVIEW_REASON: Record<
   HeadPendingKind,
   (noun: string) => string

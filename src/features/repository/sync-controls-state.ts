@@ -268,6 +268,35 @@ export interface RowUpstreamFacts {
   upstreamBehind: number;
   upstreamIsRemoteDefault: boolean;
   keepLocal: boolean;
+  /** The backend's routing of a push naming no remote; absent = unknown. */
+  namedPushRemote?: string | null;
+  namedPushBranch?: string | null;
+  namedPushRefused?: boolean;
+}
+
+/** Where a named push of the row lands, from the backend's routing fields only
+ *  (never re-derived from config): `to` when both names are known (`toUpstream` =
+ *  the live upstream itself), `refused` when the backend would refuse it, `unknown`
+ *  otherwise (an older backend, a failed read: the caller keeps today's labels and
+ *  destination). The backend names only a configured remote, so a render-time
+ *  remotes list, stale while it refetches, never overrules it. */
+export type RowPushTarget =
+  | { kind: "to"; remote: string; branch: string; toUpstream: boolean }
+  | { kind: "refused" }
+  | { kind: "unknown" };
+
+export function rowPushTarget(row: RowUpstreamFacts): RowPushTarget {
+  if (row.namedPushRefused === true) return { kind: "refused" };
+  const remote = row.namedPushRemote;
+  const branch = row.namedPushBranch;
+  if (typeof remote !== "string" || typeof branch !== "string")
+    return { kind: "unknown" };
+  const toUpstream =
+    row.upstream !== null &&
+    !row.upstreamGone &&
+    row.upstreamRemote === remote &&
+    row.upstreamBranch === branch;
+  return { kind: "to", remote, branch, toUpstream };
 }
 
 /** Non-null only for a live upstream on a CONFIGURED remote whose branch name
@@ -286,6 +315,48 @@ export function rowNameMismatch(
     remoteBranch: row.upstreamBranch,
     isRemoteDefault: row.upstreamIsRemoteDefault,
   };
+}
+
+/** The row's plain Push item: offered when it tracks a configured remote and is
+ *  ahead, except into a different-name upstream that is the remote's default
+ *  (the mismatch menu omits that push); held while behind. A row routed to
+ *  another remote than its upstream's has it at any count, held only when ahead
+ *  and behind. The row's menu and the push-to-origin hotkey both read it here,
+ *  so the routed-push toast names the Push item only when the row has one. */
+export function rowPushItem(
+  row: RowUpstreamFacts,
+  remoteNames: readonly string[],
+): "none" | "held" | "live" {
+  const tracked =
+    Boolean(row.upstream) &&
+    !row.upstreamGone &&
+    row.upstreamRemote !== null &&
+    remoteNames.includes(row.upstreamRemote);
+  if (!tracked) return "none";
+  const target = rowPushTarget(row);
+  const pushesElsewhere = target.kind === "to" && !target.toUpstream;
+  // Counts against the upstream say nothing about another remote's branch, so a
+  // row routed to another remote keeps its item at any count; only both sides
+  // moving holds it.
+  if (pushesElsewhere && target.remote !== row.upstreamRemote)
+    return row.upstreamAhead > 0 && row.upstreamBehind > 0 ? "held" : "live";
+  if (row.upstreamAhead <= 0) return "none";
+  const mismatch = pushesElsewhere ? null : rowNameMismatch(row, remoteNames);
+  const menu =
+    mismatch &&
+    deriveMismatchMenu({
+      branch: row.name,
+      remote: mismatch.remote,
+      remoteBranch: mismatch.remoteBranch,
+      ahead: row.upstreamAhead,
+      behind: row.upstreamBehind,
+      upstreamIsRemoteDefault: mismatch.isRemoteDefault,
+      // Only the publish item's label reads it.
+      remoteNewExists: false,
+      keptLocal: row.keepLocal,
+    });
+  if (menu && menu.pushToTracked === null) return "none";
+  return row.upstreamBehind > 0 ? "held" : "live";
 }
 
 export type RowSyncIndicator =
@@ -330,8 +401,12 @@ export function rowSyncIndicator(
     };
   if (row.upstream && !row.upstreamGone) {
     const mismatch = rowNameMismatch(row, remoteNames);
+    // A push routed off the upstream copies the branch elsewhere, so the menu
+    // offers neither the start point's publish nor its "track it".
+    const target = rowPushTarget(row);
+    const pushesElsewhere = target.kind === "to" && !target.toUpstream;
     // Created from the remote's default branch: nothing of it is published.
-    if (mismatch?.isRemoteDefault) {
+    if (mismatch?.isRemoteDefault && !pushesElsewhere) {
       if (row.keepLocal) return { kind: "none" };
       return {
         kind: "startPoint",
@@ -417,8 +492,9 @@ export function deriveSyncControls(input: SyncControlsInput) {
     mismatchMenu !== null &&
     (mismatchMenu.pushToTracked?.disabled ?? true) &&
     mismatchMenu.publish.disabled;
-  // "Publish branch" sends `-u origin`, so it is offered only for a branch the
-  // status has MEASURED as untracked — never for one still loading.
+  // "Publish branch" sends `-u` to the branch's routed remote, so it is offered
+  // only for a branch the status has MEASURED as untracked — never for one
+  // still loading.
   const pushLabel = (() => {
     if (mismatch) return "Push";
     if (diverged) return "Force push";

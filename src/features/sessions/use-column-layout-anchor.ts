@@ -81,7 +81,7 @@ function switchesLayout(was: StepLayout, now: StepLayout): boolean {
 }
 
 interface HeldAnchor {
-  el: Element;
+  el: HTMLElement;
   edge: ColumnAnchor["edge"];
   offset: number;
   height: number;
@@ -98,7 +98,7 @@ interface ColumnShot {
   /** A restore to the bottom over content still this tall moves nothing: what
    *  the reader saw did not change. */
   scrollHeight: number;
-  boxes: readonly (ColumnBox & { el: Element })[];
+  boxes: readonly (ColumnBox & { el: HTMLElement })[];
 }
 
 /** A placed anchor (null: the column's bottom) and the release of its hold. */
@@ -121,10 +121,24 @@ export interface ColumnLayoutAnchor {
 export const ColumnLayoutAnchorContext =
   createContext<ColumnLayoutAnchor | null>(null);
 
-function boxOf(scroller: HTMLElement, el: Element): ColumnBox {
-  const origin = scroller.getBoundingClientRect().top - scroller.scrollTop;
-  const rect = el.getBoundingClientRect();
-  return { top: rect.top - origin, bottom: rect.bottom - origin };
+/** `el`'s box in layout, summed along its offset parents up to `scroller`: a
+ *  turn's entrance slide transforms the boxes it moves, which a rect read
+ *  would take in. Null when the chain never meets `scroller` (hidden, detached,
+ *  or the scroller not positioned): no box beats a guessed one. An offset is
+ *  taken from its parent's padding edge, so each parent below the scroller
+ *  adds its top border. */
+function boxOf(scroller: HTMLElement, el: HTMLElement): ColumnBox | null {
+  let top = 0;
+  let link = el;
+  for (;;) {
+    top += link.offsetTop;
+    const parent = link.offsetParent;
+    if (parent === scroller) return { top, bottom: top + el.offsetHeight };
+    if (!(parent instanceof HTMLElement) || !scroller.contains(parent))
+      return null;
+    top += parent.clientTop;
+    link = parent;
+  }
 }
 
 /** The anchor `shot` names among its boxes still in the column, at the
@@ -167,7 +181,9 @@ function holdColumn(
       return;
     }
     if (!anchor.el.isConnected) return;
-    const top = columnScrollTop(boxOf(scroller, anchor.el), anchor);
+    const box = boxOf(scroller, anchor.el);
+    if (box === null) return;
+    const top = columnScrollTop(box, anchor);
     if (Math.abs(top - scroller.scrollTop) > 1) scroller.scrollTop = top;
   };
   // Rows landing in a box after the switch re-lay it with no scroll event, so
@@ -232,10 +248,12 @@ function createColumnAnchor(
         held: held?.anchor ?? null,
         scrollTop: scroller.scrollTop,
         scrollHeight: scroller.scrollHeight,
-        boxes: Array.from(scroller.querySelectorAll(BOX_SELECTOR), (el) => ({
-          el,
-          ...boxOf(scroller, el),
-        })),
+        boxes: Array.from(
+          scroller.querySelectorAll<HTMLElement>(BOX_SELECTOR),
+        ).flatMap((el) => {
+          const box = boxOf(scroller, el);
+          return box === null ? [] : [{ el, ...box }];
+        }),
       };
     },
     restore() {

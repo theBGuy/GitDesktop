@@ -68,6 +68,7 @@ import {
   resolveLocalLanding,
 } from "@/lib/local-landing/resolve";
 import { useMenuKeyFollowUpCanceller } from "@/lib/menu-key-follow-up";
+import { PR_NOUN, prRef } from "@/lib/pulls/pr-state";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useSettings } from "@/lib/settings/queries";
@@ -88,6 +89,12 @@ import {
 /** Stable empty default, so a settings read that hasn't landed doesn't hand a
  *  fresh array to every render. */
 const NO_RECENTS: RecentRepo[] = [];
+
+/** A request row's glyph name: its forge's own noun, capitalized. */
+function requestLabel(provider: ForgeProvider): string {
+  const noun = PR_NOUN[provider];
+  return `${noun.charAt(0).toUpperCase()}${noun.slice(1)}`;
+}
 
 // Per-provider copy as Records rather than ternary chains, so adding a forge is
 // one entry per surface and no sentence can silently keep another's wording.
@@ -1109,7 +1116,7 @@ function MyWorkRow({
   onOpen: OpenItem;
 }) {
   const Icon = item.isPullRequest ? GitPullRequestIcon : CircleDashedIcon;
-  const typeLabel = item.isPullRequest ? "Pull request" : "Issue";
+  const typeLabel = item.isPullRequest ? requestLabel(item.provider) : "Issue";
   const browserLabel = `Opens on ${item.host || providerLabel(item.provider)} — not a local repository`;
   return (
     <button
@@ -1151,7 +1158,9 @@ function MyWorkRow({
         <Icon className="size-3.5" aria-hidden />
       </span>
       <span className="shrink-0 tabular-nums text-muted-foreground">
-        #{item.number}
+        {item.isPullRequest
+          ? prRef(item.provider, item.number)
+          : `#${item.number}`}
       </span>
       <span
         className="min-w-0 flex-1 truncate"

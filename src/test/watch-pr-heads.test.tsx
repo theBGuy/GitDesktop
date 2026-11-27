@@ -74,6 +74,30 @@ describe("useWatchPrHeads", () => {
     });
   });
 
+  it("keeps watching a head named __proto__ across refetches whose answers differ", async () => {
+    const [A, B, C] = ["a", "b", "c"].map((c) => c.repeat(40));
+    h.prs = [pr("1", "__proto__"), pr("2", "feat/a")];
+    // JSON.parse makes an own key; an object literal would set the prototype.
+    const answer = (proto: string, feat: string) =>
+      JSON.parse(`{"__proto__":"${proto}","feat/a":"${feat}"}`);
+    const protoSyncs = () =>
+      vi
+        .mocked(maybeFireSync)
+        .mock.calls.filter(([e]) => e.ref === "1")
+        .map(([e]) => e.currentHeadSha);
+    vi.mocked(gitBranchTips).mockResolvedValueOnce(answer(A, A));
+    const client = mount();
+    await waitFor(() => expect(protoSyncs()).toEqual([A]));
+    // Another key differs, so structural sharing rebuilds the answer.
+    vi.mocked(gitBranchTips).mockResolvedValueOnce(answer(A, B));
+    await act(() => client.refetchQueries({ queryKey: ["branch-tips", REPO] }));
+    await waitFor(() => expect(protoSyncs()).toEqual([A, A]));
+    // The __proto__ branch itself moves.
+    vi.mocked(gitBranchTips).mockResolvedValueOnce(answer(C, B));
+    await act(() => client.refetchQueries({ queryKey: ["branch-tips", REPO] }));
+    await waitFor(() => expect(protoSyncs()).toEqual([A, A, C]));
+  });
+
   it("pins, with no fix to revert: a tips read that rejects after a success fires nothing more", async () => {
     h.prs = [pr("2", "feat/a")];
     vi.mocked(gitBranchTips).mockResolvedValueOnce({ "feat/a": SHA });
@@ -85,7 +109,7 @@ describe("useWatchPrHeads", () => {
     });
     await act(() => client.refetchQueries({ queryKey: ["branch-tips", REPO] }));
     expect(tipsState(client)?.status).toBe("error");
-    expect(tipsState(client)?.data).toEqual({ "feat/a": SHA });
+    expect(tipsState(client)?.data).toEqual([["feat/a", SHA]]);
     expect(maybeFireSync).toHaveBeenCalledTimes(1);
     expect(toast.error).not.toHaveBeenCalled();
     expect(toast.info).not.toHaveBeenCalled();

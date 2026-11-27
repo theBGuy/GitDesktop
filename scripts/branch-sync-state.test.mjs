@@ -14,10 +14,12 @@ import {
   destinationPhrase,
   destinationSlug,
   forgeShapedUrl,
+  forgeUrlHost,
   isLocalUpstream,
   presenceUnderUrls,
   publishConfirmBody,
   publishConfirmTitle,
+  publishUpdatesForkPr,
   pushWouldCreate,
   remoteHasBranch,
   repoIdentity,
@@ -264,6 +266,74 @@ test("destinationSlug: a slug only for forge-shaped URLs", () => {
     destinationSlug("https://h/o/r", () => null),
     null,
   );
+});
+
+test("forgeUrlHost: the lowercased host without user or port", () => {
+  for (const [url, want] of [
+    ["https://GitHub.com/o/r.git", "github.com"],
+    ["https://user:pw@github.com:8443/o/r", "github.com"],
+    ["ssh://git@gitlab.example:2222/g/r.git", "gitlab.example"],
+    ["git@bitbucket.org:team/repo.git", "bitbucket.org"],
+    ["  git@github.com:o/r  ", "github.com"],
+    ["https://[2001:db8::1]:8443/o/r", "[2001:db8::1]"],
+    ["https://[2001:db8::1/o/r", null],
+    ["https://@/o/r", null],
+    // As Rust `remote_host`: an http(s) authority ends at `?` or `#` too, an
+    // ssh one only at `/`.
+    ["https://github.com?@evil.example/o/r", "github.com"],
+    ["https://github.com#@evil.example/o/r", "github.com"],
+    ["ssh://git@host.example?x/o/r", "host.example?x"],
+    // scp: the host precedes the first `:`, its user ends at the last `@`.
+    ["a:b@evil.example:o/r", "a"],
+    ["a@b@github.com:o/r", "github.com"],
+    // An `@[` before the first `/` opens a bracketed host to git: unread.
+    ["github.com:x@[evil.example]:someone/late", null],
+    ["x@[evil.example]@github.com:someone/late", null],
+    ["C:/repos/r.git", null],
+    ["file:///srv/r.git", null],
+    ["", null],
+  ])
+    assert.equal(forgeUrlHost(url), want, url);
+});
+
+test("publishUpdatesForkPr: the destination must be the head's host, slug and branch", () => {
+  const slugOf = (u) =>
+    u
+      .replace(/\.git$/, "")
+      .split(/[/:]/)
+      .slice(-2)
+      .join("/");
+  const match = {
+    headRepoOwner: "Alice",
+    headRepoName: "r",
+    headRefName: "feat",
+    headRepoHost: "GitHub.com",
+  };
+  const updates = (url, over = {}, branch = "feat") =>
+    publishUpdatesForkPr({ ...match, ...over }, url, branch, slugOf);
+  assert.equal(updates("https://github.com/alice/R.git"), true);
+  assert.equal(updates("git@github.com:alice/r.git"), true);
+  // The same owner and repository name on another host is a separate copy.
+  assert.equal(updates("https://gitlab.com/alice/r.git"), false);
+  assert.equal(
+    updates("https://github.com/alice/r.git", { headRepoHost: "" }),
+    false,
+  );
+  // A match from a backend that doesn't fill the host yet: shown, never thrown.
+  const { headRepoHost: _host, ...hostless } = match;
+  assert.equal(
+    publishUpdatesForkPr(
+      hostless,
+      "https://github.com/alice/r.git",
+      "feat",
+      slugOf,
+    ),
+    false,
+  );
+  assert.equal(updates("https://github.com/bob/r.git"), false);
+  assert.equal(updates("https://github.com/alice/r.git", {}, "feat-2"), false);
+  assert.equal(updates(null), false);
+  assert.equal(updates("C:/repos/alice/r.git"), false);
 });
 
 test("destinationPhrase: slug and origin-only visibility", () => {

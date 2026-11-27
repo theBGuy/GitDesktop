@@ -1,8 +1,10 @@
 import { act, render } from "@testing-library/react";
-import { useLayoutEffect, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useModeLineAnchor } from "@/features/diff/DiffSurface";
 import { RESTORE_BOUND_MS } from "@/features/diff/diff-rows";
+import { type LineKeeper, SnapshotMark } from "@/features/diff/snapshot-mark";
+import { TabPanel } from "@/features/repository/TabPanel";
 
 // The split/unified line anchor's runtime wiring, over hand-laid rows: jsdom
 // has no layout, so each row carries its content-coordinate box (data-y,
@@ -54,9 +56,10 @@ interface HarnessProps {
 
 function Harness({ mode, lines, ready = true, content }: HarnessProps) {
   const ref = useRef<HTMLDivElement>(null);
-  useModeLineAnchor(ref, mode, "src/a.ts", content);
+  const { mark } = useModeLineAnchor(ref, mode, "src/a.ts", content);
   return (
     <div ref={ref} data-testid="scroller">
+      {mark}
       {ready && <Rows mode={mode} lines={lines} />}
       <button type="button" data-testid="inside" />
     </div>
@@ -108,6 +111,10 @@ beforeEach(() => {
   vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
     function (this: HTMLElement) {
+      // A hidden subtree lays out nothing, as under an <Activity> hide.
+      for (let el: HTMLElement | null = this; el; el = el.parentElement)
+        if (el.style.display === "none")
+          return { top: 0, bottom: 0 } as DOMRect;
       const y = this.dataset.y;
       const rowTop = y === undefined ? 0 : Number(y) - top;
       const bottom = y === undefined ? 0 : rowTop + Number(this.dataset.h);
@@ -290,10 +297,11 @@ function SpecHarness({
   rootKey,
 }: SpecProps) {
   const ref = useRef<HTMLDivElement>(null);
-  const keepLine = useModeLineAnchor(ref, mode, "src/a.ts", content);
+  const { keepLine, mark } = useModeLineAnchor(ref, mode, "src/a.ts", content);
   useLayoutEffect(() => onKeep?.(keepLine), [onKeep, keepLine]);
   return (
     <div ref={ref} data-testid="scroller">
+      {mark}
       <SpecRows key={rootKey} mode={mode} rows={rows[mode]} />
       <ClampOnBuild content={content} to={clampTo} />
     </div>
@@ -519,5 +527,275 @@ describe("useModeLineAnchor across restores", () => {
     view.userScroll(300);
     view.update({ content: {} });
     expect(top).toBe(0);
+  });
+});
+
+function AnchoredRows({
+  scrollerRef,
+  mode,
+  content,
+}: {
+  scrollerRef: { readonly current: HTMLElement | null };
+  mode: Mode;
+  content: object;
+}) {
+  const { mark } = useModeLineAnchor(scrollerRef, mode, "src/a.ts", content);
+  return (
+    <>
+      {mark}
+      <Rows mode={mode} lines={LINES} />
+    </>
+  );
+}
+
+/** A host that owns the scroller and hands its ref down to the rows' owner,
+ *  as DiffContent and the staging viewer do; `callback` takes DiffContent's
+ *  callback ref with a cleanup. React attaches an ancestor's ref after its
+ *  descendants' layout effects, so the hook sees it unset on a re-show. */
+function ParentHarness({
+  mode,
+  content,
+  callback,
+}: {
+  mode: Mode;
+  content: object;
+  callback: boolean;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const callbackRef = useCallback((node: HTMLDivElement | null) => {
+    ref.current = node;
+    return () => {
+      ref.current = null;
+    };
+  }, []);
+  return (
+    <div ref={callback ? callbackRef : ref} data-testid="scroller">
+      <AnchoredRows scrollerRef={ref} mode={mode} content={content} />
+    </div>
+  );
+}
+
+/** A scroll whose event fired but whose sampling frame hasn't run yet. */
+function scrollNoFrame(scroller: HTMLElement, y: number) {
+  top = y;
+  scroller.dispatchEvent(new Event("scroll"));
+}
+
+describe("useModeLineAnchor reads the switching commit", () => {
+  it("restores the line on screen when the scroll's frame hasn't run", () => {
+    const content = {};
+    const view = mount({ mode: "split", lines: LINES, content });
+    view.scrollTo(200);
+    // Split line 16 at the top, its sample still waiting for a frame.
+    scrollNoFrame(view.scroller, 300);
+    view.update({ mode: "unified", lines: LINES, content });
+    expect(top).toBe(450);
+    // The late frame finds the restored line frozen and samples nothing.
+    for (const frame of frames.splice(0)) frame(0);
+    view.update({ mode: "split", lines: LINES, content });
+    expect(top).toBe(300);
+  });
+
+  it("restores the line on screen when the scroll raised no event yet", () => {
+    const content = {};
+    const view = mount({ mode: "split", lines: LINES, content });
+    view.scrollTo(200);
+    top = 300;
+    view.update({ mode: "unified", lines: LINES, content });
+    expect(top).toBe(450);
+  });
+
+  it.each([
+    [
+      "the scroll's frame hadn't run",
+      (s: HTMLElement) => scrollNoFrame(s, 300),
+    ],
+    [
+      "the scroll raised no event",
+      () => {
+        top = 300;
+      },
+    ],
+  ])(
+    "restores the line shown at a hide, when %s and the switch landed hidden",
+    (_, scroll) => {
+      const content = {};
+      const at = (mode: Mode, hidden: boolean) => (
+        <TabPanel active={!hidden}>
+          <Harness mode={mode} lines={LINES} content={content} />
+        </TabPanel>
+      );
+      const view = render(at("split", false));
+      const scroller = view.getByTestId("scroller");
+      Object.defineProperty(scroller, "scrollTop", {
+        configurable: true,
+        get: () => top,
+        set: (v: number) => {
+          top = v;
+        },
+      });
+      top = 200;
+      scroller.dispatchEvent(new Event("scroll"));
+      for (const frame of frames.splice(0)) frame(0);
+      scroll(scroller);
+      view.rerender(at("split", true));
+      view.rerender(at("unified", true));
+      view.rerender(at("unified", false));
+      expect(top).toBe(450);
+    },
+  );
+
+  it.each([
+    ["an object ref", false],
+    ["a callback ref with a cleanup", true],
+  ])(
+    "restores the line shown at a hide when a parent owns the scroller through %s",
+    (_, callback) => {
+      const content = {};
+      const at = (mode: Mode, hidden: boolean) => (
+        <TabPanel active={!hidden}>
+          <ParentHarness mode={mode} content={content} callback={callback} />
+        </TabPanel>
+      );
+      const view = render(at("split", false));
+      const scroller = view.getByTestId("scroller");
+      Object.defineProperty(scroller, "scrollTop", {
+        configurable: true,
+        get: () => top,
+        set: (v: number) => {
+          top = v;
+        },
+      });
+      top = 200;
+      scroller.dispatchEvent(new Event("scroll"));
+      for (const frame of frames.splice(0)) frame(0);
+      // Split line 16 at the top with no scroll event: only the hide reads it.
+      top = 300;
+      view.rerender(at("split", true));
+      view.rerender(at("unified", true));
+      view.rerender(at("unified", false));
+      expect(top).toBe(450);
+    },
+  );
+
+  it("a read that finds no rendered row keeps the anchor it had", async () => {
+    const content = {};
+    const view = mount({ mode: "split", lines: LINES, content });
+    view.scrollTo(200);
+    view.update({ mode: "split", lines: LINES, ready: false, content });
+    view.update({ mode: "unified", lines: LINES, ready: false, content });
+    await settle();
+    view.update({ mode: "unified", lines: LINES, content });
+    await settle();
+    expect(top).toBe(300);
+  });
+});
+
+/** Split rows 20px tall under `pad` pixels of panes above them. */
+function PaddedRows({ pad }: { pad: number }) {
+  return (
+    <table>
+      <tbody>
+        {LINES.map((n, i) => (
+          <tr key={n} data-line="" data-y={pad + i * 20} data-h={20}>
+            <td data-side="old">
+              <span data-line-num={n} />
+            </td>
+            <td data-side="new">
+              <span data-line-num={n} />
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+const KEEPER_CONTENT = {};
+
+/** A host whose panes above the rows change in commits of their own. */
+function KeeperHarness({ layoutKey, pad }: { layoutKey: string; pad: number }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const keeper = useRef<LineKeeper | null>(null);
+  useModeLineAnchor(ref, "split", "src/a.ts", KEEPER_CONTENT, keeper);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: it runs once per layout, which `layoutKey` names
+  useLayoutEffect(() => {
+    keeper.current?.restore();
+  }, [layoutKey]);
+  return (
+    <div ref={ref} data-testid="scroller">
+      <SnapshotMark on={layoutKey} read={() => keeper.current?.read()} />
+      <PaddedRows pad={pad} />
+    </div>
+  );
+}
+
+function mountKeeper() {
+  const view = render(<KeeperHarness layoutKey="a" pad={0} />);
+  const scroller = view.getByTestId("scroller");
+  Object.defineProperty(scroller, "scrollTop", {
+    configurable: true,
+    get: () => top,
+    set: (v: number) => {
+      top = v;
+    },
+  });
+  return {
+    scroller,
+    sampleAt(y: number) {
+      top = y;
+      scroller.dispatchEvent(new Event("scroll"));
+      for (const frame of frames.splice(0)) frame(0);
+    },
+    relay(layoutKey: string, pad: number) {
+      view.rerender(<KeeperHarness layoutKey={layoutKey} pad={pad} />);
+    },
+  };
+}
+
+describe("useModeLineAnchor's keeper", () => {
+  it("keeps the line on screen when the panes change after an unsampled scroll", () => {
+    const view = mountKeeper();
+    // Line 11 sampled, then line 16 scrolled to with no frame yet.
+    view.sampleAt(200);
+    scrollNoFrame(view.scroller, 300);
+    view.relay("b", 100);
+    expect(top).toBe(400);
+  });
+
+  it("restores the sampled line when the rows moved with no scroll before the commit", () => {
+    const view = mountKeeper();
+    view.sampleAt(200);
+    // An image box grows as it decodes, ahead of the commit its load causes.
+    for (const row of view.scroller.querySelectorAll<HTMLElement>("tr"))
+      row.dataset.y = String(Number(row.dataset.y) + 100);
+    view.relay("b", 100);
+    expect(top).toBe(300);
+  });
+
+  it("a line the freeze re-placed stays the anchor once the freeze ends", () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const view = mountKeeper();
+      const shift = (by: number) => {
+        for (const row of view.scroller.querySelectorAll<HTMLElement>("tr"))
+          row.dataset.y = String(Number(row.dataset.y) + by);
+      };
+      // Line 11, restored under 100px of panes and frozen there.
+      view.sampleAt(200);
+      view.relay("b", 100);
+      expect(top).toBe(300);
+      // The rows re-lay during the freeze, which re-places the line.
+      shift(50);
+      resize();
+      expect(top).toBe(350);
+      vi.advanceTimersByTime(RESTORE_BOUND_MS);
+      // An image decodes after the freeze, ahead of the commit its load causes.
+      shift(100);
+      view.relay("c", 250);
+      expect(top).toBe(450);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

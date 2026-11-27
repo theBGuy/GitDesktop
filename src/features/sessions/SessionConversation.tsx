@@ -113,10 +113,12 @@ export function SessionConversation({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="relative min-h-0 flex-1">
+        {/* Positioned: the column anchor measures step boxes by their offset
+            chain up to this element, which must sit on that chain. */}
         <div
           ref={scrollRef}
           onScroll={onScroll}
-          className="h-full overflow-y-auto"
+          className="relative h-full overflow-y-auto"
         >
           <ColumnLayoutAnchorContext value={column}>
             <div className="mx-auto flex max-w-3xl flex-col gap-6 p-4">

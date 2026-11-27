@@ -1,7 +1,17 @@
+import type { DiffFile } from "@git-diff-view/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDiffFile } from "@/features/diff/DiffSurface";
+import {
+  createEditorKeep,
+  DiffRowsHeldContext,
+  type EditorKeep,
+  KeptRow,
+  LINE_COMPOSER_KEEP_ID,
+} from "@/features/diff/editor-keep";
+import { DIFF_ROWS_HELD_REASON } from "@/features/diff/whitespace-mode";
 import {
   HEAD_COLD_DIALOG_REASON,
   HEAD_COLD_REVIEW_REASON,
@@ -104,6 +114,21 @@ function expectHeld(reason: string) {
   }
 }
 
+/** Types a draft, then presses every way to submit it: both buttons and the
+ *  chord. Nothing writes and the text stays. */
+async function expectSubmitsWriteNothing(
+  user: ReturnType<typeof userEvent.setup>,
+) {
+  await user.click(editor());
+  await user.keyboard("kept");
+  for (const button of submitButtons()) await user.click(button);
+  editor().focus();
+  await user.keyboard("{Control>}{Enter}{/Control}");
+  expect(writes.thread).not.toHaveBeenCalled();
+  expect(writes.draft).not.toHaveBeenCalled();
+  expect(editor()).toHaveValue("kept");
+}
+
 describe("headPendingKind", () => {
   it.each([
     [{ isError: false, isPaused: true, isFetching: false }, "offline"],
@@ -121,14 +146,8 @@ describe("the review composer over an older head's diff (AC-A10, AC-A11)", () =>
       const { node, onClose } = composer(kind);
       render(node);
       const user = userEvent.setup();
-      await user.click(editor());
-      await user.keyboard("kept");
+      await expectSubmitsWriteNothing(user);
       expectHeld(HEAD_PENDING_REVIEW_REASON[kind]("merge request"));
-      await user.keyboard("{Control>}{Enter}{/Control}");
-      await user.click(single());
-      expect(writes.thread).not.toHaveBeenCalled();
-      expect(writes.draft).not.toHaveBeenCalled();
-      expect(editor()).toHaveValue("kept");
       await user.click(screen.getByRole("button", { name: "Add suggestion" }));
       expect(editor().value).toContain("```suggestion");
       expect(onClose).not.toHaveBeenCalled();
@@ -149,6 +168,62 @@ describe("the review composer over an older head's diff (AC-A10, AC-A11)", () =>
     await user.click(editor());
     await user.keyboard("kept{Control>}{Enter}{/Control}");
     expect(writes.draft).not.toHaveBeenCalled();
+    expect(editor()).toHaveValue("kept");
+  });
+
+  const behind = (held: boolean, rowsBehind = true) => (
+    <QueryClientProvider client={new QueryClient()}>
+      <DiffRowsHeldContext value={held}>
+        <ReviewComposer
+          repoPath="/repo"
+          number={7}
+          path="f.txt"
+          side="new"
+          line={2}
+          provider="gitlab"
+          fileSection={SECTION}
+          draftCount={0}
+          canCreateThread
+          lens="origin"
+          onClose={vi.fn()}
+          headPending={null}
+          rowsBehind={rowsBehind}
+        />
+      </DiffRowsHeldContext>
+    </QueryClientProvider>
+  );
+
+  it("rows a deferred render has not caught up hold Add suggestion with the submits' loading reason", async () => {
+    render(behind(false));
+    const user = userEvent.setup();
+    const suggest = screen.getByRole("button", { name: "Add suggestion" });
+    const loading = HEAD_PENDING_REVIEW_REASON.loading("merge request");
+    expect(suggest).toHaveAttribute("aria-disabled", "true");
+    expect(suggest).toHaveAccessibleDescription(loading);
+    expectHeld(loading);
+    await expectSubmitsWriteNothing(user);
+    await user.click(suggest);
+    expect(editor()).toHaveValue("kept");
+  });
+
+  it("held rows hold Add suggestion and the submits with the rows reason", async () => {
+    render(behind(true));
+    const user = userEvent.setup();
+    const suggest = screen.getByRole("button", { name: "Add suggestion" });
+    expect(suggest).toHaveAccessibleDescription(DIFF_ROWS_HELD_REASON);
+    expectHeld(DIFF_ROWS_HELD_REASON);
+    await expectSubmitsWriteNothing(user);
+  });
+
+  it("held rows alone, the deferred render caught up, still hold Add suggestion and the submits", async () => {
+    render(behind(true, false));
+    const user = userEvent.setup();
+    const suggest = screen.getByRole("button", { name: "Add suggestion" });
+    expect(suggest).toHaveAttribute("aria-disabled", "true");
+    expect(suggest).toHaveAccessibleDescription(DIFF_ROWS_HELD_REASON);
+    expectHeld(DIFF_ROWS_HELD_REASON);
+    await expectSubmitsWriteNothing(user);
+    await user.click(suggest);
     expect(editor()).toHaveValue("kept");
   });
 
@@ -252,5 +327,74 @@ describe("the Submit review dialog's head hold reasons (AC-D*, AC-P*)", () => {
     expect(HEAD_PENDING_DIALOG_REASON.failed("pull request")).toBe(
       "This pull request was updated and its new diff couldn't load. Retry it on the Files tab.",
     );
+  });
+});
+
+describe("Add to review's settle in a kept row", () => {
+  const file = createDiffFile("f.txt", SECTION) as DiffFile;
+  const rowOn = (keep: EditorKeep, record: string) => ({
+    keep,
+    kind: "widget" as const,
+    side: "new" as const,
+    line: 2,
+    file,
+    record,
+  });
+
+  /** A composer in pull request 7's widget row, its add held until `land`. */
+  async function addHeld() {
+    let land!: () => void;
+    writes.draft.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((resolve) => {
+          land = () => resolve(undefined);
+        }),
+    );
+    const keep = createEditorKeep();
+    keep.rowsReplaced(file, "unified", "pr-7");
+    const onClose = vi.fn();
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <KeptRow {...rowOn(keep, "pr-7")}>
+          <ReviewComposer
+            repoPath="/repo"
+            number={7}
+            path="f.txt"
+            side="new"
+            line={2}
+            provider="gitlab"
+            fileSection={SECTION}
+            draftCount={1}
+            canCreateThread
+            lens="origin"
+            onClose={onClose}
+            headPending={null}
+          />
+        </KeptRow>
+      </QueryClientProvider>,
+    );
+    const user = userEvent.setup();
+    await user.click(editor());
+    await user.keyboard("kept");
+    await user.click(screen.getByRole("button", { name: "Add to review" }));
+    expect(writes.draft).toHaveBeenCalledWith(
+      expect.objectContaining({ line: 2, side: "new", body: "kept" }),
+    );
+    return { keep, onClose, land: () => act(async () => land()) };
+  }
+
+  it("closes its widget once the add lands while it still owns the record", async () => {
+    const { keep, onClose, land } = await addHeld();
+    await land();
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(keep.widgetRecord()).toBeNull();
+  });
+
+  it("closes nothing when another pull request's composer took the widget meanwhile", async () => {
+    const { keep, onClose, land } = await addHeld();
+    keep.claim(rowOn(keep, "pr-8"), LINE_COMPOSER_KEEP_ID, "other");
+    await land();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(keep.widgetRecord()).toMatchObject({ side: "new", line: 2 });
   });
 });

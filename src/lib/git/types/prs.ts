@@ -677,6 +677,9 @@ export interface ForkPrMatch {
   headRefName: string;
   headRepoOwner: string;
   headRepoName: string;
+  /** The forge host of origin's URL (as Rust `remote_host` reads it), the host
+   *  the head repository lives on. An empty host matches no destination. */
+  headRepoHost: string;
   /** "Allow edits by maintainers"; unknown degrades to false, so the caller
    *  disables the push-to-fork route rather than promising a push that would 403. */
   maintainerCanModify: boolean;

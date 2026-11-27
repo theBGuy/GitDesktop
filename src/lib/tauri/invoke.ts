@@ -84,6 +84,38 @@ export type AppError =
   /** `open_with_default` refused a file whose default action would run it;
    *  `name` is its file name. */
   | { kind: "defaultOpenRefused"; message: string; name: string }
+  /** A push naming no remote refused because the configured push remote `value`
+   *  (from the config key `key`) is empty, invalid or not a remote of the repository;
+   *  a URL's userinfo arrives replaced by `***`. */
+  | {
+      kind: "pushRemoteUnusable";
+      message: string;
+      branch: string;
+      key: string;
+      value: string;
+    }
+  /** A create-only push refused because `remote` holds `dest` at another commit. */
+  | {
+      kind: "pushDestinationExists";
+      message: string;
+      branch: string;
+      remote: string;
+      dest: string;
+    }
+  /** A pinned push refused because HEAD left `expected` (`HEAD` = was detached). */
+  | { kind: "pushHeadMoved"; message: string; expected: string }
+  /** A pinned force push refused because `branch` moved after its confirm. */
+  | { kind: "pushTipMoved"; message: string; branch: string }
+  /** A pinned force push refused because it would also rewrite other branches:
+   *  `push.default` is `matching` (`cause` "matching") or `remote` has push
+   *  refspecs of its own (`cause` "refspecs"). */
+  | {
+      kind: "pushForceMultiRef";
+      message: string;
+      branch: string;
+      remote: string;
+      cause: "matching" | "refspecs";
+    }
   | { kind: PlainErrorKind; message: string };
 
 export function isAppError(e: unknown): e is AppError {
