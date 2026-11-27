@@ -144,7 +144,9 @@ the length of the run; its exit code is the suite's.
 - **CI can disagree:** the local end run is `cargo test`, which runs a
   binary's tests as threads of one process; a CI leg under nextest gives each
   test its own process, so in-process interference shows up locally or not at
-  all.
+  all. On Windows the rust step puts the real git's `<prefix>\bin` first on
+  PATH, skipping the `Git\cmd\git.exe` shim; when a change touches `proc_tree`
+  or the git runner's kill paths, also run it with `GD_FULL_SUITE_KEEP_PATH=1`.
 
 ⚠ **Formatting fixes stay in scope:** implementers format only their own files,
 via the targeted `pnpm exec biome check --write <files in scope>`, never the
