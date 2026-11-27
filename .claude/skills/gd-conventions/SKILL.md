@@ -1882,14 +1882,108 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `data-diff-editor`. It counts a `data-diff-editor` or `data-thread-editing`
   mark only inside a `[data-diff-anchor]` row; the line composer matches by its
   own `[data-diff-line-widget]` wrapper. The pull request diff keys on the
-  head its details name (`prDiffOptions`' last axis), and `usePrDiff` reports
-  `placeholderOf`, so a host tells an older head of the same pull request from
-  another record's diff. `refreshOpenPr` (`queries/prs.ts`) is the one re-read
-  that orders the details before the head-keyed children, which it addresses
-  by the exact key of the head the details then name, never by prefix. The
-  inline line composer holds its submits while the painted diff is an older
-  head's (`headPending` on `ReviewComposer`, its only consumer), the editor
-  staying mounted; Submit review's line-anchored drafts are not held.
+  target its details name (head, base ref and base sha, from `prDiffTarget`,
+  which lowercases a full head and base sha once, so a case-only change never
+  re-keys; branch names stay exact), and `usePrDiff` reports `placeholderOf`, so a host tells an older head of
+  the same pull request from another record's diff. The content revs key on
+  the same target and send it: GitHub compares from the target's base sha
+  when it is known, and a re-read naming another base branch (on GitLab,
+  another base sha too), or none when the branch is the only base identity,
+  refuses; Bitbucket reads the live destination commit and checks only its
+  branch. `refreshOpenPr` (`queries/prs.ts`) is the one
+  re-read that orders the details before the head-keyed children, which it
+  addresses by the exact key of the target the details then name, never by
+  prefix. The diff's queryFn is a pure read: a shared-query event may
+  trigger a run, never prove one, so it subscribes to no cache, writes no
+  key and never reads `signal`. Each run returns one `PrDiffRead` carrying
+  its proof: `proven` from the forge, or from the head proof the run starts
+  after an `unproven` diff answer, `forge_pr_head_proof` (`forgePrHeadProof`):
+  a fresh forge read judged in Rust, never the details query or its display
+  view, its answer clamped like the diff's (any other value, or a failed
+  read, files `unproven`). A record naming no full head reads by number,
+  filed `proven` only on Bitbucket (`PrDiffTarget.byNumberProven`, from the
+  record's own URL; an absent flag holds), whose record abbreviates its head;
+  elsewhere the target itself holds the review actions on the unproven reason
+  (`headUnnamed`), whatever its read's state (cold, in flight, failed, parked or
+  answered), until the details name the full commit. The target's head is the
+  backend's `headSha`: GitLab and Bitbucket fall back to their newest-first
+  list's newest commit (a partial first page still names the head), GitHub's
+  never does, and the commits tail counts only from a complete list. On the
+  Rust side every head or base field a forge payload carries is an axis of
+  its own, judged by the one verdict function `head_proof_verdict`
+  (`forge/pr_content.rs`): a readable one naming another comparison answers
+  `moved`, missing or malformed evidence proves nothing, and a field the
+  proof does not rest on (GitLab's top-level `sha` beside `diff_refs`) can
+  only contradict. Bitbucket's diff read gets the pull request first and,
+  when it names the caller's head and base branch and a destination hash,
+  asks for the diff by commit
+  (`diff/{source full_name}:{head}%0D{dest}?topic=true`, the by-number text
+  byte for byte), so the request ties the text to the head; a contradiction
+  drops it unfetched, and an unreadable read or a failed by-commit request
+  falls back to the by-number diff, unproven. GitHub's diff read compares by
+  sha from the target's base sha, or, when the record names none (a gh older
+  than 2.63.0), from a pull request read naming the target's head and base
+  branch. A compare over the cap or refused for any reason except a rate
+  limit or a transport failure falls back to the by-number diff. The same
+  fallback applies when the pull request is unreadable or names anything
+  else. A by-number text carries no identity, so a replica flipping back can
+  still prove another head's text. GitHub's by-number fallback and
+  Bitbucket's fallback keep that exposure. GitHub's head proof,
+  and Bitbucket's after its fallback, is the
+  diff read's own re-read; GitLab's is
+  contradiction-only (`gl_head_read_proof`: `moved` or `unproven`, never
+  `proven`), since its `/changes` text carries its own identity and a later
+  payload can't vouch for it. GitLab judges `/changes` on the raw JSON before
+  the typed decode (`changes_payload_at`), so a malformed field never hides a
+  readable contradiction. Bitbucket's abbreviated hashes need 12 hex at
+  least. A moved answer is data
+  (`{ proof: "moved", text, checks, recheckAt }`, the prior own text or
+  null), re-checked by the options' `refetchInterval` (soon, then at the
+  settle deadline `recheckAt`, on the monotonic clock (`performance.now()`,
+  so a wall-clock step never spends it), which the first moved answer sets
+  `PR_DIFF_MOVED_RECHECK_MS` ahead, since a forge's reads can flip back to
+  the older head for most of a second after a push; off while a re-check
+  failed and while any read runs or parks, so a passed deadline never ticks
+  every millisecond; running unfocused). Once an entry is moved, only a run
+  started at or after its deadline may leave moved or end the check: an
+  earlier run's answer of any proof (the 50 ms re-check, focus, Retry, a
+  refresh) files the second check, deadline kept. The run that ends the
+  check files `endedAt`, which later moved reads carry forward; the first
+  mounted `usePrDiff` that sees an unclaimed `endedAt` asks the details to
+  re-read (once per ended check, whichever view and whenever; a Retry over
+  an ended check asks again), so a real push re-keys the view.
+  `placeholderData` stamps each placeholder's owner (`olderHead` or
+  `otherRecord`) from the previous query's repo, lens and number, never a
+  text compare or a render-time copy: a re-key batched before React renders
+  can hand over an entry no render drew. A textless entry is served only to
+  its own record. The interval lives
+  on the observer, so leaving the pull request stops it, and offline it
+  parks. `usePrDiff` re-reads an unproven or ended entry when the details
+  answer anew, and raw readers take the text through `prDiffText`, which
+  throws on a moved entry. `ReviewComposer` (its hold-reason chain),
+  `SubmitReviewDialog` and the view's direct Approve and Request changes
+  (through `submitReviewHeadHold`; revoking either stays free) hold their
+  submits while the painted diff is an older head's, unproven (`usePrDiff`'s
+  `headUnproven`, which reads only the key's own text: an older head's
+  retained text keeps its failed, offline or loading arm), or under a moved
+  check (`headChecking`, read from the data, so a failed or parked re-check
+  still holds, on the pane's own loading, failed or offline arm), the
+  editor and the dialog staying mounted. Until a full head's target has an
+  own answer (`headProving`: under way, failed or parked, whatever
+  placeholder is painted, another pull request's included) they hold on
+  the cold reasons (`HEAD_COLD_REVIEW_REASON` / `HEAD_COLD_DIALOG_REASON`
+  in head-pending.ts), which claim no update; the older-head and
+  moved-check arms keep their "was updated" reasons. The failed reason's
+  Retry always renders: a diff read that failed while the open slot has
+  nothing to draw (no text, an older text without that file, or no file to
+  open) shows `PrDiffFailedNotice` (RemotePrViewParts.tsx), wired to
+  `prDiff.refetch()`, in place of the Files pane's file slot, or under the
+  files notice when no file rows loaded; a slot the older text can draw keeps
+  it and its own Retry. One Retry per failure, owned at the Files level
+  (`useDiffRetryOwner`, RemotePrView.tsx): focus on a Retry that moves
+  between the two placements follows it. A record's own drawn text, its
+  entry's or a placeholder stamped as one of its older heads, is what a
+  failed or textless read keeps.
 - **Commit comment placement** — a resolved comment is inline exactly while
   its anchor row is mounted in the visible slot, else listed: never both,
   and never neither while the host's list is mounted (the PR commit view

@@ -27,7 +27,7 @@ import { ConfirmDialogHost } from "@/components/confirm-dialog-host";
 import { SubmitReviewDialog } from "@/features/pulls/SubmitReviewDialog";
 import { presentError } from "@/lib/error-summary";
 import { forgePrReviewSubmit } from "@/lib/git/api";
-import { OFFLINE_WRITE_REASON } from "@/lib/offline-writes";
+import { ACT_PENDING_REASON, OFFLINE_WRITE_REASON } from "@/lib/offline-writes";
 import type { PrNoun } from "@/lib/pulls/pr-state";
 import type { ReviewDraft } from "@/lib/pulls/review-drafts";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -147,11 +147,14 @@ function renderDialog({
   withHost = false,
   remoteLabel = "Bitbucket",
   prNoun = "pull request",
+  headHeldReason,
 }: {
   withHost?: boolean;
   remoteLabel?: string;
   prNoun?: PrNoun;
+  headHeldReason?: string | null;
 } = {}) {
+  let held = headHeldReason;
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -171,6 +174,7 @@ function renderDialog({
             remoteLabel={remoteLabel}
             prNoun={prNoun}
             lens="origin"
+            {...(held === undefined ? {} : { headHeldReason: held })}
           />
         ),
       })}
@@ -184,6 +188,10 @@ function renderDialog({
     setOpen: (open: boolean) => rerender(tree(open)),
     unmountDialog: () => rerender(tree(true, false)),
     setTabVisible: (visible: boolean) => rerender(tree(true, true, visible)),
+    setHeld: (reason: string | null) => {
+      held = reason;
+      rerender(tree(true));
+    },
   };
 }
 
@@ -541,5 +549,75 @@ describe("Submit review failure line", () => {
   it("keeps the partial-posting headline", async () => {
     const line = await failWith("partial");
     expect(line.textContent).toMatch(/^Posted 2 of 5 review comments/);
+  });
+});
+
+describe("the head hold (AC-D1, AC-R7)", () => {
+  const HELD =
+    "This pull request was updated and its new diff is still loading.";
+
+  it("holds Submit with its reason; summary, verdict and Cancel stay usable; the hold lifts in place", async () => {
+    outcomes();
+    const { user, setHeld, onOpenChange } = renderDialog({
+      headHeldReason: HELD,
+    });
+    expect(submitButton()).toHaveAttribute("aria-disabled", "true");
+    expect(submitButton()).toHaveAccessibleDescription(HELD);
+    expect(screen.queryByText(/Retry above the diff/)).toBeNull();
+    const summary = screen.getByRole("textbox", { name: "Review summary" });
+    await user.type(summary, "typed");
+    await user.click(screen.getByRole("radio", { name: /Approve/ }));
+    expect(screen.getByRole("radio", { name: /Approve/ })).toBeChecked();
+    await user.click(submitButton());
+    expect(calls()).toBe(0);
+    setHeld(null);
+    expect(screen.getByRole("textbox", { name: "Review summary" })).toBe(
+      summary,
+    );
+    expect(summary).toHaveValue("typed");
+    expect(submitButton()).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(submitButton());
+    await waitFor(() => expect(calls()).toBe(1));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("Cancel closes the dialog while held", async () => {
+    const { user, onOpenChange } = renderDialog({ headHeldReason: HELD });
+    expect(submitButton()).toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(calls()).toBe(0);
+  });
+
+  it("outranks a missing summary", async () => {
+    const { user } = renderDialog({ headHeldReason: HELD });
+    await user.click(screen.getByRole("radio", { name: /Request changes/ }));
+    expect(submitButton()).toHaveAccessibleDescription(HELD);
+  });
+
+  it("a hold that starts mid-submit leaves the in-flight reason and the write", async () => {
+    let finish: () => void = () => undefined;
+    vi.mocked(forgePrReviewSubmit).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = () =>
+            resolve({ posted: 1, total: 1, verdictApplied: false });
+        }),
+    );
+    const { user, setHeld } = renderDialog();
+    await user.click(submitButton());
+    await waitFor(() => expect(calls()).toBe(1));
+    setHeld(HELD);
+    expect(submitButton()).toHaveAccessibleDescription(ACT_PENDING_REASON);
+    await act(async () => finish());
+    expect(calls()).toBe(1);
+  });
+
+  it("with the prop absent, Submit behaves as before", async () => {
+    outcomes();
+    const { user } = renderDialog();
+    expect(submitButton()).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(submitButton());
+    await waitFor(() => expect(calls()).toBe(1));
   });
 });

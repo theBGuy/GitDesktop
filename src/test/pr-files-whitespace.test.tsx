@@ -32,6 +32,7 @@ import {
   forgeGlMrMergeState,
   forgePrApprovals,
   forgePrDiff,
+  forgePrDiffAt,
   forgePrReviewThreads,
   forgePrView,
   forgeStatus,
@@ -90,6 +91,13 @@ vi.mock("sonner", async (importOriginal) => ({
     warning: vi.fn(),
   }),
 }));
+/** The diff target the details fixtures name (base "main", no base sha). */
+const diffTarget = <H extends string | null>(head: H) => ({
+  head,
+  baseRef: "main",
+  baseSha: null as string | null,
+});
+
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   forgeStatus: vi.fn(),
@@ -98,6 +106,21 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgePrReviewThreads: vi.fn(),
   forgeGlMrMergeState: vi.fn(),
   forgePrDiff: vi.fn(),
+  // The proven by-target read, delegating to the by-number mock's text.
+  forgePrDiffAt: vi.fn(
+    async (
+      repo: string,
+      number: number,
+      lens: import("@/lib/git/types").RemoteLens,
+    ) => ({
+      diff: await (await import("@/lib/git/api")).forgePrDiff(
+        repo,
+        number,
+        lens,
+      ),
+      headProof: "proven" as const,
+    }),
+  ),
   forgePrMergeMessageDefaults: vi.fn(async () => ({
     commits: [],
     reason: null,
@@ -474,15 +497,27 @@ beforeEach(() => {
   vi.mocked(forgePrView).mockImplementation(async (_repo, number) =>
     pr(number),
   );
-  // The forge serves the head current when it is asked.
-  vi.mocked(forgePrDiff).mockImplementation(async (_repo, number) => {
-    const head = heads[number] ?? SHA;
-    const text = (lists[number] ?? [])
+  const textAt = (number: number, head: string) =>
+    (lists[number] ?? [])
       .map((p) => SECTIONS_AT[head]?.[p] ?? SECTIONS[p] ?? "")
       .join("");
+  // The forge serves the head current when it is asked.
+  vi.mocked(forgePrDiff).mockImplementation(async (_repo, number) => {
+    const text = textAt(number, heads[number] ?? SHA);
     if (diffGate !== undefined) await diffGate;
     return text;
   });
+  // The by-target read answers for its own target's head.
+  vi.mocked(forgePrDiffAt).mockImplementation(
+    async (repo, number, lens, at) => {
+      const live = heads[number] ?? SHA;
+      const text = await forgePrDiff(repo, number, lens);
+      return {
+        diff: at.head === live ? text : textAt(number, at.head),
+        headProof: "proven",
+      };
+    },
+  );
   vi.mocked(forgePrApprovals).mockResolvedValue({
     viewerHasApproved: false,
     approvedBy: [],
@@ -780,7 +815,9 @@ describe("Pull request Files tab under Hide whitespace", () => {
     const client = mount();
     await screen.findByRole("button", { name: /^Files \(\d+\)$/ });
     // The diff is already read; only the revs read parks.
-    await client.prefetchQuery(prDiffOptions(REPO, 7, "origin", SHA));
+    await client.prefetchQuery(
+      prDiffOptions(REPO, 7, "origin", diffTarget(SHA)),
+    );
     act(() => onlineManager.setOnline(false));
     await openFilesTab(user);
     // The forge diff's first changed line is on screen.
@@ -1555,5 +1592,53 @@ describe("Pull request Files tab: the real review composer over a -w view", () =
     openComposerAt(23);
     expect(await screen.findByText(/^Lines 20–23/)).toBeTruthy();
     expectComposerHeld("Write a comment first");
+  }, 30_000);
+});
+
+describe("Pull request Files tab: a GitHub record naming no head", () => {
+  it("draws the by-number patch under the incomparable note while Request changes holds as unconfirmed", async () => {
+    vi.mocked(forgeStatus).mockResolvedValue(GITHUB);
+    lists[7] = ["f.txt"];
+    // An empty headRefOid over a capped oldest-first list: its tail is an
+    // older commit, so the target names no head and the revs never read.
+    vi.mocked(forgePrView).mockImplementation(
+      async (_repo, number) =>
+        ({
+          ...pr(number),
+          url: `https://github.com/owner/repo/pull/${number}`,
+          headSha: "",
+          commits: [
+            {
+              oid: SHA2,
+              headline: "older",
+              date: "2026-01-01T00:00:00Z",
+              author: "someone",
+              messageBody: "",
+            },
+          ],
+          commitsTruncated: true,
+        }) as unknown as PrDetails,
+    );
+    const user = userEvent.setup();
+    mount();
+    const requestChanges = await screen.findByRole(
+      "button",
+      { name: "Request changes" },
+      { timeout: 10_000 },
+    );
+    await waitFor(() =>
+      expect(requestChanges).toHaveAccessibleDescription(
+        "GitDesktop couldn't confirm this diff is the pull request's latest. It checks again when the pull request refreshes.",
+      ),
+    );
+    expect(requestChanges).toHaveAttribute("aria-disabled", "true");
+    await openFilesTab(user);
+    await waitFor(() => expect(newLine(2)).not.toBeNull(), {
+      timeout: 10_000,
+    });
+    expect(note("its two versions couldn't be compared")).not.toBeNull();
+    expect(forgePrDiff).toHaveBeenCalled();
+    expect(calls("forge_pr_content_revs")).toBe(0);
+    expect(calls("git_diff_bytes_ignoring_whitespace")).toBe(0);
   }, 30_000);
 });

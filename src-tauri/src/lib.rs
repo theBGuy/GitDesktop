@@ -447,6 +447,8 @@ pub fn run() {
             forge::forge_pr_diff,
             forge::forge_pr_commit_diff,
             forge::pr_content::forge_pr_content_revs,
+            forge::pr_content::forge_pr_diff_at,
+            forge::pr_content::forge_pr_head_proof,
             forge::pr_content::forge_commit_first_parent,
             forge::pr_content::forge_file_at_sha,
             forge::pr_content::git_diff_bytes_ignoring_whitespace,

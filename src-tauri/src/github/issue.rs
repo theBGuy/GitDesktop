@@ -40,7 +40,7 @@ fn map_issues_disabled(err: AppError) -> AppError {
 /// gh validates the field list against its own build before calling the API and
 /// prints `Unknown JSON field: "issueType"` (measured on gh 2.94.0); match the
 /// stable substring case-insensitively like the disabled-issues signature.
-fn is_unknown_json_field(stderr: &str) -> bool {
+pub(crate) fn is_unknown_json_field(stderr: &str) -> bool {
     stderr.to_ascii_lowercase().contains("unknown json field")
 }
 

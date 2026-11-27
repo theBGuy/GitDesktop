@@ -168,11 +168,19 @@ export function useApprovePr(repo: string, lens: RemoteLens) {
 
 /** A PR's task checklist (Bitbucket-only, gated on `implemented.prTasks`). Pass
  *  `null` when the panel isn't shown so the read doesn't fire (mirrors
- *  `usePrApprovals`). */
-export function usePrTasks(repo: string, number: number | null) {
+ *  `usePrApprovals`). `retryOnMount: false` is the Tasks section's: it mounts
+ *  its observer once the feed opens on a failed read, and a mount retry would
+ *  re-send that read at once. Other observers keep the default, so reopening the
+ *  pull request retries a failed read. */
+export function usePrTasks(
+  repo: string,
+  number: number | null,
+  { retryOnMount = true }: { retryOnMount?: boolean } = {},
+) {
   return useQuery({
     ...prTasksOptions(repo, number ?? 0),
     enabled: number !== null,
+    retryOnMount,
   });
 }
 

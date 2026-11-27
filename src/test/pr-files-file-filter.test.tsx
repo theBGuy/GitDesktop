@@ -80,6 +80,13 @@ vi.mock("@/lib/settings/api", async (importOriginal) => ({
   saveSettingsMerged: vi.fn(),
 }));
 // Every read the view makes is answered here.
+/** The diff target the details fixtures name (base "main", no base sha). */
+const diffTarget = <H extends string | null>(head: H) => ({
+  head,
+  baseRef: "main",
+  baseSha: null as string | null,
+});
+
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   forgeStatus: vi.fn(),
@@ -88,6 +95,21 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgePrReviewThreads: vi.fn(),
   forgeGlMrMergeState: vi.fn(),
   forgePrDiff: vi.fn(),
+  // The proven by-target read, delegating to the by-number mock's text.
+  forgePrDiffAt: vi.fn(
+    async (
+      repo: string,
+      number: number,
+      lens: import("@/lib/git/types").RemoteLens,
+    ) => ({
+      diff: await (await import("@/lib/git/api")).forgePrDiff(
+        repo,
+        number,
+        lens,
+      ),
+      headProof: "proven" as const,
+    }),
+  ),
   forgePrMergeMessageDefaults: vi.fn(async () => ({
     commits: [],
     reason: null,
@@ -941,7 +963,12 @@ describe("Pull request Files tab whole-file reads", () => {
     show(8);
     await screen.findByText("Merge request 8");
     await openFilesTab(user);
-    const key = prContentRevsOptions(REPO, 8, "origin", SHA8).queryKey;
+    const key = prContentRevsOptions(
+      REPO,
+      8,
+      "origin",
+      diffTarget(SHA8),
+    ).queryKey;
     await waitFor(() => expect(client.getQueryData(key)).toBeDefined());
     await settle();
     expect(openFile()).toBe("src/a.ts");
@@ -965,7 +992,12 @@ describe("Pull request Files tab whole-file reads", () => {
     await openFilesTab(user);
     await waitFor(() => expect(paneRevs()).toBe(`${BASE}..${SHA}`));
     refuse = true;
-    const key = prContentRevsOptions(REPO, 7, "origin", SHA).queryKey;
+    const key = prContentRevsOptions(
+      REPO,
+      7,
+      "origin",
+      diffTarget(SHA),
+    ).queryKey;
     await act(() => client.refetchQueries({ queryKey: key }));
     expect(client.getQueryState(key)?.status).toBe("error");
     await settle();
@@ -1174,7 +1206,12 @@ describe("Pull request Files tab drawn by the real diff", () => {
     const user = userEvent.setup();
     const { client } = mount();
     await openFilesTab(user);
-    const key = prContentRevsOptions(REPO, 7, "origin", SHA).queryKey;
+    const key = prContentRevsOptions(
+      REPO,
+      7,
+      "origin",
+      diffTarget(SHA),
+    ).queryKey;
     await waitFor(
       () => expect(client.getQueryState(key)?.status).toBe("error"),
       { timeout: 10_000 },
@@ -1236,7 +1273,12 @@ describe("Pull request Files tab drawn by the real diff", () => {
     // A push moves the head; its revs read is in flight.
     views[7] = async () => pr(7, { headSha: SHA8 });
     await act(() => client.invalidateQueries());
-    const key = prContentRevsOptions(REPO, 7, "origin", SHA8).queryKey;
+    const key = prContentRevsOptions(
+      REPO,
+      7,
+      "origin",
+      diffTarget(SHA8),
+    ).queryKey;
     await waitFor(() =>
       expect(client.getQueryState(key)?.fetchStatus).toBe("fetching"),
     );

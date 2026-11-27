@@ -46,6 +46,21 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgePrReviewThreads: vi.fn(),
   forgeGlMrMergeState: vi.fn(),
   forgePrDiff: vi.fn(),
+  // The proven by-target read, delegating to the by-number mock's text.
+  forgePrDiffAt: vi.fn(
+    async (
+      repo: string,
+      number: number,
+      lens: import("@/lib/git/types").RemoteLens,
+    ) => ({
+      diff: await (await import("@/lib/git/api")).forgePrDiff(
+        repo,
+        number,
+        lens,
+      ),
+      headProof: "proven" as const,
+    }),
+  ),
   forgePrMergeMessageDefaults: vi.fn(async () => ({
     commits: [],
     reason: null,
@@ -363,10 +378,15 @@ describe("a file only the new head carries, before its diff lands", () => {
       await screen.findByRole("button", { name: /^Files \(\d+\)$/ }),
     );
     await painted("new src/a.ts");
+    // The diff read keeps its own retry policy: one retry, a second later.
+    diffs.push(() => Promise.reject(new Error("boom")));
     diffs.push(() => Promise.reject(new Error("boom")));
     await push(client, ["src/a.ts", "src/b.ts"]);
     await user.click(await row("src/b.ts"));
-    await screen.findByText(FAILED, undefined, { timeout: 10_000 });
+    // The retained patch can't draw this file: the diff's own Retry shows.
+    await screen.findByText("Could not load this diff", undefined, {
+      timeout: 10_000,
+    });
     expect(screen.queryByText(EMPTY)).toBeNull();
     // A file the retained patch carries still shows it, under the notice.
     await user.click(await row("src/a.ts"));

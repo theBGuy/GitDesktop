@@ -4,13 +4,13 @@ import {
   type QueryClient,
   type QueryKey,
   queryOptions,
-  type UseQueryResult,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { watchPostedCopies } from "@/lib/attachments/store";
 import { shouldRetryQuery } from "@/lib/forge-backoff";
+import { FULL_OID_RE } from "@/lib/git/oid";
 import { filterPlaceholderRows } from "@/lib/remote-state-filter";
 import { useMutation } from "@/lib/started-mutation";
 import { isAppError } from "@/lib/tauri/invoke";
@@ -31,7 +31,7 @@ import type {
   ReviewThreadOut,
   ReviewThreadsOut,
 } from "../types";
-import { prHeadSha, remoteListFilterKey } from "../types";
+import { type PrDiffTarget, prDiffTarget, remoteListFilterKey } from "../types";
 import {
   invalidateRepoAfterWrite,
   keepPreviousDataForKeyAxes,
@@ -484,23 +484,201 @@ function overlayLandedMerge(
   return lagsLandedMerge(details) ? { ...details, state: "MERGED" } : details;
 }
 
-/** A pull request's diff, filed under the head its details named when the
- *  read started. A push racing the read can file the newer head's text here:
- *  content mode (`hunksMatchContent`) and the whitespace proof
- *  (`proveForgeSides`) decline it, yet it paints hunk-only (or under the
- *  mismatch note) with its composer live, a line comment posting against the
- *  head the forge resolves then, until the next details read re-keys it. */
+/** A diff entry, one value per read carrying its own proof. `proven`: the
+ *  forge, or a head read the run started after its diff read answered, showed
+ *  the text is the key's comparison. `moved`: one of them named another head
+ *  or base; the entry keeps its prior own text (or none) and counts its
+ *  checks. `recheckAt`, set by the first moved answer, is the settle
+ *  deadline: only a run started at or after it decides the entry. `endedAt`
+ *  names the answer that ended the check and rides every later moved read,
+ *  so the check's details re-read is asked once. `afterDetails`, on a held
+ *  entry only, is the details answer (its `dataUpdatedAt`) cached when the
+ *  run started. */
+export type PrDiffRead = (
+  | { proof: "proven" | "unproven"; text: string }
+  | {
+      proof: "moved";
+      text: string | null;
+      checks: number;
+      recheckAt: number;
+      endedAt?: number;
+    }
+) & { afterDetails?: number };
+
+/** A diff read whose forge answer kept naming another head or base. */
+export class PrDiffMovedError extends Error {
+  constructor() {
+    super("This diff changed on the forge while it was loading.");
+    this.name = "PrDiffMovedError";
+  }
+}
+
+/** A raw entry's text for a reader that needs this comparison's diff (the AI
+ *  runs): a moved entry's text is not known to be the key's, so it throws. */
+export function prDiffText(read: PrDiffRead): string {
+  if (read.proof === "moved") throw new PrDiffMovedError();
+  return read.text;
+}
+
+/** An answered entry: a proven one never re-reads for the details, so only an
+ *  unproven one keeps the answer its run started after. */
+const answeredRead = (
+  proof: "proven" | "unproven",
+  text: string,
+  afterDetails: number,
+): PrDiffRead =>
+  proof === "proven" ? { proof, text } : { proof, text, afterDetails };
+
+/** A proof as the wire carried it: any value but proven or moved fails toward
+ *  the hold. */
+const wireProof = (value: unknown): PrDiffRead["proof"] =>
+  value === "proven" || value === "moved" ? value : "unproven";
+
+/** The terminal check value: a moved answer from a run started at or after
+ *  the settle deadline files it, and the entry then holds until the view
+ *  re-keys or a Retry or refresh answers otherwise. */
+export const PR_DIFF_MOVED_CHECKS = 3;
+
+/** The first re-check's delay after a moved answer. */
+const PR_DIFF_MOVED_FIRST_RECHECK_MS = 50;
+
+/** How long the last re-check waits: right after a push, a forge's consecutive
+ *  reads can flip back to the older head for most of a second (measured on
+ *  gitlab.com, PR #742). */
+export const PR_DIFF_MOVED_RECHECK_MS = 1_000;
+
+/** Whether the pull request still names `at`, judged in Rust on the forge's own
+ *  fields by the diff run itself, after its diff read answered unproven. Never
+ *  the shared details query or its display view: their fetches are deduped and
+ *  reused, and their fields went through display fallbacks. */
+async function headReadProof(
+  repo: string,
+  number: number,
+  lens: RemoteLens,
+  at: { head: string; baseRef: string; baseSha: string | null },
+): Promise<PrDiffRead["proof"]> {
+  try {
+    return wireProof(await api.forgePrHeadProof(repo, number, lens, at));
+  } catch {
+    // A failed head read proves nothing.
+    return "unproven";
+  }
+}
+
+/** A pull request's diff at the head and base its details name, as a pure
+ *  read: a shared-query event may trigger a run, never prove one. A moved
+ *  answer is filed as data and re-checked by `refetchInterval`; `usePrDiff`
+ *  asks the details to re-read once the accepted entry ends the check, so a
+ *  real push re-keys the view. The queryFn never reads `signal` (query-core
+ *  would then cancel the read when its last observer leaves, and the IPC
+ *  can't be stopped) and writes no key. */
 export const prDiffOptions = (
   repo: string,
   number: number,
   lens: RemoteLens,
-  head: string | null,
-) =>
-  queryOptions({
-    queryKey: ["repo", repo, "pr", lens, number, "diff", head] as const,
-    queryFn: () => api.forgePrDiff(repo, number, lens),
-    staleTime: 30_000,
+  target: PrDiffTarget,
+) => {
+  const queryKey = [
+    "repo",
+    repo,
+    "pr",
+    lens,
+    number,
+    "diff",
+    target.head,
+    target.baseRef,
+    target.baseSha,
+  ] as const;
+  const detailsKey = prDetailsOptions(repo, number, lens).queryKey;
+  return queryOptions({
+    queryKey,
+    queryFn: async (context): Promise<PrDiffRead> => {
+      // Monotonic: a wall-clock step must not spend the settle delay early.
+      const startedAt = performance.now();
+      // A details answer landing after this run started, joined or not,
+      // re-reads a held entry (`usePrDiff`): this run can't have seen it.
+      // The stamp tells successive fetched details answers apart, since each
+      // is a network round trip; a frozen or fake clock can tie them. The
+      // app's own patches to the entry (a draft toggle, merge landed, an Edit
+      // save) change no diff target.
+      const afterDetails =
+        context.client.getQueryState(detailsKey)?.dataUpdatedAt ?? 0;
+      const head = target.head;
+      // A head-less record, or one whose head is abbreviated, has no full head
+      // to prove against: the by-target command refuses a short sha, so it
+      // reads by number, proven only where the target allows it (Bitbucket).
+      if (head === null || !FULL_OID_RE.test(head))
+        return answeredRead(
+          target.byNumberProven ? "proven" : "unproven",
+          await api.forgePrDiff(repo, number, lens),
+          afterDetails,
+        );
+      const at = { head, baseRef: target.baseRef, baseSha: target.baseSha };
+      const answer = await api.forgePrDiffAt(repo, number, lens, at);
+      // This run starts its own head read after its diff read answered. The
+      // settle deadline applies once the entry has observed movement: a first
+      // unproven diff whose head read a stale replica answers in agreement
+      // settles at once. Bitbucket's diff names the head in its request, so
+      // this exposure is GitHub's by-number fallback's, and Bitbucket's
+      // whenever it falls back to its by-number diff.
+      let proof = wireProof(answer.headProof);
+      if (proof === "unproven")
+        proof = await headReadProof(repo, number, lens, at);
+      const prior = context.client.getQueryData<PrDiffRead>(queryKey);
+      // Once the entry is moved, only a run started at or after its settle
+      // deadline may leave moved or end the check. An earlier run (the 50 ms
+      // re-check, a focus refetch, a Retry) may have read a replica flipping
+      // back, so whatever it answered files the second check, deadline kept.
+      if (prior?.proof === "moved" && startedAt < prior.recheckAt)
+        return {
+          proof: "moved",
+          text: prior.text,
+          checks: PR_DIFF_MOVED_CHECKS - 1,
+          recheckAt: prior.recheckAt,
+          afterDetails,
+        };
+      if (proof !== "moved")
+        return answeredRead(proof, answer.diff, afterDetails);
+      if (prior?.proof !== "moved")
+        return {
+          proof: "moved",
+          text: prior?.text ?? null,
+          checks: 1,
+          recheckAt: performance.now() + PR_DIFF_MOVED_RECHECK_MS,
+          afterDetails,
+        };
+      return {
+        proof: "moved",
+        text: prior.text,
+        checks: PR_DIFF_MOVED_CHECKS,
+        recheckAt: prior.recheckAt,
+        endedAt: prior.endedAt ?? performance.now(),
+        afterDetails,
+      };
+    },
+    // An unproven or moved entry is stale at once, so any re-read retries it.
+    staleTime: (query) => (query.state.data?.proof === "proven" ? 30_000 : 0),
+    // Off once the check ended, and while a re-check failed: its Retry restarts
+    // it, where an interval would loop on the failure.
+    refetchInterval: (query) => {
+      const read = query.state.data;
+      if (read?.proof !== "moved" || query.state.error !== null) return false;
+      if (read.checks >= PR_DIFF_MOVED_CHECKS) return false;
+      // None while a read runs or parks: query-core recomputes the interval
+      // on its status updates, where a passed deadline would tick every 1 ms.
+      // The read's own idle update schedules what remains.
+      if (query.state.fetchStatus !== "idle") return false;
+      if (read.checks === 1) return PR_DIFF_MOVED_FIRST_RECHECK_MS;
+      // Every query update restarts the interval, so it aims at `recheckAt`,
+      // rounded up: a timer can fire on the whole millisecond below a fraction,
+      // and a run started before the deadline never decides.
+      return Math.max(1, Math.ceil(read.recheckAt - performance.now()));
+    },
+    // Polls keep running while the window is unfocused.
+    refetchIntervalInBackground: true,
+    retry: shouldRetryQuery,
   });
+};
 
 export function usePrDetails(
   repo: string,
@@ -728,6 +906,9 @@ export type PrDiffPlaceholder = "none" | "olderHead" | "otherRecord";
  *  it, and `null` is a head-less merge request's real key. */
 const PR_DIFF_HEAD_UNANSWERED = "(unanswered)";
 
+/** The one error a check that ended with no own text presents. */
+const MOVED_ERROR = new PrDiffMovedError();
+
 interface OwnPrDiff {
   repo: string;
   lens: RemoteLens;
@@ -742,30 +923,130 @@ const sameOwnPrDiff = (a: OwnPrDiff | null, b: OwnPrDiff) =>
   a.number === b.number &&
   a.text === b.text;
 
-/** `head` undefined: the details have not named one yet, and the read waits. */
+/** The diff read as its callers see it. Every status field describes the
+ *  presented `data`: a check under way reads as a load in progress, and a
+ *  check that ended with no own text as a failure. */
+export interface PrDiffResult {
+  data: string | undefined;
+  error: unknown;
+  isError: boolean;
+  isPending: boolean;
+  isPaused: boolean;
+  isFetching: boolean;
+  isPlaceholderData: boolean;
+  refetch: () => Promise<unknown>;
+  placeholderOf: PrDiffPlaceholder;
+  /** The shown text is this key's own answer (never a retained or a
+   *  placeholder text) and no head read has proven it, or its moved check
+   *  ended. An older head's text keeps the older head's arms instead. */
+  headUnproven: boolean;
+  /** The forge answered another head or base and the entry's check has not
+   *  ended, with or without a text of this key shown. Read from the data, so
+   *  a failed or parked re-check still holds. */
+  headChecking: boolean;
+  /** A full head has no own answer of this target yet: its first read is
+   *  under way, failed or parked. Read from the key's own entry, never a
+   *  placeholder's; an older head's kept text holds on its own arms instead. */
+  headProving: boolean;
+  /** The target names no full head off Bitbucket, so no read can tie a text
+   *  to one: it holds whatever the read's state (cold, in flight, failed,
+   *  parked or answered) until the details name the full commit. */
+  headUnnamed: boolean;
+}
+
+/** A placeholder stamped with its owner where query-core hands over the
+ *  previous query, so no render-time copy decides it. */
+type StampedPrDiffRead = PrDiffRead & {
+  placeholderOf?: Exclude<PrDiffPlaceholder, "none">;
+};
+
+const stampedOwner = (read: PrDiffRead | undefined) =>
+  read !== undefined && "placeholderOf" in read
+    ? (read as StampedPrDiffRead).placeholderOf
+    : undefined;
+
+/** The ended check each diff entry last asked the details to re-read for, by
+ *  the check's `endedAt`: one hint per ended check, claimed by the first view
+ *  that sees it, however many mount and whenever. */
+const hintedChecks = new WeakMap<object, number>();
+
+/** `target` undefined: the details have not named one yet, and the read waits. */
 export function usePrDiff(
   repo: string,
   number: number | null,
   lens: RemoteLens,
-  head: string | null | undefined,
-): UseQueryResult<string> & { placeholderOf: PrDiffPlaceholder } {
+  target: PrDiffTarget | undefined,
+): PrDiffResult {
   const queryClient = useQueryClient();
+  const head = target?.head;
+  const baseRef = target?.baseRef;
+  const baseSha = target?.baseSha;
+  const byNumberProven = target?.byNumberProven === true;
+  // Keyed on the target's fields, never its identity: callers derive a fresh
+  // object every render, which would update the observer's options each time.
+  const named = target !== undefined;
+  const keyTarget = useMemo<PrDiffTarget>(
+    () =>
+      named
+        ? {
+            head: head ?? null,
+            baseRef: baseRef ?? "",
+            baseSha: baseSha ?? null,
+            byNumberProven,
+          }
+        : {
+            head: PR_DIFF_HEAD_UNANSWERED,
+            baseRef: "",
+            baseSha: null,
+            byNumberProven: false,
+          },
+    [named, head, baseRef, baseSha, byNumberProven],
+  );
+  const options = prDiffOptions(repo, number ?? 0, lens, keyTarget);
+  const diffHash = hashKey(options.queryKey);
+  const keepLens = keepPreviousDataForKeyAxes(repo, [[3, lens]]);
   const query = useQuery({
-    ...prDiffOptions(
-      repo,
-      number ?? 0,
-      lens,
-      head === undefined ? PR_DIFF_HEAD_UNANSWERED : head,
-    ),
-    enabled: number !== null && head !== undefined,
-    // Lens axis mirrors usePrDetails; the number AND head axes stay
+    ...options,
+    enabled: number !== null && target !== undefined,
+    // Lens axis mirrors usePrDetails; the number AND target axes stay
     // placeholder-served, and `placeholderOf` tells a head move from a PR switch.
-    placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
+    // Ownership is the previous query's repo, lens and number, never a text
+    // compare: a re-key batched before React renders can hand over an entry
+    // this render never drew. A textless entry is served only to its own record.
+    placeholderData: (previous, previousQuery) => {
+      const kept = keepLens(previous, previousQuery);
+      if (kept === undefined) return undefined;
+      const ownRecord = previousQuery?.queryKey[4] === (number ?? 0);
+      if (kept.text === null && !ownRecord) return undefined;
+      const stamped: StampedPrDiffRead = {
+        ...kept,
+        placeholderOf: ownRecord ? "olderHead" : "otherRecord",
+      };
+      return stamped;
+    },
   });
-  const ownText = query.isPlaceholderData ? undefined : query.data;
+  // The details' last answer, observed without fetching.
+  const detailsAt = useQuery({
+    ...prDetailsOptions(repo, number ?? 0, lens),
+    enabled: false,
+    notifyOnChangeProps: ["dataUpdatedAt"],
+  }).dataUpdatedAt;
+  const read = query.isPlaceholderData ? undefined : query.data;
+  const checking =
+    read?.proof === "moved" && read.checks < PR_DIFF_MOVED_CHECKS;
+  const movedEnded = read?.proof === "moved" && !checking;
+  const ownText = read?.text ?? undefined;
+  // Only this record's own entries are served textless (`placeholderData`).
+  const owner = query.isPlaceholderData ? stampedOwner(query.data) : undefined;
+  // Text drawn for this record, its own entry's or a placeholder stamped as one
+  // of its older heads: retention keeps the last one shown. Its proof and
+  // placeholder status stay the shown entry's, never this memory's.
+  const drawnText =
+    ownText ??
+    (owner === "olderHead" ? (query.data?.text ?? undefined) : undefined);
   const current: OwnPrDiff | null =
-    ownText === undefined ? null : { repo, lens, number, text: ownText };
-  // The live query's last own answer, adjusted during render.
+    drawnText === undefined ? null : { repo, lens, number, text: drawnText };
+  // The live query's last drawn text for this record, adjusted during render.
   const [lastOwn, setLastOwn] = useState<OwnPrDiff | null>(null);
   if (current && !sameOwnPrDiff(lastOwn, current)) setLastOwn(current);
   const own = current ?? lastOwn;
@@ -774,44 +1055,117 @@ export function usePrDiff(
     own.repo === repo &&
     own.lens === lens &&
     own.number === number;
-  // A failed first read of a new head keeps this pull request's last own diff,
-  // so a transient failure never swaps the pane for its no-data arm.
+  const ownTextlessPlaceholder =
+    owner === "olderHead" && query.data?.text === null;
+  // A failed first read of a new head, and a moved one with no own text (its
+  // own entry, or this record's textless entry standing in as a placeholder),
+  // keep this pull request's last own diff, so the pane never swaps to its
+  // no-data arm. The entry's own data shuts out another record's text.
   const retained =
-    query.data === undefined &&
-    query.isError &&
-    !query.isFetching &&
-    sameRecord;
+    sameRecord &&
+    ((read !== undefined && ownText === undefined) ||
+      ownTextlessPlaceholder ||
+      (query.data === undefined && query.isError && !query.isFetching));
+  // This record's textless placeholder with no drawable text: a cold load.
+  const textlessCold = ownTextlessPlaceholder && !retained;
   let placeholderOf: PrDiffPlaceholder = "none";
   if (retained) placeholderOf = "olderHead";
-  else if (query.isPlaceholderData)
-    placeholderOf =
-      sameRecord && own.text === query.data ? "olderHead" : "otherRecord";
-  const holdsOwn = current !== null;
-  // Once this head's own answer landed, the pull request's diff entries of other
-  // heads go: dead weight, or another head's text after a repo-wide refetch. A
-  // cold load in flight is spared, since a removal would reject its waiter.
+  else if (query.isPlaceholderData && !textlessCold)
+    placeholderOf = owner ?? "otherRecord";
+  const holdsOwn = ownText !== undefined;
+  // A textless placeholder's null reads as no text.
+  const data = retained ? own?.text : (query.data?.text ?? undefined);
+  const isPlaceholderData =
+    retained || (query.isPlaceholderData && !textlessCold);
+  const endedBare = movedEnded && ownText === undefined;
+  const isError = query.isError || endedBare;
+  const fullHead =
+    head !== undefined && head !== null && FULL_OID_RE.test(head);
+  const headProving =
+    fullHead && number !== null && read === undefined && !retained;
+  // Derived from the target alone, never the read's state.
+  const headUnnamed =
+    target !== undefined && number !== null && !fullHead && !byNumberProven;
+  // A check under way is a load in progress until a re-check fails or parks.
+  const checkWaits = checking && query.error === null && !query.isPaused;
+  // Once this target's own answer landed, the pull request's diff entries of
+  // other targets go: dead weight, or another head's text after a repo-wide
+  // refetch. A cold load in flight is spared, since a removal would reject its
+  // waiter.
   useEffect(() => {
     if (!holdsOwn || number === null || head === undefined) return;
     queryClient.removeQueries({
       queryKey: [...prDetailsOptions(repo, number, lens).queryKey, "diff"],
       predicate: (q) =>
-        q.queryKey[6] !== head &&
+        !(
+          q.queryKey[6] === head &&
+          q.queryKey[7] === baseRef &&
+          q.queryKey[8] === baseSha
+        ) &&
         q.getObserversCount() === 0 &&
         !(q.state.fetchStatus !== "idle" && q.state.data === undefined),
     });
-  }, [queryClient, repo, lens, number, head, holdsOwn]);
-  const data = retained ? own?.text : query.data;
-  const isPlaceholderData = retained || query.isPlaceholderData;
-  // A view over the live result, so its tracked-prop reads stay lazy (a spread
-  // would read and track every field, `promise` included).
-  return new Proxy(query, {
-    get: (target, key) => {
-      if (key === "data") return data;
-      if (key === "isPlaceholderData") return isPlaceholderData;
-      if (key === "placeholderOf") return placeholderOf;
-      return Reflect.get(target, key);
+  }, [queryClient, repo, lens, number, head, baseRef, baseSha, holdsOwn]);
+  // A held entry (unproven, or a check that ended) reads again while the
+  // details hold an answer its run started before, so it checks again when the
+  // pull request refreshes, even when that answer landed mid-run.
+  const awaitsDetails = read?.proof === "unproven" || movedEnded;
+  const readAfter = read?.afterDetails;
+  const answeredAt = query.dataUpdatedAt;
+  const refetch = query.refetch;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: every answer re-asks (`answeredAt`), since structural sharing keeps a joined run's equal answer as the same entry.
+  useEffect(() => {
+    if (awaitsDetails && readAfter !== detailsAt)
+      void refetch({ cancelRefetch: false });
+  }, [awaitsDetails, readAfter, detailsAt, answeredAt, refetch]);
+  // The accepted entry that ends a check asks the details to re-read, once
+  // per ended check, so a real push re-keys the view. A superseded run's
+  // answer is never accepted, so it asks nothing.
+  const endedAt = read?.proof === "moved" ? (read.endedAt ?? 0) : 0;
+  useEffect(() => {
+    if (endedAt === 0 || number === null) return;
+    const entry = queryClient.getQueryCache().get(diffHash);
+    if (entry === undefined || hintedChecks.get(entry) === endedAt) return;
+    hintedChecks.set(entry, endedAt);
+    void queryClient
+      .invalidateQueries({
+        queryKey: prDetailsOptions(repo, number, lens).queryKey,
+        exact: true,
+      })
+      .catch(() => undefined);
+  }, [queryClient, diffHash, endedAt, repo, number, lens]);
+  return {
+    data,
+    error: query.error ?? (endedBare ? MOVED_ERROR : null),
+    isError,
+    isPending:
+      query.isPending ||
+      textlessCold ||
+      (checking && data === undefined && !isError),
+    isPaused: query.isPaused,
+    isFetching: query.isFetching || checkWaits,
+    isPlaceholderData,
+    // A Retry over an ended check also re-reads the details: the push it
+    // missed may be what the forge now names.
+    refetch: () => {
+      if (movedEnded && number !== null)
+        void queryClient
+          .invalidateQueries({
+            queryKey: prDetailsOptions(repo, number, lens).queryKey,
+            exact: true,
+          })
+          .catch(() => undefined);
+      return refetch();
     },
-  }) as UseQueryResult<string> & { placeholderOf: PrDiffPlaceholder };
+    placeholderOf,
+    headUnproven:
+      !checking &&
+      !isPlaceholderData &&
+      (read?.proof === "unproven" || movedEnded),
+    headChecking: checking,
+    headProving,
+    headUnnamed,
+  };
 }
 
 // File:line-anchored review threads (Copilot/CodeRabbit/human line comments); the
@@ -1297,7 +1651,7 @@ export function usePrefetchPr(repo: string, lens: RemoteLens) {
         .fetchQuery(prDetailsOptions(repo, number, lens))
         .then((pr) =>
           queryClient.prefetchQuery(
-            prDiffOptions(repo, number, lens, prHeadSha(pr) ?? null),
+            prDiffOptions(repo, number, lens, prDiffTarget(pr)),
           ),
         )
         .catch(() => undefined);
@@ -1362,18 +1716,21 @@ export async function refreshOpenPr(
     return;
   const pr = queryClient.getQueryData(details);
   if (pr === undefined) return;
-  const head = prHeadSha(pr) ?? null;
+  const target = prDiffTarget(pr);
   queryClient
     .invalidateQueries({
-      queryKey: prDiffOptions(repo, number, lens, head).queryKey,
+      queryKey: prDiffOptions(repo, number, lens, target).queryKey,
       exact: true,
     })
     .catch(() => undefined);
   // A head-less record has no revs entry: its read is disabled under "".
-  if (head !== null)
+  if (target.head !== null)
     queryClient
       .invalidateQueries({
-        queryKey: prContentRevsOptions(repo, number, lens, head).queryKey,
+        queryKey: prContentRevsOptions(repo, number, lens, {
+          ...target,
+          head: target.head,
+        }).queryKey,
         exact: true,
       })
       .catch(() => undefined);
@@ -1561,13 +1918,14 @@ const retryUnlessRefused = (failureCount: number, error: unknown) =>
   !(isAppError(error) && error.kind === "invalidArgument") &&
   shouldRetryQuery(failureCount, error);
 
-/** A pull request's content revs at one head: its merge base and that head.
+/** A pull request's content revs at one diff target: its merge base and that
+ *  head. Keyed on the same target as the diff, so a retarget re-reads the base.
  *  In the PR subtree, so it refreshes with the diff. */
 export const prContentRevsOptions = (
   repo: string,
   number: number,
   lens: RemoteLens,
-  headSha: string,
+  target: PrDiffTarget & { head: string },
 ) =>
   queryOptions({
     queryKey: [
@@ -1577,23 +1935,38 @@ export const prContentRevsOptions = (
       lens,
       number,
       "content-revs",
-      headSha,
+      target.head,
+      target.baseRef,
+      target.baseSha,
     ] as const,
-    queryFn: () => api.forgePrContentRevs(repo, number, lens, headSha),
+    queryFn: () =>
+      api.forgePrContentRevs(
+        repo,
+        number,
+        lens,
+        target.head,
+        target.baseRef,
+        target.baseSha,
+      ),
     staleTime: 30_000,
     retry: retryUnlessRefused,
   });
 
+/** A head-less target keeps a disabled entry under an empty head. */
 export function usePrContentRevs(
   repo: string,
   number: number,
   lens: RemoteLens,
-  headSha: string | null,
+  target: PrDiffTarget | null,
   enabled: boolean,
 ) {
   return useQuery({
-    ...prContentRevsOptions(repo, number, lens, headSha ?? ""),
-    enabled: enabled && !!headSha,
+    ...prContentRevsOptions(repo, number, lens, {
+      head: target?.head ?? "",
+      baseRef: target?.baseRef ?? "",
+      baseSha: target?.baseSha ?? null,
+    }),
+    enabled: enabled && !!target?.head,
   });
 }
 

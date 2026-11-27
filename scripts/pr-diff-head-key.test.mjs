@@ -1,6 +1,7 @@
-// Pins the head-keyed PR diff's call sites: every `prDiffOptions(` call passes
-// the head, RemotePrView's two AI sites key on the shown record (number and
-// head one record's), and the unanswered-head sentinel never leaves usePrDiff.
+// Pins the target-keyed PR diff's call sites: every `prDiffOptions(` call
+// passes the target, RemotePrView's two AI sites key on the shown record
+// (number and target one record's), and the unanswered-head sentinel never
+// leaves usePrDiff.
 // CONTRACT. Corpus: every .ts/.tsx under src/ outside src/test/, read on
 // `maskNonCode` text (comments, strings and JSX text blanked, offsets kept),
 // so no mention inside them counts. Each code mention of `prDiffOptions` is
@@ -127,17 +128,17 @@ test("every prDiffOptions call passes four arguments", () => {
     assert.equal(call.args.length, 4, `${call.file}: ${call.args.join(", ")}`);
 });
 
-test("RemotePrView's two AI sites key on the shown record and its head", () => {
+test("RemotePrView's two AI sites key on the shown record and its target", () => {
   const view = diffOptionCalls(files).filter((c) =>
     c.file.endsWith("features/pulls/RemotePrView.tsx"),
   );
-  // Each site's head comes from the details record the view shows: `prForGen`
+  // Each site's target comes from the details record the view shows: `prForGen`
   // aliases `pr` (= details.data) for the Edit dialog's hoisted closure.
   assert.deepEqual(
     view.map(({ args }) => [args[1], args[3]]),
     [
-      ["shownNumber", "prHeadSha(prForGen) ?? null"],
-      ["shownNumber", "prHeadSha(pr) ?? null"],
+      ["shownNumber", "prDiffTarget(prForGen)"],
+      ["shownNumber", "prDiffTarget(pr)"],
     ],
   );
 });

@@ -1,5 +1,5 @@
 import { ClockIcon } from "@phosphor-icons/react";
-import { type ComponentProps, useMemo, useState } from "react";
+import { type ComponentProps, type Ref, useMemo, useState } from "react";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import { PathText } from "@/components/path-text";
@@ -199,6 +199,27 @@ export function DiffThreadAnchor({
   );
 }
 
+/** The diff read's failure with nothing to draw, with its Retry: the cold
+ *  verdict hold's failed reason points here, whichever file is open. */
+export function PrDiffFailedNotice({
+  onRetry,
+  retryRef,
+}: {
+  onRetry: () => void;
+  retryRef?: Ref<HTMLButtonElement>;
+}) {
+  return (
+    <DiffPlaceholder
+      message="Could not load this diff"
+      action={
+        <Button ref={retryRef} size="xs" variant="outline" onClick={onRetry}>
+          Retry
+        </Button>
+      }
+    />
+  );
+}
+
 /** The "Files" sub-tab: a file list down the left, the selected file's diff on
  *  the right. Presentational — the parent owns the selection + diff query
  *  and the file filter.
@@ -213,6 +234,8 @@ export function PrFilesPane({
   isPaused,
   isFetching,
   onRetry,
+  failed = false,
+  failedRetryRef,
   dataIsPlaceholder,
   contentRevs,
   revsUnavailable = false,
@@ -249,6 +272,11 @@ export function PrFilesPane({
   /** The diff read has a fetch in flight; over `isError` it hasn't settled. */
   isFetching: boolean;
   onRetry?: () => void;
+  /** The diff read failed with nothing drawable: the pane shows that failure
+   *  and its Retry in place of any file slot, so there is one Retry for it. */
+  failed?: boolean;
+  /** The Files tab's one Retry owner (focus handoff across its placements). */
+  failedRetryRef?: Ref<HTMLButtonElement>;
   dataIsPlaceholder?: boolean;
   /** The pull request's merge base and head, for expand context and image
    *  previews. Absent while unknown or while the diff is another record's. */
@@ -334,6 +362,7 @@ export function PrFilesPane({
     ? keyedPaneView(repoPath ?? "", diffEntity, openPath, openPath)
     : placeholderPaneView(diffEntity);
   const diffSlots = useFileSlots(diffTarget);
+  const failedShown = failed && onRetry !== undefined;
 
   const fileRows = filter.visible.map((file) => (
     <button
@@ -381,53 +410,57 @@ export function PrFilesPane({
         </ScrollArea>
       </DetailRail>
       <main className="min-w-0 flex-1">
-        <FileSlots
-          slots={diffSlots}
-          target={diffTarget}
-          busy={diffSlots.holding || diffSlots.read.loading}
-        >
-          {(view) =>
-            view.kind === "file" ? (
-              <PrFileDiffSlot
-                path={view.file}
-                entity={view.entity}
-                fileDiff={fileDiff}
-                isPending={isPending}
-                isError={isError}
-                isPaused={isPaused}
-                isFetching={isFetching}
-                onRetry={onRetry}
-                dataIsPlaceholder={dataIsPlaceholder}
-                content={content}
-                pairUnavailable={pairUnavailable}
-                pairPaused={revsPaused}
-                threads={threads}
-                drafts={drafts}
-                repoPath={repoPath}
-                lens={lens}
-                number={number}
-                previewRev={previewRev}
-                anchorCommit={blameRev ?? null}
-                lineWidget={lineWidget}
-                onQuote={onQuote}
-                onReply={onReply}
-                onResolve={onResolve}
-                onEditComment={onEditComment}
-                onDeleteComment={onDeleteComment}
-                editHeld={editHeld}
-                editHeldReason={editHeldReason}
-                pendingWrites={pendingWrites}
-                provider={provider}
-                apply={apply}
-                fileDiffLookup={fileDiffLookup}
-                mentions={mentions}
-                reportRead={diffSlots.reportRead}
-              />
-            ) : (
-              <DiffPlaceholder message="Select a file to see its changes" />
-            )
-          }
-        </FileSlots>
+        {failedShown ? (
+          <PrDiffFailedNotice onRetry={onRetry} retryRef={failedRetryRef} />
+        ) : (
+          <FileSlots
+            slots={diffSlots}
+            target={diffTarget}
+            busy={diffSlots.holding || diffSlots.read.loading}
+          >
+            {(view) =>
+              view.kind === "file" ? (
+                <PrFileDiffSlot
+                  path={view.file}
+                  entity={view.entity}
+                  fileDiff={fileDiff}
+                  isPending={isPending}
+                  isError={isError}
+                  isPaused={isPaused}
+                  isFetching={isFetching}
+                  onRetry={onRetry}
+                  dataIsPlaceholder={dataIsPlaceholder}
+                  content={content}
+                  pairUnavailable={pairUnavailable}
+                  pairPaused={revsPaused}
+                  threads={threads}
+                  drafts={drafts}
+                  repoPath={repoPath}
+                  lens={lens}
+                  number={number}
+                  previewRev={previewRev}
+                  anchorCommit={blameRev ?? null}
+                  lineWidget={lineWidget}
+                  onQuote={onQuote}
+                  onReply={onReply}
+                  onResolve={onResolve}
+                  onEditComment={onEditComment}
+                  onDeleteComment={onDeleteComment}
+                  editHeld={editHeld}
+                  editHeldReason={editHeldReason}
+                  pendingWrites={pendingWrites}
+                  provider={provider}
+                  apply={apply}
+                  fileDiffLookup={fileDiffLookup}
+                  mentions={mentions}
+                  reportRead={diffSlots.reportRead}
+                />
+              ) : (
+                <DiffPlaceholder message="Select a file to see its changes" />
+              )
+            }
+          </FileSlots>
+        )}
       </main>
     </DetailRailRow>
   );

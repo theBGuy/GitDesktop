@@ -28,6 +28,7 @@ use crate::forge::model::{
 use crate::forge::my_work::{
     merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
 };
+use crate::forge::pr_content::{head_proof_verdict, HeadProof};
 use crate::forge::session::{classify_glab_failure_for_host, mask_host_tokens, GlabFailure};
 use crate::forge::{
     c_quote_label, c_quote_path, cap_readme, paren_parts, validate_owner, validate_repo_name,
@@ -2524,6 +2525,9 @@ struct GlabMrChanges {
     title: String,
     #[serde(default)]
     description: Option<String>,
+    /// Empty when absent or not a string, so a head contradiction in `diff_refs`
+    /// still reads beside an unreadable branch.
+    #[serde(default, deserialize_with = "tolerant_string")]
     target_branch: String,
     source_branch: String,
     #[serde(default)]
@@ -2541,6 +2545,10 @@ struct GlabMrChanges {
     labels: Vec<String>,
     #[serde(default, deserialize_with = "null_to_default")]
     changes: Vec<GlabChange>,
+    /// The commits this payload's diff was computed between. Unreadable refs read
+    /// as absent, so they never fail the diff or the view that parse this payload.
+    #[serde(default, deserialize_with = "tolerant_diff_refs")]
+    diff_refs: Option<GlabDiffRefs>,
     #[serde(default, deserialize_with = "null_to_default")]
     overflow: bool,
     /// The head commit's pipeline (`null` when the MR has no CI). Its jobs become the
@@ -2902,6 +2910,25 @@ async fn project_label_colors(repo_path: &str, enc: &str) -> HashMap<String, Str
     .unwrap_or_default()
 }
 
+/// The merge request view's payload, refused when it names no target branch: the
+/// merge dialog and the merge read their destination from it, where the diff proof
+/// alone tolerates an unreadable one.
+fn mr_view_changes(stdout: &str) -> AppResult<GlabMrChanges> {
+    let mr: GlabMrChanges = serde_json::from_str(stdout).map_err(|e| {
+        gl_unreadable(
+            "the merge request",
+            format!("could not parse GitLab merge request: {e}"),
+        )
+    })?;
+    if mr.target_branch.is_empty() {
+        return Err(gl_unreadable(
+            "the merge request",
+            "GitLab named no target branch for it".to_string(),
+        ));
+    }
+    Ok(mr)
+}
+
 /// Full read view of one merge request — core fields + files, commits, comments, and
 /// the head pipeline's CI checks, mapped onto `PrDetails`. Reviews stay empty (a
 /// GitLab approval carries no reviewable body — approvals surface via the timeline
@@ -2930,13 +2957,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     );
     let out = out?;
     let (stack, stack_members) = mr_stack_from_rows(&open_prs, number);
-    let mr: GlabMrChanges = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| {
-            gl_unreadable(
-                "the merge request",
-                format!("could not parse GitLab merge request: {e}"),
-            )
-        })?;
+    let mr = mr_view_changes(&out.stdout_lossy())?;
 
     let mut additions = 0;
     let mut deletions = 0;
@@ -2959,8 +2980,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         })
         .collect();
 
-    // GitLab returns newest-first; reverse to the neutral model's oldest-first order.
-    let (mut commits, commits_unknown, commits_truncated) = read_or_unknown(
+    let (commits, commits_unknown, commits_truncated) = read_or_unknown(
         run_glab(
             Some(repo_path),
             &[
@@ -2972,12 +2992,12 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         .await
         .and_then(|o| mr_commits_from(&o.stdout_lossy())),
     );
-    commits.reverse();
-    let head_sha = if mr.sha.is_empty() {
-        commits.last().map(|c| c.oid.clone()).filter(|oid| !oid.is_empty())
-    } else {
-        Some(mr.sha)
-    };
+    let (commits, head_sha) = mr_commits_and_head(mr.sha, commits);
+    let base_sha = mr
+        .diff_refs
+        .as_ref()
+        .map(|refs| refs.base_sha.clone())
+        .filter(|sha| crate::forge::pr_content::is_full_sha(sha));
 
     // Resolve the signed-in user once, tolerantly — a failure just hides every
     // comment's edit/delete (drives `viewer_did_author`), it must not fail the view.
@@ -3086,6 +3106,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         base_ref_name: mr.target_branch,
         head_ref_name: mr.source_branch,
         head_sha,
+        base_sha,
         additions,
         deletions,
         url: mr.web_url,
@@ -3194,6 +3215,25 @@ fn mr_create_note_from(body: &str) -> Option<bool> {
         .ok()?
         .pointer("/data/project/mergeRequest/userPermissions/createNote")
         .and_then(serde_json::Value::as_bool)
+}
+
+/// GitLab lists commits newest-first: reversed to the neutral model's oldest-first
+/// order, with the head `sha` names, else the newest listed commit, which a capped
+/// first page still holds.
+fn mr_commits_and_head(
+    sha: String,
+    mut commits: Vec<PrCommitOut>,
+) -> (Vec<PrCommitOut>, Option<String>) {
+    commits.reverse();
+    let head_sha = if sha.is_empty() {
+        commits
+            .last()
+            .map(|c| c.oid.clone())
+            .filter(|oid| !oid.is_empty())
+    } else {
+        Some(sha)
+    };
+    (commits, head_sha)
 }
 
 /// A full single page heuristically signals incomplete commits; exact-cap totals
@@ -3806,6 +3846,53 @@ fn gl_range_from_changes(
 /// The unified diff for one merge request, rebuilt from `/changes` into the same
 /// `git`-style format `gh pr diff` produces so the frontend diff viewer parses it.
 pub async fn diff_pr(repo_path: &str, number: u64) -> AppResult<String> {
+    let mr = mr_changes(repo_path, number).await?;
+    Ok(changes_diff(&mr))
+}
+
+/// `diff_pr`'s text plus whether the same payload's diff refs prove it is the diff of
+/// `head` against the caller's base (`base_ref`, and `base_sha` when it names one).
+pub async fn diff_pr_at(
+    repo_path: &str,
+    number: u64,
+    head: &str,
+    base_ref: &str,
+    base_sha: Option<&str>,
+) -> AppResult<(String, HeadProof)> {
+    let stdout = mr_changes_stdout(repo_path, number).await?;
+    changes_payload_at(&stdout, head, base_ref, base_sha)
+}
+
+/// A `/changes` payload judged before its typed decode, so a readable contradiction
+/// answers moved even beside a field the decode refuses; only then is the text decoded.
+fn changes_payload_at(
+    stdout: &str,
+    head: &str,
+    base_ref: &str,
+    base_sha: Option<&str>,
+) -> AppResult<(String, HeadProof)> {
+    let value: serde_json::Value = serde_json::from_str(stdout).map_err(changes_unreadable)?;
+    let proof = gl_diff_proof(&value, head, base_ref, base_sha);
+    if proof == HeadProof::Moved {
+        return Ok((String::new(), proof));
+    }
+    let mr: GlabMrChanges = serde_json::from_value(value).map_err(changes_unreadable)?;
+    Ok((changes_diff(&mr), proof))
+}
+
+async fn mr_changes(repo_path: &str, number: u64) -> AppResult<GlabMrChanges> {
+    let stdout = mr_changes_stdout(repo_path, number).await?;
+    serde_json::from_str(&stdout).map_err(changes_unreadable)
+}
+
+fn changes_unreadable(e: serde_json::Error) -> AppError {
+    gl_unreadable(
+        "merge request changes",
+        format!("could not parse GitLab merge request changes: {e}"),
+    )
+}
+
+async fn mr_changes_stdout(repo_path: &str, number: u64) -> AppResult<String> {
     let enc = encode_project(&project_path(repo_path).await?);
     let out = run_glab(
         Some(repo_path),
@@ -3816,12 +3903,10 @@ pub async fn diff_pr(repo_path: &str, number: u64) -> AppResult<String> {
         GLAB_NETWORK_TIMEOUT,
     )
     .await?;
-    let mr: GlabMrChanges = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
-        gl_unreadable(
-            "merge request changes",
-            format!("could not parse GitLab merge request changes: {e}"),
-        )
-    })?;
+    Ok(out.stdout_lossy())
+}
+
+fn changes_diff(mr: &GlabMrChanges) -> String {
     let mut diff = String::new();
     for c in &mr.changes {
         diff.push_str(&reconstruct_file_diff(c));
@@ -3829,7 +3914,76 @@ pub async fn diff_pr(repo_path: &str, number: u64) -> AppResult<String> {
     // Cap to match the GitHub path (`gh_pr_diff`), so a pathologically large MR
     // can't blow up the diff viewer.
     let (text, _) = crate::git::diff::truncate_at_char_boundary(diff, 2_000_000);
-    Ok(text)
+    text
+}
+
+/// Each head or base field a merge request payload (`/changes` or the plain GET) carries,
+/// read on its own from the raw JSON: Some(moved) from readable evidence, None when it is
+/// missing or malformed. Shas compare case-insensitively; with no caller base sha the
+/// base axis has nothing to compare and reads Some(false).
+struct GlProofAxes {
+    top_sha: Option<bool>,
+    refs_head: Option<bool>,
+    target: Option<bool>,
+    refs_base: Option<bool>,
+}
+
+fn gl_proof_axes(
+    mr: &serde_json::Value,
+    head: &str,
+    base_ref: &str,
+    base_sha: Option<&str>,
+) -> GlProofAxes {
+    use crate::forge::pr_content::sha_at;
+    let moved_from =
+        |pointer: &str, want: &str| sha_at(mr, pointer).map(|sha| !sha.eq_ignore_ascii_case(want));
+    GlProofAxes {
+        top_sha: moved_from("/sha", head),
+        refs_head: moved_from("/diff_refs/head_sha", head),
+        target: mr
+            .pointer("/target_branch")
+            .and_then(serde_json::Value::as_str)
+            .filter(|branch| !branch.is_empty())
+            .map(|branch| branch != base_ref),
+        refs_base: base_sha.map_or(Some(false), |sha| moved_from("/diff_refs/base_sha", sha)),
+    }
+}
+
+/// The `/changes` payload carries its own text's identity: proven needs the refs' head,
+/// the target branch and (when the caller names one) the refs' base; the top-level `sha`
+/// (the head `view_pr` publishes) can only contradict.
+fn gl_diff_proof(
+    mr: &serde_json::Value,
+    head: &str,
+    base_ref: &str,
+    base_sha: Option<&str>,
+) -> HeadProof {
+    let axes = gl_proof_axes(mr, head, base_ref, base_sha);
+    head_proof_verdict(
+        &[axes.refs_head, axes.target, axes.refs_base],
+        &[axes.top_sha],
+    )
+}
+
+/// A separate merge request read, judged after a `/changes` text its own refs could not
+/// tie: a later payload can't vouch for an earlier text, so every axis only contradicts
+/// and the answer is moved or unproven, never proven. The hold ends on a `/changes` read
+/// whose own refs prove.
+pub(crate) fn gl_head_read_proof(
+    mr: &AppResult<serde_json::Value>,
+    head: &str,
+    base_ref: &str,
+    base_sha: Option<&str>,
+) -> HeadProof {
+    let Ok(mr) = mr else {
+        return HeadProof::Unproven;
+    };
+    let axes = gl_proof_axes(mr, head, base_ref, base_sha);
+    let readable = [axes.top_sha, axes.refs_head, axes.target, axes.refs_base];
+    match head_proof_verdict(&[], &readable) {
+        HeadProof::Proven => HeadProof::Unproven,
+        verdict => verdict,
+    }
 }
 
 /// Validate a commit sha before it's interpolated into an API path — a hex value
@@ -9908,6 +10062,42 @@ struct GlabDiffRefs {
     start_sha: String,
     #[serde(default)]
     head_sha: String,
+}
+
+/// A string that reads as empty when null or not a string.
+fn tolerant_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string())
+}
+
+/// `diff_refs` that are absent, null or not an object read as None. Each sha reads on
+/// its own, a missing or non-string one as empty, so a null unused field keeps the rest.
+fn tolerant_diff_refs<'de, D>(deserializer: D) -> Result<Option<GlabDiffRefs>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.filter(serde_json::Value::is_object).map(|value| {
+        let field = |name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        GlabDiffRefs {
+            base_sha: field("base_sha"),
+            start_sha: field("start_sha"),
+            head_sha: field("head_sha"),
+        }
+    }))
 }
 
 /// Fetch an MR's `diff_refs`. Errors clearly when GitLab omits them (a not-yet-diffable
@@ -19768,6 +19958,45 @@ mod tests {
         assert_eq!(mr_create_note_from("not json"), None);
     }
 
+    /// The view refuses what the diff proof tolerates: a null or omitted
+    /// `target_branch` names no destination for the merge.
+    #[test]
+    fn the_mr_view_refuses_a_payload_naming_no_target_branch() {
+        let core = r#""iid":6,"web_url":"u","title":"t","source_branch":"feat","state":"opened","changes":[]"#;
+        for branch in [r#","target_branch":null"#, "", r#","target_branch":"""#] {
+            let Err(err) = mr_view_changes(&format!("{{{core}{branch}}}")) else {
+                panic!("{branch}: the view parsed");
+            };
+            let err = err.to_string();
+            assert!(err.contains("named no target branch"), "{branch}: {err}");
+        }
+        let mr = mr_view_changes(&format!(r#"{{{core},"target_branch":"main"}}"#)).unwrap();
+        assert_eq!(mr.target_branch, "main");
+    }
+
+    /// A null, omitted or non-string `target_branch` reads as unreadable, so the
+    /// payload still parses and a contradicting head answers moved.
+    #[test]
+    fn an_unreadable_target_branch_keeps_the_head_contradiction() {
+        let (head, other, base) = ("1".repeat(40), "2".repeat(40), "a".repeat(40));
+        let refs =
+            format!(r#""diff_refs":{{"base_sha":"{base}","start_sha":null,"head_sha":"{other}"}}"#);
+        let core = r#""iid":6,"web_url":"u","title":"t","source_branch":"feat","state":"opened","#;
+        for branch in [r#""target_branch":null,"#, "", r#""target_branch":7,"#] {
+            let body = format!("{{{core}{branch}{refs}}}");
+            let mr: GlabMrChanges = serde_json::from_str(&body).unwrap();
+            assert_eq!(mr.target_branch, "");
+            let proof = |want: &str| {
+                changes_payload_at(&body, want, "main", Some(&base))
+                    .unwrap()
+                    .1
+            };
+            assert_eq!(proof(&head), HeadProof::Moved, "{branch}");
+            // The head agrees, but the branch can't be read: nothing proves it.
+            assert_eq!(proof(&other), HeadProof::Unproven, "{branch}");
+        }
+    }
+
     /// The `/changes` payload the MR view already fetches carries the conflict and
     /// project-id fields, so the detail view costs no extra HTTP.
     #[test]
@@ -21360,6 +21589,26 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_mr_sha_takes_the_newest_commit_of_a_capped_first_page() {
+        // SYNTHETIC: a full 100-row page, newest first, as the commits endpoint lists.
+        let ids: Vec<String> = (0..100).map(|i| format!("{:040x}", 1000 - i)).collect();
+        let page: Vec<_> = ids
+            .iter()
+            .map(|id| serde_json::json!({"id": id, "title": "commit"}))
+            .collect();
+        let (commits, unknown, truncated) =
+            read_or_unknown(mr_commits_from(&serde_json::to_string(&page).unwrap()));
+        assert_eq!((unknown, truncated), (true, true));
+        let (commits, head) = mr_commits_and_head(String::new(), commits);
+        assert_eq!(head.as_deref(), Some(ids[0].as_str()));
+        assert_eq!(commits[0].oid, ids[99]);
+        // A named sha wins over the list.
+        let named = "f".repeat(40);
+        let (_, head) = mr_commits_and_head(named.clone(), commits);
+        assert_eq!(head, Some(named));
+    }
+
+    #[test]
     fn mr_reviewer_verdict_failures_are_unknown() {
         // SYNTHETIC: a failed read, a known empty list and an approved reviewer.
         let (states, unknown) =
@@ -21528,6 +21777,272 @@ mod tests {
         let out = reconstruct_file_diff(&c);
         assert!(out.contains("--- a/gone.txt\n"));
         assert!(out.contains("+++ /dev/null\n"));
+    }
+
+    const DIFF_AT_HEAD: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const DIFF_AT_BASE: &str = "fedcba9876543210fedcba9876543210fedcba98";
+    const DIFF_AT_OTHER: &str = "1111111111111111111111111111111111111111";
+
+    fn changes_body(refs: &str, target: &str) -> String {
+        format!(
+            r#"{{"iid":6,"web_url":"u","title":"t","target_branch":"{target}",
+            "source_branch":"feat","state":"opened"{refs},"changes":[
+            {{"old_path":"a.txt","new_path":"a.txt","diff":"@@ -1 +1 @@\n-x\n+y\n"}},
+            {{"old_path":"n.md","new_path":"n.md","new_file":true,"diff":"@@ -0,0 +1 @@\n+hi"}}]}}"#
+        )
+    }
+
+    fn refs(base: &str, head: &str) -> String {
+        format!(r#","diff_refs":{{"base_sha":"{base}","start_sha":"{base}","head_sha":"{head}"}}"#)
+    }
+
+    const CHANGES_TEXT: &str = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\n\
+        diff --git a/n.md b/n.md\nnew file mode 100644\n--- /dev/null\n+++ b/n.md\n@@ -0,0 +1 @@\n+hi\n";
+
+    #[test]
+    fn the_changes_rebuild_is_the_by_number_diff() {
+        for refs in ["".to_string(), refs(DIFF_AT_BASE, DIFF_AT_HEAD)] {
+            let mr: GlabMrChanges = serde_json::from_str(&changes_body(&refs, "main")).unwrap();
+            assert_eq!(changes_diff(&mr), CHANGES_TEXT);
+            let (text, _) =
+                changes_payload_at(&changes_body(&refs, "main"), DIFF_AT_HEAD, "main", None)
+                    .unwrap();
+            assert_eq!(text, CHANGES_TEXT);
+        }
+    }
+
+    #[test]
+    fn diff_refs_prove_the_payload_only_for_the_callers_comparison() {
+        let proof = |refs: &str, target: &str, head: &str, base_sha: Option<&str>| {
+            let (text, proof) =
+                changes_payload_at(&changes_body(refs, target), head, "main", base_sha).unwrap();
+            assert_eq!(text.is_empty(), proof == HeadProof::Moved, "{refs}");
+            proof
+        };
+        let full = refs(DIFF_AT_BASE, DIFF_AT_HEAD);
+        for unreadable in [
+            "".to_string(),
+            r#","diff_refs":null"#.to_string(),
+            r#","diff_refs":"x""#.to_string(),
+            r#","diff_refs":{"base_sha":null,"head_sha":null}"#.to_string(),
+            refs(DIFF_AT_BASE, ""),
+            refs(DIFF_AT_BASE, "abc1234"),
+        ] {
+            assert_eq!(
+                proof(&unreadable, "main", DIFF_AT_HEAD, None),
+                HeadProof::Unproven,
+                "{unreadable}"
+            );
+        }
+        assert_eq!(proof(&full, "main", DIFF_AT_HEAD, None), HeadProof::Proven);
+        assert_eq!(
+            proof(
+                &full,
+                "main",
+                &DIFF_AT_HEAD.to_ascii_uppercase(),
+                Some(&DIFF_AT_BASE.to_ascii_uppercase())
+            ),
+            HeadProof::Proven
+        );
+        assert_eq!(proof(&full, "main", DIFF_AT_OTHER, None), HeadProof::Moved);
+        assert_eq!(
+            proof(&full, "develop", DIFF_AT_HEAD, None),
+            HeadProof::Moved
+        );
+        assert_eq!(
+            proof(&full, "main", DIFF_AT_HEAD, Some(DIFF_AT_OTHER)),
+            HeadProof::Moved
+        );
+        // A defaulted target branch or base sha is missing evidence, never movement.
+        assert_eq!(proof(&full, "", DIFF_AT_HEAD, None), HeadProof::Unproven);
+        for base in ["", "abc1234"] {
+            assert_eq!(
+                proof(
+                    &refs(base, DIFF_AT_HEAD),
+                    "main",
+                    DIFF_AT_HEAD,
+                    Some(DIFF_AT_BASE)
+                ),
+                HeadProof::Unproven,
+                "{base}"
+            );
+        }
+        // A readable contradiction still wins over missing evidence elsewhere.
+        assert_eq!(proof(&full, "", DIFF_AT_OTHER, None), HeadProof::Moved);
+        for absent in ["".to_string(), r#","diff_refs":null"#.to_string()] {
+            assert_eq!(
+                proof(&absent, "develop", DIFF_AT_HEAD, None),
+                HeadProof::Moved,
+                "{absent}"
+            );
+        }
+        // Each sha parses on its own: a null unused start_sha keeps a readable head.
+        let null_start = format!(
+            r#","diff_refs":{{"base_sha":"{DIFF_AT_BASE}","start_sha":null,"head_sha":"{DIFF_AT_HEAD}"}}"#
+        );
+        assert_eq!(
+            proof(&null_start, "main", DIFF_AT_HEAD, Some(DIFF_AT_BASE)),
+            HeadProof::Proven
+        );
+        assert_eq!(
+            proof(&null_start, "main", DIFF_AT_OTHER, None),
+            HeadProof::Moved
+        );
+    }
+
+    /// The top-level `sha` is the head the view publishes: a readable one naming another
+    /// head is movement whatever the refs say, while one that agrees proves nothing alone.
+    #[test]
+    fn the_top_level_sha_contradicts_but_never_proves_alone() {
+        let proof = |top: &str, refs: &str, head: &str| {
+            let sha = if top.is_empty() {
+                String::new()
+            } else {
+                format!(r#","sha":"{top}""#)
+            };
+            let body = changes_body(&format!("{sha}{refs}"), "main");
+            let mr: GlabMrChanges = serde_json::from_str(&body).unwrap();
+            assert_eq!(mr.sha, top);
+            changes_payload_at(&body, head, "main", None).unwrap().1
+        };
+        let null_refs = r#","diff_refs":null"#;
+        assert_eq!(
+            proof(DIFF_AT_OTHER, null_refs, DIFF_AT_HEAD),
+            HeadProof::Moved
+        );
+        assert_eq!(
+            proof(DIFF_AT_HEAD, null_refs, DIFF_AT_HEAD),
+            HeadProof::Unproven
+        );
+        let full = refs(DIFF_AT_BASE, DIFF_AT_HEAD);
+        assert_eq!(proof(DIFF_AT_OTHER, &full, DIFF_AT_HEAD), HeadProof::Moved);
+        assert_eq!(proof(DIFF_AT_HEAD, &full, DIFF_AT_HEAD), HeadProof::Proven);
+        // A top-level sha differing only in letter case is the same head.
+        let mixed = DIFF_AT_MIXED_CASE_HEAD;
+        assert_ne!(mixed, DIFF_AT_HEAD);
+        assert_eq!(proof(mixed, &full, DIFF_AT_HEAD), HeadProof::Proven);
+        assert_eq!(proof(mixed, null_refs, DIFF_AT_HEAD), HeadProof::Unproven);
+        // An empty or abbreviated top-level sha is no evidence either way.
+        for top in ["", "abc1234"] {
+            assert_eq!(proof(top, &full, DIFF_AT_HEAD), HeadProof::Proven, "{top}");
+            assert_eq!(
+                proof(top, null_refs, DIFF_AT_HEAD),
+                HeadProof::Unproven,
+                "{top}"
+            );
+        }
+    }
+
+    const DIFF_AT_MIXED_CASE_HEAD: &str =
+        "0123456789ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef";
+
+    /// The proof reads the raw payload before the typed decode: a field the decode
+    /// refuses never hides a readable contradiction, and a matching payload with the same
+    /// field malformed still fails the decode rather than proving a text it can't build.
+    #[test]
+    fn a_malformed_changes_field_never_hides_a_readable_contradiction() {
+        let moved_refs = refs(DIFF_AT_BASE, DIFF_AT_OTHER);
+        let own_refs = refs(DIFF_AT_BASE, DIFF_AT_HEAD);
+        let core = |refs: &str, broken: (&str, &str)| {
+            let mut fields = vec![
+                ("iid", "6".to_string()),
+                ("web_url", r#""u""#.to_string()),
+                ("title", r#""t""#.to_string()),
+                ("target_branch", r#""main""#.to_string()),
+                ("source_branch", r#""feat""#.to_string()),
+                ("state", r#""opened""#.to_string()),
+                ("draft", "false".to_string()),
+                ("sha", format!(r#""{DIFF_AT_HEAD}""#)),
+                (
+                    "changes",
+                    r#"[{"old_path":"a","new_path":"a","diff":"@@ -1 +1 @@\n-x\n+y\n"}]"#
+                        .to_string(),
+                ),
+            ];
+            for field in &mut fields {
+                if field.0 == broken.0 {
+                    field.1 = broken.1.to_string();
+                }
+            }
+            let body: Vec<String> = fields
+                .iter()
+                .map(|(k, v)| format!(r#""{k}":{v}"#))
+                .collect();
+            format!("{{{}{refs}}}", body.join(","))
+        };
+        let broken_change = r#"[{"old_path":"a","new_path":"a","diff":null}]"#;
+        for broken in [
+            ("sha", "7"),
+            ("iid", "null"),
+            ("web_url", "null"),
+            ("title", "null"),
+            ("source_branch", "null"),
+            ("state", "null"),
+            ("draft", "null"),
+            ("changes", broken_change),
+        ] {
+            let proof = changes_payload_at(&core(&moved_refs, broken), DIFF_AT_HEAD, "main", None);
+            assert_eq!(
+                proof.unwrap(),
+                (String::new(), HeadProof::Moved),
+                "{broken:?}"
+            );
+            assert!(
+                changes_payload_at(&core(&own_refs, broken), DIFF_AT_HEAD, "main", None).is_err(),
+                "{broken:?}"
+            );
+        }
+        let (text, proof) =
+            changes_payload_at(&core(&own_refs, ("", "")), DIFF_AT_HEAD, "main", None).unwrap();
+        assert_eq!(proof, HeadProof::Proven);
+        assert!(text.contains("+y\n"), "{text}");
+        assert!(changes_payload_at("not json", DIFF_AT_HEAD, "main", None).is_err());
+    }
+
+    /// A separate merge request read only contradicts: a matching payload, even one
+    /// whose refs and top-level sha both name the head, never proves a text it didn't carry.
+    #[test]
+    fn the_separate_merge_request_read_is_contradiction_only() {
+        let mr = |sha: &str, refs: &str, target: &str| -> AppResult<serde_json::Value> {
+            Ok(serde_json::from_str(&format!(
+                r#"{{"iid":6,"sha":{sha},"target_branch":{target}{refs}}}"#
+            ))
+            .unwrap())
+        };
+        let head = format!(r#""{DIFF_AT_HEAD}""#);
+        let other = format!(r#""{DIFF_AT_OTHER}""#);
+        let full = refs(DIFF_AT_BASE, DIFF_AT_HEAD);
+        let read = |mr: &AppResult<serde_json::Value>, base: Option<&str>| {
+            gl_head_read_proof(mr, DIFF_AT_HEAD, "main", base)
+        };
+        let base = Some(DIFF_AT_BASE);
+        let main = r#""main""#;
+        let mixed = format!(r#""{DIFF_AT_MIXED_CASE_HEAD}""#);
+        for (sha, base) in [(&head, base), (&head, None), (&mixed, base)] {
+            assert_eq!(read(&mr(sha, &full, main), base), HeadProof::Unproven);
+        }
+        // Every readable axis contradicts on its own, beside unreadable ones.
+        let no_refs = r#","diff_refs":null"#.to_string();
+        let moved_base = refs(DIFF_AT_OTHER, DIFF_AT_HEAD);
+        for (sha, refs, target, base) in [
+            (other.as_str(), full.clone(), main, base),
+            ("null", refs(DIFF_AT_BASE, DIFF_AT_OTHER), main, base),
+            ("null", no_refs, r#""develop""#, None),
+            (head.as_str(), moved_base, "null", base),
+            ("7", refs(DIFF_AT_BASE, DIFF_AT_OTHER), "7", None),
+        ] {
+            assert_eq!(
+                read(&mr(sha, &refs, target), base),
+                HeadProof::Moved,
+                "{sha} {refs} {target}"
+            );
+        }
+        // The refs head contradicts even when the top-level sha agrees.
+        let refs_moved = refs(DIFF_AT_BASE, DIFF_AT_OTHER);
+        assert_eq!(read(&mr(&head, &refs_moved, main), base), HeadProof::Moved);
+        let failed = Err(AppError::Glab("down".into()));
+        assert_eq!(read(&failed, base), HeadProof::Unproven);
+        assert_eq!(read(&mr("null", "", "null"), base), HeadProof::Unproven);
     }
 
     // The three shape tests below assert header/rename/`+++` lines that match

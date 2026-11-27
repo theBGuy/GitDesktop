@@ -145,6 +145,47 @@ export const forgePrDiff = (
   lens: RemoteLens,
 ) => invoke<string>("forge_pr_diff", { repoPath, number, lens });
 
+/** A diff read's proof: the text is the head's against its base, couldn't be tied to
+ *  them, or the forge named another head or base (the text is then empty). */
+export interface PrDiffAt {
+  diff: string;
+  headProof: "proven" | "unproven" | "moved";
+}
+
+/** The pull request's diff tied to the head and base its details named. */
+export const forgePrDiffAt = (
+  repoPath: string,
+  number: number,
+  lens: RemoteLens,
+  target: { head: string; baseRef: string; baseSha: string | null },
+) =>
+  invoke<PrDiffAt>("forge_pr_diff_at", {
+    repoPath,
+    number,
+    lens,
+    headSha: target.head,
+    baseRef: target.baseRef,
+    baseSha: target.baseSha,
+  });
+
+/** A fresh read of the pull request judged against the head and base its
+ *  details named, per axis like the diff read's own re-read; a failed read is
+ *  unproven. GitLab's answer is never proven (its text proves itself). */
+export const forgePrHeadProof = (
+  repoPath: string,
+  number: number,
+  lens: RemoteLens,
+  target: { head: string; baseRef: string; baseSha: string | null },
+) =>
+  invoke<PrDiffAt["headProof"]>("forge_pr_head_proof", {
+    repoPath,
+    number,
+    lens,
+    headSha: target.head,
+    baseRef: target.baseRef,
+    baseSha: target.baseSha,
+  });
+
 /** The unified diff for a single commit of a PR/MR (per-commit review view). */
 export const forgePrCommitDiff = (
   repoPath: string,
@@ -167,19 +208,24 @@ export interface PrContentRevs {
   newSha: string;
 }
 
-/** The PR's merge base against `headSha` (one forge read, plus a compare when the
- *  commits aren't local). Rejects when no merge base can be read. */
+/** The PR's merge base against `headSha` and the base the caller's details named:
+ *  GitHub compares from `baseSha` when given; a forge whose re-read names another
+ *  base branch or base sha rejects. Rejects when no merge base can be read. */
 export const forgePrContentRevs = (
   repoPath: string,
   number: number,
   lens: RemoteLens,
   headSha: string,
+  baseRef: string,
+  baseSha: string | null,
 ) =>
   invoke<PrContentRevs>("forge_pr_content_revs", {
     repoPath,
     number,
     lens,
     headSha,
+    baseRef,
+    baseSha,
   });
 
 /** A commit's first parent from the forge; null for a root commit. */

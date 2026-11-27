@@ -1,3 +1,4 @@
+import { FULL_OID_RE } from "../oid.ts";
 import type { ForgeProvider, ForgeUserRef, RepoLabel } from "./forge";
 import type { CompletedReviewerWithState, PrThreadOut } from "./pr-reviews";
 
@@ -439,6 +440,10 @@ export interface PrDetails {
    *  abbreviated); null when none could be read. GitHub lists commits
    *  oldest-first under a cap, so the list's tail is not the head there. */
   headSha: string | null;
+  /** The pull request's stored base commit (GitHub `baseRefOid`, GitLab
+   *  `diff_refs.base_sha`), not the live base tip; null or absent where the forge
+   *  names none. An identity for the diff read, never a merge base to compute with. */
+  baseSha?: string | null;
   /** True when the files read failed or may be incomplete — never present
    *  `files` as complete. A partial list may be retained; an empty one is a
    *  missing list, not a PR without changed files. */
@@ -591,6 +596,67 @@ export function prHeadSha(
   pr: Pick<PrDetails, "headSha" | "commits">,
 ): string | undefined {
   return pr.headSha || pr.commits.at(-1)?.oid;
+}
+
+/** The comparison a pull request's diff read is tied to: its head, its base branch
+ *  and, when the forge names one as a full id, its base commit. Full ids are
+ *  lowercased once here, so a case-only change never re-keys the read; branch
+ *  names stay exact. */
+export interface PrDiffTarget {
+  head: string | null;
+  baseRef: string;
+  baseSha: string | null;
+  /** Whether a read by number, for a record naming no full head, stands as
+   *  proven: only on Bitbucket, whose record abbreviates its head. Elsewhere a
+   *  missing or short head holds the review actions until one is named, and an
+   *  absent flag reads as that hold. */
+  byNumberProven?: boolean;
+}
+
+/** A record served from Bitbucket Cloud, the only Bitbucket host the backend
+ *  routes to; any other or unreadable URL fails toward the hold. */
+function bitbucketRecord(url: unknown): boolean {
+  if (typeof url !== "string") return false;
+  try {
+    return new URL(url).hostname === "bitbucket.org";
+  } catch {
+    return false;
+  }
+}
+
+const canonicalOid = (oid: string) =>
+  FULL_OID_RE.test(oid) ? oid.toLowerCase() : oid;
+
+/** The diff target's head is `pr.headSha`, the backend's: GitLab and Bitbucket
+ *  fall back to their newest-first list's newest commit (a partial first page
+ *  still names the head), GitHub's never does. The commits tail below, read in
+ *  GitHub's oldest-first order, counts only from a complete list, since a
+ *  capped list's tail is an older commit a by-sha compare would prove; else the
+ *  head stays unnamed and the review actions hold. */
+export function prDiffTarget(
+  pr: Pick<
+    PrDetails,
+    | "headSha"
+    | "commits"
+    | "commitsUnknown"
+    | "commitsTruncated"
+    | "baseRefName"
+    | "baseSha"
+    | "url"
+  >,
+): PrDiffTarget {
+  const listComplete = !pr.commitsUnknown && !pr.commitsTruncated;
+  const head =
+    pr.headSha || (listComplete ? pr.commits.at(-1)?.oid : undefined);
+  return {
+    head: head === undefined ? null : canonicalOid(head),
+    baseRef: pr.baseRefName,
+    baseSha:
+      typeof pr.baseSha === "string" && FULL_OID_RE.test(pr.baseSha)
+        ? pr.baseSha.toLowerCase()
+        : null,
+    byNumberProven: bitbucketRecord(pr.url),
+  };
 }
 
 /** How far a pull request's head has drifted from its base — the update-branch

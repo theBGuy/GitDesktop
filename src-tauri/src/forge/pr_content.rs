@@ -61,21 +61,190 @@ pub async fn forge_pr_content_revs(
     number: u64,
     lens: Option<String>,
     head_sha: String,
+    base_ref: Option<String>,
+    base_sha: Option<String>,
 ) -> AppResult<PrContentRevs> {
     lens_remote(lens.as_deref())?;
     full_sha(&head_sha)?;
+    if let Some(base) = &base_sha {
+        full_sha(base)?;
+    }
+    let (base_ref, base_sha) = (base_ref.as_deref(), base_sha.as_deref());
     let old_sha = match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab_merge_base(&repo_path, number, &head_sha).await?,
+        Some((Provider::GitLab, _)) => {
+            gitlab_merge_base(&repo_path, number, &head_sha, base_ref, base_sha).await?
+        }
         Some((Provider::Bitbucket, _)) => {
             let creds = http::load_credentials().await?;
-            bitbucket_merge_base(&creds, &repo_path, number, &head_sha).await?
+            bitbucket_merge_base(&creds, &repo_path, number, &head_sha, base_ref).await?
         }
-        _ => github_merge_base(&repo_path, number, lens.as_deref(), &head_sha).await?,
+        _ => {
+            let target = TargetBase { base_ref, base_sha };
+            github_merge_base(&repo_path, number, lens.as_deref(), &head_sha, target).await?
+        }
     };
     Ok(PrContentRevs {
         old_sha,
         new_sha: head_sha,
     })
+}
+
+/// What a pull request diff read proved about its text: the diff of the caller's head
+/// against its base, a text no read could tie to them, or the forge naming another
+/// head or base (the text is then dropped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HeadProof {
+    Proven,
+    Unproven,
+    Moved,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrDiffAt {
+    /// The unified diff, capped like `forge_pr_diff`; empty when `head_proof` is moved.
+    pub diff: String,
+    pub head_proof: HeadProof,
+}
+
+fn diff_at(diff: String, head_proof: HeadProof) -> PrDiffAt {
+    PrDiffAt {
+        diff: if head_proof == HeadProof::Moved {
+            String::new()
+        } else {
+            diff
+        },
+        head_proof,
+    }
+}
+
+/// A pull request's diff tied to the head and base the caller's details named.
+/// `base_ref` is only compared with the forge's answer, never put in a path or argv.
+#[tauri::command]
+pub async fn forge_pr_diff_at(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+    head_sha: String,
+    base_ref: String,
+    base_sha: Option<String>,
+) -> AppResult<PrDiffAt> {
+    lens_remote(lens.as_deref())?;
+    full_sha(&head_sha)?;
+    if let Some(base) = &base_sha {
+        full_sha(base)?;
+    }
+    let base_sha = base_sha.as_deref();
+    let (diff, proof) = match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => {
+            Box::pin(crate::forge::gitlab::diff_pr_at(
+                &repo_path, number, &head_sha, &base_ref, base_sha,
+            ))
+            .await?
+        }
+        Some((Provider::Bitbucket, _)) => {
+            Box::pin(bitbucket_diff_at(&repo_path, number, &head_sha, &base_ref)).await?
+        }
+        _ => {
+            Box::pin(github_diff_at(
+                &repo_path,
+                number,
+                lens.as_deref(),
+                &head_sha,
+                &base_ref,
+                base_sha,
+            ))
+            .await?
+        }
+    };
+    Ok(diff_at(diff, proof))
+}
+
+/// Whether a fresh read of the pull request ties an unproven text to the head and base
+/// the caller's details named, judged per axis like the diff read's own re-read. A
+/// failed or unreadable read is unproven; only a bad argument is an error.
+#[tauri::command]
+pub async fn forge_pr_head_proof(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+    head_sha: String,
+    base_ref: String,
+    base_sha: Option<String>,
+) -> AppResult<HeadProof> {
+    lens_remote(lens.as_deref())?;
+    full_sha(&head_sha)?;
+    if let Some(base) = &base_sha {
+        full_sha(base)?;
+    }
+    let provider = detect_non_github(&repo_path)
+        .await
+        .map(|(provider, _)| provider);
+    let read = |provider: Option<Provider>| async move {
+        match provider {
+            Some(Provider::GitLab) => Box::pin(gitlab_mr(&repo_path, number)).await,
+            Some(Provider::Bitbucket) => {
+                Box::pin(async {
+                    let (creds, base) = bb_session(&repo_path).await?;
+                    bitbucket_pr(&creds, &base, number).await
+                })
+                .await
+            }
+            _ => {
+                Box::pin(async {
+                    let slug = gh_lens_slug(&repo_path, lens.as_deref()).await?;
+                    github_pr(&repo_path, &slug, number).await
+                })
+                .await
+            }
+        }
+    };
+    Ok(head_proof_at(provider, &head_sha, &base_ref, base_sha.as_deref(), read).await)
+}
+
+/// [`forge_pr_head_proof`]'s per-forge dispatch over its read: `read` fetches the
+/// provider's pull request, and that forge's rule judges it.
+async fn head_proof_at<F, Fut>(
+    provider: Option<Provider>,
+    head: &str,
+    base_ref: &str,
+    base_sha: Option<&str>,
+    read: F,
+) -> HeadProof
+where
+    F: FnOnce(Option<Provider>) -> Fut,
+    Fut: std::future::Future<Output = AppResult<Value>>,
+{
+    let pr = read(provider).await;
+    match provider {
+        Some(Provider::GitLab) => {
+            crate::forge::gitlab::gl_head_read_proof(&pr, head, base_ref, base_sha)
+        }
+        Some(Provider::Bitbucket) => bb_reread_proof(&pr, head, base_ref),
+        _ => gh_reread_proof(&pr, head, base_ref, base_sha),
+    }
+}
+
+/// The one per-axis rule every head proof shares. Each axis is Some(moved) from readable
+/// evidence or None when it can't be read: a readable contradiction on any axis is
+/// movement, even beside unreadable ones; proven needs every required axis readable.
+/// A contradiction-only axis never proves and never blocks.
+pub(crate) fn head_proof_verdict(
+    required: &[Option<bool>],
+    contradiction_only: &[Option<bool>],
+) -> HeadProof {
+    if required
+        .iter()
+        .chain(contradiction_only)
+        .any(|axis| *axis == Some(true))
+    {
+        HeadProof::Moved
+    } else if required.contains(&None) {
+        HeadProof::Unproven
+    } else {
+        HeadProof::Proven
+    }
 }
 
 /// First parent of `oid`; None = a root commit.
@@ -381,7 +550,7 @@ fn whitespace_hunks(stdout: &[u8]) -> WhitespaceHunks {
     WhitespaceHunks { hunks, is_binary }
 }
 
-fn is_full_sha(sha: &str) -> bool {
+pub(crate) fn is_full_sha(sha: &str) -> bool {
     matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -427,7 +596,7 @@ fn encode_segments(segments: &[&str]) -> String {
 }
 
 /// A full sha at `pointer`, never an abbreviation or a guessed default.
-fn sha_at(value: &Value, pointer: &str) -> Option<String> {
+pub(crate) fn sha_at(value: &Value, pointer: &str) -> Option<String> {
     value
         .pointer(pointer)?
         .as_str()
@@ -524,35 +693,292 @@ async fn gh_json(repo: &str, endpoint: &str, what: &str) -> AppResult<Value> {
     serde_json::from_slice(&out.stdout).map_err(|e| gh_unreadable(what, e.to_string()))
 }
 
-/// The PR's base tip, then the merge base of it and the head: local when both commits
-/// are, else the base repo's compare by sha (it holds a fork PR's head as its pull ref).
+/// The base the caller's details named for the pull request.
+#[derive(Clone, Copy)]
+struct TargetBase<'a> {
+    base_ref: Option<&'a str>,
+    base_sha: Option<&'a str>,
+}
+
+/// The caller's base sha, else the re-read PR's base sha while its base branch is the
+/// caller's; then the merge base of it and the head: local when both commits are, else
+/// the base repo's compare by sha (it holds a fork PR's head as its pull ref).
 async fn github_merge_base(
     repo: &str,
     number: u64,
     lens: Option<&str>,
     head: &str,
+    target: TargetBase<'_>,
 ) -> AppResult<String> {
     let slug = gh_lens_slug(repo, lens).await?;
-    let pr = gh_json(
-        repo,
-        &format!("repos/{slug}/pulls/{number}"),
-        "the pull request",
-    )
-    .await?;
-    let base = sha_at(&pr, "/base/sha")
-        .ok_or_else(|| gh_unreadable("the pull request", "its base sha is missing".into()))?;
+    let base = match target.base_sha {
+        Some(sha) => sha.to_string(),
+        None => gh_live_base_outcome(&github_pr(repo, &slug, number).await?, target.base_ref)?,
+    };
     let both = vec![base.clone(), head.to_string()];
     let present = matches!(
         crate::git::compare::git_objects_present(repo.to_string(), both).await,
         Ok(true)
     );
-    let endpoint = format!("repos/{slug}/compare/{base}...{head}?per_page=1");
+    let endpoint = format!("{}?per_page=1", github_compare_path(&slug, &base, head)?);
     let compare = async {
         let compare = gh_json(repo, &endpoint, "the comparison").await?;
         sha_at(&compare, "/merge_base_commit/sha")
             .ok_or_else(|| gh_unreadable("the comparison", "its merge base sha is missing".into()))
     };
     merge_base_local_first(repo, &base, head, present, compare).await
+}
+
+/// The re-read PR's base sha, only when it names the caller's base branch: the branch is
+/// then the caller's one base identity, so a retarget or an unnamed branch refuses.
+fn gh_live_base_outcome(pr: &Value, base_ref: Option<&str>) -> AppResult<String> {
+    let base = sha_at(pr, "/base/sha")
+        .ok_or_else(|| gh_unreadable("the pull request", "its base sha is missing".into()))?;
+    let live_ref = pr
+        .pointer("/base/ref")
+        .and_then(Value::as_str)
+        .filter(|r| !r.is_empty());
+    match (live_ref, base_ref) {
+        (_, None) => Ok(base),
+        (Some(live), Some(want)) if live == want => Ok(base),
+        (Some(live), Some(want)) => Err(AppError::Gh(format!(
+            "this pull request now targets {live}, not {want}."
+        ))),
+        (None, Some(_)) => Err(gh_unreadable(
+            "the pull request",
+            "its base branch is missing".into(),
+        )),
+    }
+}
+
+async fn github_pr(repo: &str, slug: &str, number: u64) -> AppResult<Value> {
+    gh_json(
+        repo,
+        &format!("repos/{slug}/pulls/{number}"),
+        "the pull request",
+    )
+    .await
+}
+
+/// The base repo's three-dot comparison of two commits, the one builder of that path.
+/// With the caller's base sha the diff text and the content revs compare the same pair;
+/// without it, each reads the PR's base sha while its base branch is the caller's.
+fn github_compare_path(slug: &str, base: &str, head: &str) -> AppResult<String> {
+    full_sha(base)?;
+    full_sha(head)?;
+    Ok(format!("repos/{slug}/compare/{base}...{head}"))
+}
+
+/// The webview's diff ceiling, `gh_pr_diff`'s cap, measured on the decoded text. A
+/// compare text past it is not served; the by-number read answers, cut at the same cap.
+const PR_DIFF_CAP: usize = 2_000_000;
+
+const GH_DIFF_ACCEPT: &str = "Accept: application/vnd.github.diff";
+
+/// Distinct over-cap comparisons remembered before the memo starts over.
+const OVER_CAP_MEMO_MAX: usize = 256;
+
+/// Comparisons whose diff measured over the cap. A verdict over two immutable commits
+/// and a constant cap, so it needs no expiry or auth epoch.
+static OVER_CAP: std::sync::LazyLock<std::sync::Mutex<OverCapMemo>> =
+    std::sync::LazyLock::new(Default::default);
+
+#[derive(Debug, PartialEq)]
+enum ComparePlan {
+    Compare,
+    Skip,
+}
+
+#[derive(Debug, Default)]
+struct OverCapMemo(std::collections::HashSet<(String, String, String)>);
+
+impl OverCapMemo {
+    fn key(slug: &str, base: &str, head: &str) -> (String, String, String) {
+        (
+            slug.to_string(),
+            base.to_ascii_lowercase(),
+            head.to_ascii_lowercase(),
+        )
+    }
+
+    fn plan(&self, slug: &str, base: &str, head: &str) -> ComparePlan {
+        if self.0.contains(&Self::key(slug, base, head)) {
+            ComparePlan::Skip
+        } else {
+            ComparePlan::Compare
+        }
+    }
+
+    fn note(&mut self, slug: &str, base: &str, head: &str) {
+        let key = Self::key(slug, base, head);
+        if self.0.len() >= OVER_CAP_MEMO_MAX && !self.0.contains(&key) {
+            self.0.clear();
+        }
+        self.0.insert(key);
+    }
+}
+
+fn lock_memo(memo: &std::sync::Mutex<OverCapMemo>) -> std::sync::MutexGuard<'_, OverCapMemo> {
+    memo.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[derive(Debug, PartialEq)]
+enum CompareAnswer {
+    Text(String),
+    /// The by-number diff can still answer when the compare exceeds the cap or is refused.
+    NotAddressable,
+}
+
+/// Only an exit-0 body over the cap is noted in `memo`. A refusal can depend on the
+/// account or the forge.
+fn gh_compare_outcome(
+    result: AppResult<GhOutput>,
+    memo: &mut OverCapMemo,
+    slug: &str,
+    base: &str,
+    head: &str,
+) -> AppResult<CompareAnswer> {
+    let out = result?;
+    if out.code == 0 {
+        // The lossy decode can grow the text (an invalid byte becomes a 3-byte U+FFFD).
+        let text = out.stdout_lossy();
+        if text.len() > PR_DIFF_CAP {
+            memo.note(slug, base, head);
+            return Ok(CompareAnswer::NotAddressable);
+        }
+        return Ok(CompareAnswer::Text(text));
+    }
+    match classify_gh_failure(&out.stderr) {
+        GhFailure::NotFound | GhFailure::Answered => Ok(CompareAnswer::NotAddressable),
+        GhFailure::RateLimited | GhFailure::Transport => Err(AppError::Gh(gh_failure_reason(&out))),
+    }
+}
+
+/// A re-read pull request against the caller's head, base branch and base sha, each read
+/// on its own: any readable mismatch is another comparison, even beside a field it can't
+/// read; proven needs both shas, and the base branch when the caller has no base sha.
+fn gh_reread_proof(
+    pr: &AppResult<Value>,
+    head: &str,
+    base_ref: &str,
+    base_sha: Option<&str>,
+) -> HeadProof {
+    let Ok(pr) = pr else {
+        return HeadProof::Unproven;
+    };
+    // Each check: Some(moved) from readable evidence, None when it can't be read.
+    let head_check = sha_at(pr, "/head/sha").map(|sha| !sha.eq_ignore_ascii_case(head));
+    let base_check = sha_at(pr, "/base/sha")
+        .map(|sha| base_sha.is_some_and(|want| !sha.eq_ignore_ascii_case(want)));
+    let ref_check = pr
+        .pointer("/base/ref")
+        .and_then(Value::as_str)
+        .filter(|r| !r.is_empty())
+        .map(|r| r != base_ref);
+    if base_sha.is_none() {
+        head_proof_verdict(&[head_check, base_check, ref_check], &[])
+    } else {
+        head_proof_verdict(&[head_check, base_check], &[ref_check])
+    }
+}
+
+/// Use the by-number diff and re-read the PR when there is no compare base, the diff
+/// exceeds the cap, or GitHub refuses the compare. Rate limits and transport failures
+/// return their error.
+async fn github_diff_at(
+    repo: &str,
+    number: u64,
+    lens: Option<&str>,
+    head: &str,
+    base_ref: &str,
+    base_sha: Option<&str>,
+) -> AppResult<(String, HeadProof)> {
+    let slug = gh_lens_slug(repo, lens).await?;
+    let slug = slug.as_str();
+    gh_diff_at_from(
+        head,
+        base_ref,
+        base_sha,
+        || github_pr(repo, slug, number),
+        |base| {
+            gh_compare_at(&OVER_CAP, slug, base, head, |path| async move {
+                run_gh_raw(
+                    Some(repo),
+                    &["api", "-H", GH_DIFF_ACCEPT, &path],
+                    GH_NETWORK_TIMEOUT,
+                )
+                .await
+            })
+        },
+        || crate::github::pr::gh_pr_diff(repo.to_string(), number, lens.map(str::to_string)),
+    )
+    .await
+}
+
+/// One compare of `base...head` in `slug` through `run`, which answers the compare path:
+/// a pair `memo` holds as over the cap is not asked again.
+async fn gh_compare_at<R, RF>(
+    memo: &std::sync::Mutex<OverCapMemo>,
+    slug: &str,
+    base: String,
+    head: &str,
+    run: R,
+) -> AppResult<CompareAnswer>
+where
+    R: FnOnce(String) -> RF,
+    RF: std::future::Future<Output = AppResult<GhOutput>>,
+{
+    if lock_memo(memo).plan(slug, &base, head) == ComparePlan::Skip {
+        return Ok(CompareAnswer::NotAddressable);
+    }
+    let path = github_compare_path(slug, &base, head)?;
+    let result = run(path).await;
+    gh_compare_outcome(result, &mut lock_memo(memo), slug, &base, head)
+}
+
+/// [`github_diff_at`] over its reads: `read_pr` answers the pull request, `compare` the
+/// base repo's diff of a base sha and the head, `by_number` the PR's own diff, capped.
+/// Without the caller's base sha (a gh older than 2.63.0 names none), a PR read naming
+/// the caller's head and base branch gives the compare its base sha, so the text carries
+/// the head's identity either way; any other read keeps the by-number path.
+async fn gh_diff_at_from<P, PF, C, CF, N, NF>(
+    head: &str,
+    base_ref: &str,
+    base_sha: Option<&str>,
+    read_pr: P,
+    compare: C,
+    by_number: N,
+) -> AppResult<(String, HeadProof)>
+where
+    P: Fn() -> PF,
+    PF: std::future::Future<Output = AppResult<Value>>,
+    C: FnOnce(String) -> CF,
+    CF: std::future::Future<Output = AppResult<CompareAnswer>>,
+    N: FnOnce() -> NF,
+    NF: std::future::Future<Output = AppResult<String>>,
+{
+    let compare_base = match base_sha {
+        Some(base) => Some(base.to_string()),
+        None => gh_compare_base(&read_pr().await, head, base_ref),
+    };
+    if let Some(base) = compare_base {
+        if let CompareAnswer::Text(text) = compare(base).await? {
+            return Ok((text, HeadProof::Proven));
+        }
+    }
+    let diff = by_number().await?;
+    let pr = read_pr().await;
+    Ok((diff, gh_reread_proof(&pr, head, base_ref, base_sha)))
+}
+
+/// The read PR's base sha, only when the read names the caller's head and its base
+/// branch is the caller's; a failed read or any other answer gives none.
+fn gh_compare_base(pr: &AppResult<Value>, head: &str, base_ref: &str) -> Option<String> {
+    let pr = pr.as_ref().ok()?;
+    let names_head = sha_at(pr, "/head/sha").is_some_and(|sha| sha.eq_ignore_ascii_case(head));
+    names_head
+        .then(|| gh_live_base_outcome(pr, Some(base_ref)).ok())
+        .flatten()
 }
 
 /// The local merge base when the clone holds both commits, is measured not shallow and
@@ -861,16 +1287,34 @@ async fn gitlab_project(repo: &str) -> AppResult<String> {
 
 /// GitLab's `diff_refs.base_sha` is the merge base (`start_sha` is the target tip); this
 /// duplicates gitlab.rs `mr_diff_refs`' read, which is private there.
-async fn gitlab_merge_base(repo: &str, number: u64, head: &str) -> AppResult<String> {
-    let enc = gitlab_project(repo).await?;
-    let endpoint = format!("projects/{enc}/merge_requests/{number}");
-    let mr = glab_json(repo, &endpoint, "the merge request").await?;
-    gl_merge_base_outcome(&mr, head)
+async fn gitlab_merge_base(
+    repo: &str,
+    number: u64,
+    head: &str,
+    base_ref: Option<&str>,
+    base_sha: Option<&str>,
+) -> AppResult<String> {
+    let mr = gitlab_mr(repo, number).await?;
+    gl_merge_base_outcome(&mr, head, base_ref, base_sha)
 }
 
-/// The merge base, only while the merge request's diff refs are for the caller's head:
-/// right after a push they can pair the old base with a new head.
-fn gl_merge_base_outcome(mr: &Value, head: &str) -> AppResult<String> {
+/// The plain merge request GET (no changes payload).
+async fn gitlab_mr(repo: &str, number: u64) -> AppResult<Value> {
+    let enc = gitlab_project(repo).await?;
+    let endpoint = format!("projects/{enc}/merge_requests/{number}");
+    glab_json(repo, &endpoint, "the merge request").await
+}
+
+/// The merge base, only while the merge request's diff refs are for the caller's head
+/// (right after a push they can pair the old base with a new head) and its readable
+/// target branch and base sha are the caller's. Without the caller's base sha the
+/// target branch must be readable, since it is then the one base identity.
+fn gl_merge_base_outcome(
+    mr: &Value,
+    head: &str,
+    base_ref: Option<&str>,
+    base_sha: Option<&str>,
+) -> AppResult<String> {
     let no_refs = || {
         AppError::Glab("this merge request has no diff refs to read its merge base from.".into())
     };
@@ -881,7 +1325,25 @@ fn gl_merge_base_outcome(mr: &Value, head: &str) -> AppResult<String> {
             "this merge request's diff refs are for {refs_head}, not {head}."
         )));
     }
-    Ok(base)
+    if let Some(want) = base_sha.filter(|want| !base.eq_ignore_ascii_case(want)) {
+        return Err(AppError::Glab(format!(
+            "this merge request's diff refs are against {base}, not {want}."
+        )));
+    }
+    let target = mr
+        .pointer("/target_branch")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty());
+    match (target, base_ref) {
+        (Some(live), Some(want)) if live != want => Err(AppError::Glab(format!(
+            "this merge request now targets {live}, not {want}."
+        ))),
+        (None, Some(_)) if base_sha.is_none() => Err(gl_unreadable(
+            "the merge request",
+            "its target branch is missing".into(),
+        )),
+        _ => Ok(base),
+    }
 }
 
 async fn gitlab_first_parent(repo: &str, oid: &str) -> AppResult<Option<String>> {
@@ -1048,25 +1510,11 @@ async fn bitbucket_merge_base(
     repo: &str,
     number: u64,
     head: &str,
+    base_ref: Option<&str>,
 ) -> AppResult<String> {
     let base = bb_repo_base(repo).await?;
-    let pr: Value = http::bb_get_json(
-        creds,
-        &format!("{base}/pullrequests/{number}"),
-        "pull request",
-        BbOpKind::Read,
-    )
-    .await?;
-    let dest = pr
-        .pointer("/destination/commit/hash")
-        .and_then(Value::as_str)
-        .filter(|h| bb_short_hash(h))
-        .ok_or_else(|| {
-            bb_unreadable(
-                "pull request",
-                "its destination commit hash is missing".into(),
-            )
-        })?;
+    let pr = bitbucket_pr(creds, &base, number).await?;
+    let dest = bb_destination_outcome(&pr, base_ref)?;
     let endpoint = format!("{base}/merge-base/{head}..{dest}");
     let merge_base: Value =
         http::bb_get_json(creds, &endpoint, "merge base", BbOpKind::Read).await?;
@@ -1074,10 +1522,170 @@ async fn bitbucket_merge_base(
         .ok_or_else(|| bb_unreadable("merge base", "its commit hash is missing".into()))
 }
 
-/// A commit hash Bitbucket may abbreviate: git's shortest abbreviation (7) up to a full
-/// SHA-256 id.
+/// The PR's abbreviated destination hash, only when it names the caller's destination
+/// branch, the caller's one base identity: a retarget or an unnamed branch refuses.
+fn bb_destination_outcome<'a>(pr: &'a Value, base_ref: Option<&str>) -> AppResult<&'a str> {
+    let live = pr
+        .pointer("/destination/branch/name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty());
+    match (live, base_ref) {
+        (Some(live), Some(want)) if live != want => {
+            return Err(AppError::Bitbucket(format!(
+                "this pull request now targets {live}, not {want}."
+            )));
+        }
+        (None, Some(_)) => {
+            return Err(bb_unreadable(
+                "pull request",
+                "its destination branch is missing".into(),
+            ));
+        }
+        _ => {}
+    }
+    bb_destination_hash(pr).ok_or_else(|| {
+        bb_unreadable(
+            "pull request",
+            "its destination commit hash is missing".into(),
+        )
+    })
+}
+
+/// The pull request first, then its diff addressed by commit, the way the PR's own diff
+/// link addresses it: `diff/{source repo}:{head}%0D{dest}` with `topic=true` answers the
+/// PR's diff byte for byte (measured on one Bitbucket Cloud PR, bb-probe 2026-11-26), and
+/// the source qualifier reaches a head only a fork holds. A readable contradiction drops
+/// the text unfetched; a read naming no destination hash or source repository, one that
+/// proves nothing, or a failed read by commit falls back to the by-number diff.
+async fn bitbucket_diff_at(
+    repo: &str,
+    number: u64,
+    head: &str,
+    base_ref: &str,
+) -> AppResult<(String, HeadProof)> {
+    let by_number = || crate::forge::bitbucket::diff_pr(repo, number);
+    // Without a session nothing is read by commit: the by-number diff, which
+    // loads its own, answers or reports the failure, as a failed PR read would.
+    let Ok((creds, base)) = bb_session(repo).await else {
+        return Ok((by_number().await?, HeadProof::Unproven));
+    };
+    let pr = bitbucket_pr(&creds, &base, number).await;
+    bb_diff_at_from(
+        &pr,
+        head,
+        base_ref,
+        |rel| async move {
+            http::bb_get_text(&creds, &format!("{base}/{rel}"), BbOpKind::Read).await
+        },
+        by_number,
+    )
+    .await
+}
+
+/// [`bitbucket_diff_at`] over its two diff reads: `by_commits` takes the path below the
+/// repository, `by_number` answers the PR's own diff, already capped.
+async fn bb_diff_at_from<C, CF, N, NF>(
+    pr: &AppResult<Value>,
+    head: &str,
+    base_ref: &str,
+    by_commits: C,
+    by_number: N,
+) -> AppResult<(String, HeadProof)>
+where
+    C: FnOnce(String) -> CF,
+    CF: std::future::Future<Output = AppResult<String>>,
+    N: FnOnce() -> NF,
+    NF: std::future::Future<Output = AppResult<String>>,
+{
+    match bb_reread_proof(pr, head, base_ref) {
+        HeadProof::Moved => return Ok((String::new(), HeadProof::Moved)),
+        HeadProof::Proven => {
+            let read = pr.as_ref().ok();
+            let dest = read.and_then(bb_destination_hash);
+            let source = read.and_then(bb_source_full_name);
+            if let (Some(dest), Some(source)) = (dest, source) {
+                let rel = format!("diff/{source}:{head}%0D{dest}?topic=true");
+                // Its error is never the answer: the PR's own diff can still serve.
+                if let Ok(diff) = by_commits(rel).await {
+                    let (text, _) = crate::git::diff::truncate_at_char_boundary(diff, PR_DIFF_CAP);
+                    return Ok((text, HeadProof::Proven));
+                }
+            }
+        }
+        HeadProof::Unproven => {}
+    }
+    Ok((by_number().await?, HeadProof::Unproven))
+}
+
+/// The PR's abbreviated destination commit hash, when it reads as one.
+fn bb_destination_hash(pr: &Value) -> Option<&str> {
+    pr.pointer("/destination/commit/hash")
+        .and_then(Value::as_str)
+        .filter(|h| bb_short_hash(h))
+}
+
+/// The PR's source repository as `{workspace}/{slug}`, when both segments read as
+/// Bitbucket slugs: the value lands in a request path.
+fn bb_source_full_name(pr: &Value) -> Option<&str> {
+    let name = pr
+        .pointer("/source/repository/full_name")
+        .and_then(Value::as_str)?;
+    let (workspace, slug) = name.split_once('/')?;
+    let segment = |s: &str| {
+        !s.is_empty()
+            && !s.bytes().all(|b| b == b'.')
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+    };
+    (segment(workspace) && segment(slug)).then_some(name)
+}
+
+/// The stored credentials and API path a command's Bitbucket reads share; the by-number
+/// fallback (`diff_pr`) loads its own.
+async fn bb_session(repo: &str) -> AppResult<(BbCredentials, String)> {
+    Ok((http::load_credentials().await?, bb_repo_base(repo).await?))
+}
+
+/// The core pull request GET, whose source hash is the head the proof reads.
+async fn bitbucket_pr(creds: &BbCredentials, base: &str, number: u64) -> AppResult<Value> {
+    http::bb_get_json::<Value>(
+        creds,
+        &format!("{base}/pullrequests/{number}"),
+        "pull request",
+        BbOpKind::Read,
+    )
+    .await
+}
+
+/// The PR's source hash is abbreviated, so it proves the head as a prefix of it. Each
+/// field reads on its own: a readable mismatch is another comparison, and proven needs
+/// both a readable hash and a named (non-empty) destination branch.
+fn bb_reread_proof(pr: &AppResult<Value>, head: &str, base_ref: &str) -> HeadProof {
+    let Ok(pr) = pr else {
+        return HeadProof::Unproven;
+    };
+    // Each check: Some(moved) from readable evidence, None when it can't be read.
+    let head_check = pr
+        .pointer("/source/commit/hash")
+        .and_then(Value::as_str)
+        .filter(|hash| bb_short_hash(hash))
+        .map(|source| {
+            !head
+                .get(..source.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(source))
+        });
+    let dest_check = pr
+        .pointer("/destination/branch/name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(|dest| dest != base_ref);
+    head_proof_verdict(&[head_check, dest_check], &[])
+}
+
+/// A commit hash Bitbucket abbreviates: its 12-hex form up to a full SHA-256 id. A
+/// shorter prefix would tie more commits than the forge itself names.
 fn bb_short_hash(hash: &str) -> bool {
-    (7..=64).contains(&hash.len()) && hash.bytes().all(|b| b.is_ascii_hexdigit())
+    (12..=64).contains(&hash.len()) && hash.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 async fn bitbucket_first_parent(
@@ -1264,6 +1872,701 @@ mod tests {
         assert!(value.get("old_sha").is_none() && value.get("new_sha").is_none());
     }
 
+    #[test]
+    fn the_shared_verdict_reads_each_axis_on_its_own() {
+        let (moved, agrees, unreadable) = (Some(true), Some(false), None);
+        assert_eq!(
+            head_proof_verdict(&[agrees, agrees], &[]),
+            HeadProof::Proven
+        );
+        assert_eq!(
+            head_proof_verdict(&[agrees, agrees], &[unreadable]),
+            HeadProof::Proven
+        );
+        assert_eq!(
+            head_proof_verdict(&[agrees, unreadable], &[agrees]),
+            HeadProof::Unproven
+        );
+        assert_eq!(
+            head_proof_verdict(&[unreadable, moved], &[]),
+            HeadProof::Moved
+        );
+        assert_eq!(
+            head_proof_verdict(&[unreadable], &[moved]),
+            HeadProof::Moved
+        );
+        assert_eq!(head_proof_verdict(&[], &[agrees]), HeadProof::Proven);
+    }
+
+    #[test]
+    fn diff_at_serializes_to_the_pinned_wire_shape() {
+        for (proof, wire) in [
+            (HeadProof::Proven, "proven"),
+            (HeadProof::Unproven, "unproven"),
+            (HeadProof::Moved, "moved"),
+        ] {
+            // `forge_pr_head_proof` answers the bare enum.
+            assert_eq!(serde_json::to_value(proof).unwrap(), json!(wire));
+            let value = serde_json::to_value(diff_at("d".into(), proof)).unwrap();
+            let diff = if proof == HeadProof::Moved { "" } else { "d" };
+            assert_eq!(value, json!({ "diff": diff, "headProof": wire }));
+            assert!(value.get("head_proof").is_none());
+        }
+    }
+
+    const SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const OTHER: &str = "fedcba9876543210fedcba9876543210fedcba98";
+    const TOO_MANY_LINES: &str =
+        "gh: Sorry, the diff exceeded the maximum number of lines (20000) (HTTP 406)";
+    const TOO_MANY_FILES: &str = "gh: Sorry, the diff exceeded the maximum number of files (300). Consider using 'List pull requests files' API or locally cloning the repository instead. (HTTP 406)";
+    const TRANSPORT_STDERR: &str =
+        "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com";
+
+    fn compare(result: AppResult<GhOutput>, memo: &mut OverCapMemo) -> AppResult<CompareAnswer> {
+        gh_compare_outcome(result, memo, "o/r", SHA, SHA256)
+    }
+
+    #[test]
+    fn compare_answers_split_text_fallback_and_failure() {
+        assert!(matches!(
+            classify_gh_failure(TRANSPORT_STDERR),
+            GhFailure::Transport
+        ));
+        let mut memo = OverCapMemo::default();
+        let at_cap = "a".repeat(PR_DIFF_CAP);
+        assert_eq!(
+            compare(gh_output(0, &at_cap, ""), &mut memo).unwrap(),
+            CompareAnswer::Text(at_cap.clone())
+        );
+        assert_eq!(memo.plan("o/r", SHA, SHA256), ComparePlan::Compare);
+        let over = "a".repeat(PR_DIFF_CAP + 1);
+        assert_eq!(
+            compare(gh_output(0, &over, ""), &mut memo).unwrap(),
+            CompareAnswer::NotAddressable
+        );
+        // Under the cap in bytes, over it once each invalid byte decodes to U+FFFD.
+        let mut grows = OverCapMemo::default();
+        let invalid = GhOutput {
+            stdout: vec![0xFF; PR_DIFF_CAP / 2],
+            stderr: String::new(),
+            code: 0,
+        };
+        assert_eq!(
+            compare(Ok(invalid), &mut grows).unwrap(),
+            CompareAnswer::NotAddressable
+        );
+        assert_eq!(grows.plan("o/r", SHA, SHA256), ComparePlan::Skip);
+        for stderr in [
+            TOO_MANY_LINES,
+            TOO_MANY_FILES,
+            NOT_FOUND_STDERR,
+            ANSWERED_STDERR,
+            "",
+        ] {
+            assert_eq!(
+                compare(gh_output(1, "", stderr), &mut memo).unwrap(),
+                CompareAnswer::NotAddressable,
+                "{stderr}"
+            );
+        }
+        assert!(compare(Err(AppError::GhNotFound), &mut memo).is_err());
+    }
+
+    #[test]
+    fn an_answered_compare_refusal_reads_by_number() {
+        let mut memo = OverCapMemo::default();
+        let refusal = "gh: Resource not accessible by personal access token (HTTP 403)";
+        assert_eq!(
+            compare(gh_output(1, "", refusal), &mut memo).unwrap(),
+            CompareAnswer::NotAddressable
+        );
+        assert_eq!(memo.plan("o/r", SHA, SHA256), ComparePlan::Compare);
+
+        for stderr in [HELD_REST_STDERR, TRANSPORT_STDERR] {
+            assert!(
+                matches!(
+                    compare(gh_output(1, "", stderr), &mut memo),
+                    Err(AppError::Gh(_))
+                ),
+                "{stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_over_cap_body_is_remembered() {
+        let over = "a".repeat(PR_DIFF_CAP + 1);
+        let mut memo = OverCapMemo::default();
+        for stderr in [TOO_MANY_LINES, NOT_FOUND_STDERR, HELD_REST_STDERR] {
+            let _ = compare(gh_output(1, "", stderr), &mut memo);
+        }
+        let _ = compare(Err(AppError::GhNotFound), &mut memo);
+        assert_eq!(memo.plan("o/r", SHA, SHA256), ComparePlan::Compare);
+        compare(gh_output(0, &over, ""), &mut memo).unwrap();
+        assert_eq!(memo.plan("o/r", SHA, SHA256), ComparePlan::Skip);
+        let upper = (SHA.to_ascii_uppercase(), SHA256.to_ascii_uppercase());
+        assert_eq!(memo.plan("o/r", &upper.0, &upper.1), ComparePlan::Skip);
+        assert_eq!(memo.plan("o/r", SHA, OTHER), ComparePlan::Compare);
+        assert_eq!(memo.plan("o/r", OTHER, SHA256), ComparePlan::Compare);
+        assert_eq!(memo.plan("o/other", SHA, SHA256), ComparePlan::Compare);
+    }
+
+    #[test]
+    fn the_memo_never_holds_more_than_its_cap() {
+        let mut memo = OverCapMemo::default();
+        for n in 0..=OVER_CAP_MEMO_MAX {
+            memo.note("o/r", SHA, &format!("{n:040x}"));
+            assert!(memo.0.len() <= OVER_CAP_MEMO_MAX);
+        }
+        assert_eq!(memo.0.len(), 1);
+        let last = format!("{OVER_CAP_MEMO_MAX:040x}");
+        assert_eq!(memo.plan("o/r", SHA, &last), ComparePlan::Skip);
+        // Noting a remembered triple at the cap keeps the rest.
+        let mut full = OverCapMemo::default();
+        for n in 0..OVER_CAP_MEMO_MAX {
+            full.note("o/r", SHA, &format!("{n:040x}"));
+        }
+        full.note("o/r", SHA, &format!("{:040x}", 0));
+        assert_eq!(full.0.len(), OVER_CAP_MEMO_MAX);
+    }
+
+    fn gh_pr(head: Option<&str>, base: Option<&str>) -> AppResult<Value> {
+        let mut pr = json!({ "number": 1 });
+        if let Some(head) = head {
+            pr["head"] = json!({ "sha": head });
+        }
+        if let Some(base) = base {
+            pr["base"] = json!({ "sha": base, "ref": "main" });
+        }
+        Ok(pr)
+    }
+
+    #[test]
+    fn github_reread_proves_only_the_callers_head_and_base() {
+        let failed: AppResult<Value> = Err(AppError::Gh("HTTP 502".into()));
+        assert_eq!(
+            gh_reread_proof(&failed, SHA, "main", None),
+            HeadProof::Unproven
+        );
+        let pr = gh_pr(Some(SHA), Some(SHA256));
+        for base in [None, Some(SHA256)] {
+            assert_eq!(gh_reread_proof(&pr, SHA, "main", base), HeadProof::Proven);
+            // A readable base branch naming another target is another comparison.
+            assert_eq!(gh_reread_proof(&pr, SHA, "develop", base), HeadProof::Moved);
+        }
+        // Without the caller's base sha, an unreadable base branch ties nothing.
+        let mut no_ref = gh_pr(Some(SHA), Some(SHA256)).unwrap();
+        no_ref["base"]["ref"] = Value::Null;
+        let no_ref: AppResult<Value> = Ok(no_ref);
+        assert_eq!(
+            gh_reread_proof(&no_ref, SHA, "main", None),
+            HeadProof::Unproven
+        );
+        assert_eq!(
+            gh_reread_proof(&no_ref, SHA, "main", Some(SHA256)),
+            HeadProof::Proven
+        );
+        assert_eq!(
+            gh_reread_proof(
+                &gh_pr(Some(&SHA.to_ascii_uppercase()), Some(SHA256)),
+                SHA,
+                "main",
+                Some(&SHA256.to_ascii_uppercase())
+            ),
+            HeadProof::Proven
+        );
+        assert_eq!(
+            gh_reread_proof(&gh_pr(Some(OTHER), Some(SHA256)), SHA, "main", Some(SHA256)),
+            HeadProof::Moved
+        );
+        assert_eq!(
+            gh_reread_proof(&gh_pr(Some(SHA), Some(OTHER)), SHA, "main", Some(SHA256)),
+            HeadProof::Moved
+        );
+        for pr in [
+            gh_pr(None, Some(SHA256)),
+            gh_pr(Some(SHA), None),
+            gh_pr(Some("abc1234"), Some(SHA256)),
+        ] {
+            assert_eq!(gh_reread_proof(&pr, SHA, "main", None), HeadProof::Unproven);
+        }
+        // A readable contradiction wins over a missing sha on another axis.
+        let mut no_base_sha = gh_pr(Some(SHA), Some(SHA256)).unwrap();
+        no_base_sha["base"]["sha"] = Value::Null;
+        let no_base_sha: AppResult<Value> = Ok(no_base_sha);
+        assert_eq!(
+            gh_reread_proof(&no_base_sha, SHA, "develop", Some(SHA256)),
+            HeadProof::Moved
+        );
+        assert_eq!(
+            gh_reread_proof(&no_base_sha, SHA, "main", Some(SHA256)),
+            HeadProof::Unproven
+        );
+        assert_eq!(
+            gh_reread_proof(&gh_pr(None, Some(OTHER)), SHA, "main", Some(SHA256)),
+            HeadProof::Moved
+        );
+    }
+
+    /// What [`gh_diff_at_from`] asked of recording fakes: its answer, the base shas the
+    /// compare was asked for, how many PR reads ran, whether the by-number read ran, and
+    /// the order of every call.
+    struct GhDiffRun {
+        out: AppResult<(String, HeadProof)>,
+        compared: Vec<String>,
+        reads: usize,
+        by_number: bool,
+        order: Vec<&'static str>,
+    }
+
+    /// `pr` is told whether the PR read was issued after the by-number text completed,
+    /// so a fake can answer differently on either side of it. The text's marker is set
+    /// when its future completes and the PR read samples it when first polled, so a read
+    /// issued early or alongside the text, whatever the await order, still shows.
+    async fn gh_diff_run(
+        pr: impl Fn(bool) -> AppResult<Value>,
+        base_ref: &str,
+        base_sha: Option<&str>,
+        answer: AppResult<CompareAnswer>,
+    ) -> GhDiffRun {
+        let compared = std::cell::RefCell::new(Vec::new());
+        let reads = std::cell::Cell::new(0);
+        let by_number = std::cell::Cell::new(false);
+        let order = std::cell::RefCell::new(Vec::new());
+        let (pr, compared_ref, reads_ref) = (&pr, &compared, &reads);
+        let (by_number_ref, order_ref) = (&by_number, &order);
+        let out = gh_diff_at_from(
+            SHA,
+            base_ref,
+            base_sha,
+            move || async move {
+                let after_text = by_number_ref.get();
+                tokio::task::yield_now().await;
+                reads_ref.set(reads_ref.get() + 1);
+                order_ref.borrow_mut().push("read");
+                pr(after_text)
+            },
+            move |base| async move {
+                tokio::task::yield_now().await;
+                compared_ref.borrow_mut().push(base);
+                order_ref.borrow_mut().push("compare");
+                answer
+            },
+            move || async move {
+                tokio::task::yield_now().await;
+                by_number_ref.set(true);
+                order_ref.borrow_mut().push("by number");
+                Ok("by number".to_string())
+            },
+        )
+        .await;
+        GhDiffRun {
+            out,
+            compared: compared.into_inner(),
+            reads: reads.get(),
+            by_number: by_number.get(),
+            order: order.into_inner(),
+        }
+    }
+
+    fn compared_text() -> AppResult<CompareAnswer> {
+        Ok(CompareAnswer::Text("by sha".into()))
+    }
+
+    #[tokio::test]
+    async fn github_diff_without_a_base_sha_compares_from_a_read_naming_the_target() {
+        for head in [SHA.to_string(), SHA.to_ascii_uppercase()] {
+            let run = gh_diff_run(
+                |_| gh_pr(Some(&head), Some(SHA256)),
+                "main",
+                None,
+                compared_text(),
+            )
+            .await;
+            assert_eq!(run.compared, vec![SHA256.to_string()]);
+            assert_eq!(run.out.unwrap(), ("by sha".into(), HeadProof::Proven));
+            assert_eq!((run.reads, run.by_number), (1, false));
+        }
+        // The caller's own base sha needs no read first.
+        let run = gh_diff_run(
+            |_| gh_pr(Some(SHA), Some(SHA256)),
+            "main",
+            Some(OTHER),
+            compared_text(),
+        )
+        .await;
+        assert_eq!(run.compared, vec![OTHER.to_string()]);
+        assert_eq!(run.out.unwrap(), ("by sha".into(), HeadProof::Proven));
+        assert_eq!((run.reads, run.by_number), (0, false));
+    }
+
+    #[tokio::test]
+    async fn github_diff_without_a_base_sha_reads_by_number_unless_the_read_names_the_target() {
+        // Another base branch, or another head: nothing compared, today's path.
+        let retargeted = gh_diff_run(
+            |_| gh_pr(Some(SHA), Some(SHA256)),
+            "develop",
+            None,
+            compared_text(),
+        )
+        .await;
+        let moved_head = gh_diff_run(
+            |_| gh_pr(Some(OTHER), Some(SHA256)),
+            "main",
+            None,
+            compared_text(),
+        )
+        .await;
+        for run in [retargeted, moved_head] {
+            assert!(run.compared.is_empty());
+            assert_eq!(run.out.unwrap(), ("by number".into(), HeadProof::Moved));
+            assert_eq!((run.reads, run.by_number), (2, true));
+        }
+        // A failed read, or one missing the base branch or a full base sha, proves nothing.
+        let no_ref = |_: bool| -> AppResult<Value> {
+            let mut pr = gh_pr(Some(SHA), Some(SHA256))?;
+            pr["base"]["ref"] = Value::Null;
+            Ok(pr)
+        };
+        let failed = gh_diff_run(
+            |_| Err(AppError::Gh("HTTP 502".into())),
+            "main",
+            None,
+            compared_text(),
+        )
+        .await;
+        let unnamed = gh_diff_run(no_ref, "main", None, compared_text()).await;
+        let short_base = gh_diff_run(
+            |_| gh_pr(Some(SHA), Some("abc1234")),
+            "main",
+            None,
+            compared_text(),
+        )
+        .await;
+        for run in [failed, unnamed, short_base] {
+            assert!(run.compared.is_empty());
+            assert_eq!(run.out.unwrap(), ("by number".into(), HeadProof::Unproven));
+            assert_eq!((run.reads, run.by_number), (2, true));
+        }
+    }
+
+    #[tokio::test]
+    async fn github_diff_from_a_read_base_keeps_the_fallback_and_the_failure() {
+        let mut memo = OverCapMemo::default();
+        let over = "a".repeat(PR_DIFF_CAP + 1);
+        let over_cap = gh_compare_outcome(gh_output(0, &over, ""), &mut memo, "o/r", SHA256, SHA);
+        assert_eq!(memo.plan("o/r", SHA256, SHA), ComparePlan::Skip);
+        for answer in [over_cap, Ok(CompareAnswer::NotAddressable)] {
+            let run = gh_diff_run(|_| gh_pr(Some(SHA), Some(SHA256)), "main", None, answer).await;
+            assert_eq!(run.compared, vec![SHA256.to_string()]);
+            assert_eq!(run.out.unwrap(), ("by number".into(), HeadProof::Proven));
+            assert_eq!((run.reads, run.by_number), (2, true));
+            assert_eq!(run.order, ["read", "compare", "by number", "read"]);
+        }
+        let run = gh_diff_run(
+            |_| gh_pr(Some(SHA), Some(SHA256)),
+            "main",
+            None,
+            Err(AppError::Gh("HTTP 502".into())),
+        )
+        .await;
+        assert!(matches!(run.out, Err(AppError::Gh(_))));
+        assert_eq!((run.reads, run.by_number), (1, false));
+    }
+
+    #[tokio::test]
+    async fn the_github_fallback_proves_its_text_with_a_read_after_it() {
+        // The head moves once the by-number text is read: only a read after it sees that.
+        let moves_after_text =
+            |text_read: bool| gh_pr(Some(if text_read { OTHER } else { SHA }), Some(SHA256));
+        let not_addressable = || Ok(CompareAnswer::NotAddressable);
+        let read_base = gh_diff_run(moves_after_text, "main", None, not_addressable()).await;
+        assert_eq!(
+            read_base.out.unwrap(),
+            ("by number".into(), HeadProof::Moved)
+        );
+        assert_eq!(read_base.order, ["read", "compare", "by number", "read"]);
+        let callers_base =
+            gh_diff_run(moves_after_text, "main", Some(SHA256), not_addressable()).await;
+        assert_eq!(
+            callers_base.out.unwrap(),
+            ("by number".into(), HeadProof::Moved)
+        );
+        assert_eq!(callers_base.order, ["compare", "by number", "read"]);
+    }
+
+    #[tokio::test]
+    async fn an_over_cap_comparison_is_asked_once() {
+        let memo = std::sync::Mutex::new(OverCapMemo::default());
+        let over = "a".repeat(PR_DIFF_CAP + 1);
+        let paths = std::cell::RefCell::new(Vec::new());
+        let by_number = std::cell::Cell::new(0);
+        for _ in 0..2 {
+            let out = gh_diff_at_from(
+                SHA,
+                "main",
+                Some(SHA256),
+                || async { gh_pr(Some(SHA), Some(SHA256)) },
+                |base| {
+                    gh_compare_at(&memo, "o/r", base, SHA, |path| {
+                        paths.borrow_mut().push(path);
+                        let out = gh_output(0, &over, "");
+                        async move { out }
+                    })
+                },
+                || {
+                    by_number.set(by_number.get() + 1);
+                    async { Ok("by number".to_string()) }
+                },
+            )
+            .await;
+            assert_eq!(out.unwrap(), ("by number".into(), HeadProof::Proven));
+        }
+        assert_eq!(
+            paths.into_inner(),
+            vec![["repos/o/r/compare/", SHA256, "...", SHA].concat()]
+        );
+        assert_eq!(by_number.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_head_proof_dispatch_judges_each_forges_read_with_its_arguments() {
+        // Each payload agrees on head and branch and contradicts on one axis only
+        // that forge's rule reads with the caller's arguments.
+        let github = gh_pr(Some(SHA), Some(OTHER));
+        let gitlab = Ok(json!({ "sha": OTHER, "target_branch": "main" }));
+        let bitbucket = bb_pr(Some(&OTHER[..12]), Some("main"));
+        for (provider, pr) in [
+            (None, github),
+            (Some(Provider::GitLab), gitlab),
+            (Some(Provider::Bitbucket), bitbucket),
+        ] {
+            let asked = std::cell::Cell::new(None);
+            let proof = head_proof_at(provider, SHA, "main", Some(SHA256), |p| {
+                asked.set(Some(p));
+                async move { pr }
+            })
+            .await;
+            assert_eq!(proof, HeadProof::Moved, "{provider:?}");
+            assert_eq!(asked.get(), Some(provider));
+        }
+    }
+
+    fn bb_pr(hash: Option<&str>, branch: Option<&str>) -> AppResult<Value> {
+        let mut pr = json!({ "id": 1, "source": {}, "destination": {} });
+        if let Some(hash) = hash {
+            pr["source"]["commit"] = json!({ "hash": hash });
+        }
+        if let Some(branch) = branch {
+            pr["destination"]["branch"] = json!({ "name": branch });
+        }
+        Ok(pr)
+    }
+
+    #[test]
+    fn bitbucket_reread_proves_the_head_by_prefix_and_the_base_by_branch() {
+        let failed: AppResult<Value> = Err(AppError::Command("offline".into()));
+        assert_eq!(bb_reread_proof(&failed, SHA, "main"), HeadProof::Unproven);
+        for head in [SHA, SHA256] {
+            assert_eq!(
+                bb_reread_proof(&bb_pr(Some(&head[..12]), Some("main")), head, "main"),
+                HeadProof::Proven
+            );
+        }
+        assert_eq!(
+            bb_reread_proof(
+                &bb_pr(Some(&SHA[..12].to_ascii_uppercase()), Some("main")),
+                SHA,
+                "main"
+            ),
+            HeadProof::Proven
+        );
+        assert_eq!(
+            bb_reread_proof(&bb_pr(Some(&OTHER[..12]), Some("main")), SHA, "main"),
+            HeadProof::Moved
+        );
+        assert_eq!(
+            bb_reread_proof(&bb_pr(Some(&SHA[..12]), Some("develop")), SHA, "main"),
+            HeadProof::Moved
+        );
+        // A readable hash longer than the head can't be its prefix.
+        let longer = format!("{SHA}0");
+        assert_eq!(
+            bb_reread_proof(&bb_pr(Some(&longer), Some("main")), SHA, "main"),
+            HeadProof::Moved
+        );
+        for pr in [
+            bb_pr(Some(&SHA[..6]), Some("main")),
+            bb_pr(Some("0123456789zz"), Some("main")),
+            bb_pr(None, Some("main")),
+            bb_pr(Some(&SHA[..12]), None),
+            bb_pr(Some(&SHA[..12]), Some("")),
+        ] {
+            assert_eq!(bb_reread_proof(&pr, SHA, "main"), HeadProof::Unproven);
+        }
+        // An empty name is an unread branch, never the caller's empty base.
+        assert_eq!(
+            bb_reread_proof(&bb_pr(Some(&SHA[..12]), Some("")), SHA, ""),
+            HeadProof::Unproven
+        );
+        // A readable contradiction wins over the other field missing.
+        assert_eq!(
+            bb_reread_proof(&bb_pr(None, Some("develop")), SHA, "main"),
+            HeadProof::Moved
+        );
+        assert_eq!(
+            bb_reread_proof(&bb_pr(Some(&OTHER[..12]), Some("")), SHA, "main"),
+            HeadProof::Moved
+        );
+    }
+
+    fn bb_pr_at(hash: Option<&str>, branch: Option<&str>, dest: Option<&str>) -> AppResult<Value> {
+        let mut pr = bb_pr(hash, branch)?;
+        if let Some(dest) = dest {
+            pr["destination"]["commit"] = json!({ "hash": dest });
+        }
+        pr["source"]["repository"] = json!({ "full_name": "o/r" });
+        pr["destination"]["repository"] = json!({ "full_name": "o/r" });
+        Ok(pr)
+    }
+
+    /// [`bb_diff_at_from`] over recording fakes: the paths asked of the by-commit read
+    /// (answering `body`), and whether the by-number read ran.
+    async fn bb_diff_run(
+        pr: AppResult<Value>,
+        head: &str,
+        body: AppResult<String>,
+    ) -> (AppResult<(String, HeadProof)>, Vec<String>, bool) {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let by_number = std::cell::Cell::new(false);
+        let out = bb_diff_at_from(
+            &pr,
+            head,
+            "main",
+            |rel| {
+                asked.borrow_mut().push(rel);
+                async move { body }
+            },
+            || {
+                by_number.set(true);
+                async { Ok("by number".to_string()) }
+            },
+        )
+        .await;
+        (out, asked.into_inner(), by_number.get())
+    }
+
+    #[tokio::test]
+    async fn bitbucket_diff_reads_by_commit_only_when_the_pr_names_the_head() {
+        let dest = &OTHER[..12];
+        let commits = || Ok("by commits".to_string());
+        for (pr, head) in [
+            (bb_pr_at(Some(&SHA[..12]), Some("main"), Some(dest)), SHA),
+            (
+                bb_pr_at(
+                    Some(&SHA[..12].to_ascii_uppercase()),
+                    Some("main"),
+                    Some(dest),
+                ),
+                SHA,
+            ),
+            (
+                bb_pr_at(Some(&SHA256[..12]), Some("main"), Some(OTHER)),
+                SHA256,
+            ),
+        ] {
+            let want_dest = pr.as_ref().unwrap()["destination"]["commit"]["hash"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let (out, asked, by_number) = bb_diff_run(pr, head, commits()).await;
+            assert_eq!(out.unwrap(), ("by commits".into(), HeadProof::Proven));
+            // The caller's full head, never the PR's abbreviated source.
+            assert_eq!(asked, [format!("diff/o/r:{head}%0D{want_dest}?topic=true")]);
+            assert!(!by_number);
+        }
+        // A readable contradiction: moved, and no diff read at all.
+        for pr in [
+            bb_pr_at(Some(&OTHER[..12]), Some("main"), Some(dest)),
+            bb_pr_at(Some(&SHA[..12]), Some("develop"), Some(dest)),
+            bb_pr_at(Some(&OTHER[..12]), None, None),
+        ] {
+            let (out, asked, by_number) = bb_diff_run(pr, SHA, commits()).await;
+            assert_eq!(out.unwrap(), (String::new(), HeadProof::Moved));
+            assert!(asked.is_empty() && !by_number);
+        }
+        // Nothing readable to address the diff by: by number, unproven.
+        for pr in [
+            Err(AppError::Bitbucket("offline".into())),
+            bb_pr_at(Some(&SHA[..12]), Some("main"), None),
+            bb_pr_at(Some(&SHA[..12]), Some("main"), Some("0123456789zz")),
+            bb_pr_at(Some(&SHA[..12]), Some(""), Some(dest)),
+            bb_pr_at(None, Some("main"), Some(dest)),
+        ] {
+            let (out, asked, by_number) = bb_diff_run(pr, SHA, commits()).await;
+            assert_eq!(out.unwrap(), ("by number".into(), HeadProof::Unproven));
+            assert!(asked.is_empty() && by_number);
+        }
+        // A missing or unusable source repository can't address the comparison.
+        for name in [
+            None,
+            Some(json!(7)),
+            Some(json!("")),
+            Some(json!("o")),
+            Some(json!("o/r/x")),
+            Some(json!("../r")),
+            Some(json!("o/r?x")),
+        ] {
+            let mut pr = bb_pr_at(Some(&SHA[..12]), Some("main"), Some(dest)).unwrap();
+            match name {
+                Some(name) => pr["source"]["repository"]["full_name"] = name,
+                None => pr["source"] = json!({ "commit": { "hash": &SHA[..12] } }),
+            }
+            let (out, asked, by_number) = bb_diff_run(Ok(pr), SHA, commits()).await;
+            assert_eq!(out.unwrap(), ("by number".into(), HeadProof::Unproven));
+            assert!(asked.is_empty() && by_number);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bitbucket_fork_pr_addresses_its_head_in_the_source_repository() {
+        let mut pr = bb_pr_at(Some(&SHA[..12]), Some("main"), Some(&OTHER[..12])).unwrap();
+        pr["source"]["repository"]["full_name"] = json!("team/fork");
+        pr["destination"]["repository"]["full_name"] = json!("team/upstream");
+        let (out, asked, by_number) = bb_diff_run(Ok(pr), SHA, Ok("by commits".to_string())).await;
+        assert_eq!(out.unwrap(), ("by commits".into(), HeadProof::Proven));
+        let dest = &OTHER[..12];
+        assert_eq!(asked, [format!("diff/team/fork:{SHA}%0D{dest}?topic=true")]);
+        assert!(!by_number);
+    }
+
+    #[tokio::test]
+    async fn a_bitbucket_diff_by_commit_keeps_the_cap_and_falls_back_on_failure() {
+        let pr = || bb_pr_at(Some(&SHA[..12]), Some("main"), Some(&OTHER[..12]));
+        let long = format!("{}é", "a".repeat(PR_DIFF_CAP - 1));
+        let (out, _, _) = bb_diff_run(pr(), SHA, Ok(long)).await;
+        let (text, proof) = out.unwrap();
+        assert_eq!((text.len(), proof), (PR_DIFF_CAP - 1, HeadProof::Proven));
+        // A failed read by commit never surfaces: the PR's own diff answers, unproven.
+        let (out, asked, by_number) =
+            bb_diff_run(pr(), SHA, Err(AppError::Bitbucket("gone".into()))).await;
+        assert_eq!(out.unwrap(), ("by number".into(), HeadProof::Unproven));
+        assert_eq!(asked.len(), 1);
+        assert!(by_number);
+    }
+
+    #[test]
+    fn the_compare_path_takes_only_full_shas() {
+        assert_eq!(
+            github_compare_path("o/r", SHA, SHA256).unwrap(),
+            ["repos/o/r/compare/", SHA, "...", SHA256].concat()
+        );
+        for bad in ["main", "abc1234", "{branch}", &format!("{SHA}?x")] {
+            assert!(github_compare_path("o/r", bad, SHA).is_err());
+            assert!(github_compare_path("o/r", SHA, bad).is_err());
+        }
+    }
+
     #[tokio::test]
     async fn invalid_input_is_refused_before_any_spawn() {
         // A missing folder: any git, gh or glab spawn would fail with another kind.
@@ -1278,9 +2581,16 @@ mod tests {
         };
         // The lens is validated first, so it wins over a bad sha and a bad path.
         invalid(
-            forge_pr_content_revs(repo.clone(), 1, Some("fork".into()), "abc".into())
-                .await
-                .map(|_| ()),
+            forge_pr_content_revs(
+                repo.clone(),
+                1,
+                Some("fork".into()),
+                "abc".into(),
+                None,
+                None,
+            )
+            .await
+            .map(|_| ()),
             "unknown remote lens",
         );
         invalid(
@@ -1301,6 +2611,19 @@ mod tests {
                 .map(|_| ()),
             "unknown remote lens",
         );
+        invalid(
+            forge_pr_diff_at(
+                repo.clone(),
+                1,
+                Some("fork".into()),
+                "abc".into(),
+                "main".into(),
+                Some("abc".into()),
+            )
+            .await
+            .map(|_| ()),
+            "unknown remote lens",
+        );
         for bad in [
             "",
             "abc1234",
@@ -1312,7 +2635,7 @@ mod tests {
             &format!("-{}", "a".repeat(39)),
         ] {
             invalid(
-                forge_pr_content_revs(repo.clone(), 1, None, bad.to_string())
+                forge_pr_content_revs(repo.clone(), 1, None, bad.to_string(), None, None)
                     .await
                     .map(|_| ()),
                 "expected a full commit sha",
@@ -1321,6 +2644,39 @@ mod tests {
                 forge_commit_first_parent(repo.clone(), bad.to_string(), Some("upstream".into()))
                     .await
                     .map(|_| ()),
+                "expected a full commit sha",
+            );
+            // A bad head refuses, and so does a bad base beside a full head.
+            invalid(
+                forge_pr_diff_at(repo.clone(), 1, None, bad.to_string(), "main".into(), None)
+                    .await
+                    .map(|_| ()),
+                "expected a full commit sha",
+            );
+            invalid(
+                forge_pr_diff_at(
+                    repo.clone(),
+                    1,
+                    Some("upstream".into()),
+                    SHA.into(),
+                    "main".into(),
+                    Some(bad.to_string()),
+                )
+                .await
+                .map(|_| ()),
+                "expected a full commit sha",
+            );
+            invalid(
+                forge_pr_content_revs(
+                    repo.clone(),
+                    1,
+                    None,
+                    SHA.into(),
+                    Some("main".into()),
+                    Some(bad.to_string()),
+                )
+                .await
+                .map(|_| ()),
                 "expected a full commit sha",
             );
             // The sha precedes the path.
@@ -1879,13 +3235,29 @@ mod tests {
         let base = "b".repeat(40);
         let head = "c".repeat(40);
         let mr = |head_sha: &str| json!({"diff_refs": {"base_sha": base, "start_sha": "d".repeat(40), "head_sha": head_sha}});
-        assert_eq!(gl_merge_base_outcome(&mr(&head), &head).unwrap(), base);
+        let outcome = |mr: &Value, head: &str| gl_merge_base_outcome(mr, head, None, None);
+        assert_eq!(outcome(&mr(&head), &head).unwrap(), base);
+        assert_eq!(outcome(&mr(&head.to_uppercase()), &head).unwrap(), base);
+        // The caller's base sha and target branch must be the merge request's.
+        let mut targeted = mr(&head);
+        targeted["target_branch"] = json!("main");
+        let caller = |base_ref: Option<&str>, base_sha: Option<&str>| {
+            gl_merge_base_outcome(&targeted, &head, base_ref, base_sha)
+        };
         assert_eq!(
-            gl_merge_base_outcome(&mr(&head.to_uppercase()), &head).unwrap(),
+            caller(Some("main"), Some(&base.to_uppercase())).unwrap(),
             base
         );
+        assert_eq!(caller(None, None).unwrap(), base);
+        let other = "f".repeat(40);
+        for (base_ref, base_sha) in [(Some("develop"), None), (None, Some(other.as_str()))] {
+            assert!(
+                matches!(caller(base_ref, base_sha), Err(AppError::Glab(_))),
+                "{base_ref:?} {base_sha:?}"
+            );
+        }
         // Right after a push the refs still pair the old base with the old head.
-        let moved = gl_merge_base_outcome(&mr(&"e".repeat(40)), &head).unwrap_err();
+        let moved = outcome(&mr(&"e".repeat(40)), &head).unwrap_err();
         assert!(
             matches!(&moved, AppError::Glab(m) if m.contains(&head)),
             "{moved}"
@@ -1898,9 +3270,98 @@ mod tests {
             json!({"diff_refs": {"base_sha": "", "head_sha": head}}),
         ] {
             assert!(
-                matches!(gl_merge_base_outcome(&bad, &head), Err(AppError::Glab(_))),
+                matches!(outcome(&bad, &head), Err(AppError::Glab(_))),
                 "{bad}"
             );
+        }
+    }
+
+    #[test]
+    fn live_bases_refuse_a_retargeted_pull_request() {
+        let base = "b".repeat(40);
+        let gh = json!({ "base": { "sha": base, "ref": "main" } });
+        assert_eq!(gh_live_base_outcome(&gh, Some("main")).unwrap(), base);
+        assert_eq!(gh_live_base_outcome(&gh, None).unwrap(), base);
+        let retargeted = gh_live_base_outcome(&gh, Some("develop"));
+        assert!(
+            matches!(&retargeted, Err(AppError::Gh(m)) if m.contains("develop")),
+            "{retargeted:?}"
+        );
+        // The branch is the caller's one base identity here, so it must be named.
+        for unnamed in [
+            json!({ "base": { "sha": base } }),
+            json!({ "base": { "sha": base, "ref": "" } }),
+            json!({ "base": { "sha": base, "ref": null } }),
+        ] {
+            assert!(
+                matches!(
+                    gh_live_base_outcome(&unnamed, Some("main")),
+                    Err(AppError::Gh(_))
+                ),
+                "{unnamed}"
+            );
+            assert!(
+                matches!(
+                    gh_live_base_outcome(&unnamed, Some("")),
+                    Err(AppError::Gh(_))
+                ),
+                "{unnamed}"
+            );
+        }
+        let bb = json!({
+            "destination": { "commit": { "hash": "abcdef123456" }, "branch": { "name": "main" } }
+        });
+        assert_eq!(
+            bb_destination_outcome(&bb, Some("main")).unwrap(),
+            "abcdef123456"
+        );
+        assert_eq!(bb_destination_outcome(&bb, None).unwrap(), "abcdef123456");
+        assert!(matches!(
+            bb_destination_outcome(&bb, Some("develop")),
+            Err(AppError::Bitbucket(_))
+        ));
+        for name in [json!(""), Value::Null] {
+            let mut unnamed = bb.clone();
+            unnamed["destination"]["branch"]["name"] = name;
+            for want in ["main", ""] {
+                assert!(
+                    matches!(
+                        bb_destination_outcome(&unnamed, Some(want)),
+                        Err(AppError::Bitbucket(_))
+                    ),
+                    "{unnamed} {want:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gitlab_merge_bases_need_a_named_target_without_a_base_sha() {
+        let base = "b".repeat(40);
+        let head = "c".repeat(40);
+        let refs = json!({"base_sha": base, "start_sha": base, "head_sha": head});
+        for target in [None, Some(""), Some("main")] {
+            let mut mr = json!({ "diff_refs": refs });
+            if let Some(target) = target {
+                mr["target_branch"] = json!(target);
+            }
+            let named = gl_merge_base_outcome(&mr, &head, Some("main"), None);
+            assert_eq!(
+                named.is_ok(),
+                target == Some("main"),
+                "{target:?} {named:?}"
+            );
+            assert!(
+                gl_merge_base_outcome(&mr, &head, Some(""), None).is_err(),
+                "{target:?}"
+            );
+            // The caller's base sha ties the base when the branch can't be read.
+            if target != Some("main") {
+                assert_eq!(
+                    gl_merge_base_outcome(&mr, &head, Some("main"), Some(&base)).unwrap(),
+                    base
+                );
+            }
         }
     }
 
@@ -2008,8 +3469,9 @@ mod tests {
                 Err(AppError::Bitbucket(_))
             ));
         }
-        assert!(bb_short_hash("abc1234") && bb_short_hash(&"a".repeat(64)));
-        for bad in ["", "abc123", "abc123g", &"a".repeat(65)] {
+        assert!(bb_short_hash("abcdef123456") && bb_short_hash(&"a".repeat(64)));
+        let too_long = "a".repeat(65);
+        for bad in ["", "abc1234", "abcdef12345", "abcdef12345g", &too_long] {
             assert!(!bb_short_hash(bad), "{bad}");
         }
     }
@@ -2216,11 +3678,14 @@ mod tests {
             match self {
                 Live::Commands => {
                     let revs =
-                        forge_pr_content_revs(repo.into(), number, None, head.into()).await?;
+                        forge_pr_content_revs(repo.into(), number, None, head.into(), None, None)
+                            .await?;
                     assert_eq!(revs.new_sha, head);
                     Ok(revs.old_sha)
                 }
-                Live::Bitbucket(creds) => bitbucket_merge_base(creds, repo, number, head).await,
+                Live::Bitbucket(creds) => {
+                    bitbucket_merge_base(creds, repo, number, head, None).await
+                }
             }
         }
 
@@ -2449,6 +3914,8 @@ mod tests {
             84,
             None,
             "3080dcb5570904def71e7feee50ceeeb0c02d8c0".into(),
+            None,
+            None,
         )
         .await
         .unwrap();

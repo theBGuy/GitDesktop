@@ -178,6 +178,7 @@ import {
   prChecksRecheck,
   prDetailsOptions,
   prDiffOptions,
+  prDiffText,
   prUpdateBranchKeys,
   recheckRunsAfterPush,
   repoKeys,
@@ -259,6 +260,7 @@ import {
   type PrListPage,
   type PrThreadOut,
   prConversationHold,
+  prDiffTarget,
   prHeadSha,
   type RemoteLens,
   savedProvider,
@@ -302,7 +304,11 @@ import { useRetained } from "@/lib/use-retained";
 import { useToastClearance } from "@/lib/use-toast-clearance";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
-import { headPendingKind } from "./head-pending";
+import {
+  type HeadPendingKind,
+  headPendingKind,
+  submitReviewHeadHold,
+} from "./head-pending";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import {
   type DeleteBranchBlock,
@@ -342,7 +348,11 @@ import {
   plainCheckoutTarget,
 } from "./PrWorktreeCheckout";
 import { prSectionAnswered } from "./pr-section-answered";
-import { MrTimeTracking, PrFilesPane } from "./RemotePrViewParts";
+import {
+  MrTimeTracking,
+  PrDiffFailedNotice,
+  PrFilesPane,
+} from "./RemotePrViewParts";
 import {
   DISCARD_RESOLVE_CONFIRM,
   ResolveRemotePrView,
@@ -376,6 +386,73 @@ import {
   useLinkedIssueChips,
 } from "./useLinkedIssueChips";
 import { usePrCapabilities } from "./usePrCapabilities";
+
+/** The Files tab's one owner of the diff Retry across its two placements (the
+ *  tab's own line and the pane's). A Retry that leaves under focus while
+ *  another mounts in the same commit hands focus to the new one; one that goes
+ *  for good lands focus on the Files host (`useRetryFocusRescue`). The pane's
+ *  own Retry above a drawable patch is not one of them: when the last element
+ *  focused inside the host has left and focus is lost as one of these mounts,
+ *  the new one takes it. A live element, or focus outside the host, keeps it. */
+function useDiffRetryOwner(shown: boolean) {
+  const rescue = useRetryFocusRescue(shown);
+  const node = useRef<HTMLButtonElement | null>(null);
+  const handoff = useRef(false);
+  const arrived = useRef(false);
+  const lastIn = useRef<Element | null>(null);
+  const rescueRef = rescue.retryRef;
+  const rescueHostRef = rescue.hostRef;
+  const hostRef = useCallback(
+    (el: HTMLElement | null) => {
+      rescueHostRef(el);
+      if (el === null) return;
+      const onIn = (e: FocusEvent) => {
+        lastIn.current = e.target instanceof Element ? e.target : null;
+      };
+      // Focus moving elsewhere forgets it; a removal (no related target) doesn't.
+      const onOut = (e: FocusEvent) => {
+        if (e.relatedTarget instanceof Node && !el.contains(e.relatedTarget))
+          lastIn.current = null;
+      };
+      el.addEventListener("focusin", onIn);
+      el.addEventListener("focusout", onOut);
+      return () => {
+        el.removeEventListener("focusin", onIn);
+        el.removeEventListener("focusout", onOut);
+        lastIn.current = null;
+        rescueHostRef(null);
+      };
+    },
+    [rescueHostRef],
+  );
+  const retryRef = useCallback(
+    (el: HTMLButtonElement | null) => {
+      const cleanup = rescueRef(el);
+      node.current = el;
+      if (el !== null) arrived.current = true;
+      return () => {
+        cleanup();
+        handoff.current = el !== null && el.contains(document.activeElement);
+        if (node.current === el) node.current = null;
+      };
+    },
+    [rescueRef],
+  );
+  useLayoutEffect(() => {
+    const handed = handoff.current;
+    const mounted = arrived.current;
+    handoff.current = false;
+    arrived.current = false;
+    const target = node.current;
+    if (target === null) return;
+    const left = lastIn.current;
+    if (handed && document.activeElement === document.body)
+      target.focus({ preventScroll: true });
+    else if (mounted && left !== null && !left.isConnected && focusIsLost())
+      target.focus({ preventScroll: true });
+  });
+  return { hostRef, retryRef };
+}
 
 /** The git remote a lens resolves to, mirroring the backend's own mapping
  *  (github/mod.rs:73 `lens_remote`). Exhaustive on purpose: a widened `RemoteLens`
@@ -1002,7 +1079,7 @@ export function RemotePrView({
     number,
     lens,
     targetDetails.data !== undefined && !targetDetails.isPlaceholderData
-      ? (prHeadSha(targetDetails.data) ?? null)
+      ? prDiffTarget(targetDetails.data)
       : undefined,
   );
   const targetReactions = usePrReactions(
@@ -1060,7 +1137,7 @@ export function RemotePrView({
     shownNumber,
     lens,
     details.data !== undefined && !detailsPlaceholder
-      ? (prHeadSha(details.data) ?? null)
+      ? prDiffTarget(details.data)
       : undefined,
   );
   // The selected PR's late reads, warmed while the hold keeps the old one on
@@ -1290,7 +1367,7 @@ export function RemotePrView({
   // (`prSectionAnswered`, the hold's rule too): reviews, comments, claimed
   // threads, timeline events, reaction counts and the Bitbucket tasks above them
   // appear together, so no row inserts above another after.
-  const feedReady = prSectionAnswered("conversation", {
+  const feedAnswered = prSectionAnswered("conversation", {
     threads: reviewThreads,
     timeline: provider ? timeline : null,
     forgeSettled: !forge.isPending,
@@ -1298,6 +1375,15 @@ export function RemotePrView({
     tasks: canTasks ? prTasks : null,
     diff: prDiff,
   });
+  // Once open, the feed stays open for its PR: a later refetch of a read that
+  // failed with nothing loaded turns it pending again, which would close the
+  // feed and unmount the section whose mount refetched it. Each section shows
+  // its own wait or failure from there. A PR switch closes it.
+  const [feedOpenFor, setFeedOpenFor] = useState<string | null>(null);
+  let feedLatch = feedOpenFor === hold.shownKey ? feedOpenFor : null;
+  if (feedAnswered) feedLatch = hold.shownKey;
+  if (feedLatch !== feedOpenFor) setFeedOpenFor(feedLatch);
+  const feedReady = feedLatch !== null;
   // The header chip's "View" asks for the tasks section, which mounts with the
   // feed: armed per shown PR and consumed once the section is in the DOM.
   const [tasksScrollFor, setTasksScrollFor] = useState<string | null>(null);
@@ -3166,14 +3252,37 @@ export function RemotePrView({
   const diffHeadPending = !diffStale && prDiff.placeholderOf === "olderHead";
   // Either: the revs the details name are not the painted text's.
   const diffNotOwn = diffStale || diffHeadPending;
-  const headPending = diffHeadPending ? headPendingKind(prDiff) : null;
+  // An older head outranks a moved answer under check, which holds on the
+  // pane's own arm (loading, failed or offline) with or without this key's
+  // text; an unproven diff, or a target naming no full head, holds on its own
+  // reason.
+  const headPending: HeadPendingKind | null = (() => {
+    switch (true) {
+      case diffHeadPending && !prDiff.headUnproven && !prDiff.headUnnamed:
+        return headPendingKind(prDiff);
+      case !diffStale && prDiff.headChecking:
+        return headPendingKind(prDiff);
+      default:
+        return null;
+    }
+  })();
+  // Until this target's own read answers, nothing proved its head, whatever
+  // placeholder is painted (another pull request's diff included): the cold
+  // arm holds from the moment this record's details name the target.
+  const headCold: HeadPendingKind | null =
+    headPending === null && prDiff.headProving ? headPendingKind(prDiff) : null;
+  // A target with no full head is this record's own (the details name it only
+  // when they are), so it holds over any painted placeholder.
+  const headUnproven =
+    prDiff.headUnnamed || (!diffStale && prDiff.headUnproven);
   // The Files tab's whole-file reads: the rendered pull request's merge base
   // and head. Read only on that tab, and never for a placeholder's head.
+  const diffTarget = pr ? prDiffTarget(pr) : null;
   const contentRevs = usePrContentRevs(
     repoPath,
     shownNumber,
     lens,
-    pr ? (prHeadSha(pr) ?? null) : null,
+    diffTarget,
     section === "files" && !detailsPlaceholder,
   );
   // No binary flag from a previous PR's placeholder diff or details.
@@ -3365,6 +3474,15 @@ export function RemotePrView({
   // something to report — someone approved, or a GitLab Premium project requires
   // N approvals.
   const approval = approvals.data;
+  // Approving and requesting changes post a verdict on the head the forge names
+  // when it lands, so they hold like Submit review; revoking either vouches for
+  // no diff and stays free.
+  const approveHeadHold = approval?.viewerHasApproved
+    ? null
+    : submitReviewHeadHold(headPending, headCold, headUnproven, prNoun);
+  const requestChangesHeadHold = approval?.viewerRequestedChanges
+    ? null
+    : submitReviewHeadHold(headPending, headCold, headUnproven, prNoun);
   const approvalNote =
     approval &&
     (approval.approvalsRequired > 0 || approval.approvedBy.length > 0)
@@ -3462,15 +3580,16 @@ export function RemotePrView({
   // anchors, so the handoff waits for that sub-tab too — the hinted tab arrives
   // through `pendingPrSection` in its own commit.
   //
-  // The request is consumed only once the feed it scrolls in is MOUNTED: the
-  // feed's own readiness (`feedReady`), so no row lands above the target after
-  // the one attempt, and never under a placeholder, a hold or a resolve takeover.
+  // The request is consumed only once the feed's reads have answered NOW
+  // (`feedAnswered`, never the mount latch, which stays open while a retried
+  // read is pending), so no row lands above the target after the one attempt,
+  // and never under a placeholder, a hold or a resolve takeover.
   // Retained content counts: a failed refresh keeps rendering it.
   const revealInputsSettled =
     (details.isSuccess || (details.isError && details.data !== undefined)) &&
     !detailsStale &&
     !resolve &&
-    feedReady;
+    feedAnswered;
   useEffect(() => {
     if (pendingReviewId === null || !isSelectedPr) return;
     if (!revealInputsSettled || section !== "conversation") return;
@@ -3624,11 +3743,41 @@ export function RemotePrView({
   // A files read with nothing to draw: the Files tab shows its notice alone.
   const filesMissing =
     pr !== undefined && pr.filesUnknown && pr.files.length === 0;
+  // With no file rows the pane is absent, so the tab shows a failed diff's
+  // Retry itself; otherwise the pane does (`diffFailedNoSlot`).
+  const diffFailedUnshown =
+    section === "files" && filesMissing && refreshFailed(prDiff);
   const filesRailShown =
     section === "files" &&
     !showsLoadingFrame &&
     pr !== undefined &&
     !filesMissing;
+  // No diff loaded means no file diff: an empty section synthesized from the
+  // missing text would render as "No changes to show" through a cold outage.
+  // A placeholder (an older head's diff, or another record's) without the
+  // file's section says nothing about it either, so the slot shows its read.
+  const fileSection = effectivePath
+    ? fileSections.get(effectivePath)
+    : undefined;
+  const fileDiff =
+    effectivePath &&
+    prDiff.data !== undefined &&
+    (fileSection !== undefined || !prDiff.isPlaceholderData)
+      ? {
+          filePath: effectivePath,
+          text: fileSection ?? "",
+          isBinary: sectionIsBinary(fileSection ?? ""),
+          isTruncated: false,
+        }
+      : undefined;
+
+  // A failed diff read whose selected slot has nothing to draw (no text, an
+  // older text without that file, or no file to select) shows its Retry in
+  // place of the slot; a slot the older text can draw keeps it and its Retry.
+  const diffFailedNoSlot = refreshFailed(prDiff) && fileDiff === undefined;
+  const diffRetry = useDiffRetryOwner(
+    diffFailedUnshown || (filesRailShown && diffFailedNoSlot),
+  );
   // Every arm but the resolve view renders inside the same host and frame, so the
   // frame's focus sink survives an arm swap and the hold dims whichever arm the
   // held PR showed. The resolve view replaces the sections: host node, no frame.
@@ -3941,14 +4090,16 @@ export function RemotePrView({
       // so this works for fork PRs / unfetched head branches.
       async (settings) => {
         const [text, exclude] = await Promise.all([
-          queryClient.ensureQueryData(
-            prDiffOptions(
-              repoPath,
-              shownNumber,
-              lens,
-              prHeadSha(prForGen) ?? null,
-            ),
-          ),
+          queryClient
+            .ensureQueryData(
+              prDiffOptions(
+                repoPath,
+                shownNumber,
+                lens,
+                prDiffTarget(prForGen),
+              ),
+            )
+            .then(prDiffText),
           aiExcludePatterns(repoPath, settings.aiIgnorePatterns),
         ]);
         // The Files tab's own binary verdict, read from the diff just awaited.
@@ -4016,25 +4167,6 @@ export function RemotePrView({
     );
   }
 
-  // No diff loaded means no file diff: an empty section synthesized from the
-  // missing text would render as "No changes to show" through a cold outage.
-  // A placeholder (an older head's diff, or another record's) without the
-  // file's section says nothing about it either, so the slot shows its read.
-  const fileSection = effectivePath
-    ? fileSections.get(effectivePath)
-    : undefined;
-  const fileDiff =
-    effectivePath &&
-    prDiff.data !== undefined &&
-    (fileSection !== undefined || !prDiff.isPlaceholderData)
-      ? {
-          filePath: effectivePath,
-          text: fileSection ?? "",
-          isBinary: sectionIsBinary(fileSection ?? ""),
-          isTruncated: false,
-        }
-      : undefined;
-
   // A file's unified-diff section by path, so the in-diff thread cards (Files tab)
   // and the Conversation suggestion threads can synthesize a hunk on hunk-less
   // providers (GitLab/Bitbucket) to gain the Apply affordance.
@@ -4063,6 +4195,8 @@ export function RemotePrView({
               lens={lens}
               onClose={onClose}
               headPending={headPending}
+              headCold={headCold}
+              headUnproven={headUnproven}
               rowsBehind={rowsBehind}
             />
           ),
@@ -5007,13 +5141,9 @@ export function RemotePrView({
             loadDiff: () =>
               queryClient
                 .ensureQueryData(
-                  prDiffOptions(
-                    repoPath,
-                    shownNumber,
-                    lens,
-                    prHeadSha(pr) ?? null,
-                  ),
+                  prDiffOptions(repoPath, shownNumber, lens, prDiffTarget(pr)),
                 )
+                .then(prDiffText)
                 .then((text) => {
                   // The Files tab's own binary verdict, read from this diff.
                   const bins = binaryRowPaths(pr.files, splitUnifiedDiff(text));
@@ -5419,7 +5549,10 @@ export function RemotePrView({
                         // Every term of `disabled` gets words this way, `busy`'s via
                         // `composerReason`, so the hold is never mute.
                         disabled={
-                          busy || approvals.isPending || approvals.isError
+                          busy ||
+                          approvals.isPending ||
+                          approvals.isError ||
+                          approveHeadHold !== null
                         }
                         reason={(() => {
                           switch (true) {
@@ -5431,6 +5564,8 @@ export function RemotePrView({
                               );
                             case approvals.isPending:
                               return "Checking approval state…";
+                            case approveHeadHold !== null:
+                              return approveHeadHold;
                             default:
                               return undefined;
                           }
@@ -5493,7 +5628,8 @@ export function RemotePrView({
                         ) ||
                         requestHeldForAttaching(
                           approval?.viewerRequestedChanges ?? false,
-                        )
+                        ) ||
+                        requestChangesHeadHold !== null
                       }
                       reason={(() => {
                         switch (true) {
@@ -5511,6 +5647,8 @@ export function RemotePrView({
                             approval?.viewerRequestedChanges ?? false,
                           ):
                             return ATTACHING_REASON;
+                          case requestChangesHeadHold !== null:
+                            return requestChangesHeadHold;
                           default:
                             return undefined;
                         }
@@ -5607,7 +5745,11 @@ export function RemotePrView({
         })()}
 
       {section === "files" && (
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div
+          ref={diffRetry.hostRef}
+          tabIndex={-1}
+          className="flex min-h-0 flex-1 flex-col"
+        >
           {/* Pending-review status bar — hidden until a draft exists. */}
           <PendingReviewBar
             repoPath={repoPath}
@@ -5635,6 +5777,14 @@ export function RemotePrView({
                 : "shrink-0 border-b px-4 py-1.5"
             }
           />
+          {diffFailedUnshown && (
+            <div className="shrink-0 pb-6">
+              <PrDiffFailedNotice
+                onRetry={() => void prDiff.refetch()}
+                retryRef={diffRetry.retryRef}
+              />
+            </div>
+          )}
           {!filesMissing && (
             <ThreadReplyHoldContext value={conversationHold.composer}>
               <PrFilesPane
@@ -5647,17 +5797,20 @@ export function RemotePrView({
                 isPaused={prDiff.isPaused}
                 isFetching={prDiff.isFetching}
                 onRetry={() => void prDiff.refetch()}
+                failed={diffFailedNoSlot}
+                failedRetryRef={diffRetry.retryRef}
                 dataIsPlaceholder={prDiff.isPlaceholderData}
                 // Revs with no answer, or a diff that is not this head's own
                 // (another record's, or an older head's: the revs name the new
                 // head), read no files; a failed refetch keeps the answer it had.
                 contentRevs={!diffNotOwn ? contentRevs.data : undefined}
                 // Settled with no answer (a refused read is never retried), or
-                // details that name no head: the pane drops any image pair it
-                // kept, never under an older head's text, whose pair it is.
+                // a target naming no head (the revs read never starts): the
+                // pane drops any image pair it kept, never under an older
+                // head's text, whose pair it is.
                 revsUnavailable={
                   !diffNotOwn &&
-                  (!prHeadSha(pr) ||
+                  (!diffTarget?.head ||
                     (contentRevs.isError &&
                       !contentRevs.isFetching &&
                       contentRevs.data === undefined))
@@ -6098,6 +6251,12 @@ export function RemotePrView({
         remoteLabel={remoteLabel}
         prNoun={prNoun}
         lens={lens}
+        headHeldReason={submitReviewHeadHold(
+          headPending,
+          headCold,
+          headUnproven,
+          prNoun,
+        )}
       />
 
       {/* Palette-triggered "Discard pending review" confirmation (the bar has its

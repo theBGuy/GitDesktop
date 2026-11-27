@@ -18,7 +18,9 @@ import { PR_NOUN } from "@/lib/pulls/pr-state";
 import { useAddReviewDraft } from "@/lib/pulls/review-drafts";
 import { toastError } from "@/lib/toast";
 import {
+  HEAD_COLD_REVIEW_REASON,
   HEAD_PENDING_REVIEW_REASON,
+  HEAD_UNPROVEN_REVIEW_REASON,
   type HeadPendingKind,
 } from "./head-pending";
 import { buildSuggestionFence, extractNewSideLines } from "./suggestion-utils";
@@ -48,8 +50,18 @@ export interface ReviewComposerProps {
   /** The origin|upstream lens the parent PR view resolved (scopes the thread). */
   lens: RemoteLens;
   onClose: () => void;
-  /** Set while the painted diff is an older head's: both submit paths hold with its reason. */
+  /** Set while the painted diff is an older head's, or a moved answer is under
+   *  check (loading, failed or offline): both submit paths hold with its
+   *  reason. */
   headPending?: HeadPendingKind | null;
+  /** Set while this target has no own diff answer yet (a cold read, or one
+   *  that failed or parked): both submit paths hold on the cold reasons,
+   *  which claim no update. */
+  headCold?: HeadPendingKind | null;
+  /** Set while the painted diff is this head's own text and no head read has
+   *  proven it, or the details name no full head commit to prove it against:
+   *  both submit paths hold, below `headPending`'s reason. */
+  headUnproven?: boolean;
   /** The diff's rows on screen are not yet the live text's (`LineWidget`'s
    *  `rowsBehind`): held as a loading head, since `fileSection` already is. */
   rowsBehind?: boolean;
@@ -77,6 +89,8 @@ export function ReviewComposer({
   lens,
   onClose,
   headPending = null,
+  headCold = null,
+  headUnproven = false,
   rowsBehind = false,
 }: ReviewComposerProps) {
   // Kept by the diff's line widget, so a remount of its rows reopens the
@@ -132,6 +146,10 @@ export function ReviewComposer({
     switch (true) {
       case headPending !== null:
         return HEAD_PENDING_REVIEW_REASON[headPending](noun);
+      case headCold !== null:
+        return HEAD_COLD_REVIEW_REASON[headCold](noun);
+      case headUnproven:
+        return HEAD_UNPROVEN_REVIEW_REASON(noun);
       case rowsHeld:
         return DIFF_ROWS_HELD_REASON;
       case rowsBehind:
