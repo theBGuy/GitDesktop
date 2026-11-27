@@ -1166,7 +1166,7 @@ function CommitFileDiffSlot({
   // anchors and the pane's painted report, so the list never judges a comment
   // against another commit's patch.
   const paintsRendered = mayPaintRendered && diffIsRendered;
-  const lineAnchors = useCommitLineAnchors(
+  const { anchors: lineAnchors, renderAnchor } = useCommitLineAnchors(
     comments,
     commentPatch,
     commentsReady && paintsRendered ? path : null,
@@ -1193,7 +1193,7 @@ function CommitFileDiffSlot({
       return undefined;
     return {
       enabled: true,
-      render: ({ side, line, fromLine, onClose }) => (
+      render: ({ side, line, fromLine, onClose, rowsBehind }) => (
         <CommitLineComposer
           repoPath={repoPath}
           sha={hash}
@@ -1205,6 +1205,7 @@ function CommitFileDiffSlot({
           fileSection={commentPatch?.get(path)}
           onClose={onClose}
           lens="origin"
+          rowsBehind={rowsBehind}
         />
       ),
     };
@@ -1226,6 +1227,7 @@ function CommitFileDiffSlot({
       imageRevs={{ old: `${hash}~1`, new: hash }}
       contentRevs={{ oldRev: `${hash}~1`, newRev: hash }}
       lineAnchors={lineAnchors}
+      renderAnchor={renderAnchor}
       lineWidget={lineWidget}
       paintsOtherCommit={!paintsRendered}
     />

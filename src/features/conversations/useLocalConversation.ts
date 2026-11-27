@@ -1,8 +1,12 @@
 import { useRef, useState } from "react";
+import { toast } from "sonner";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
 import { toastError } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { makeQuoteReply } from "./quoteReply";
+
+const EDITED_COMMENT_GONE =
+  "This comment was deleted, so the edit wasn't saved.";
 
 /** A comment on a local (offline) PR or issue. */
 export interface LocalConvComment {
@@ -89,15 +93,32 @@ export function useLocalConversation<T extends LocalConvEntity>(
       .finally(() => postingRef.current.delete(key));
   }
 
-  function editComment(commentId: string, body: string) {
-    if (!entity) return;
-    write((cur) =>
-      patch(cur, {
-        comments: cur.comments.map((c) =>
-          c.id === commentId ? { ...c, body } : c,
-        ),
-      } as Partial<T>),
-    );
+  /** Resolves whether the edit landed, for the comment's editor to close on
+   *  (true) or keep its text open on (false). */
+  async function editComment(commentId: string, body: string) {
+    if (!entity) return false;
+    // Read off the record `apply` reloaded: another writer may have deleted
+    // the comment since it was drawn, and then nothing saved the edit.
+    let found = false;
+    try {
+      await apply((cur) => {
+        found = cur.comments.some((c) => c.id === commentId);
+        return found
+          ? patch(cur, {
+              comments: cur.comments.map((c) =>
+                c.id === commentId ? { ...c, body } : c,
+              ),
+            } as Partial<T>)
+          : cur;
+      });
+      // Known gap: the list's refetch then drops the deleted comment's row, and
+      // the revised text with it (needs a second writer deleting it mid-edit).
+      if (!found) toast.error(EDITED_COMMENT_GONE);
+      return found;
+    } catch (e) {
+      toastError(e);
+      return false;
+    }
   }
 
   function deleteComment(commentId: string) {

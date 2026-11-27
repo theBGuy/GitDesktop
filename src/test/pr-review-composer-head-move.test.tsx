@@ -14,6 +14,8 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
+import { DIFF_ROWS_HELD_REASON } from "@/features/diff/whitespace-mode";
 import { HEAD_PENDING_REVIEW_REASON } from "@/features/pulls/head-pending";
 import { RemotePrView } from "@/features/pulls/RemotePrView";
 import {
@@ -167,14 +169,12 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
   function StandIn({
     data,
     lineAnchors,
+    renderAnchor,
     lineWidget,
   }: {
     data?: { filePath: string; text: string };
-    lineAnchors?: {
-      side: "new" | "old";
-      line: number;
-      render: () => React.ReactNode;
-    }[];
+    lineAnchors?: DiffLineAnchor[];
+    renderAnchor?: (anchor: DiffLineAnchor) => React.ReactNode;
     lineWidget?: {
       render: (args: {
         side: "new" | "old";
@@ -195,7 +195,7 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async (importOriginal) => {
         })}
         {lineAnchors?.map((a) => (
           <div key={`${a.side}:${a.line}`} data-anchor="">
-            {a.render()}
+            {renderAnchor?.(a)}
           </div>
         ))}
       </div>
@@ -567,7 +567,9 @@ describe("what the hold leaves alone (AC-A12)", () => {
     await waitFor(() =>
       expect(forgePrThreadReply).toHaveBeenCalledWith(REPO, 7, "T1", "a reply"),
     );
-    await user.click(within(anchor).getByRole("button", { name: "Edit" }));
+    await user.click(
+      within(anchor).getByRole("button", { name: "Edit pending comment" }),
+    );
     const edit = within(anchor).getByRole("textbox", {
       name: "Edit pending comment",
     });
@@ -649,33 +651,126 @@ describe("over the real diff (AC-A10's D13 case, AC-A11)", () => {
     return box;
   }
 
-  for (const [name, next, kept] of [
-    ["keeps the composer when the file's section is unchanged", HUNK, true],
+  it("keeps the composer when the file's section is unchanged", async () => {
+    const user = userEvent.setup();
+    const client = mount();
+    const box = await openComposer(user);
+    const held = deferred<string>();
+    diffs.push(() => held.promise);
+    await moveHead(client, SHA8);
+    expect(box.isConnected).toBe(true);
+    expectHeld(HEAD_PENDING_REVIEW_REASON.loading(NOUN));
+    await act(async () => held.resolve(HUNK));
+    await waitFor(expectLifted);
+    await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
+    expect(box.isConnected).toBe(true);
+    expect(box).toHaveValue("kept");
+  }, 30_000);
+
+  const SECOND_HUNK =
+    "@@ -9,3 +9,3 @@\n line 9\n-line 10\n+line ten\n line 11\n";
+  const FIRST_HUNK = "@@ -1,3 +1,3 @@\n line 1\n-line 2\n+line two\n line 3\n";
+  /** A push that edits another line of the section: line 2 and both its
+   *  neighbours read as before. */
+  const KEPT_LINE = `${HUNK}${SECOND_HUNK}`;
+
+  it("A1-2: a push that kept the line restores the composer on the new rows, and it posts once", async () => {
+    const user = userEvent.setup();
+    const client = mount();
+    const box = await openComposer(user);
+    const held = deferred<string>();
+    diffs.push(() => held.promise);
+    await moveHead(client, SHA8);
+    await act(async () => held.resolve(KEPT_LINE));
+    await waitFor(
+      () => expect(document.body.textContent).toContain("line ten"),
+      { timeout: 10_000 },
+    );
+    const back = await waitFor(() => {
+      const next = composerBox();
+      expect(next).toHaveValue("kept");
+      return next;
+    });
+    expect(back).not.toBe(box);
+    await waitFor(expectLifted);
+    await user.click(single());
+    await waitFor(() => expect(forgePrThreadCreate).toHaveBeenCalledTimes(1));
+    expect(forgePrThreadCreate).toHaveBeenCalledWith(
+      REPO,
+      expect.objectContaining({ line: 2, side: "new", body: "kept" }),
+      "origin",
+    );
+  }, 30_000);
+
+  for (const [name, next, shows] of [
+    ["(i) the line's text changed", PUSHED, "line 2, pushed"],
     [
-      "drops the composer when the push changed the file's section",
-      PUSHED,
-      false,
+      "(ii) a line inserted above it",
+      HUNK.replace(
+        "@@ -1,3 +1,3 @@\n line 1\n",
+        "@@ -1,3 +1,4 @@\n line 1\n+inserted\n",
+      ),
+      "inserted",
+    ],
+    [
+      "(iii) its hunk removed",
+      HUNK.replace(FIRST_HUNK, SECOND_HUNK),
+      "line ten",
     ],
   ] as const)
-    it(name, async () => {
+    it(`A1-3 ${name}: the composer holds the older rows until it closes`, async () => {
       const user = userEvent.setup();
       const client = mount();
       const box = await openComposer(user);
       const held = deferred<string>();
       diffs.push(() => held.promise);
       await moveHead(client, SHA8);
-      expect(box.isConnected).toBe(true);
-      expectHeld(HEAD_PENDING_REVIEW_REASON.loading(NOUN));
       await act(async () => held.resolve(next));
-      if (kept) {
-        await waitFor(expectLifted);
-        await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
-        expect(box.isConnected).toBe(true);
-        expect(box).toHaveValue("kept");
-      } else {
-        await waitFor(() => expect(box.isConnected).toBe(false));
-      }
+      await waitFor(() => expectHeld(DIFF_ROWS_HELD_REASON), {
+        timeout: 10_000,
+      });
+      expect(box.isConnected).toBe(true);
+      expect(composerBox()).toBe(box);
+      expect(box).toHaveValue("kept");
+      expect(document.body.textContent).toContain("line two");
+      expect(document.body.textContent).not.toContain(shows);
+      const suggest = screen.getByRole("button", { name: "Add suggestion" });
+      expect(suggest).toHaveAttribute("aria-disabled", "true");
+      expect(suggest).toHaveAccessibleDescription(DIFF_ROWS_HELD_REASON);
+      await user.click(suggest);
+      expect(box).toHaveValue("kept");
+      await user.click(single());
+      box.focus();
+      await user.keyboard("{Control>}{Enter}{/Control}");
+      await settleWrites();
+      expect(forgePrThreadCreate).not.toHaveBeenCalled();
+      expect(seeded.addDraft).not.toHaveBeenCalled();
+      const widget = box.closest("[data-diff-line-widget]") as HTMLElement;
+      await user.click(within(widget).getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(document.body.textContent).toContain(shows), {
+        timeout: 10_000,
+      });
+      expect(document.activeElement).toBe(
+        screen.getByRole("group", { name: "Diff of f.txt" }),
+      );
     }, 30_000);
+
+  it("A1-3: a second push while the rows are held shows the pull request's own hold first", async () => {
+    const user = userEvent.setup();
+    const client = mount();
+    const box = await openComposer(user);
+    diffs.push(async () => PUSHED);
+    await moveHead(client, SHA8);
+    await waitFor(() => expectHeld(DIFF_ROWS_HELD_REASON), {
+      timeout: 10_000,
+    });
+    diffs.push(() => Promise.reject(new Error("boom")));
+    await moveHead(client, BASE);
+    await waitFor(() => expectHeld(HEAD_PENDING_REVIEW_REASON.failed(NOUN)), {
+      timeout: 10_000,
+    });
+    expect(box.isConnected).toBe(true);
+  }, 30_000);
 
   it("holds both submits while the rows on screen are the older text's, until the deferred paint", async () => {
     const pushedNew = OLD.replace("line 2\n", "line 2, pushed\n");
@@ -708,11 +803,16 @@ describe("over the real diff (AC-A10's D13 case, AC-A11)", () => {
     await settleWrites();
     expect(forgePrThreadCreate).not.toHaveBeenCalled();
     await releaseLag();
-    // The push changed this file's section, so the new rows drop the composer;
-    // one opened on them posts.
-    await waitFor(() => expect(box.isConnected).toBe(false), {
+    // The push changed the composer's line, so the older rows stay under it,
+    // held with the file's own reason, until it closes; one opened on the new
+    // rows then posts, with no kept text.
+    await waitFor(() => expectHeld(DIFF_ROWS_HELD_REASON), {
       timeout: 10_000,
     });
+    expect(box.isConnected).toBe(true);
+    expect(document.body.textContent).not.toContain("line 2, pushed");
+    const widget = box.closest("[data-diff-line-widget]") as HTMLElement;
+    await user.click(within(widget).getByRole("button", { name: "Cancel" }));
     const again = await composeOnLine2(user);
     expect(again).toHaveValue("kept");
     expect(document.body.textContent).toContain("line 2, pushed");

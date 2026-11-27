@@ -1102,16 +1102,22 @@ export function RemoteIssueView({
     toast.success(`Reopened #${number}`);
   }
 
-  function saveCommentEdit(commentId: string, body: string) {
+  // Resolves whether the edit saved: Thread keeps its editor open on `false`.
+  async function saveCommentEdit(
+    commentId: string,
+    body: string,
+  ): Promise<boolean> {
     // The comment id is the rendered issue's while the write addresses `number`
     // — GitLab routes by both, so a mismatched pair 404s.
-    if (detailsStale) return;
-    // Detached: Thread closes its inline editor on submit, so there is nothing
-    // left for an await to hold open.
-    void editComment
-      .mutateAsync({ number, commentId, body })
-      .then(() => toast.success("Comment updated"))
-      .catch(onError);
+    if (detailsStale) return false;
+    try {
+      await editComment.mutateAsync({ number, commentId, body });
+      toast.success("Comment updated");
+      return true;
+    } catch (e) {
+      onError(e);
+      return false;
+    }
   }
 
   // Both take a comment id off the RENDERED issue, which through a switch is the
@@ -1349,10 +1355,10 @@ export function RemoteIssueView({
               ? (body) => saveCommentEdit(c.id, body)
               : undefined
           }
-          // Withholding the handler only drops the menu entry: an editor already
-          // open when a placeholder took over holds its Save here. During a hold
-          // the inert frame covers it (no focus or pointer reaches it).
-          editHeld={detailsPlaceholder}
+          // Every stale arm that withholds the saver holds an open editor here,
+          // so its Save holds silently instead of reading as a lost permission.
+          // During a hold the inert frame also covers it.
+          editHeld={detailsStale}
           onDelete={
             canEditOwnComments && c.viewerDidAuthor && !detailsStale
               ? () => setDeletingCommentId(c.id)

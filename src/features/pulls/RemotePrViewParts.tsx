@@ -24,6 +24,10 @@ import {
   type LineWidget,
 } from "@/features/diff/DiffSurfaceLazy";
 import {
+  OpenEditorsContext,
+  useOpenEditorsHost,
+} from "@/features/diff/editor-keep";
+import {
   FileSlots,
   keyedPaneView,
   placeholderPaneView,
@@ -74,14 +78,19 @@ interface DiffThreadWiring {
   onReply?: (threadId: string, body: string) => Promise<void>;
   onResolve?: (threadId: string, resolved: boolean) => Promise<void>;
   /** Present when the viewer may edit their own thread comments; saves the new
-   *  body. Wired to a Thread's edit control only for a comment the viewer wrote. */
-  onEditComment?: (commentId: string, body: string) => void;
+   *  body. Wired to a Thread's edit control only for a comment the viewer wrote;
+   *  resolves whether the edit saved, as Thread's `onSaveEdit` does. */
+  onEditComment?: (
+    commentId: string,
+    body: string,
+  ) => boolean | Promise<boolean>;
   /** Present when the viewer may delete their own thread comments; opens the
    *  delete confirmation. Wired only for a comment the viewer wrote. */
   onDeleteComment?: (commentId: string) => void;
-  /** Holds an ALREADY-OPEN comment editor's Save — withholding `onEditComment`
-   *  only drops the menu entry, so a caller whose threads went stale sets this
-   *  too. Threaded straight through to every card's Thread. */
+  /** The caller's temporary hold over an ALREADY-OPEN comment editor: Save
+   *  holds silently. Set it whenever a stale arm withholds `onEditComment`,
+   *  or the open editor reads that absence as a lost permission. Threaded
+   *  straight through to every card's Thread. */
   editHeld?: boolean;
   /** Why the viewer's own comments can't be edited (null = they can): holds the
    *  Edit row and an open editor's Save with this reason. */
@@ -109,7 +118,7 @@ interface DiffThreadWiring {
  * expanded state (unresolved default-open, resolved default-closed) so each
  * card collapses independently, mirroring the Conversation block's defaults.
  */
-function DiffThreadAnchor({
+export function DiffThreadAnchor({
   threads,
   onQuote,
   onReply,
@@ -125,36 +134,68 @@ function DiffThreadAnchor({
   mentions,
 }: { threads: ReviewThreadOut[] } & DiffThreadWiring) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const isExpanded = (t: ReviewThreadOut) => expanded[t.id] ?? !t.isResolved;
+  // A thread resolved elsewhere stays open while it draws an open Reply or
+  // comment edit, so the editor and its text survive (a remount of the rows
+  // and a hide of the tab included); it takes the resolved default once that
+  // editor closes. Both read the editors the card draws: a Reply only while
+  // replies are wired, an edit only on a comment the thread still lists. A
+  // Reply stays in the open set while replies are withdrawn, so their return
+  // re-expands the thread with the Reply and its text, on purpose.
+  const holds = (t: ReviewThreadOut, has: (id: string) => boolean) =>
+    (onReply !== undefined && has(`reply:${t.id}`)) ||
+    t.comments.some((c) => has(`edit:${c.id}`));
+  const fold = (t: ReviewThreadOut, has: (id: string) => boolean) =>
+    expanded[t.id] ?? (!t.isResolved || holds(t, has));
+  const editors = useOpenEditorsHost(
+    threads.flatMap((t) => [
+      ...(onReply === undefined ? [] : [`reply:${t.id}`]),
+      ...t.comments.map((c) => `edit:${c.id}`),
+    ]),
+    // Only the Reply and edit ids are this anchor's to prune; another
+    // editor's id under its provider passes through.
+    (id, has) =>
+      !/^(?:reply|edit):/.test(id) ||
+      threads.some(
+        (t) =>
+          id === `reply:${t.id}` ||
+          (fold(t, has) && t.comments.some((c) => id === `edit:${c.id}`)),
+      ),
+  );
+  const isExpanded = (t: ReviewThreadOut) => fold(t, editors.has);
   return (
-    <div className="flex flex-col gap-2">
-      {threads.map((t) => (
-        <ReviewThreadCard
-          key={t.id}
-          thread={t}
-          compact
-          expanded={isExpanded(t)}
-          onToggleExpand={() =>
-            setExpanded((prev) => ({
-              ...prev,
-              [t.id]: !(prev[t.id] ?? !t.isResolved),
-            }))
-          }
-          onQuote={onQuote}
-          onReply={onReply}
-          onResolve={onResolve}
-          onEditComment={onEditComment}
-          onDeleteComment={onDeleteComment}
-          editHeld={editHeld}
-          editHeldReason={editHeldReason}
-          pendingWrites={pendingWrites}
-          provider={provider}
-          apply={apply}
-          fileDiffLookup={fileDiffLookup}
-          mentions={mentions}
-        />
-      ))}
-    </div>
+    <OpenEditorsContext value={editors}>
+      <div className="flex flex-col gap-2">
+        {threads.map((t) => (
+          <ReviewThreadCard
+            key={t.id}
+            thread={t}
+            compact
+            expanded={isExpanded(t)}
+            onToggleExpand={() =>
+              setExpanded((prev) => ({
+                ...prev,
+                [t.id]: !(
+                  prev[t.id] ??
+                  (!t.isResolved || holds(t, editors.has))
+                ),
+              }))
+            }
+            onQuote={onQuote}
+            onReply={onReply}
+            onResolve={onResolve}
+            onEditComment={onEditComment}
+            onDeleteComment={onDeleteComment}
+            editHeld={editHeld}
+            editHeldReason={editHeldReason}
+            pendingWrites={pendingWrites}
+            provider={provider}
+            apply={apply}
+            fileDiffLookup={fileDiffLookup}
+            mentions={mentions}
+          />
+        ))}
+      </div>
+    </OpenEditorsContext>
   );
 }
 
@@ -530,97 +571,108 @@ function PrFileDiffSlot({
     isPaused,
   });
 
-  // Anchors for THIS slot's file only: threads (with a known line, not outdated)
-  // AND pending-review drafts on this path. Multiple items on the same side+line
-  // collapse into ONE stacked anchor (the diff library keeps a single render per
-  // side+line — last write wins — so threads + a draft here must share it).
-  const lineAnchors = useMemo<DiffLineAnchor[]>(() => {
-    const threadsBySideLine = new Map<string, ReviewThreadOut[]>();
-    for (const t of threads ?? []) {
-      if (t.path !== path || t.line <= 0 || t.isOutdated) continue;
-      const side = t.side === "old" ? "old" : "new";
-      const key = `${side}:${t.line}`;
-      const bucket = threadsBySideLine.get(key);
-      if (bucket) bucket.push(t);
-      else threadsBySideLine.set(key, [t]);
-    }
-    const draftsBySideLine = new Map<string, ReviewDraft[]>();
-    // Drafts only render when the store owner keys (repoPath/lens/number) are present.
-    if (repoPath !== undefined && lens !== undefined && number !== undefined) {
-      for (const d of drafts ?? []) {
-        if (d.path !== path || d.line <= 0) continue;
-        const key = `${d.side}:${d.line}`;
-        const bucket = draftsBySideLine.get(key);
-        if (bucket) bucket.push(d);
-        else draftsBySideLine.set(key, [d]);
-      }
-    }
-    const keys = new Set([
-      ...threadsBySideLine.keys(),
-      ...draftsBySideLine.keys(),
-    ]);
-    return [...keys].map((key) => {
-      const [side, line] = key.split(":");
-      const threadGroup = threadsBySideLine.get(key) ?? [];
-      const draftGroup = draftsBySideLine.get(key) ?? [];
-      return {
-        side: side as "old" | "new",
-        line: Number(line),
-        render: () => (
-          <div className="flex flex-col gap-2">
-            {threadGroup.length > 0 && (
-              <DiffThreadAnchor
-                threads={threadGroup}
-                onQuote={onQuote}
-                onReply={onReply}
-                onResolve={onResolve}
-                onEditComment={onEditComment}
-                onDeleteComment={onDeleteComment}
-                editHeld={editHeld}
-                editHeldReason={editHeldReason}
-                pendingWrites={pendingWrites}
-                provider={provider}
-                apply={apply}
-                fileDiffLookup={fileDiffLookup}
-                mentions={mentions}
-              />
-            )}
-            {repoPath !== undefined &&
-              lens !== undefined &&
-              number !== undefined &&
-              draftGroup.map((d) => (
-                <DraftCommentCard
-                  key={d.id}
-                  repoPath={repoPath}
-                  lens={lens}
-                  number={number}
-                  draft={d}
-                />
-              ))}
-          </div>
-        ),
-      };
-    });
-  }, [
-    path,
-    threads,
-    drafts,
-    repoPath,
-    lens,
-    number,
-    onQuote,
-    onReply,
-    onResolve,
-    onEditComment,
-    onDeleteComment,
-    editHeld,
-    editHeldReason,
-    pendingWrites,
-    provider,
-    apply,
-    fileDiffLookup,
-    mentions,
-  ]);
+  // Placements for THIS slot's file only: threads (with a known line, not
+  // outdated) AND pending-review drafts on this path, as data. An older head's
+  // placeholder keeps the placements of this slot's last own paint, and only
+  // while it paints that same text of this pull request and path: a thread can
+  // land before the patch of the head it names.
+  const livePlacements = JSON.stringify(
+    prPlacements(
+      path,
+      threads,
+      repoPath !== undefined && lens !== undefined && number !== undefined
+        ? drafts
+        : undefined,
+    ),
+  );
+  const text = data?.text;
+  const [lastOwn, setLastOwn] = useState<{
+    entity: string;
+    path: string;
+    text: string;
+    placements: string;
+  } | null>(null);
+  if (
+    !dataIsPlaceholder &&
+    text !== undefined &&
+    (lastOwn?.entity !== entity ||
+      lastOwn.path !== path ||
+      lastOwn.text !== text ||
+      lastOwn.placements !== livePlacements)
+  )
+    setLastOwn({ entity, path, text, placements: livePlacements });
+  const placements = !dataIsPlaceholder
+    ? livePlacements
+    : lastOwn !== null &&
+        lastOwn.entity === entity &&
+        lastOwn.path === path &&
+        lastOwn.text === text
+      ? lastOwn.placements
+      : "[]";
+  // Keyed on the placements' value, so a re-render that moves no placement
+  // hands the diff the same list.
+  const lineAnchors = useMemo<DiffLineAnchor[]>(
+    () =>
+      (JSON.parse(placements) as PrPlacement[]).map((p) => ({
+        side: p.side,
+        line: p.line,
+        ids: p.ids,
+        items: [
+          ...p.threadIds.map((id) => `${THREAD_ITEM}${id}`),
+          ...p.draftIds.map((id) => `${DRAFT_ITEM}${id}`),
+        ],
+      })),
+    [placements],
+  );
+  // Read by the diff on every render, held rows included: items resolve by id
+  // against the slot's CURRENT threads (all of them, so a thread that went
+  // outdated under an open editor keeps its held row) and drafts.
+  const owner =
+    repoPath !== undefined && lens !== undefined && number !== undefined
+      ? { repoPath, lens, number }
+      : undefined;
+  // By id, the first of a repeated id.
+  const threadById = new Map<string, ReviewThreadOut>();
+  for (const t of threads ?? [])
+    if (!threadById.has(t.id)) threadById.set(t.id, t);
+  const draftById = new Map<string, ReviewDraft>();
+  for (const d of drafts ?? [])
+    if (!draftById.has(d.id)) draftById.set(d.id, d);
+  const renderAnchor = (anchor: DiffLineAnchor) => {
+    const rowThreads = anchor.items.flatMap((k) =>
+      k.startsWith(THREAD_ITEM)
+        ? (threadById.get(k.slice(THREAD_ITEM.length)) ?? [])
+        : [],
+    );
+    const rowDrafts =
+      owner === undefined
+        ? []
+        : anchor.items.flatMap((k) =>
+            k.startsWith(DRAFT_ITEM)
+              ? (draftById.get(k.slice(DRAFT_ITEM.length)) ?? [])
+              : [],
+          );
+    if (rowThreads.length === 0 && rowDrafts.length === 0) return null;
+    return (
+      <PrAnchorBody
+        threads={rowThreads}
+        drafts={rowDrafts}
+        owner={owner}
+        onQuote={onQuote}
+        onReply={onReply}
+        onResolve={onResolve}
+        onEditComment={onEditComment}
+        onDeleteComment={onDeleteComment}
+        editHeld={editHeld}
+        editHeldReason={editHeldReason}
+        pendingWrites={pendingWrites}
+        provider={provider}
+        apply={apply}
+        fileDiffLookup={fileDiffLookup}
+        mentions={mentions}
+      />
+    );
+  };
 
   const widget = useSlotWidget(lineWidget);
   return (
@@ -657,8 +709,89 @@ function PrFileDiffSlot({
         typechangeAnchors
         anchorCommit={anchorCommit}
         lineAnchors={lineAnchors}
+        renderAnchor={renderAnchor}
         lineWidget={widget}
       />
+    </div>
+  );
+}
+
+/** One anchor row's items, by id: `ids` are the editor keep ids. */
+interface PrPlacement {
+  side: "old" | "new";
+  line: number;
+  threadIds: string[];
+  draftIds: string[];
+  ids: string[];
+}
+
+/** Multiple items on the same side+line collapse into ONE placement (the diff
+ *  library keeps a single render per side+line, last write wins). `drafts` is
+ *  absent while the draft store's owner keys are. */
+function prPlacements(
+  path: string,
+  threads: ReviewThreadOut[] | undefined,
+  drafts: ReviewDraft[] | undefined,
+): PrPlacement[] {
+  const bySideLine = new Map<string, PrPlacement>();
+  const at = (side: "old" | "new", line: number) => {
+    const key = `${side}:${line}`;
+    let p = bySideLine.get(key);
+    if (p === undefined) {
+      p = { side, line, threadIds: [], draftIds: [], ids: [] };
+      bySideLine.set(key, p);
+    }
+    return p;
+  };
+  for (const t of threads ?? []) {
+    if (t.path !== path || t.line <= 0 || t.isOutdated) continue;
+    const p = at(t.side === "old" ? "old" : "new", t.line);
+    p.threadIds.push(t.id);
+    p.ids.push(`reply:${t.id}`, ...t.comments.map((c) => `edit:${c.id}`));
+  }
+  const draftIds: { p: PrPlacement; id: string }[] = [];
+  for (const d of drafts ?? []) {
+    if (d.path !== path || d.line <= 0) continue;
+    draftIds.push({ p: at(d.side, d.line), id: d.id });
+  }
+  // Drafts follow every thread id in a row, as the editor keep lists them.
+  for (const { p, id } of draftIds) {
+    p.draftIds.push(id);
+    p.ids.push(`draft:${id}`);
+  }
+  return [...bySideLine.values()];
+}
+
+/** Item-id prefixes in a Files anchor's `items`. */
+const THREAD_ITEM = "thread:";
+const DRAFT_ITEM = "draft:";
+
+/** An anchor row's cards, from items already resolved against the slot's
+ *  current threads and drafts. `owner` is the draft store's key, absent while
+ *  any part of it is. */
+function PrAnchorBody({
+  threads,
+  drafts,
+  owner,
+  ...wiring
+}: {
+  threads: ReviewThreadOut[];
+  drafts: ReviewDraft[];
+  owner?: { repoPath: string; lens: RemoteLens; number: number };
+} & DiffThreadWiring) {
+  return (
+    <div className="flex flex-col gap-2">
+      {threads.length > 0 && <DiffThreadAnchor threads={threads} {...wiring} />}
+      {owner !== undefined &&
+        drafts.map((d) => (
+          <DraftCommentCard
+            key={d.id}
+            repoPath={owner.repoPath}
+            lens={owner.lens}
+            number={owner.number}
+            draft={d}
+          />
+        ))}
     </div>
   );
 }

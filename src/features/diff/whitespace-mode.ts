@@ -62,6 +62,11 @@ export const SHOW_FULL_COMPOSER_HELD =
 export const OPEN_PR_REFRESH_HELD = (noun: string) =>
   `Finish or close the comment you're writing in a diff (here or in another tab), then refresh again to update the open ${noun}.`;
 
+/** A line composer over rows kept for an open editor while the file's newer
+ *  text waits behind them: its line is the earlier text's, so it can't post. */
+export const DIFF_ROWS_HELD_REASON =
+  "This file's diff was updated. Close what you're writing in it to see the new diff.";
+
 // Both diff settings are app-wide and hidden tabs keep their DOM under
 // `<Activity>`, so a flip from any pane rebuilds a hidden tab's composer too.
 // Every writer of either setting checks its probe first

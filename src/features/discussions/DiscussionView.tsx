@@ -611,15 +611,20 @@ export function DiscussionView({
   // Every comment id below comes off the rendered discussion, which mid-switch is
   // the previous one — so each write would land on the discussion the viewer just
   // left. The affordances withhold or disable too; these arms back them up.
-  async function saveCommentEdit(commentId: string, body: string) {
-    if (detailsStale) return;
+  // Resolves whether the edit saved: Thread keeps its editor open on `false`.
+  async function saveCommentEdit(
+    commentId: string,
+    body: string,
+  ): Promise<boolean> {
+    if (detailsStale) return false;
     try {
       await updateComment.mutateAsync({ commentId, body });
     } catch (e) {
       onError(e);
-      return;
+      return false;
     }
     toast.success("Comment updated");
+    return true;
   }
 
   async function hideComment(commentId: string, classifier: MinimizeReason) {
@@ -1152,11 +1157,11 @@ export function DiscussionView({
                   onQuote={detailsStale ? undefined : () => quoteReply(c.body)}
                   onSaveEdit={
                     c.viewerDidAuthor && !detailsStale
-                      ? (body) => void saveCommentEdit(c.id, body)
+                      ? (body) => saveCommentEdit(c.id, body)
                       : undefined
                   }
-                  // Withholding the handler only drops the menu entry; an editor
-                  // already open when the switch began needs its Save held too.
+                  // The same stale arm that withholds the saver holds an editor
+                  // already open, so its Save holds silently.
                   editHeld={detailsStale}
                   onDelete={
                     c.viewerDidAuthor && !detailsStale
@@ -1230,7 +1235,7 @@ export function DiscussionView({
                       }
                       onSaveEdit={
                         r.viewerDidAuthor && !detailsStale
-                          ? (body) => void saveCommentEdit(r.id, body)
+                          ? (body) => saveCommentEdit(r.id, body)
                           : undefined
                       }
                       editHeld={detailsStale}

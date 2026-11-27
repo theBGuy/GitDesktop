@@ -694,6 +694,8 @@ the last list up, with a line above it saying it couldn't refresh.
   them in; those read the new version alone, so a file the PR deletes shows
   **Nothing to preview**. *Toggle Markdown preview* in the command palette
   (palette-only by default — bind a key in **Settings → Keyboard**) flips it too.
+  While a comment you're writing is open in the diff, the toggle waits: finish or close
+  the comment first, so its text isn't lost.
 - Very large diffs are capped (with a **Show full diff** escape hatch) so a huge file
   never freezes the view.
 - Files that look **generated or minified** (one enormous line — bundles, source maps,
@@ -2365,7 +2367,10 @@ progress) stay disabled and say why.
 
 When the pull request is updated while you're writing a line comment, both buttons
 stay disabled and say why until its new diff is on screen, whether that diff is still
-loading, failed to load, or can't load while you're offline.
+loading, failed to load, or can't load while you're offline. If the update changed or
+moved the line you're commenting on, or a line next to it, or left the file with no text
+changes, the file's earlier version stays on screen until you close the comment, with
+**Add single comment**, **Start a review** and **Add suggestion** disabled.
 
 A **Review in progress** bar shows the pending count with **Submit review…** and
 **Discard**. Submitting opens a dialog to choose a **verdict** — **Comment**, **Approve**,

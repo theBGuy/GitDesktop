@@ -14,7 +14,7 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
-    acquire_repo_lock, run_git, run_git_raw, run_git_raw_index_retry, DEFAULT_TIMEOUT,
+    acquire_repo_lock, run_git, run_git_raw, run_git_raw_index_retry, GitOutput, DEFAULT_TIMEOUT,
     LOCK_WAIT_TIMEOUT,
 };
 use crate::state::AppState;
@@ -834,7 +834,8 @@ pub(crate) async fn git_checkout_conflict_side_core(
 /// (proposed-vs-ours). Round-trips through a throwaway temp dir + `git diff
 /// --no-index` so the output is byte-for-byte the same shape every other diff in
 /// the app renders (the viewer supplies its own display filename, so the temp
-/// paths never surface).
+/// paths never surface). Exit 0 succeeds, and exit 1 succeeds only when stdout
+/// contains a diff line; every other exit is an error.
 #[tauri::command]
 pub async fn git_diff_contents(old: String, new: String) -> AppResult<String> {
     let dir =
@@ -861,19 +862,26 @@ pub async fn git_diff_contents(old: String, new: String) -> AppResult<String> {
             DEFAULT_TIMEOUT,
         )
         .await?;
-        // `--no-index` exits 1 when the files differ (the common case); only a
-        // code above that is a real failure.
-        if out.code > 1 {
-            return Err(AppError::Git {
-                code: out.code,
-                stderr: out.stderr,
-            });
-        }
-        Ok(out.stdout_lossy())
+        diff_contents_result(out)
     }
     .await;
     let _ = tokio::task::spawn_blocking(move || dir.close()).await;
     result
+}
+
+fn diff_contents_result(out: GitOutput) -> AppResult<String> {
+    if !crate::forge::pr_content::no_index_diff_ok(out.code, &out.stdout) {
+        let text = out.full_failure_text();
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: if text.is_empty() {
+                "git diff printed no diff".into()
+            } else {
+                text
+            },
+        });
+    }
+    Ok(out.stdout_lossy())
 }
 
 /// `git_resolve_conflict_core`'s write-then-add without the path gate, the literal
@@ -898,6 +906,29 @@ pub(crate) async fn resolve_for_test(repo: &str, path: &str, content: &str) {
 mod tests {
     use super::*;
     use crate::git::runner::{run_git, TestGitEnv, TEST_GIT_HANG_GUARD};
+
+    #[test]
+    fn diff_contents_checks_exit_code_and_output() {
+        let output = |code, stdout: &str, stderr: &str| GitOutput {
+            code,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.into(),
+        };
+        let killed = diff_contents_result(output(-1, "diff --git a b\n", ""));
+        assert!(matches!(killed, Err(AppError::Git { code: -1, .. })));
+
+        let message = "error: Could not access 'x'";
+        let missing = diff_contents_result(output(1, "", message));
+        assert!(matches!(missing, Err(AppError::Git { code: 1, stderr }) if stderr == message));
+
+        let diff = "diff --git a b\n@@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(diff_contents_result(output(1, diff, "")).unwrap(), diff);
+        assert_eq!(diff_contents_result(output(0, "", "")).unwrap(), "");
+        assert!(matches!(
+            diff_contents_result(output(2, "", "")),
+            Err(AppError::Git { code: 2, .. })
+        ));
+    }
 
     #[tokio::test]
     async fn private_temp_diff_contents_concurrent_calls_stay_separate() {

@@ -444,7 +444,9 @@ describe("editors open inside a diff hold the layout probe", () => {
         ),
       );
       expect(lineComposerOpen()).toBe(false);
-      await user.click(screen.getByRole("button", { name: "Edit" }));
+      await user.click(
+        screen.getByRole("button", { name: "Edit pending comment" }),
+      );
       expect(lineComposerOpen()).toBe(anchored);
       await user.click(screen.getByRole("button", { name: "Cancel" }));
       await act(async () => undefined);

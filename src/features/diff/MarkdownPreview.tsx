@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { InfoNote } from "@/components/info-note";
 import { Markdown } from "@/components/markdown/markdown";
 import { repoDocBaseDir } from "@/components/markdown/markdown-images";
@@ -53,32 +54,45 @@ export function canPreviewMarkdown(
   );
 }
 
-/** The Raw ⇄ Preview segment pair in the diff toolbar. */
+/** The Raw ⇄ Preview segment pair in the diff toolbar. `heldReason` holds
+ *  both segments, still focusable, with that reason. */
 export function MarkdownViewToggle({
   view,
   onChange,
+  heldReason,
 }: {
   view: MarkdownDiffView;
   onChange: (view: MarkdownDiffView) => void;
+  heldReason?: string;
 }) {
+  const held = heldReason !== undefined;
+  // The wrapper spans carry no `data-slot`, so ButtonGroup's seam and focus
+  // selectors skip them: the segments set the join's `border-l-0` and lift
+  // their own focus ring.
   return (
     <ButtonGroup aria-label="Markdown view">
-      <Button
+      <DisabledReasonButton
         variant={view === "raw" ? "secondary" : "ghost"}
         size="xs"
         aria-pressed={view === "raw"}
+        disabled={held}
+        reason={heldReason}
+        className="focus-visible:relative focus-visible:z-10"
         onClick={() => onChange("raw")}
       >
         Raw
-      </Button>
-      <Button
+      </DisabledReasonButton>
+      <DisabledReasonButton
         variant={view === "preview" ? "secondary" : "ghost"}
         size="xs"
         aria-pressed={view === "preview"}
+        disabled={held}
+        reason={heldReason}
+        className="border-l-0 focus-visible:relative focus-visible:z-10"
         onClick={() => onChange("preview")}
       >
         Preview
-      </Button>
+      </DisabledReasonButton>
     </ButtonGroup>
   );
 }

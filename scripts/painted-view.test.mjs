@@ -58,6 +58,7 @@ const report = (patch, cut, extra = {}) => ({
   truncated: false,
   cut,
   anchors: [],
+  drawn: [],
   ...extra,
 });
 
@@ -98,6 +99,17 @@ function randomCase(seed) {
   // as when a report lags the pane), plus a stray key no comment has.
   const anchors = keys.filter(() => r() < 0.5);
   if (r() < 0.3) anchors.push("new:99");
+  // Drawn items: some comments on a mounted key (a held row draws only its
+  // placement's), plus a stray id no comment has.
+  const drawn = comments
+    .filter(
+      (c) =>
+        c.line !== null &&
+        anchors.includes(anchorKey(c.side, c.line)) &&
+        r() < 0.7,
+    )
+    .map((c) => c.id);
+  if (r() < 0.3) drawn.push("c99");
   const big = pick(PATCHES)();
   const rep =
     r() < 0.15
@@ -114,6 +126,7 @@ function randomCase(seed) {
           truncated: r() < 0.2,
           cut: pick(CUTS),
           anchors: anchors.sort(),
+          drawn: drawn.sort(),
         };
   const pinned = new Set(comments.filter(() => r() < 0.25).map((c) => c.id));
   if (r() < 0.3) pinned.add("not-resolved");
@@ -124,16 +137,12 @@ test("placeComments: each comment placed exactly once, a pinned or unresolved on
   for (let seed = 1; seed <= 3000; seed++) {
     const { comments, report: rep, pinned, patchReady } = randomCase(seed);
     const { listed } = placeComments(comments, rep, pinned, patchReady);
-    const mounted = new Set(rep?.anchors ?? []);
+    const drawn = new Set(rep?.drawn ?? []);
     const listedIds = listed.map((l) => l.comment.id);
     assert.equal(new Set(listedIds).size, listedIds.length, `seed ${seed}`);
     for (const c of comments) {
       const inline =
-        c.line !== null &&
-        !pinned.has(c.id) &&
-        mounted.has(anchorKey(c.side, c.line))
-          ? 1
-          : 0;
+        c.line !== null && !pinned.has(c.id) && drawn.has(c.id) ? 1 : 0;
       const inList = listedIds.includes(c.id) ? 1 : 0;
       assert.equal(inline + inList, 1, `seed ${seed}: ${c.id} placed once`);
       if (pinned.has(c.id) || c.line === null)
@@ -279,7 +288,7 @@ test("placeComments: under no cut, a line the patch holds has no note, and one i
     "unplaced",
   ]);
   // A mounted, unpinned comment is inline; pinned, it stays listed.
-  const mounted = report(patch, null, { anchors: ["new:1"] });
+  const mounted = report(patch, null, { anchors: ["new:1"], drawn: ["p"] });
   assert.deepEqual(
     placeComments([onPatch], mounted, new Set(), true).listed,
     [],
@@ -301,7 +310,11 @@ test("placeComments: a pinned row on a line the patch holds takes no note under 
     for (const whitespaceHidden of [false, true]) {
       const notes = placeComments(
         [onPatch, offPatch],
-        report(patch, cut, { whitespaceHidden, anchors: ["new:250"] }),
+        report(patch, cut, {
+          whitespaceHidden,
+          anchors: ["new:250"],
+          drawn: ["p"],
+        }),
         pinned,
         true,
       ).listed.map((l) => l.reason);
@@ -312,6 +325,23 @@ test("placeComments: a pinned row on a line the patch holds takes no note under 
         `${cut}, -w ${whitespaceHidden}`,
       );
     }
+});
+
+test("placeComments: a comment its line's mounted row does not draw stays listed", () => {
+  const patch = patchWith([], [1, 2, 3]);
+  const a = { id: "a", side: "new", line: 2 };
+  const b = { id: "b", side: "new", line: 2 };
+  // A held row on new:2 draws only its placement's item.
+  const held = report(patch, null, { anchors: ["new:2"], drawn: ["a"] });
+  assert.deepEqual(
+    placeComments([a, b], held, new Set(), true).listed.map((l) => [
+      l.comment.id,
+      l.reason,
+    ]),
+    [["b", null]],
+  );
+  const live = report(patch, null, { anchors: ["new:2"], drawn: ["a", "b"] });
+  assert.deepEqual(placeComments([a, b], live, new Set(), true).listed, []);
 });
 
 test("confirmWhitespace: a whitespace candidate follows the whitespace-shown read", () => {
@@ -375,6 +405,25 @@ test("anchor registry: a key stays mounted until its last row leaves, and only s
   assert.equal(notified, 4, "an unsubscribed listener hears nothing");
 });
 
+test("anchor registry: a row's items stay drawn until the last row drawing them leaves", () => {
+  const registry = createAnchorRegistry();
+  let notified = 0;
+  registry.subscribe(() => notified++);
+  const held = registry.add("new:2", ["a"]);
+  assert.deepEqual(registry.drawn(), ["a"]);
+  const live = registry.add("new:2", ["a", "b"]);
+  assert.deepEqual(registry.snapshot(), ["new:2"]);
+  assert.deepEqual(registry.drawn(), ["a", "b"]);
+  assert.equal(notified, 2, "a new item notifies under a mounted key");
+  held();
+  assert.deepEqual(registry.drawn(), ["a", "b"]);
+  assert.equal(notified, 2);
+  live();
+  assert.deepEqual(registry.drawn(), []);
+  assert.deepEqual(registry.snapshot(), []);
+  assert.equal(notified, 3);
+});
+
 test("painted relay: the newest visible owner's view stands, and an equal view never notifies", () => {
   const relay = createPaintedRelay();
   let notified = 0;
@@ -386,6 +435,7 @@ test("painted relay: the newest visible owner's view stands, and an equal view n
     truncated: false,
     cut: null,
     anchors,
+    drawn: [],
   });
   const held = {};
   const promoted = {};

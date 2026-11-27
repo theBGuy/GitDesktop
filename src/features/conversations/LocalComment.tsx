@@ -1,5 +1,5 @@
 import { DotsThreeIcon, RobotIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Markdown } from "@/components/markdown/markdown";
 import { RelativeTime } from "@/components/relative-time";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { copyText } from "@/lib/clipboard";
 import { CommentEditor } from "./CommentEditor";
+import { useEditorCloseLanding } from "./Thread";
 import type { MentionSource } from "./useMentionCandidates";
 
 /**
@@ -35,8 +36,10 @@ export function LocalComment({
     hidden?: boolean;
   };
   onQuote?: () => void;
-  /** Replaces the comment body in local storage. */
-  onSaveEdit: (body: string) => void;
+  /** Replaces the comment body in local storage and resolves whether it
+   *  saved: the editor stays open, frozen, until it settles, and `false` (or
+   *  a rejection) keeps it open with the draft. */
+  onSaveEdit: (body: string) => boolean | Promise<boolean>;
   /** Removes the comment from local storage. */
   onDelete: () => void;
   /** Collapses the comment (sets its hidden flag). */
@@ -50,9 +53,33 @@ export function LocalComment({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [expanded, setExpanded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // The ref gates a second submit fired before the `saving` render lands.
+  const savingRef = useRef(false);
+  const landing = useEditorCloseLanding(editing);
+  function closeEditor() {
+    landing.arm();
+    setEditing(false);
+  }
+  async function save(): Promise<boolean> {
+    if (savingRef.current) return false;
+    savingRef.current = true;
+    setSaving(true);
+    let saved = false;
+    try {
+      saved = await onSaveEdit(draft.trim());
+    } catch {
+      saved = false;
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+    if (saved) closeEditor();
+    return saved;
+  }
   const hidden = comment.hidden ?? false;
   return (
-    <div className="group space-y-1">
+    <div ref={landing.rootRef} className="group space-y-1">
       <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
         {comment.author && (
           <>
@@ -73,6 +100,7 @@ export function LocalComment({
             <span className="flex-1" />
             <DropdownMenu>
               <DropdownMenuTrigger
+                ref={landing.triggerRef}
                 render={
                   <Button
                     variant="ghost"
@@ -122,11 +150,11 @@ export function LocalComment({
           value={draft}
           onChange={setDraft}
           canSubmit={!!draft.trim() && draft.trim() !== comment.body.trim()}
-          onSubmit={() => {
-            onSaveEdit(draft.trim());
-            setEditing(false);
+          pending={saving}
+          onSubmit={save}
+          onCancel={() => {
+            if (!savingRef.current) closeEditor();
           }}
-          onCancel={() => setEditing(false)}
           textareaClassName="max-h-48 min-h-16 resize-y"
           mentions={mentions}
         />

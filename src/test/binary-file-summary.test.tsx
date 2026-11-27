@@ -25,6 +25,7 @@ import {
 import type { BlobSizes } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
+import { bodies, renderBody } from "./anchor-bodies";
 import { stubCanvas } from "./canvas-stub";
 
 vi.mock("@/lib/git/api", async (importOriginal) => ({
@@ -484,9 +485,10 @@ describe("a split symlink-to-binary typechange", () => {
           isError={false}
           repoPath="/repo"
           anchorCommit={hex(40)}
-          lineAnchors={[
+          renderAnchor={renderBody}
+          lineAnchors={bodies([
             { side: "old", line: 1, render: () => <span>anchored note</span> },
-          ]}
+          ])}
           lineWidget={{ enabled: true, render: widgetRender }}
         />
       </QueryClientProvider>,
@@ -545,9 +547,10 @@ describe("a split binary-to-symlink typechange", () => {
           isError={false}
           repoPath="/repo"
           anchorCommit={hex(40)}
-          lineAnchors={[
+          renderAnchor={renderBody}
+          lineAnchors={bodies([
             { side: "new", line: 1, render: () => <span>anchored note</span> },
-          ]}
+          ])}
         />
       </QueryClientProvider>,
     );

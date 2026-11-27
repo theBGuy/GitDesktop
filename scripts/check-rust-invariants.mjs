@@ -418,12 +418,6 @@ const STDERR_ONLY_ALLOWLIST = [
     rationale: "`grep` read — stdout is the match list, never a report",
   },
   {
-    file: "git/conflict.rs",
-    fn: "git_diff_contents",
-    rationale:
-      "`show`/`cat-file` read — stdout is the file content being parsed",
-  },
-  {
     file: "git/diff.rs",
     fn: "git_diff_file",
     rationale: "`diff` read — stdout is the patch being parsed",

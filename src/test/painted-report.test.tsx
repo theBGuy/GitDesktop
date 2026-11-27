@@ -31,6 +31,7 @@ import type { FileDiff } from "@/lib/git/types";
 import { type AppSettings, loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
+import { bodies, renderBody } from "./anchor-bodies";
 import { stubCanvas } from "./canvas-stub";
 import { unmockedCommands } from "./setup";
 
@@ -102,11 +103,14 @@ const bytes = (s: string): FileBytes => ({
   size: s.length,
 });
 /** An anchor whose row shows its own report key, so the DOM names it. */
-const anchor = (side: "old" | "new", line: number): DiffLineAnchor => ({
-  side,
-  line,
-  render: () => <span>{`${side}:${line}`}</span>,
-});
+const anchor = (side: "old" | "new", line: number): DiffLineAnchor =>
+  bodies([
+    {
+      side,
+      line,
+      render: () => <span>{`${side}:${line}`}</span>,
+    },
+  ])[0];
 /** The keys of the anchor rows mounted now, read off the DOM. */
 const domKeys = () =>
   [...document.querySelectorAll("[data-diff-anchor]")]
@@ -169,6 +173,7 @@ describe("a slot's painted report names the anchor rows mounted, never lines rea
         data={diff(p, LONG)}
         isPending={false}
         isError={false}
+        renderAnchor={renderBody}
         lineAnchors={anchors}
       />
     ));
@@ -204,6 +209,7 @@ describe("a slot's painted report names the anchor rows mounted, never lines rea
         isError={false}
         repoPath="/repo"
         contentRevs={{ oldRev: "A", newRev: "B" }}
+        renderAnchor={renderBody}
         lineAnchors={anchors}
       />
     ));
@@ -233,6 +239,7 @@ describe("a slot's painted report names the anchor rows mounted, never lines rea
         data={diff(p, SHORT)}
         isPending={false}
         isError={false}
+        renderAnchor={renderBody}
         lineAnchors={anchors}
       />
     ));
@@ -263,6 +270,7 @@ describe("arms that mount no anchor rows report none", () => {
         data={diff(p, MEGA)}
         isPending={false}
         isError={false}
+        renderAnchor={renderBody}
         lineAnchors={anchors}
       />
     ));
@@ -286,6 +294,7 @@ describe("arms that mount no anchor rows report none", () => {
         isError={false}
         repoPath="/repo"
         previewRev="B"
+        renderAnchor={renderBody}
         lineAnchors={anchors}
       />
     ));
@@ -312,6 +321,7 @@ describe("arms that mount no anchor rows report none", () => {
         data={undefined}
         isPending
         isError={false}
+        renderAnchor={renderBody}
         lineAnchors={anchors}
       />
     ));
@@ -328,6 +338,7 @@ describe("arms that mount no anchor rows report none", () => {
         isError={false}
         repoPath="/repo"
         contentRevs={{ oldRev: "A", newRev: "B" }}
+        renderAnchor={renderBody}
         lineAnchors={anchors}
       />
     ));
@@ -340,16 +351,17 @@ describe("arms that mount no anchor rows report none", () => {
   it("reports nothing mounted once the renderer's error fallback replaces the rows", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const boom = { on: false };
-    const throwing = (): DiffLineAnchor[] => [
-      {
-        side: "new",
-        line: 2,
-        render: () => {
-          if (boom.on) throw new Error("renderer failed");
-          return <span>new:2</span>;
+    const throwing = (): DiffLineAnchor[] =>
+      bodies([
+        {
+          side: "new",
+          line: 2,
+          render: () => {
+            if (boom.on) throw new Error("renderer failed");
+            return <span>new:2</span>;
+          },
         },
-      },
-    ];
+      ]);
     const h = harness();
     const rerender = h.mount("a.txt", (p) => (
       <DiffContent
@@ -357,6 +369,7 @@ describe("arms that mount no anchor rows report none", () => {
         data={diff(p, SHORT)}
         isPending={false}
         isError={false}
+        renderAnchor={renderBody}
         lineAnchors={throwing()}
       />
     ));
@@ -368,6 +381,7 @@ describe("arms that mount no anchor rows report none", () => {
         data={diff(p, SHORT)}
         isPending={false}
         isError={false}
+        renderAnchor={renderBody}
         lineAnchors={throwing()}
       />
     ));
@@ -391,6 +405,7 @@ describe("the slot relay", () => {
           data={diff(p, SHORT)}
           isPending={false}
           isError={false}
+          renderAnchor={renderBody}
           lineAnchors={[anchor("new", 2)]}
         />
       </Suspense>
@@ -411,6 +426,7 @@ describe("the slot relay", () => {
           data={diff(p, SHORT)}
           isPending={false}
           isError={false}
+          renderAnchor={renderBody}
           lineAnchors={anchors}
         />
       ) : (
@@ -420,6 +436,7 @@ describe("the slot relay", () => {
           data={undefined}
           isPending
           isError={false}
+          renderAnchor={renderBody}
           lineAnchors={anchors}
         />
       );
