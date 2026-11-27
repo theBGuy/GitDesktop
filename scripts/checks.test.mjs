@@ -5712,6 +5712,124 @@ test("marker branches follow one same-file override helper", () => {
   );
 });
 
+const crossFileHolder = `${markerHolder('"feature"', "x_root(&root);")}
+    fn victim() { switch("feature"); }`;
+const crossFileHelper = (setup) => [
+  { file: "holder.rs", src: crossFileHolder },
+  {
+    file: "helpers.rs",
+    src: `#[cfg(test)] mod tests { pub(crate) fn x_root(root: &Path) { ${setup} } }`,
+  },
+];
+
+test("marker branches follow an override helper defined in another corpus file", () => {
+  const hits = markerBranchHits(
+    crossFileHolder,
+    "",
+    crossFileHelper("TestRootOverride::set(root);"),
+  );
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "holder");
+  assert.match(hits[0].fix, /unique/);
+});
+
+test("marker branches skip a site whose other-file helper sets no override", () => {
+  assert.equal(
+    markerBranchHits(crossFileHolder, "", crossFileHelper("let _ = root;"))
+      .length,
+    0,
+  );
+});
+
+test("marker branches fail closed on a corpus file that does not lex", () => {
+  const hits = markerBranchHits(
+    crossFileHolder,
+    "",
+    crossFileHelper('TestRootOverride::set(root); let _ = "open;'),
+  );
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].file, "helpers.rs");
+  assert.equal(hits[0].fn, "<unreadable>");
+  assert.match(hits[0].fix, /closed literals and comments.*helpers\.rs/);
+});
+
+test("marker branches read other rows only for a site that needs a helper", () => {
+  const holder = markerHolder('"held-alone"');
+  const corpus = [
+    { file: "holder.rs", src: holder },
+    { file: "helpers.rs", src: 'fn open() { let _ = "open; }' },
+  ];
+  assert.equal(markerBranchHits(holder, "", corpus).length, 0);
+  const own = [];
+  checkTestMarkerBranches("helpers.rs", corpus[1].src, [], own, corpus);
+  assert.equal(own.length, 1);
+  assert.equal(own[0].file, "helpers.rs");
+  assert.equal(own[0].fn, "<unreadable>");
+  assert.match(own[0].fix, /closed literals and comments/);
+});
+
+test("marker branches key other-file helpers on the file's text, not its path", () => {
+  const installs = crossFileHelper("TestRootOverride::set(root);");
+  assert.equal(markerBranchHits(crossFileHolder, "", installs).length, 1);
+  const edited = crossFileHelper("let _ = root;");
+  assert.equal(edited[1].file, installs[1].file);
+  assert.equal(markerBranchHits(crossFileHolder, "", edited).length, 0);
+});
+
+// Check I prints OK when it stops evaluating a site, so the real tree must keep every named
+// site; a duplicate row of the scanned text turns each evaluated site into a hit.
+test("check I still evaluates every named test-held marker site in the real tree", () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const corpus = readdirSync(join(root, "src-tauri/src"), { recursive: true })
+    .map((entry) => String(entry).split("\\").join("/"))
+    .filter((file) => file.endsWith(".rs"))
+    .sort()
+    .map((file) => ({
+      file,
+      src: readFileSync(join(root, "src-tauri/src", file), "utf8").replace(
+        /\r\n/g,
+        "\n",
+      ),
+    }));
+  const missing = (rows) => {
+    const evaluated = new Set();
+    for (const row of rows) {
+      if (!row.src.includes("create_for")) continue;
+      const hits = [];
+      checkTestMarkerBranches(row.file, row.src, [], hits, [
+        ...rows,
+        { file: "<duplicate>", src: row.src },
+      ]);
+      for (const hit of hits)
+        if (hit.fn !== "<unreadable>") evaluated.add(`${hit.file} ${hit.fn}`);
+    }
+    return [
+      "git/autostash.rs a_refused_switch_never_stashes",
+      "git/branches/in_use.rs a_live_marker_refuses_delete_and_reset_before_the_checkout_exists",
+      "git/branches/in_use.rs update_holder_refusal_classifies_without_claiming",
+      "git/branches/rename.rs a_rename_that_waited_refuses_an_update_started_during_the_wait",
+      "git/ops.rs rebase_refused_after_replay",
+      "git/ops.rs finalize_base_refuses_while_an_update_holds_the_base_branch",
+      "git/pr_checkout.rs plain_refuses_while_an_update_holds_the_branch",
+    ].filter((site) => !evaluated.has(site));
+  };
+  assert.deepEqual(missing(corpus), [], "check I stopped evaluating these sites");
+  // m1: holder_marker_root no longer installing the override drops rename.rs's site.
+  const mod = corpus.findIndex((row) => row.file === "git/branches/mod.rs");
+  const unset = corpus[mod].src.replace(
+    "TestRootOverride::set(",
+    "TestRootOverride::unset(",
+  );
+  assert.notEqual(unset, corpus[mod].src, "m1 changed nothing");
+  assert.deepEqual(
+    missing(corpus.with(mod, { file: corpus[mod].file, src: unset })),
+    [
+      "git/branches/rename.rs a_rename_that_waited_refuses_an_update_started_during_the_wait",
+    ],
+    "m1",
+  );
+});
+
 test("marker branches fail closed on unresolved second arguments", () => {
   for (const arg of [
     'format!("branch-{}", id)',
@@ -6068,7 +6186,7 @@ test("merge guard ignores test modules and literals but scans production after t
 
 test("merge guard allowlists only the named fresh-checkout function", () => {
   const src = 'async fn verify_pin_and_merge() { run(&["merge", sha]); }';
-  const hits = mergeGuardHits(src, "git/branches.rs");
+  const hits = mergeGuardHits(src, "git/branches/update.rs");
   assert.equal(hits.length, 1);
   assert.equal(hits[0].allowlisted, true);
   assert.equal(mergeGuardHits(src, "fixture.rs")[0].allowlisted, false);
@@ -8435,16 +8553,16 @@ test("branch-delete check honours its allowlist by file and fn", () => {
     "}",
   ].join("\n");
   const verdicts = (list) =>
-    branchDeleteHits(src, list, "git/branches.rs").map((h) => [h.fn, h.allowlisted]);
+    branchDeleteHits(src, list, "git/branches/delete.rs").map((h) => [h.fn, h.allowlisted]);
   const row = (file) => [{ file, fn: "primitive", rationale: "r" }];
   assert.deepEqual(
-    branchDeleteHits(src, [], "git/branches.rs").map((h) => [h.fn, h.line]),
+    branchDeleteHits(src, [], "git/branches/delete.rs").map((h) => [h.fn, h.line]),
     [
       ["primitive", 2],
       ["other", 5],
     ],
   );
-  assert.deepEqual(verdicts(row("git/branches.rs")), [
+  assert.deepEqual(verdicts(row("git/branches/delete.rs")), [
     ["primitive", true],
     ["other", false],
   ]);
@@ -8525,7 +8643,7 @@ test("branch-delete check's corpus records the primitive's own delete", () => {
   const group = 'run(&["update-ref", "--no-deref", "-d", &full_ref, tip]);';
   const primitive = (name = "delete_branch_ref_at", body = group) =>
     [`async fn ${name}(repo: &str, full_ref: &str, tip: &str) {`, `    ${body}`, "}"].join("\n");
-  const corpusOf = (src, file = "git/branches.rs", corpus = { primitive: false }) => {
+  const corpusOf = (src, file = "git/branches/delete.rs", corpus = { primitive: false }) => {
     branchDeleteHits(src, [], file, corpus);
     return corpus;
   };
@@ -8553,7 +8671,7 @@ test("branch-delete check's empty corpus is a hit, never a pass", () => {
     reportEmptyBranchDeleteScope(hits, corpus);
     assert.deepEqual(
       hits.map((h) => [h.file, h.fn, h.allowlisted]),
-      [["git/branches.rs", "<empty scope>", false]],
+      [["git/branches/delete.rs", "<empty scope>", false]],
     );
     assert.equal(hits[0].line, 0);
     assert.equal(hits[0].failClosed, true);
@@ -8566,12 +8684,12 @@ test("branch-delete check's empty corpus is a hit, never a pass", () => {
 
 test("branch-delete check goes red on an in-memory mutation of the real primitive", () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const src = readFileSync(join(root, "src-tauri/src/git/branches.rs"), "utf8")
+  const src = readFileSync(join(root, "src-tauri/src/git/branches/delete.rs"), "utf8")
     .split("\r\n")
     .join("\n");
   const run = (text) => {
     const corpus = { primitive: false };
-    const hits = branchDeleteHits(text, LOCAL_BRANCH_DELETE_ALLOWLIST, "git/branches.rs", corpus);
+    const hits = branchDeleteHits(text, LOCAL_BRANCH_DELETE_ALLOWLIST, "git/branches/delete.rs", corpus);
     return { pairs: hits.map((h) => [h.fn, h.allowlisted]), primitive: corpus.primitive };
   };
   assert.deepEqual(run(src), {
@@ -9373,7 +9491,7 @@ test("check L allowlists a (file, fn) row and reports a stale row", () => {
   assert.deepEqual(splitStaleEntries([row], hits).failing, []);
   // Another file's row never covers this one.
   assert.deepEqual(
-    hangGuardHits(src, "git/branches.rs", [row]).map((h) => h.allowlisted),
+    hangGuardHits(src, "git/branches/mod.rs", [row]).map((h) => h.allowlisted),
     [false, false],
   );
   // A row whose function no longer passes DEFAULT_TIMEOUT is stale.

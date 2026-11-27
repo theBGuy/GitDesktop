@@ -1066,7 +1066,7 @@ pub async fn git_reset(
 }
 
 /// The refusal a reset gets when HEAD is no longer the tip the user confirmed.
-/// KEEP IN STEP: one wording family with branches.rs's ref-move refusals (reset and
+/// KEEP IN STEP: one wording family with branches/'s ref-move refusals (reset and
 /// delete) and commit.rs's `UNDO_HEAD_MOVED` ("… — nothing was <verb>.").
 const RESET_HEAD_MOVED: &str = "The branch changed since you confirmed — nothing was reset.";
 
@@ -3993,7 +3993,7 @@ pub(crate) async fn classify_failure(
 /// A short, stable hash of a repo key, kept in sync BY HAND with
 /// `worktree.rs::repo_hash` (both hash the lower-cased key with `DefaultHasher`) —
 /// `ops_and_worktree_repo_hash_agree` is what enforces that by-hand sync.
-/// Resolve worktrees — and `branches.rs`'s `gd-update-*` checkouts — must land
+/// Resolve worktrees — and `branches/update.rs`'s `gd-update-*` checkouts — must land
 /// under the same `<app_data>/worktrees/<hash>` root, because that placement
 /// is what makes `git_worktree_list_user` hide them from the user-facing worktree
 /// manager (`is_session_worktree`'s app-data check).

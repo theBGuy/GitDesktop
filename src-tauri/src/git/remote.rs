@@ -2341,7 +2341,7 @@ pub(crate) fn parse_upstream_tracking(
     let upstream = upstream_from_remoteref(parts.next().unwrap_or(""));
     let remotename = parts.next().unwrap_or("").to_string();
     let track = parts.next().unwrap_or("");
-    // Mirror branches.rs's gone detection: `[gone]` in %(upstream:track).
+    // Mirror branches/listing.rs's gone detection: `[gone]` in %(upstream:track).
     Some((upstream, remotename, track.contains("[gone]")))
 }
 
@@ -5143,7 +5143,78 @@ mod tests {
         let bitbucket = production_text(include_str!("../forge/bitbucket.rs"));
         let files = [
             ("ops.rs", ops.clone()),
-            ("branches.rs", production_text(include_str!("branches.rs"))),
+            (
+                "branches/config_repair.rs",
+                production_text(include_str!("branches/config_repair.rs")),
+            ),
+            (
+                "branches/create_checkout.rs",
+                production_text(include_str!("branches/create_checkout.rs")),
+            ),
+            (
+                "branches/default_branch.rs",
+                production_text(include_str!("branches/default_branch.rs")),
+            ),
+            (
+                "branches/delete.rs",
+                production_text(include_str!("branches/delete.rs")),
+            ),
+            (
+                "branches/divergence.rs",
+                production_text(include_str!("branches/divergence.rs")),
+            ),
+            (
+                "branches/in_use.rs",
+                production_text(include_str!("branches/in_use.rs")),
+            ),
+            (
+                "branches/listing.rs",
+                production_text(include_str!("branches/listing.rs")),
+            ),
+            (
+                "branches/marks.rs",
+                production_text(include_str!("branches/marks.rs")),
+            ),
+            (
+                "branches/mod.rs",
+                production_text(include_str!("branches/mod.rs")),
+            ),
+            (
+                "branches/names.rs",
+                production_text(include_str!("branches/names.rs")),
+            ),
+            (
+                "branches/refs.rs",
+                production_text(include_str!("branches/refs.rs")),
+            ),
+            (
+                "branches/remote_branch.rs",
+                production_text(include_str!("branches/remote_branch.rs")),
+            ),
+            (
+                "branches/rename.rs",
+                production_text(include_str!("branches/rename.rs")),
+            ),
+            (
+                "branches/renamed_copy.rs",
+                production_text(include_str!("branches/renamed_copy.rs")),
+            ),
+            (
+                "branches/spelling.rs",
+                production_text(include_str!("branches/spelling.rs")),
+            ),
+            (
+                "branches/unpushed.rs",
+                production_text(include_str!("branches/unpushed.rs")),
+            ),
+            (
+                "branches/update.rs",
+                production_text(include_str!("branches/update.rs")),
+            ),
+            (
+                "branches/upstream_rewrite.rs",
+                production_text(include_str!("branches/upstream_rewrite.rs")),
+            ),
             ("remote.rs", production_text(include_str!("remote.rs"))),
             (
                 "autostash.rs",
@@ -5174,11 +5245,61 @@ mod tests {
             let body = wiring_body(text, name);
             assert!(roster_holds(&body, branch, count), "{name}:\n{body}");
         }
-        let mut flagged = Vec::new();
-        for (file, text) in &files {
-            assert!(!column0_fns(text).is_empty(), "{file}: no fn read");
-            flagged.extend(unrechecked_pushes(text));
+        // The branches/ entries must name every file in that folder, so a new seam cannot
+        // escape the scan; this runs before the scan so a missed file is the first failure.
+        let listed = |files: &[(&str, String)]| -> std::collections::BTreeSet<String> {
+            files
+                .iter()
+                .filter_map(|(file, _)| file.strip_prefix("branches/"))
+                .map(str::to_string)
+                .collect()
+        };
+        let git_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/git");
+        let mut on_disk = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(git_dir.join("branches")).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            assert!(
+                !entry.file_type().unwrap().is_dir(),
+                "src/git/branches/{name} is a folder the roster cannot list"
+            );
+            if name.ends_with(".rs") {
+                on_disk.insert(name);
+            }
         }
+        assert_eq!(
+            listed(&files),
+            on_disk,
+            "the roster's branches/ entries differ from the files in src/git/branches"
+        );
+        // Each branches/ label must carry its own file's text, so a mislabeled include_str!
+        // cannot hide the seam it should have read.
+        let mislabeled = |files: &[(&str, String)]| -> Vec<String> {
+            let mut wrong = Vec::new();
+            for (file, text) in files {
+                if file.starts_with("branches/") {
+                    let disk = std::fs::read_to_string(git_dir.join(file)).unwrap();
+                    if *text != production_text(&disk) {
+                        wrong.push(file.to_string());
+                    }
+                }
+            }
+            wrong
+        };
+        let wrong = mislabeled(&files);
+        assert!(
+            wrong.is_empty(),
+            "roster texts differ from their labels' files: {wrong:?}"
+        );
+        let flag = |files: &[(&str, String)]| {
+            let mut flagged = Vec::new();
+            for (file, text) in files {
+                assert!(!column0_fns(text).is_empty(), "{file}: no fn read");
+                flagged.extend(unrechecked_pushes(text));
+            }
+            flagged
+        };
+        let mut flagged = flag(&files);
         flagged.sort();
         let mut exempt = EXEMPT.map(str::to_string).to_vec();
         exempt.sort();
@@ -5223,6 +5344,34 @@ mod tests {
                 .iter()
                 .all(|name| EXEMPT.contains(&name.as_str())),
             "m4"
+        );
+        // m5: a roster missing one branches/ file fails the set comparison.
+        let m5: Vec<(&str, String)> = files
+            .iter()
+            .filter(|(file, _)| *file != "branches/update.rs")
+            .cloned()
+            .collect();
+        assert_ne!(listed(&m5), on_disk, "m5");
+        // m6: a plain-runner push planted in one seam's text is flagged.
+        const PLANTED: &str =
+            "\nasync fn planted() { run_git_mutating_with_creds(s, r, &[], &[\"push\", \"o\", \"b\"], T).await }\n";
+        let mut m6 = files.clone();
+        for (file, text) in &mut m6 {
+            if *file == "branches/update.rs" {
+                text.push_str(PLANTED);
+            }
+        }
+        assert!(flag(&m6).contains(&"planted".to_string()), "m6");
+        // m7: two seams' texts swapped under their labels are both reported.
+        let at = |name: &str| files.iter().position(|(file, _)| *file == name).unwrap();
+        let mut m7 = files.clone();
+        let (update, refs) = (at("branches/update.rs"), at("branches/refs.rs"));
+        let text = std::mem::take(&mut m7[update].1);
+        m7[update].1 = std::mem::replace(&mut m7[refs].1, text);
+        assert_eq!(
+            mislabeled(&m7),
+            ["branches/refs.rs", "branches/update.rs"],
+            "m7"
         );
     }
 

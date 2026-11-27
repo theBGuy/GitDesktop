@@ -105,7 +105,7 @@
 //      `-`-led literal other than --, --no-deref, --create-reflog, --stdin or
 //      a cluster of letters (--deref and -0 refuse, -Q is read past); a missing
 //      operand. The check fails when it cannot find the primitive's own delete
-//      in git/branches.rs. Allowlist rows are per function, so a second delete
+//      in git/branches/delete.rs. Allowlist rows are per function, so a second delete
 //      in an allowlisted function is not reported. A `#[cfg(test)] fn` outside
 //      a test module reads as production (reported, never missed). The branch
 //      scan skips the separate value of --sort, --format, --points-at,
@@ -173,48 +173,48 @@ const REFSPEC_ALLOWLIST = [
       "Bitbucket REST path, not a git refspec — every segment is encode_query_value'd",
   },
   {
-    file: "git/branches.rs",
+    file: "git/branches/refs.rs",
     fn: "branch_full_ref",
     rationale:
       "validates with validate_branch_name at fn entry; the full ref is a for-each-ref pattern (the exact tip read and the deleted branch's upstream read), a show-ref --verify tip read, and update-ref's compare-and-delete and put-back target, never a refspec",
   },
   {
-    file: "git/branches.rs",
+    file: "git/branches/default_branch.rs",
     fn: "git_default_branch",
     rationale: "interpolates only the fixed literals main/master",
   },
   {
-    file: "git/branches.rs",
+    file: "git/branches/unpushed.rs",
     fn: "git_unpushed_count",
     rationale:
       "interpolates only git_default_branch's own output: a remote HEAD's target or the literals main/master",
   },
   {
-    file: "git/branches.rs",
+    file: "git/branches/divergence.rs",
     fn: "git_branch_merge_states",
     rationale:
       "validates each pair's head/base with validate_branch_name inline",
   },
   {
-    file: "git/branches.rs",
+    file: "git/branches/upstream_rewrite.rs",
     fn: "branch_rewrite_status",
     rationale:
       "read-only `rev-list --walk-reflogs` of the branch (never a refspec); validates with validate_branch_name at fn entry",
   },
   {
-    file: "git/branches.rs",
+    file: "git/branches/upstream_rewrite.rs",
     fn: "branch_reset_to_upstream_within",
     rationale:
       "validates with validate_branch_name at fn entry; the full ref is update-ref's compare-and-swap target, never a refspec",
   },
   {
-    file: "git/branches.rs",
+    file: "git/branches/update.rs",
     fn: "update_branch_from",
     rationale:
       "the fast-forward's local `fetch .` destination; validates branch and base with validate_branch_name at fn entry",
   },
   {
-    file: "git/branches.rs",
+    file: "git/branches/remote_branch.rs",
     fn: "git_delete_remote_branch_core",
     rationale:
       "validates remote and name via refuse_remote_branch_delete at fn entry; the full ref is the push --delete destination",
@@ -408,7 +408,7 @@ const STDERR_ONLY_ALLOWLIST = [
     rationale: "`check-ignore` read — stdout is the match list, never a report",
   },
   {
-    file: "git/branches.rs",
+    file: "git/branches/marks.rs",
     fn: "set_branch_archived_core",
     rationale: "`config` write — no working-tree operation to half-finish",
   },
@@ -475,7 +475,7 @@ const COMPARE_ENDPOINT_ALLOWLIST = [
 // reading each one.
 const SHORT_REF_ALLOWLIST = [
   {
-    file: "git/branches.rs",
+    file: "git/branches/listing.rs",
     fn: "git_branches",
     rationale:
       "`%(upstream:short)` is a REV use: the UI hands it back as a rev, and the disambiguated short form resolves correctly where a stripped bare name would resolve to a same-named tag",
@@ -1425,7 +1425,7 @@ export const MERGE_GUARD_ALLOWLIST = [
       "GitLab merge-method names an MR input is validated against, never a git argv",
   },
   {
-    file: "git/branches.rs",
+    file: "git/branches/update.rs",
     fn: "verify_pin_and_merge",
     rationale: "fresh gd-update checkout, with no user's ignored files",
   },
@@ -2528,11 +2528,14 @@ export function checkMergeIgnoredGuard(
 // a reviewed allowlist rationale must establish why such a holder is private.
 
 // testModuleSpans misses #[cfg(all(unix, test))] and out-of-line `mod tests;` files.
-// Delegation covers one same-file level only. Exact quoted literals miss victims
-// using "refs/heads/<name>" or larger literals containing the marker branch name.
+// Exact quoted literals miss victims using "refs/heads/<name>" or larger literals
+// containing the marker branch name.
 
-// Reverse delegation is skipped: a test-module helper that mints a marker
-// is not checked when only its caller installs the override.
+// Delegation is one level: a site's function installs the override when it calls,
+// by bare name, a function whose own body sets TestRootOverride in any corpus file,
+// so a same-named function anywhere counts and only adds evaluated sites. Other rows
+// are read only when a site needs a helper, failing closed on one that does not lex;
+// each file also fails its own scan. Helper-of-helper and reverse delegation are skipped.
 
 // Binding resolution uses the last same-named let before the call, even when
 // that binding belongs to an already-closed inner block.
@@ -2558,6 +2561,28 @@ function markerCorpus(file, src) {
     file: key,
     src: key === file ? src : value,
   }));
+}
+
+const TEST_ROOT_OVERRIDE = /\bTestRootOverride\s*::\s*set\s*\(/;
+const overrideHelperNames = new Map();
+
+// Keyed on the row's exact text, so an injected corpus never reads names lexed
+// from other text; null marks a row that does not lex.
+function overrideHelpersOf(text) {
+  if (!overrideHelperNames.has(text)) {
+    const { masked, unterminated } = lexRust(text);
+    overrideHelperNames.set(
+      text,
+      unterminated >= 0
+        ? null
+        : rustFunctions(masked)
+            .filter((fn) =>
+              TEST_ROOT_OVERRIDE.test(masked.slice(fn.open + 1, fn.close)),
+            )
+            .map((fn) => fn.name),
+    );
+  }
+  return overrideHelperNames.get(text);
 }
 
 export function checkTestMarkerBranches(file, src, _lines, hits, corpus) {
@@ -2609,13 +2634,32 @@ export function checkTestMarkerBranches(file, src, _lines, hits, corpus) {
   const tests = testModuleSpans(masked);
   const functions = rustFunctions(masked);
   const body = (fn) => masked.slice(fn.open + 1, fn.close);
-  const override = /\bTestRootOverride\s*::\s*set\s*\(/;
-  const helpers = functions.filter((fn) => override.test(body(fn)));
-  const installsOverride = (fn) =>
-    override.test(body(fn)) ||
-    helpers.some((helper) =>
-      new RegExp(String.raw`\b${helper.name}\s*\(`).test(body(fn)),
+  const override = TEST_ROOT_OVERRIDE;
+  // Resolved on the first site that needs a helper, so a file without one
+  // lexes no other corpus row.
+  let helpers;
+  let unreadableRow;
+  const resolveHelpers = () => {
+    helpers = new Set(
+      functions.filter((fn) => override.test(body(fn))).map((fn) => fn.name),
     );
+    for (const row of sources) {
+      if (row.file === file) continue;
+      const names = overrideHelpersOf(row.src);
+      if (names === null) {
+        unreadableRow = row.file;
+        return;
+      }
+      for (const name of names) helpers.add(name);
+    }
+  };
+  const installsOverride = (fn) => {
+    if (override.test(body(fn))) return true;
+    if (!helpers) resolveHelpers();
+    return [...helpers].some((name) =>
+      new RegExp(String.raw`\b${name}\s*\(`).test(body(fn)),
+    );
+  };
   const literal = /^"(?:\\.|[^"\\])*"$/;
   for (const site of masked.matchAll(
     /\bUpdateMarker\s*::\s*create_for\s*\(/g,
@@ -2636,7 +2680,18 @@ export function checkTestMarkerBranches(file, src, _lines, hits, corpus) {
       );
       continue;
     }
-    if (!installsOverride(fn)) continue;
+    const installs = installsOverride(fn);
+    if (unreadableRow !== undefined) {
+      hits.push({
+        file: unreadableRow,
+        line: 0,
+        fn: "<unreadable>",
+        allowlisted: allowed(TEST_MARKER_ALLOWLIST, unreadableRow, "<unreadable>"),
+        fix: `check I requires closed literals and comments in every corpus file (${unreadableRow})`,
+      });
+      return;
+    }
+    if (!installs) continue;
     const args = [];
     let start = site.index + site[0].length;
     let depth = 0;
@@ -3362,7 +3417,7 @@ export function reportEmptyHangGuardScope(hits, corpus) {
 // reading each site.
 export const LOCAL_BRANCH_DELETE_ALLOWLIST = [
   {
-    file: "git/branches.rs",
+    file: "git/branches/delete.rs",
     fn: "delete_branch_ref_at",
     rationale:
       "the guarded primitive itself: `update-ref --no-deref -d` at the measured tip, inside the config-write lock after refuse_if_branch_in_use, with a read-after-delete put-back (restore_deleted_ref)",
@@ -3416,7 +3471,7 @@ const OPAQUE_DELETE_REF_FIX =
   "template, route a branch delete through delete_branch_ref_at, or allowlist " +
   "with a rationale naming what the ref is and why the primitive does not apply";
 const BRANCH_DELETE_SCOPE_FIX =
-  "check M saw no `update-ref -d` in git/branches.rs fn delete_branch_ref_at — " +
+  "check M saw no `update-ref -d` in git/branches/delete.rs fn delete_branch_ref_at — " +
   "update check M to the primitive's new name or home (never remove its " +
   "allowlist row to silence this)";
 // git branch's delete flags: --delete or a prefix of it git accepts (--d at
@@ -3529,7 +3584,7 @@ function deleteRefFix(element, noDeref) {
 }
 
 /** Check M over one file. `corpus.primitive` turns true on reading the
- *  primitive's own `update-ref -d` group (git/branches.rs, fn
+ *  primitive's own `update-ref -d` group (git/branches/delete.rs, fn
  *  delete_branch_ref_at), which reportEmptyBranchDeleteScope requires. */
 export function checkLocalBranchDeletes(
   file,
@@ -3622,7 +3677,7 @@ export function checkLocalBranchDeletes(
     if (values[verb] === "branch") {
       if (branchFlag) report(at, name, LOCAL_BRANCH_DELETE_FIX);
     } else if (values[verb] === "update-ref" && refDelete) {
-      if (corpus && file === "git/branches.rs" && name === "delete_branch_ref_at")
+      if (corpus && file === "git/branches/delete.rs" && name === "delete_branch_ref_at")
         corpus.primitive = true;
       const { ref, noDeref } = updateRefOperand(
         elements.slice(verb + 1),
@@ -3639,7 +3694,7 @@ export function checkLocalBranchDeletes(
 export function reportEmptyBranchDeleteScope(hits, corpus) {
   if (corpus?.primitive !== true)
     hits.push({
-      file: "git/branches.rs",
+      file: "git/branches/delete.rs",
       line: 0,
       fn: "<empty scope>",
       allowlisted: false,
