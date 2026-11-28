@@ -8,7 +8,7 @@
  *  explicit retrack (the mismatch menu's publish item). Drives ROUTING and the
  *  publish confirm's gate; success toasts claim outcomes through pushOutcome /
  *  pushSuccessCopy, never this flag alone. KEEP IN STEP with the backend's
- *  publish arm (`build_push_args`, git/remote.rs) and the twin predicate
+ *  publish arm (`build_push_args`, git/remote/push.rs) and the twin predicate
  *  branchPushLabel inlines (push-writes.ts). */
 export function willPublish(b: {
   upstream: string | null;
@@ -42,7 +42,7 @@ export function remoteHasBranch(
 }
 
 // The push-destination contract and its out-of-contract classes live on
-// `resolve_push_target` (git/remote.rs). This file claims a create only from
+// `resolve_push_target` (git/remote/push.rs). This file claims a create only from
 // facts git reports (remote-tracking refs as of the last fetch), with no network
 // read.
 

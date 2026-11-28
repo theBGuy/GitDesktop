@@ -1849,7 +1849,7 @@ mod tests {
         assert!(github_credential_entries("github.com;evil", "/abs/gh").is_empty());
     }
 
-    // --- gh-auth TTL cache (mirrors remote.rs's cache tests). Distinct host keys
+    // --- gh-auth TTL cache (mirrors remote/remotes.rs's cache tests). Distinct host keys
     // per test — the cache is a process-wide static shared across all tests. ---
 
     const BIG: std::time::Duration = std::time::Duration::from_secs(3600);
