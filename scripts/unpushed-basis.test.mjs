@@ -11,7 +11,7 @@
 // basis. HistoryPanel's wiring of the helpers is pinned by source shape (code
 // only, comments and strings masked, each pin proven by an in-memory mutated
 // copy). Not testable here: the Rust side's choice of basis (pinned by
-// branches.rs's unpushed tests).
+// branches/unpushed.rs's unpushed tests).
 //
 // The import reaches straight into `src/` under Node's type stripping, so the
 // module must stay free of runtime imports.

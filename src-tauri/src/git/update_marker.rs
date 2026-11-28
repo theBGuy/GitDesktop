@@ -41,7 +41,7 @@ use crate::git::runner::{
 };
 use crate::state::AppState;
 
-/// The basename prefix every update mint carries (`branches.rs::update_worktree_path`).
+/// The basename prefix every update mint carries (`branches/update.rs::update_worktree_path`).
 /// It is the NAME filter for every claim and must never widen — the same root holds the
 /// user's `gd/session/*` agent worktrees. It is only the first gate: a claim also has to
 /// pass the root-scope check, the lock probe, and (for the markerless shape) the age
@@ -160,7 +160,7 @@ impl MarkerRoots {
 }
 
 /// The roots this module works in. Every entry point — and the mint in
-/// `branches.rs::update_worktree_path` — resolves through here, so a test can point the
+/// `branches/update.rs::update_worktree_path` — resolves through here, so a test can point the
 /// whole module at a temp directory.
 ///
 /// Outside tests the primary root hashes [`crate::git::repo::repo_identity`]'s output,
@@ -208,7 +208,7 @@ pub(crate) async fn roots_for(repo_path: &str) -> AppResult<MarkerRoots> {
 
 /// [`roots_for`] with the identity served from AppState's lock-key cache — for
 /// guard and claim sites that run in bulk (branch cleanup deletes one branch per
-/// call). The MINT (`branches.rs::update_worktree_path` via [`root_for`]) stays on
+/// call). The MINT (`branches/update.rs::update_worktree_path` via [`root_for`]) stays on
 /// the uncached resolver: a checkout must never be placed under a stale root.
 /// Identity errors propagate to each caller's advisory or mint policy.
 ///
@@ -770,7 +770,7 @@ pub(crate) async fn sweep_orphaned_update_worktrees(state: &AppState, repo_path:
 
 /// The sweep body. The caller MUST already hold the repo's worktree-admin domain —
 /// `run_git_worktree_admin` would re-acquire it and deadlock, so the runners here are
-/// the lock-free ones, exactly as `branches.rs::remove_tmp_worktree` does.
+/// the lock-free ones, exactly as `branches/update.rs::remove_tmp_worktree` does.
 async fn sweep_update_orphans_locked(repo_path: &str) {
     let Ok(roots) = roots_for(repo_path).await else {
         return;

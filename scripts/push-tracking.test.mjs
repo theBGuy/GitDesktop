@@ -120,7 +120,7 @@ test("head vs row: tracking moved to another remote is a mismatch", () => {
 
 test("head vs row: a local upstream matches the list's `.` and null forms", () => {
   // Status nulls the remote of a local upstream; the branch list passes git's
-  // `.` through (src-tauri/src/git/branches.rs keeps any non-empty remotename).
+  // `.` through (src-tauri/src/git/branches/listing.rs keeps any non-empty remotename).
   const local = head({
     upstream: "main",
     upstreamRemote: null,
