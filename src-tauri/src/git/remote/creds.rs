@@ -109,8 +109,8 @@ async fn run_git_with_creds_rechecked(
 /// `NETWORK_TIMEOUT` and must not stall staging or a commit for that long. The pull
 /// cores' bare fall-through is the one caller whose command also touches the working
 /// tree: it holds the working-tree lock across this call, which is the only sanctioned
-/// nesting direction (see `run_git_mutating`). Every other caller in `git::remote` — fetch, push,
-/// set-head — holds nothing but the network domain this takes.
+/// nesting direction (see `run_git_mutating`). Every other caller in `git::remote` —
+/// fetch, push, set-head — holds nothing but the network domain this takes.
 ///
 /// A `push -u` whose upstream write lost `.git/config.lock` still exits 0 (measured,
 /// git 2.51.1), so every same-name publish gets its upstream re-set here, once the
@@ -535,8 +535,8 @@ mod tests {
         assert_eq!(feat_x_tip(&origin).await, feat_x_tip(&work).await);
     }
 
-    /// A module's production text, CRLF-normalized: cut at a `#[cfg(test)]` line that follows
-    /// a newline and opens `mod tests {`; a byte-0 one or a `pub(crate) mod tests` is kept.
+    /// A module's production text, CRLF-normalized: all before the first column-0 pair of lines
+    /// `#[cfg(test)]`, `mod tests {`; a pair at byte 0 or a `pub(crate) mod tests` keeps it whole.
     fn production_text(source: &str) -> String {
         let source = source.replace("\r\n", "\n");
         match source.split_once("\n#[cfg(test)]\nmod tests {") {
@@ -812,8 +812,8 @@ mod tests {
             on_disk,
             "the roster's branches/ entries differ from the files in src/git/branches"
         );
-        // remote/ entries plus EXCLUDED must name every file in that folder, and an excluded
-        // file must keep no column-0 fn, so a fn added to one forces a roster entry.
+        // remote/ entries plus EXCLUDED must name every file there. A column-0 fn added above an
+        // excluded file's test module fails this: move that file from EXCLUDED into the roster.
         let listed_remote = |files: &[(&str, String)]| -> std::collections::BTreeSet<String> {
             files
                 .iter()
@@ -852,7 +852,7 @@ mod tests {
             let text = std::fs::read_to_string(git_dir.join("remote").join(name)).unwrap();
             assert!(
                 excluded_clean(&text),
-                "src/git/remote/{name} holds a column-0 fn: add it to the roster"
+                "src/git/remote/{name} holds a column-0 fn: move {name} from EXCLUDED to the roster"
             );
         }
         // Each branches/ and remote/ label must carry its own file's text, so a mislabeled

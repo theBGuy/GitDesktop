@@ -191,8 +191,8 @@ function displayRegister(kind: AppError["kind"], message: string): string {
  *  drive-letter and `file://` remotes match too; POSIX, relative, UNC,
  *  IPv6-scp, and space-containing paths don't, and keep line one. Both headers
  *  and the two per-ref patterns below are pinned by the Rust canary
- *  `transfer_report_stderr_still_matches_the_frontend_markers` (git/remote/stderr_canaries.rs)
- *  — keep the two in step. */
+ *  `transfer_report_stderr_still_matches_the_frontend_markers`
+ *  (git/remote/stderr_canaries.rs) — keep the two in step. */
 const PUSH_TRANSFER_HEADER = /^To (?:[\w.-]+@)?[\w.+-]+:\S+$/;
 const FETCH_TRANSFER_HEADER = /^From (?:[\w.-]+@)?[\w.+-]+:\S+$/;
 
@@ -348,12 +348,11 @@ const DIRTY_TREE_MARKERS = [
  *  behind — different advice, and git's own hint already reads plainly — so it
  *  keeps its raw presentation.
  *
- *  Paired with the Rust canaries
- *  `force_push_rejection_stderr_still_matches_the_frontend_markers`
- *  (git/remote/stderr_canaries.rs) and
- *  `force_push_refuses_fetched_but_unintegrated_remote_work`
- *  (git/remote/push.rs), which re-run real rejections and assert these reasons
- *  still hold — keep the two lists in step. */
+ *  Paired with two Rust canaries that re-run real rejections and assert these
+ *  reasons still hold (keep the two lists in step): in stderr_canaries.rs,
+ *  `force_push_rejection_stderr_still_matches_the_frontend_markers`, and in
+ *  push.rs, `force_push_refuses_fetched_but_unintegrated_remote_work` (both
+ *  under git/remote/). */
 const PUSH_REJECTION_SUMMARIES: readonly (readonly [RegExp, string])[] = [
   // The bare lease refused: the remote-tracking ref no longer describes the
   // remote, so git can't tell what the push would destroy. The advice has to
@@ -400,8 +399,8 @@ const READ_ONLY_REPOSITORY_SUMMARY =
  *  username, which asks for "Password" rather than "Username"); the SSH
  *  key-refusal entry against gitlab.com and github.com with no usable key
  *  offered. Paired with `remote_access_stderr_still_matches_the_frontend_markers`
- *  (git/remote/stderr_canaries.rs), the Rust canary that pins measured stderr against Rust
- *  mirrors of these patterns — keep the two lists in step, ORDER INCLUDED.
+ *  (git/remote/stderr_canaries.rs), the Rust canary that pins measured stderr
+ *  against Rust mirrors of these patterns — keep both in step, ORDER INCLUDED.
  *
  *  Bitbucket's read-only/archived wording is UNMEASURED — Bitbucket Cloud has no
  *  project-archive feature to reproduce it against, and its branch-restriction
@@ -472,9 +471,9 @@ function longPathSummary(text: string): string | null {
  *  2026-08-11). The `GH013` code heading the block is deliberately NOT a marker:
  *  it covers every repository rule violation, so a branch-name rule would borrow
  *  advice about secrets. Start-anchored only — GitHub pads every `remote:` line
- *  with trailing spaces. The Rust canary
- *  `push_protection_stderr_still_matches_the_frontend_markers` (git/remote/stderr_canaries.rs)
- *  pins these shapes against the measured stderr. */
+ *  with trailing spaces. The Rust canary in git/remote/stderr_canaries.rs,
+ *  `push_protection_stderr_still_matches_the_frontend_markers`, pins these
+ *  shapes against the measured stderr. */
 const PUSH_PROTECTION_MARKERS = [
   /^[ \t]*remote:[ \t]*-[ \t]*GITHUB PUSH PROTECTION\b/m,
   /^[ \t]*remote:[ \t]*-[ \t]*Push cannot contain secrets\b/m,

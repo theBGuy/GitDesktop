@@ -440,7 +440,7 @@ const GH_NETWORKISH_EXTRA: [&str; 9] = [
 /// Whether gh error text (an account's `error`, or an old gh's text report) names a
 /// transport or server failure: the request never reached a verdict on the
 /// credential, so the session is Offline, not Broken. Deliberately narrow, in the
-/// spirit of `git::remote::is_auth_class_failure`: whole words only, and any text
+/// spirit of `git::remote::creds::is_auth_class_failure`: whole words only, and any text
 /// naming a 401/403 answer is the server's credential verdict whatever its body says.
 /// Callers check the rate limit first.
 pub(crate) fn gh_error_is_network(error: Option<&str>) -> bool {

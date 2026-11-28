@@ -82,10 +82,10 @@
 //      `TEST_GIT_HANG_GUARD` (git/runner.rs, test builds only) is the hang
 //      guard. A test fn passing it to product code under test, the
 //      lock-taking, retrying or credential runner wrappers (git/runner.rs,
-//      git/remote/creds.rs) included, is not a site, and a runner-arm site takes no
-//      allowlist row. A test attribute outside the code check L reads as test
-//      code fails the census test (testAttrsOutsideTestCode); the other blind
-//      spots print as its NOTE.
+//      git/remote/creds.rs) included, is not a site, and a runner-arm site
+//      takes no allowlist row. A test attribute outside the code check L reads
+//      as test code fails the census test (testAttrsOutsideTestCode); the
+//      other blind spots print as its NOTE.
 //   M. local branch ref delete outside the primitive — `branch -d/-D/--delete`
 //      (or a --delete prefix such as --del) or an `update-ref` delete (-d, alone
 //      or in a short cluster such as -dm) on a branch ref skips the in-use

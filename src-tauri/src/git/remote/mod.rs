@@ -42,7 +42,7 @@ mod tests {
     use super::*;
     use crate::git::runner::TEST_GIT_HANG_GUARD;
 
-    // --- Push fixtures the seam tests share, plus the seeded origin's hostile-config test. ---
+    // --- Origins and push helpers other files' tests share; the origins' hostile-config test. ---
 
     /// The upstream a decision-table row tracks: `""` is none, else that branch.
     pub(super) fn up(name: &str) -> Upstream {
@@ -254,7 +254,7 @@ mod tests {
             .expect("a branch pin")
     }
 
-    // --- Real-repo helpers the seam tests share (temp_dir, git on PATH). ---
+    // --- Real-repo helpers the other files' tests share (temp_dir, git on PATH). ---
 
     pub(super) async fn run(repo: &str, args: &[&str]) -> String {
         run_git(Some(repo), args, TEST_GIT_HANG_GUARD)

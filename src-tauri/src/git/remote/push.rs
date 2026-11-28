@@ -609,8 +609,8 @@ fn head_push_remote(
     }
 }
 
-/// `branch`'s push remote ([`crate::git::status::PushConfig::push_remote_setting`]), validated:
-/// empty, an invalid name or not one of `remotes` is
+/// `branch`'s configured push remote ([`crate::git::status::PushConfig::push_remote_setting`]),
+/// validated: empty, an invalid name or not one of `remotes` is
 /// [`PushRemoteUnusable`](AppError::PushRemoteUnusable), naming the key that won.
 fn configured_push_remote_checked<'c>(
     config: &'c crate::git::status::PushConfig,
