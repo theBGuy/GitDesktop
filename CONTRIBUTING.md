@@ -61,6 +61,18 @@ calls. Any process holding the port makes the wrapper wait; after 30 seconds
 of consecutive bind errors other than the port being in use, it says so and
 runs the suite unserialized.
 
+On a machine with Docker, `pnpm test:rust:container` runs the Rust suite in a
+warm Linux container, for iterating. It holds a lock of its own (port 27484
+by default, `GD_RUST_CONTAINER_PORT` to change it), so it never waits for a
+native or Vitest full suite, and it logs whether one was running. It cannot
+run `cfg(windows)` tests or check CRLF behavior or Windows path rules, so a
+change still needs one `pnpm test:rust:full`. Put no `--` before the cargo
+arguments (pnpm 11 passes a leading one through to the script); a later `--`
+still reaches the test binary. Its Docker volumes outlive a removed worktree
+(a warm target volume measured about 10.6 GB); to reclaim the space, run
+`node scripts/rust-container.mjs clean --worktree <path>`, or `clean --stale`
+for every worktree that no longer exists.
+
 We use **Biome** for both formatting and linting the frontend — there is no
 separate Prettier/ESLint step. Run `pnpm lint` before committing.
 

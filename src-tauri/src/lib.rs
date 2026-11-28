@@ -41,6 +41,8 @@ mod sessions;
 mod state;
 mod store_lock;
 mod store_lock_commands;
+#[cfg(test)]
+mod test_exec;
 #[cfg(all(test, windows))]
 mod test_junction;
 mod tray;

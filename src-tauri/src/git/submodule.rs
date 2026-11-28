@@ -10356,12 +10356,7 @@ mod tests {
         let header = WOULD_OVERWRITE_HEADERS[0].0;
         let script =
             format!("#!/bin/sh\necho 'hook: build step failed' >&2\necho '{header}' >&2\nprintf '\\tdep.txt\\n' >&2\nexit 1\n");
-        std::fs::write(&hook, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::test_exec::write_executable(&hook, &script);
         let outcome = pick(&f.host, &f.c1, &f.c0).await.unwrap();
         assert!(
             matches!(&outcome, SubmodulePickOutcome::CheckoutFailed { .. }),
@@ -10381,21 +10376,14 @@ mod tests {
         // index write runs post-index-change with "1", which drops `keep` before git's
         // orphan check, so git still warns about leaving the commit behind (measured,
         // git 2.47.3, 2.51.1, 2.56.1).
-        std::fs::write(
+        crate::test_exec::write_executable(
             &hook,
             "#!/bin/sh\necho 'hook: build step failed' >&2\nexit 1\n",
-        )
-        .unwrap();
+        );
         let drop_keep = hooks.join("post-index-change");
         let script =
             "#!/bin/sh\n[ \"$1\" = 1 ] || exit 0\nexec git update-ref -d refs/heads/keep\n";
-        std::fs::write(&drop_keep, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::Permissions::from_mode(0o755);
-            std::fs::set_permissions(&drop_keep, mode).unwrap();
-        }
+        crate::test_exec::write_executable(&drop_keep, script);
         let orphan = commit_in(&f.sub, "x.txt", "orphan").await;
         git(&f.sub, &["branch", "keep", orphan.as_str()]).await;
         stage_gitlink(&f.host, &orphan).await;
@@ -10895,12 +10883,7 @@ mod tests {
         std::fs::create_dir_all(&hooks).unwrap();
         let marker = Path::new(&sub).join("..").join("hook-ran");
         let hook = hooks.join("post-index-change");
-        std::fs::write(&hook, "#!/bin/sh\necho ran > ../hook-ran\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::test_exec::write_executable(&hook, "#!/bin/sh\necho ran > ../hook-ran\n");
         set_mtime(&Path::new(&sub).join("touch.txt"), old_time());
         assert_eq!(
             pick_read(&host, &m).await.plan,
@@ -13059,13 +13042,7 @@ mod tests {
 
     fn write_hook(hooks: &Path, name: &str, body: &str) {
         std::fs::create_dir_all(hooks).unwrap();
-        let hook = hooks.join(name);
-        std::fs::write(&hook, format!("#!/bin/sh\n{body}")).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::test_exec::write_executable(&hooks.join(name), &format!("#!/bin/sh\n{body}"));
     }
 
     fn sh_path(path: &Path) -> String {

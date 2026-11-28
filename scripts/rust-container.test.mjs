@@ -9,12 +9,14 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -24,7 +26,7 @@ import {
 } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, posix, resolve, win32 } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -33,10 +35,13 @@ import {
   APT_PACKAGES,
   absentPaths,
   buildDockerfile,
+  buildSyncArchive,
+  CACHE_LEAF,
   CARGO_SCRIPT,
   containerPortFromEnv,
   DEFAULT_CONTAINER_PORT,
   DOCKERFILE,
+  defaultCacheDir,
   fileHash,
   imageName,
   listWorktree,
@@ -58,8 +63,10 @@ import {
   SYNC_SCRIPT,
   sha256hex,
   spawnDocker,
+  syncManifest,
   tarBuffer,
   toLf,
+  VERIFY_PL,
   validTreePath,
   volumeNames,
   worktreeKey,
@@ -78,9 +85,11 @@ const linuxOnly = (needs) =>
   process.platform === "linux"
     ? false
     : `needs ${needs}; runs on Linux (CI's guards job)`;
-const SYNC_ONLY = linuxOnly("bash, GNU tar and flock");
-const CARGO_ONLY = linuxOnly("bash and flock");
+const SYNC_ONLY = linuxOnly("bash, GNU tar, flock and perl");
+const CARGO_ONLY = linuxOnly("bash, flock and perl");
+const PERL_ONLY = linuxOnly("perl with Digest::SHA");
 const BASH_ONLY = linuxOnly("bash for a fake docker");
+const UNIX_ONLY = linuxOnly("POSIX file modes");
 
 // ---------------------------------------------------------------- R1 tar
 
@@ -335,6 +344,58 @@ test("R4 parseEolListing reads the probed record shapes", () => {
     () => parseEolListing(listing(["x/lf w/lf attr/\tp"])),
     /unreadable/,
   );
+});
+
+/** NUL-terminated records of an ASCII head, a tab and raw path bytes. */
+function byteListing(head, paths) {
+  return Buffer.concat(
+    paths.map((bytes) =>
+      Buffer.concat([
+        Buffer.from(`${head}\t`),
+        Buffer.from(bytes),
+        Buffer.from([0]),
+      ]),
+    ),
+  );
+}
+
+const EOL_HEAD = "i/lf    w/lf    attr/                 ";
+const MODE_HEAD = `100644 ${"e".repeat(40)} 0`;
+const REPLACEMENT = String.fromCharCode(0xfffd);
+
+test("R4 a listed path that is not UTF-8 is skipped by hex, never merged", () => {
+  const paths = [
+    [0x61, 0xff, 0x2e, 0x72, 0x73],
+    [0x61, 0xfe, 0x2e, 0x72, 0x73],
+    [0x61, 0xef, 0xbf, 0xbd, 0x2e, 0x72, 0x73],
+  ];
+  const sink = new Set();
+  const rows = parseEolListing(byteListing(EOL_HEAD, paths), sink);
+  assert.deepEqual(
+    rows.map((r) => r.path),
+    [`a${REPLACEMENT}.rs`],
+  );
+  assert.deepEqual([...sink], ["61ff2e7273", "61fe2e7273"]);
+  const modeSink = new Set();
+  const modes = parseModeListing(byteListing(MODE_HEAD, paths), modeSink);
+  assert.deepEqual([...modes.keys()], [`a${REPLACEMENT}.rs`]);
+  assert.deepEqual([...modeSink], ["61ff2e7273", "61fe2e7273"]);
+});
+
+test("R4 BOM-prefixed and literal U+FFFD names parse unchanged", () => {
+  const sink = new Set();
+  const rows = parseEolListing(
+    byteListing(EOL_HEAD, [
+      [0xef, 0xbb, 0xbf, 0x66, 0x2e, 0x72, 0x73],
+      [0x66, 0x2e, 0x72, 0x73],
+    ]),
+    sink,
+  );
+  assert.deepEqual(
+    rows.map((r) => r.path),
+    [`${String.fromCharCode(0xfeff)}f.rs`, "f.rs"],
+  );
+  assert.equal(sink.size, 0);
 });
 
 // Machine-wide and per-user git state (autocrlf, hooks, the default excludes
@@ -907,31 +968,108 @@ test("R9 containerPortFromEnv accepts the range and refuses the rest", () => {
 const ID_A = "a".repeat(32);
 const ID_B = "b".repeat(32);
 const ID_C = "c".repeat(32);
+const DIGEST_D = "d".repeat(64);
 
 test("R10 planSync goes full without a usable cache", () => {
   const files = new Map([
     ["b", "h2"],
     ["a", "h1"],
   ]);
-  const full = { mode: "full", prev: null, send: ["a", "b"], deletes: [] };
+  const full = {
+    mode: "full",
+    prev: null,
+    prevDigest: null,
+    send: ["a", "b"],
+    deletes: [],
+  };
   assert.deepEqual(planSync({ files, cache: null }), full);
+  const v5 = { version: 5, digest: DIGEST_D };
   for (const cache of [
     { version: 1, syncId: ID_A, files: {} },
     { version: 2, syncId: ID_A, files: { a: "h1", b: "h2" } },
     { version: 3, syncId: ID_A, files: {}, missing: [] },
-    { version: 4, syncId: ID_A.toUpperCase(), files: {}, missing: [] },
-    { version: 4, syncId: "a".repeat(31), files: {}, missing: [] },
-    { version: 4, files: {}, missing: [] },
-    { version: 4, syncId: ID_A, files: null, missing: [] },
-    { version: 4, syncId: ID_A, files: [], missing: [] },
-    { version: 4, syncId: ID_A, files: { "../x": "h" }, missing: [] },
-    { version: 4, syncId: ID_A, files: { a: 1 }, missing: [] },
-    { version: 4, syncId: ID_A, files: {} },
-    { version: 4, syncId: ID_A, files: {}, missing: "a" },
-    { version: 4, syncId: ID_A, files: {}, missing: ["../x"] },
+    { version: 4, syncId: ID_A, files: {}, missing: [] },
+    { ...v5, syncId: ID_A.toUpperCase(), files: {}, missing: [] },
+    { ...v5, syncId: "a".repeat(31), files: {}, missing: [] },
+    { ...v5, files: {}, missing: [] },
+    { ...v5, syncId: ID_A, files: null, missing: [] },
+    { ...v5, syncId: ID_A, files: [], missing: [] },
+    { ...v5, syncId: ID_A, files: { "../x": "h" }, missing: [] },
+    { ...v5, syncId: ID_A, files: { a: 1 }, missing: [] },
+    { ...v5, syncId: ID_A, files: {} },
+    { ...v5, syncId: ID_A, files: {}, missing: "a" },
+    { ...v5, syncId: ID_A, files: {}, missing: ["../x"] },
+    { version: 5, syncId: ID_A, files: {}, missing: [] },
+    {
+      ...v5,
+      digest: DIGEST_D.toUpperCase(),
+      syncId: ID_A,
+      files: {},
+      missing: [],
+    },
+    { ...v5, digest: "d".repeat(63), syncId: ID_A, files: {}, missing: [] },
     "not an object",
   ]) {
     assert.deepEqual(planSync({ files, cache }), full, JSON.stringify(cache));
+  }
+});
+
+test("R10 a v4 cache plans full; a v5 cache needs its digest", () => {
+  const files = new Map([["a", "h1"]]);
+  const v4 = { version: 4, syncId: ID_A, files: { a: "h1" }, missing: [] };
+  assert.equal(planSync({ files, cache: v4 }).mode, "full");
+  assert.deepEqual(
+    planSync({ files, cache: { ...v4, version: 5, digest: DIGEST_D } }),
+    { mode: "delta", prev: ID_A, prevDigest: DIGEST_D, send: [], deletes: [] },
+  );
+  assert.equal(planSync({ files, cache: { ...v4, version: 5 } }).mode, "full");
+});
+
+test("R10 syncManifest sorts by path bytes and writes f and a records", () => {
+  const halfwidth = String.fromCharCode(0xff61);
+  const emoji = String.fromCodePoint(0x1f600);
+  const hash = (n) => String(n).repeat(64);
+  const bytes = syncManifest(
+    new Map([
+      ["b", hash(1)],
+      ["a", hash(2)],
+      [halfwidth, hash(3)],
+      [emoji, hash(4)],
+      ["a\nb", hash(5)],
+    ]),
+    ["c"],
+  );
+  const expected = Buffer.from(
+    [
+      `f ${hash(2)} a\0`,
+      `f ${hash(5)} a\nb\0`,
+      `f ${hash(1)} b\0`,
+      "a c\0",
+      `f ${hash(3)} ${halfwidth}\0`,
+      `f ${hash(4)} ${emoji}\0`,
+    ].join(""),
+  );
+  assert.ok(bytes.equals(expected), bytes.toString("hex"));
+  assert.equal(sha256hex(bytes), sha256hex(expected));
+  assert.equal(syncManifest(new Map(), []).length, 0);
+});
+
+test("R10 syncManifest refuses bad paths, bad hashes and a path in both sets", () => {
+  const good = "0".repeat(64);
+  for (const [files, absent] of [
+    [new Map([["../x", good]]), []],
+    [new Map([[".gd-rust-container/end", good]]), []],
+    [new Map([["a", good.toUpperCase().replace(/0/g, "A")]]), []],
+    [new Map([["a", "0".repeat(63)]]), []],
+    [new Map([["a", 1]]), []],
+    [new Map(), ["/abs"]],
+    [new Map([["a", good]]), ["a"]],
+  ]) {
+    assert.throws(
+      () => syncManifest(files, absent),
+      Error,
+      JSON.stringify([[...files], absent]),
+    );
   }
 });
 
@@ -942,8 +1080,9 @@ test("R10 planSync sends changed and new paths, deletes vanished ones", () => {
     ["same.txt", "h1"],
   ]);
   const cache = {
-    version: 4,
+    version: 5,
     syncId: ID_A,
+    digest: DIGEST_D,
     missing: [],
     files: {
       "same.txt": "h1",
@@ -955,6 +1094,7 @@ test("R10 planSync sends changed and new paths, deletes vanished ones", () => {
   assert.deepEqual(planSync({ files, cache }), {
     mode: "delta",
     prev: ID_A,
+    prevDigest: DIGEST_D,
     send: ["changed.txt", "new.txt"],
     deletes: ["a-gone.txt", "z-gone.txt"],
   });
@@ -966,6 +1106,7 @@ test("R10 planSync sends changed and new paths, deletes vanished ones", () => {
     {
       mode: "delta",
       prev: ID_A,
+      prevDigest: DIGEST_D,
       send: [],
       deletes: [],
     },
@@ -1015,33 +1156,70 @@ test("R10 validTreePath refuses non-relative, dotted and reserved paths", () => 
 // ------------------------------------------------- R11 sync script (Linux)
 
 const nulList = (paths) => Buffer.from(paths.map((p) => `${p}\0`).join(""));
+const D_PREV = "d".repeat(64);
+const D_NEXT = "e".repeat(64);
+const asRoot = process.getuid?.() === 0;
+const ROOT_SKIP = "root bypasses permission checks; runs as a non-root uid";
 
+/** The fileHash of a `[name, data, mode?]` entry, as readTree computes it. */
+const entryHash = ([, data, mode]) =>
+  fileHash(mode === 0o755 ? "100755" : "100644", Buffer.from(data));
+
+const manifestOf = (listed, absent = []) =>
+  syncManifest(
+    new Map(listed.map((entry) => [entry[0], entryHash(entry)])),
+    absent,
+  );
+
+/**
+ * A sync archive whose manifest lists `listed` (`[name, data, mode?]`, the
+ * sent files by default) and `absent`. The Buffer carries its manifest as
+ * `manifest` and the manifest's sha256 as `digest`.
+ */
 function syncArchive({
   deletes = [],
   files = [],
-  manifest = files.map(([name]) => name),
+  listed = files,
   absent = [],
   end,
 }) {
+  const manifest = manifestOf(listed, absent);
   const entries = [
     { name: ".gd-rust-container/deletes", data: nulList(deletes) },
-    ...files.map(([name, data]) => ({ name, data: Buffer.from(data) })),
-    { name: ".gd-rust-container/manifest", data: nulList(manifest) },
-    { name: ".gd-rust-container/absent", data: nulList(absent) },
+    ...files.map(([name, data, mode]) => ({
+      name,
+      data: Buffer.from(data),
+      mode,
+    })),
+    { name: ".gd-rust-container/manifest", data: manifest },
   ];
   if (end !== undefined)
     entries.push({ name: ".gd-rust-container/end", data: Buffer.from(end) });
-  return tarBuffer(entries);
+  return Object.assign(tarBuffer(entries), {
+    manifest,
+    digest: sha256hex(manifest),
+  });
 }
 
-function runSync(script, args, input, cwd = root) {
+function runSync(script, args, input, cwd = root, env = process.env) {
   const result = spawnSync("bash", ["-c", script, "sync", ...args], {
     cwd,
+    env,
     input,
     timeout: 30_000,
   });
   return { status: result.status, stderr: String(result.stderr) };
 }
+
+/** The six sync arguments of a delta from `prev` to `next` onto `vol`. */
+const deltaArgs = (vol, prevDigest, archive, prev = ID_A, next = ID_B) => [
+  "delta",
+  vol,
+  prev,
+  prevDigest,
+  next,
+  archive.digest,
+];
 
 function snapshot(dir) {
   const out = {};
@@ -1069,15 +1247,16 @@ const BASE_FILES = [
   ["d/e", "d was a dir\n"],
 ];
 
-function fullVolume({ absent } = {}) {
+function fullVolume({ absent, files = BASE_FILES } = {}) {
   const vol = fresh("vol");
+  const archive = syncArchive({ files, absent, end: ID_A });
   const result = runSync(
     SYNC_SCRIPT,
-    ["full", vol, "-", ID_A],
-    syncArchive({ files: BASE_FILES, absent, end: ID_A }),
+    ["full", vol, "-", "-", ID_A, archive.digest],
+    archive,
   );
   assert.equal(result.status, 0, result.stderr);
-  return vol;
+  return { vol, digest: archive.digest };
 }
 
 const DELTA = {
@@ -1093,7 +1272,7 @@ const DELTA = {
 test("R11 full sync materializes the tree and records its id", {
   skip: SYNC_ONLY,
 }, () => {
-  const vol = fullVolume();
+  const { vol } = fullVolume();
   const tree = snapshot(join(vol, "tree"));
   assert.deepEqual(Object.keys(tree), [
     "a.txt",
@@ -1112,15 +1291,12 @@ test("R11 full sync materializes the tree and records its id", {
 test("R11 delta applies changes, deletes, swaps and keeps unchanged mtimes", {
   skip: SYNC_ONLY,
 }, () => {
-  const vol = fullVolume();
+  const { vol, digest } = fullVolume();
   const old = new Date("2000-01-01T00:00:00Z");
   utimesSync(join(vol, "tree", "keep.txt"), old, old);
   utimesSync(join(vol, "tree", "a.txt"), old, old);
-  const result = runSync(
-    SYNC_SCRIPT,
-    ["delta", vol, ID_A, ID_B],
-    syncArchive({ ...DELTA, end: ID_B }),
-  );
+  const archive = syncArchive({ ...DELTA, end: ID_B });
+  const result = runSync(SYNC_SCRIPT, deltaArgs(vol, digest, archive), archive);
   assert.equal(result.status, 0, result.stderr);
   const dir = join(vol, "tree");
   assert.deepEqual(Object.keys(snapshot(dir)), [
@@ -1142,12 +1318,13 @@ test("R11 delta applies changes, deletes, swaps and keeps unchanged mtimes", {
 test("R11 a delta against the wrong prev exits 75 and changes nothing", {
   skip: SYNC_ONLY,
 }, () => {
-  const vol = fullVolume();
+  const { vol, digest } = fullVolume();
   const before = snapshot(vol);
+  const archive = syncArchive({ ...DELTA, end: ID_B });
   const result = runSync(
     SYNC_SCRIPT,
-    ["delta", vol, ID_C, ID_B],
-    syncArchive({ ...DELTA, end: ID_B }),
+    deltaArgs(vol, digest, archive, ID_C),
+    archive,
   );
   assert.equal(result.status, 75, result.stderr);
   assert.deepEqual(snapshot(vol), before);
@@ -1156,18 +1333,21 @@ test("R11 a delta against the wrong prev exits 75 and changes nothing", {
 /** The delta archive cut at a member boundary just before its end member. */
 function truncatedArchive() {
   const archive = syncArchive({ ...DELTA });
-  return archive.subarray(0, archive.length - 1024);
+  return Object.assign(archive.subarray(0, archive.length - 1024), {
+    digest: archive.digest,
+  });
 }
 
 test("R11 an archive without its end member exits 3 and changes nothing", {
   skip: SYNC_ONLY,
 }, () => {
-  const vol = fullVolume();
+  const { vol } = fullVolume();
   const before = snapshot(vol);
+  const archive = truncatedArchive();
   const result = runSync(
     SYNC_SCRIPT,
-    ["full", vol, "-", ID_B],
-    truncatedArchive(),
+    ["full", vol, "-", "-", ID_B, archive.digest],
+    archive,
   );
   assert.equal(result.status, 3, result.stderr);
   assert.deepEqual(snapshot(vol), before);
@@ -1187,12 +1367,17 @@ test("R11 volume roots resolving to / or relative are refused (delta mode)", {
   try {
     for (const vol of roots) {
       const result = runSync(
-        SYNC_SCRIPT,
-        ["delta", vol, ID_A, ID_B],
+        stopAfterGuard(SYNC_SCRIPT),
+        ["delta", vol, ID_A, D_PREV, ID_B, D_NEXT],
         syncArchive({ end: ID_B }),
         cwd,
       );
       assert.equal(result.status, 2, `${vol}: ${result.stderr}`);
+      assert.match(
+        result.stderr,
+        vol === "x/y" ? /must be absolute/ : /resolves to \//,
+        vol,
+      );
     }
     assert.deepEqual(readdirSync(cwd), []);
   } finally {
@@ -1207,29 +1392,41 @@ function mutated(script, from, to) {
   return out;
 }
 
+// Ends the sync script right after its root guard, before it opens .lock, so
+// no form of the guard can create /.lock; 64 is no exit the script uses.
+function stopAfterGuard(script) {
+  const lock = "exec 9> .lock\n";
+  assert.equal(script.split(lock).length, 2, "the lock line must occur once");
+  return script.replace(
+    lock,
+    () => 'echo "rust-container: guard passed" >&2; exit 64\n',
+  );
+}
+
 test("R11 control: a pwd -P string compare lets // through the guard", {
   skip: SYNC_ONLY,
 }, () => {
-  const weak = mutated(
-    SYNC_SCRIPT,
-    "if [ . -ef / ]; then",
-    'if [ "$(pwd -P)" = / ]; then',
+  const weak = stopAfterGuard(
+    mutated(
+      SYNC_SCRIPT,
+      "if [ . -ef / ]; then",
+      'if [ "$(pwd -P)" = / ]; then',
+    ),
   );
   const cwd = fresh("empty-cwd");
-  const result = runSync(
-    weak,
-    ["delta", "//", ID_A, ID_B],
-    syncArchive({ end: ID_B }),
-    cwd,
-  );
-  assert.notEqual(result.status, 2, result.stderr);
+  const args = ["delta", "//", ID_A, D_PREV, ID_B, D_NEXT];
+  const result = runSync(weak, args, syncArchive({ end: ID_B }), cwd);
+  assert.equal(result.status, 64, result.stderr);
+  assert.match(result.stderr, /guard passed/);
   const strong = runSync(
-    SYNC_SCRIPT,
-    ["delta", "//", ID_A, ID_B],
+    stopAfterGuard(SYNC_SCRIPT),
+    args,
     syncArchive({ end: ID_B }),
     cwd,
   );
-  assert.equal(strong.status, 2);
+  assert.equal(strong.status, 2, strong.stderr);
+  assert.match(strong.stderr, /volume root resolves to \/: \/\//);
+  assert.deepEqual(readdirSync(cwd), []);
 });
 
 test("R11 control: without the deletes line a deleted file stays", {
@@ -1238,19 +1435,20 @@ test("R11 control: without the deletes line a deleted file stays", {
   const line =
     'tar -x -O -f "$work/sync.tar" .gd-rust-container/deletes | xargs -0 -r rm -f --\n';
   const noDeletes = mutated(SYNC_SCRIPT, line, "");
-  const vol = fullVolume();
+  const { vol, digest } = fullVolume();
   const archive = syncArchive({ deletes: ["sub/b.txt"], end: ID_B });
   assert.equal(
-    runSync(noDeletes, ["delta", vol, ID_A, ID_B], archive).status,
+    runSync(noDeletes, deltaArgs(vol, digest, archive), archive).status,
     0,
   );
   assert.equal(existsSync(join(vol, "tree", "sub", "b.txt")), true);
   const real = fullVolume();
   assert.equal(
-    runSync(SYNC_SCRIPT, ["delta", real, ID_A, ID_B], archive).status,
+    runSync(SYNC_SCRIPT, deltaArgs(real.vol, real.digest, archive), archive)
+      .status,
     0,
   );
-  assert.equal(existsSync(join(real, "tree", "sub", "b.txt")), false);
+  assert.equal(existsSync(join(real.vol, "tree", "sub", "b.txt")), false);
 });
 
 test("R11 control: without the sentinel check a truncated archive is applied", {
@@ -1259,11 +1457,12 @@ test("R11 control: without the sentinel check a truncated archive is applied", {
   const check =
     '[ "$(tar -x -O -f "$work/sync.tar" .gd-rust-container/end 2>/dev/null || true)" = "$next" ] \\\n  || { echo "rust-container: sync: the archive is incomplete" >&2; exit 3; }\n';
   const noSentinel = mutated(SYNC_SCRIPT, check, "");
-  const vol = fullVolume();
+  const { vol } = fullVolume();
+  const archive = truncatedArchive();
   const result = runSync(
     noSentinel,
-    ["full", vol, "-", ID_B],
-    truncatedArchive(),
+    ["full", vol, "-", "-", ID_B, archive.digest],
+    archive,
   );
   assert.equal(result.status, 0, result.stderr);
   assert.equal(readFileSync(join(vol, "tree", "c.txt"), "utf8"), "new\n");
@@ -1291,14 +1490,15 @@ async function holdVolumeLock(dir) {
 test("R11 a held volume lock exits 73 and changes nothing", {
   skip: SYNC_ONLY,
 }, async () => {
-  const vol = fullVolume();
+  const { vol, digest } = fullVolume();
   const holder = await holdVolumeLock(vol);
   try {
     const before = snapshot(vol);
+    const archive = syncArchive({ ...DELTA, end: ID_B });
     const result = runSync(
       SYNC_SCRIPT,
-      ["delta", vol, ID_A, ID_B],
-      syncArchive({ ...DELTA, end: ID_B }),
+      deltaArgs(vol, digest, archive),
+      archive,
     );
     assert.equal(result.status, 73, result.stderr);
     assert.deepEqual(snapshot(vol), before);
@@ -1310,26 +1510,41 @@ test("R11 a held volume lock exits 73 and changes nothing", {
 test("R11 a full sync replaces an existing tree and lands the manifest", {
   skip: SYNC_ONLY,
 }, () => {
-  const vol = fullVolume();
-  assert.equal(
-    readFileSync(join(vol, ".sync-manifest"), "latin1"),
-    BASE_FILES.map(([name]) => `${name}\0`).join(""),
-  );
+  const { vol, digest } = fullVolume();
+  assert.equal(sha256hex(readFileSync(join(vol, ".sync-manifest"))), digest);
+  const archive = syncArchive({
+    files: [["only.txt", "only\n"]],
+    absent: ["extra/listed.txt"],
+    end: ID_B,
+  });
   const result = runSync(
     SYNC_SCRIPT,
-    ["full", vol, "-", ID_B],
-    syncArchive({
-      files: [["only.txt", "only\n"]],
-      manifest: ["only.txt", "extra/listed.txt"],
-      end: ID_B,
-    }),
+    ["full", vol, "-", "-", ID_B, archive.digest],
+    archive,
   );
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(Object.keys(snapshot(join(vol, "tree"))), ["only.txt"]);
-  assert.equal(
-    readFileSync(join(vol, ".sync-manifest"), "latin1"),
-    "only.txt\0extra/listed.txt\0",
+  const landed = readFileSync(join(vol, ".sync-manifest"));
+  assert.ok(landed.equals(archive.manifest));
+  assert.equal(sha256hex(landed), archive.digest);
+  assert.equal(readFileSync(join(vol, ".sync-id"), "utf8"), `${ID_B}\n`);
+});
+
+test("R11 a full sync heals a directory at .sync-manifest", {
+  skip: SYNC_ONLY,
+}, () => {
+  const { vol } = fullVolume();
+  rmSync(join(vol, ".sync-manifest"));
+  mkdirSync(join(vol, ".sync-manifest"));
+  writeFileSync(join(vol, ".sync-manifest", "inside"), "x");
+  const archive = syncArchive({ files: BASE_FILES, end: ID_B });
+  const result = runSync(
+    SYNC_SCRIPT,
+    ["full", vol, "-", "-", ID_B, archive.digest],
+    archive,
   );
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(readFileSync(join(vol, ".sync-manifest")).equals(archive.manifest));
   assert.equal(readFileSync(join(vol, ".sync-id"), "utf8"), `${ID_B}\n`);
 });
 
@@ -1340,21 +1555,20 @@ function rewriteLater(file, text) {
   utimesSync(file, later, later);
 }
 
-test("R11 the absent list lands in .sync-absent, always", {
+test("R11 absent paths land in the manifest; a v4 .sync-absent is removed", {
   skip: SYNC_ONLY,
 }, () => {
-  const vol = fullVolume({ absent: ["gone.txt", "src/Cargo.lock"] });
-  assert.equal(
-    readFileSync(join(vol, ".sync-absent"), "latin1"),
-    "gone.txt\0src/Cargo.lock\0",
-  );
-  const result = runSync(
-    SYNC_SCRIPT,
-    ["delta", vol, ID_A, ID_B],
-    syncArchive({ files: [["a.txt", "a2\n"]], end: ID_B }),
-  );
+  const { vol, digest } = fullVolume({
+    absent: ["gone.txt", "src/Cargo.lock"],
+  });
+  const manifest = readFileSync(join(vol, ".sync-manifest"), "latin1");
+  assert.ok(manifest.includes("a gone.txt\0"), manifest);
+  assert.ok(manifest.includes("a src/Cargo.lock\0"), manifest);
+  writeFileSync(join(vol, ".sync-absent"), "gone.txt\0");
+  const archive = syncArchive({ files: [["a.txt", "a2\n"]], end: ID_B });
+  const result = runSync(SYNC_SCRIPT, deltaArgs(vol, digest, archive), archive);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(readFileSync(join(vol, ".sync-absent"), "latin1"), "");
+  assert.equal(existsSync(join(vol, ".sync-absent")), false);
   assert.equal(existsSync(join(vol, "tree", ".gd-rust-container")), false);
 });
 
@@ -1370,13 +1584,14 @@ test("R11 a delta over a tree changed since its sync exits 75 and changes nothin
     ],
   ];
   for (const [name, drift] of cases) {
-    const vol = fullVolume({ absent: ["gone.txt"] });
+    const { vol, digest } = fullVolume({ absent: ["gone.txt"] });
     drift(join(vol, "tree"));
     const before = snapshot(vol);
+    const archive = syncArchive({ ...DELTA, end: ID_B });
     const result = runSync(
       SYNC_SCRIPT,
-      ["delta", vol, ID_A, ID_B],
-      syncArchive({ ...DELTA, end: ID_B }),
+      deltaArgs(vol, digest, archive),
+      archive,
     );
     assert.equal(result.status, 75, `${name}: ${result.stderr}`);
     assert.match(result.stderr, /changed since its last sync/, name);
@@ -1384,23 +1599,34 @@ test("R11 a delta over a tree changed since its sync exits 75 and changes nothin
   }
 });
 
-test("R11 a generated unsynced file, or a volume without a manifest, lets a delta through", {
+test("R11 a generated unsynced file lets a delta through; a volume without a manifest exits 75", {
   skip: SYNC_ONLY,
 }, () => {
   const generated = fullVolume({ absent: ["gone.txt"] });
-  mkdirSync(join(generated, "tree", "gen"));
-  rewriteLater(join(generated, "tree", "gen", "out.txt"), "new\n");
+  mkdirSync(join(generated.vol, "tree", "gen"));
+  rewriteLater(join(generated.vol, "tree", "gen", "out.txt"), "new\n");
   const archive = syncArchive({ files: [["a.txt", "a2\n"]], end: ID_B });
   assert.equal(
-    runSync(SYNC_SCRIPT, ["delta", generated, ID_A, ID_B], archive).status,
+    runSync(
+      SYNC_SCRIPT,
+      deltaArgs(generated.vol, generated.digest, archive),
+      archive,
+    ).status,
     0,
   );
   const old = fullVolume();
-  rmSync(join(old, ".sync-manifest"));
-  rewriteLater(join(old, "tree", "keep.txt"), "cargo\n");
-  const result = runSync(SYNC_SCRIPT, ["delta", old, ID_A, ID_B], archive);
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(readFileSync(join(old, ".sync-id"), "utf8"), `${ID_B}\n`);
+  rmSync(join(old.vol, ".sync-manifest"));
+  rewriteLater(join(old.vol, "tree", "keep.txt"), "cargo\n");
+  const before = snapshot(join(old.vol, "tree"));
+  const result = runSync(
+    SYNC_SCRIPT,
+    deltaArgs(old.vol, old.digest, archive),
+    archive,
+  );
+  assert.equal(result.status, 75, result.stderr);
+  assert.match(result.stderr, /changed since its last sync/);
+  assert.equal(readFileSync(join(old.vol, ".sync-id"), "utf8"), `${ID_A}\n`);
+  assert.deepEqual(snapshot(join(old.vol, "tree")), before);
 });
 
 test("R11 a delta into a volume without a tree exits 75", {
@@ -1408,13 +1634,471 @@ test("R11 a delta into a volume without a tree exits 75", {
 }, () => {
   const vol = fresh("vol");
   writeFileSync(join(vol, ".sync-id"), `${ID_A}\n`);
-  const result = runSync(
-    SYNC_SCRIPT,
-    ["delta", vol, ID_A, ID_B],
-    syncArchive({ ...DELTA, end: ID_B }),
-  );
+  const archive = syncArchive({ ...DELTA, end: ID_B });
+  const result = runSync(SYNC_SCRIPT, deltaArgs(vol, D_PREV, archive), archive);
   assert.equal(result.status, 75, result.stderr);
   assert.equal(existsSync(join(vol, "tree")), false);
+});
+
+test("R11 the container scripts render without a NUL and quote the verifier safely", () => {
+  for (const [name, text] of [
+    ["SYNC_SCRIPT", SYNC_SCRIPT],
+    ["CARGO_SCRIPT", CARGO_SCRIPT],
+    ["VERIFY_PL", VERIFY_PL],
+  ]) {
+    assert.equal(text.includes("\0"), false, name);
+  }
+  assert.equal(VERIFY_PL.includes("'"), false);
+  assert.equal(VERIFY_PL.includes("`"), false);
+});
+
+test("R11 perl compiles the verifier", { skip: PERL_ONLY }, () => {
+  const result = spawnSync("perl", ["-c", "-e", VERIFY_PL]);
+  assert.equal(result.status, 0, String(result.stderr));
+});
+
+test("R11 a module the verifier cannot load exits 75", {
+  skip: PERL_ONLY,
+}, () => {
+  const lib = fresh("perl5lib");
+  mkdirSync(join(lib, "Digest"));
+  writeFileSync(
+    join(lib, "Digest", "SHA.pm"),
+    'package Digest::SHA; die "planted load failure\\n"; 1;\n',
+  );
+  const manifest = join(fresh("manifest"), "manifest");
+  writeFileSync(manifest, "");
+  const result = spawnSync(
+    "perl",
+    ["-e", VERIFY_PL, "--", manifest, sha256hex("")],
+    { env: { ...process.env, PERL5LIB: lib } },
+  );
+  assert.equal(result.status, 75, String(result.stderr));
+  assert.ok(
+    String(result.stderr).includes(
+      "rust-container: verify: cannot check the tree (planted load failure)",
+    ),
+    String(result.stderr),
+  );
+});
+
+test("R11 the verifier passes a die a module catches while loading", {
+  skip: PERL_ONLY,
+}, () => {
+  const lib = fresh("perl5lib");
+  mkdirSync(join(lib, "Digest"));
+  // Digest::SHA requires Digest::base inside an eval of its own.
+  writeFileSync(
+    join(lib, "Digest", "base.pm"),
+    'package Digest::base; print STDERR "stub loaded\\n"; die "optional module failed\\n";\n',
+  );
+  const manifest = join(fresh("manifest"), "manifest");
+  writeFileSync(manifest, "");
+  const result = spawnSync(
+    "perl",
+    ["-e", VERIFY_PL, "--", manifest, sha256hex("")],
+    { cwd: fresh("tree"), env: { ...process.env, PERL5LIB: lib } },
+  );
+  assert.ok(
+    String(result.stderr).includes("stub loaded"),
+    String(result.stderr),
+  );
+  assert.equal(result.status, 0, String(result.stderr));
+});
+
+test("R11 a multi-line load failure names its first line", {
+  skip: PERL_ONLY,
+}, () => {
+  const lib = fresh("perl5lib");
+  mkdirSync(join(lib, "Digest"));
+  writeFileSync(
+    join(lib, "Digest", "SHA.pm"),
+    'package Digest::SHA; die "first line\\nsecond line\\n"; 1;\n',
+  );
+  const manifest = join(fresh("manifest"), "manifest");
+  writeFileSync(manifest, "");
+  const result = spawnSync(
+    "perl",
+    ["-e", VERIFY_PL, "--", manifest, sha256hex("")],
+    { cwd: fresh("tree"), env: { ...process.env, PERL5LIB: lib } },
+  );
+  assert.equal(result.status, 75, String(result.stderr));
+  assert.equal(
+    String(result.stderr),
+    "rust-container: verify: cannot check the tree (first line)\n",
+  );
+});
+
+const hashesOf = (tree) =>
+  new Map([...tree.files].map(([path, file]) => [path, file.hash]));
+
+test("R11 a real readTree snapshot syncs full then delta and verifies", {
+  skip: SYNC_ONLY,
+}, () => {
+  const host = fresh("host");
+  const utf8Name = Buffer.from([0x75, 0xc3, 0xa9, 0x2e, 0x74, 0x78, 0x74]);
+  const contents = new Map([
+    ["a.txt", "a1\n"],
+    ["sub/b.txt", "b\n"],
+    ["run.sh", "#!/bin/sh\n"],
+    ["with space.txt", "s\n"],
+    [utf8Name.toString(), "u\n"],
+    ["new\nline.txt", "n\n"],
+  ]);
+  for (const [name, data] of contents) {
+    mkdirSync(dirname(join(host, name)), { recursive: true });
+    writeFileSync(join(host, name), data);
+  }
+  const rows = [...contents.keys(), "gone.txt"].map(treeRow);
+  const options = { modes: new Map([["run.sh", "100755"]]) };
+  const tree = readTree(host, rows, undefined, options);
+  const plan = planSync({ files: hashesOf(tree), cache: null });
+  const first = buildSyncArchive(tree, plan, ID_A);
+  const vol = fresh("vol");
+  const full = runSync(
+    SYNC_SCRIPT,
+    ["full", vol, "-", "-", ID_A, first.digest],
+    first.archive,
+  );
+  assert.equal(full.status, 0, full.stderr);
+  assert.equal(
+    sha256hex(readFileSync(join(vol, ".sync-manifest"))),
+    first.digest,
+  );
+  assert.ok(statSync(join(vol, "tree", "run.sh")).mode & 0o100);
+  writeFileSync(join(host, "a.txt"), "a2\n");
+  const again = readTree(host, rows, undefined, options);
+  const delta = planSync({
+    files: hashesOf(again),
+    cache: {
+      version: 5,
+      syncId: ID_A,
+      digest: first.digest,
+      files: Object.fromEntries(hashesOf(tree)),
+      missing: [...tree.missing].sort(),
+    },
+  });
+  assert.equal(delta.mode, "delta");
+  assert.deepEqual(delta.send, ["a.txt"]);
+  const second = buildSyncArchive(again, delta, ID_B);
+  const result = runSync(
+    SYNC_SCRIPT,
+    ["delta", vol, ID_A, delta.prevDigest, ID_B, second.digest],
+    second.archive,
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(vol, ".sync-id"), "utf8"), `${ID_B}\n`);
+});
+
+const KEEP = "keep\n";
+const VERIFIED_FILES = [
+  ["keep.txt", KEEP],
+  ["src/deep/mod.rs", "mod\n"],
+  ["run.sh", "#!/bin/sh\n", 0o755],
+  ["\n", "nl\n"],
+];
+
+/** A volume fully synced from VERIFIED_FILES with gone.txt absent. */
+function verifiedVolume() {
+  const vol = fresh("vol");
+  const archive = syncArchive({
+    files: VERIFIED_FILES,
+    absent: ["gone.txt"],
+    end: ID_A,
+  });
+  const result = runSync(
+    SYNC_SCRIPT,
+    ["full", vol, "-", "-", ID_A, archive.digest],
+    archive,
+  );
+  assert.equal(result.status, 0, result.stderr);
+  return { vol, tree: join(vol, "tree"), digest: archive.digest };
+}
+
+/** A delta sending c.txt onto a verifiedVolume. */
+function deltaOnto(v, env) {
+  const archive = syncArchive({ files: [["c.txt", "c\n"]], end: ID_B });
+  return runSync(
+    SYNC_SCRIPT,
+    deltaArgs(v.vol, v.digest, archive),
+    archive,
+    root,
+    env,
+  );
+}
+
+// The manifest's state without reading a FIFO (a read would block).
+function manifestState(vol) {
+  const file = join(vol, ".sync-manifest");
+  const stat = lstatSyncOrNull(file);
+  if (stat === null) return "absent";
+  if (!stat.isFile()) return stat.isFIFO() ? "fifo" : "other";
+  return readFileSync(file).toString("base64");
+}
+
+function lstatSyncOrNull(path) {
+  try {
+    return lstatSync(path);
+  } catch {
+    return null;
+  }
+}
+
+const OLD = new Date("2001-01-01T00:00:00Z");
+
+test("R11 a delta into a tree that fails the content check exits 75 and changes nothing", {
+  skip: SYNC_ONLY,
+}, () => {
+  const cases = [
+    [
+      "rewrite, mtime restored",
+      "content or mode differs: keep.txt",
+      ({ tree }) => {
+        const file = join(tree, "keep.txt");
+        const stat = statSync(file);
+        writeFileSync(file, "cargo\n");
+        utimesSync(file, stat.atime, stat.mtime);
+      },
+    ],
+    [
+      "chmod +x",
+      "content or mode differs: keep.txt",
+      ({ tree }) => chmodSync(join(tree, "keep.txt"), 0o755),
+    ],
+    [
+      "chmod -x",
+      "content or mode differs: run.sh",
+      ({ tree }) => chmodSync(join(tree, "run.sh"), 0o644),
+    ],
+    [
+      "mv of an older file",
+      "content or mode differs: keep.txt",
+      ({ tree }) => {
+        const older = join(tree, "older.txt");
+        writeFileSync(older, "moved\n");
+        utimesSync(older, OLD, OLD);
+        renameSync(older, join(tree, "keep.txt"));
+      },
+    ],
+    [
+      "cp -p of an older file",
+      "content or mode differs: keep.txt",
+      ({ tree }) => {
+        const copy = join(fresh("cp"), "copy.txt");
+        writeFileSync(copy, "copied\n");
+        copyFileSync(copy, join(tree, "keep.txt"));
+        utimesSync(join(tree, "keep.txt"), OLD, OLD);
+      },
+    ],
+    [
+      "manifest removed",
+      "cannot open the manifest",
+      ({ vol }) => rmSync(join(vol, ".sync-manifest")),
+    ],
+    [
+      "FIFO at the manifest",
+      "the manifest is not a regular file",
+      ({ vol }) => {
+        rmSync(join(vol, ".sync-manifest"));
+        const made = spawnSync("mkfifo", [join(vol, ".sync-manifest")]);
+        assert.equal(made.status, 0, String(made.stderr));
+      },
+    ],
+    [
+      "hiding forge",
+      "the manifest does not match the host",
+      ({ vol, tree }) => {
+        writeFileSync(join(tree, "keep.txt"), "cargo\n");
+        const forged = VERIFIED_FILES.map((entry) =>
+          entry[0] === "keep.txt" ? ["keep.txt", "cargo\n"] : entry,
+        );
+        writeFileSync(
+          join(vol, ".sync-manifest"),
+          manifestOf(forged, ["gone.txt"]),
+        );
+      },
+    ],
+    [
+      "directory at an absent path",
+      "an entry exists at an absent path: gone.txt",
+      ({ tree }) => mkdirSync(join(tree, "gone.txt")),
+    ],
+    [
+      "symlink at an absent path",
+      "not a regular file or directory: gone.txt",
+      ({ tree }) => symlinkSync("keep.txt", join(tree, "gone.txt")),
+    ],
+    [
+      "FIFO in the tree",
+      "not a regular file or directory: src/fifo",
+      ({ tree }) => {
+        const made = spawnSync("mkfifo", [join(tree, "src", "fifo")]);
+        assert.equal(made.status, 0, String(made.stderr));
+      },
+    ],
+    [
+      "symlinked directory",
+      "not a regular file or directory: src/deep",
+      ({ tree }) => {
+        const outside = join(fresh("outside"), "deep");
+        renameSync(join(tree, "src", "deep"), outside);
+        symlinkSync(outside, join(tree, "src", "deep"));
+      },
+    ],
+    [
+      "file replaced by a directory",
+      "missing or not a regular file: keep.txt",
+      ({ tree }) => {
+        unlinkSync(join(tree, "keep.txt"));
+        mkdirSync(join(tree, "keep.txt"));
+      },
+    ],
+    [
+      "newline-named file removed",
+      "missing or not a regular file: \\x0a",
+      ({ tree }) => unlinkSync(join(tree, "\n")),
+    ],
+    [
+      "rewrite under a touched sync id",
+      "content or mode differs: keep.txt",
+      ({ vol, tree }) => {
+        writeFileSync(join(tree, "keep.txt"), "cargo\n");
+        const later = new Date(Date.now() + 60_000);
+        utimesSync(join(vol, ".sync-id"), later, later);
+      },
+    ],
+  ];
+  for (const [name, line, mutate] of cases) {
+    const v = verifiedVolume();
+    mutate(v);
+    const manifest = manifestState(v.vol);
+    const result = deltaOnto(v);
+    assert.equal(result.status, 75, `${name}: ${result.stderr}`);
+    assert.ok(
+      result.stderr.includes(`rust-container: verify: ${line}`),
+      `${name}: ${result.stderr}`,
+    );
+    assert.match(result.stderr, /changed since its last sync/, name);
+    assert.equal(
+      readFileSync(join(v.vol, ".sync-id"), "utf8"),
+      `${ID_A}\n`,
+      name,
+    );
+    assert.equal(manifestState(v.vol), manifest, name);
+    assert.equal(lstatSyncOrNull(join(v.tree, "c.txt")), null, name);
+  }
+});
+
+test("R11 an unreadable listed file fails the check", {
+  skip: SYNC_ONLY || (asRoot ? ROOT_SKIP : false),
+}, () => {
+  for (const [name, target, line] of [
+    ["file", (v) => join(v.tree, "keep.txt"), "cannot open keep.txt"],
+    [
+      "manifest",
+      (v) => join(v.vol, ".sync-manifest"),
+      "cannot open the manifest",
+    ],
+  ]) {
+    const v = verifiedVolume();
+    const file = target(v);
+    chmodSync(file, 0);
+    try {
+      const result = deltaOnto(v);
+      assert.equal(result.status, 75, `${name}: ${result.stderr}`);
+      assert.ok(
+        result.stderr.includes(
+          `rust-container: verify: ${line} (Permission denied)`,
+        ),
+        `${name}: ${result.stderr}`,
+      );
+      assert.equal(
+        readFileSync(join(v.vol, ".sync-id"), "utf8"),
+        `${ID_A}\n`,
+        name,
+      );
+    } finally {
+      chmodSync(file, 0o644);
+    }
+  }
+});
+
+test("R11 unlisted files and directories in the tree pass", {
+  skip: SYNC_ONLY,
+}, () => {
+  const v = verifiedVolume();
+  mkdirSync(join(v.tree, "gen", "schemas"), { recursive: true });
+  writeFileSync(join(v.tree, "gen", "schemas", "app.json"), "{}\n");
+  const result = deltaOnto(v);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(v.vol, ".sync-id"), "utf8"), `${ID_B}\n`);
+});
+
+test("R11 a delta never deletes or writes through a symlinked directory", {
+  skip: SYNC_ONLY,
+}, () => {
+  const { vol, digest } = fullVolume({
+    files: [
+      ["src/deep/victim.rs", "victim\n"],
+      ["keep.txt", KEEP],
+    ],
+  });
+  const outside = fresh("outside");
+  writeFileSync(join(outside, "victim.rs"), "victim\n");
+  rmSync(join(vol, "tree", "src", "deep"), { recursive: true });
+  symlinkSync(outside, join(vol, "tree", "src", "deep"));
+  const archive = syncArchive({
+    deletes: ["src/deep/victim.rs"],
+    files: [["src/deep/mod.rs", "mod\n"]],
+    end: ID_B,
+  });
+  const result = runSync(SYNC_SCRIPT, deltaArgs(vol, digest, archive), archive);
+  assert.equal(result.status, 75, result.stderr);
+  assert.equal(existsSync(join(outside, "victim.rs")), true);
+  assert.equal(existsSync(join(outside, "mod.rs")), false);
+});
+
+test("R11 a sync whose result does not match its manifest exits 75 and records no id", {
+  skip: SYNC_ONLY,
+}, () => {
+  const vol = fresh("vol");
+  const archive = syncArchive({
+    files: [["keep.txt", KEEP]],
+    listed: [["keep.txt", "other bytes\n"]],
+    end: ID_A,
+  });
+  const result = runSync(
+    SYNC_SCRIPT,
+    ["full", vol, "-", "-", ID_A, archive.digest],
+    archive,
+  );
+  assert.equal(result.status, 75, result.stderr);
+  assert.match(result.stderr, /does not match this sync/);
+  assert.equal(existsSync(join(vol, ".sync-id")), false);
+});
+
+/** A dir holding a `perl` that exits 127, as a missing perl would. */
+function perlStub() {
+  const dir = fresh("perl-stub");
+  writeFileSync(join(dir, "perl"), "#!/bin/sh\nexit 127\n");
+  chmodSync(join(dir, "perl"), 0o755);
+  return dir;
+}
+
+test("R11 a missing perl is a mismatch, never a pass", {
+  skip: SYNC_ONLY,
+}, () => {
+  const vol = fresh("vol");
+  const archive = syncArchive({ files: BASE_FILES, end: ID_A });
+  const result = runSync(
+    SYNC_SCRIPT,
+    ["full", vol, "-", "-", ID_A, archive.digest],
+    archive,
+    root,
+    { ...process.env, PATH: `${perlStub()}:${process.env.PATH}` },
+  );
+  assert.equal(result.status, 75, result.stderr);
+  assert.equal(existsSync(join(vol, ".sync-id")), false);
 });
 
 // ------------------------------------------------ R12 cargo script (Linux)
@@ -1426,6 +2110,7 @@ case \${FAKE_MODE:-exit} in
   sleep) : > "$FAKE_READY"; exec sleep 30 ;;
   slow) sleep 1; exit "\${FAKE_EXIT:-0}" ;;
   rewrite) printf 'cargo wrote this\\n' > synced.txt; exit "\${FAKE_EXIT:-0}" ;;
+  restamp) t=$(stat -c %Y synced.txt); printf 'cargo wrote this\\n' > synced.txt; touch -d "@$t" synced.txt; exit "\${FAKE_EXIT:-0}" ;;
   generate) mkdir -p gen; printf 'new\\n' > gen/out.txt; exit "\${FAKE_EXIT:-0}" ;;
   regenerate) printf 'g\\n' > gone.txt; exit "\${FAKE_EXIT:-0}" ;;
   delete) rm synced.txt; exit "\${FAKE_EXIT:-0}" ;;
@@ -1433,12 +2118,14 @@ case \${FAKE_MODE:-exit} in
 esac
 `;
 
+const CARGO_TREE = ["synced.txt", "other.txt"];
+
 /**
- * A source volume root (`src/`, the script's cwd) holding a synced tree and a
- * sync id, a target dir and a fake cargo. Synced files predate the sync id,
- * as after a real sync.
+ * A source volume root (`src/`, the script's cwd) holding a synced tree, its
+ * manifest (unless `manifest: false`) and a sync id, a target dir and a fake
+ * cargo. Synced files predate the sync id, as after a real sync.
  */
-function cargoVolume({ syncId = ID_A, manifest, absent } = {}) {
+function cargoVolume({ syncId = ID_A, manifest = true, absent = [] } = {}) {
   const vol = fresh("cargo-vol");
   const bin = join(vol, "bin");
   mkdirSync(bin);
@@ -1449,16 +2136,15 @@ function cargoVolume({ syncId = ID_A, manifest, absent } = {}) {
   mkdirSync(tree, { recursive: true });
   mkdirSync(join(vol, "target"));
   const old = new Date(Date.now() - 120_000);
-  for (const name of ["synced.txt", "other.txt"]) {
+  for (const name of CARGO_TREE) {
     writeFileSync(join(tree, name), `${name}\n`);
     utimesSync(join(tree, name), old, old);
   }
-  if (manifest !== undefined) {
-    writeFileSync(join(src, ".sync-manifest"), nulList(manifest));
-  }
-  if (absent !== undefined) {
-    writeFileSync(join(src, ".sync-absent"), nulList(absent));
-  }
+  const bytes = manifestOf(
+    CARGO_TREE.map((name) => [name, `${name}\n`]),
+    absent,
+  );
+  if (manifest) writeFileSync(join(src, ".sync-manifest"), bytes);
   writeFileSync(join(src, ".sync-id"), `${syncId}\n`);
   const synced = new Date(Date.now() - 60_000);
   utimesSync(join(src, ".sync-id"), synced, synced);
@@ -1466,6 +2152,7 @@ function cargoVolume({ syncId = ID_A, manifest, absent } = {}) {
     vol,
     src,
     tree,
+    digest: sha256hex(bytes),
     target: join(vol, "target"),
     argsFile: join(vol, "args"),
     cwdFile: join(vol, "cwd"),
@@ -1484,6 +2171,7 @@ function runCargo(script, args, setup, { env = {}, closeWhenReady } = {}) {
         FAKE_READY: setup.readyFile,
         GD_IMAGE: "img-a",
         GD_SYNC_ID: ID_A,
+        GD_SYNC_DIGEST: setup.digest,
         CARGO_TARGET_DIR: setup.target,
         ...env,
       },
@@ -1522,10 +2210,9 @@ function receivedArgs(setup) {
 
 const CARGO_PREFIX = ["test", "--manifest-path", "src-tauri/Cargo.toml"];
 const HOSTILE_ARGS = ["a b", "$(touch pwned)", "--lib", ""];
-const changedLine = (first) =>
-  `rust-container: cargo changed 1 synced path(s) in the source volume (first: ${first}); the next run does a full sync`;
-const CHANGED_LINE = changedLine("synced.txt");
-const SYNCED = { manifest: ["other.txt", "synced.txt"], absent: ["gone.txt"] };
+const changedLine = (detail) =>
+  `rust-container: cargo changed the source volume's tree (${detail}); the next run does a full sync`;
+const SYNCED = { absent: ["gone.txt"] };
 
 test("R12 cargo args arrive verbatim as positional parameters, in the tree", {
   skip: CARGO_ONLY,
@@ -1615,19 +2302,22 @@ test("R12 the target volume is cleared when its image marker differs", {
 test("R12 a synced file cargo rewrote voids the sync id; cargo's code stays", {
   skip: CARGO_ONLY,
 }, async () => {
-  const setup = cargoVolume({ manifest: ["other.txt", "synced.txt"] });
+  const setup = cargoVolume();
   const result = await runCargo(CARGO_SCRIPT, [], setup, {
     env: { FAKE_MODE: "rewrite", FAKE_EXIT: "101" },
   });
   assert.equal(result.code, 101, result.stderr);
-  assert.ok(result.stderr.includes(CHANGED_LINE), result.stderr);
+  assert.ok(
+    result.stderr.includes(changedLine("content or mode differs: synced.txt")),
+    result.stderr,
+  );
   assert.equal(existsSync(join(setup.src, ".sync-id")), false);
 });
 
-test("R12 a file cargo generated, or no manifest, keeps the sync id", {
+test("R12 a file cargo generated keeps the sync id; no manifest exits 75 before cargo", {
   skip: CARGO_ONLY,
 }, async () => {
-  const generated = cargoVolume({ manifest: ["other.txt", "synced.txt"] });
+  const generated = cargoVolume();
   const result = await runCargo(CARGO_SCRIPT, [], generated, {
     env: { FAKE_MODE: "generate" },
   });
@@ -1635,12 +2325,13 @@ test("R12 a file cargo generated, or no manifest, keeps the sync id", {
   assert.ok(existsSync(join(generated.tree, "gen", "out.txt")));
   assert.equal(result.stderr.includes("cargo changed"), false, result.stderr);
   assert.equal(existsSync(join(generated.src, ".sync-id")), true);
-  const bare = cargoVolume();
+  const bare = cargoVolume({ manifest: false });
   const rewrote = await runCargo(CARGO_SCRIPT, [], bare, {
     env: { FAKE_MODE: "rewrite" },
   });
-  assert.equal(rewrote.code, 0, rewrote.stderr);
-  assert.equal(rewrote.stderr.includes("cargo changed"), false);
+  assert.equal(rewrote.code, 75, rewrote.stderr);
+  assert.match(rewrote.stderr, /changed since its last sync/);
+  assert.equal(existsSync(bare.argsFile), false);
   assert.equal(existsSync(join(bare.src, ".sync-id")), true);
 });
 
@@ -1666,19 +2357,105 @@ test("R12 a tree changed since its sync exits 75 before cargo, id kept", {
   }
 });
 
+test("R12 the content check before cargo: a mismatch exits 75 and cargo never runs, id kept", {
+  skip: CARGO_ONLY,
+}, async () => {
+  const cases = [
+    [
+      "rewrite, mtime restored",
+      (setup) => {
+        const file = join(setup.tree, "synced.txt");
+        const stat = statSync(file);
+        writeFileSync(file, "cargo\n");
+        utimesSync(file, stat.atime, stat.mtime);
+      },
+    ],
+    ["chmod +x", (setup) => chmodSync(join(setup.tree, "synced.txt"), 0o755)],
+    ["no manifest", (setup) => rmSync(join(setup.src, ".sync-manifest"))],
+    [
+      "perl exits 127",
+      (setup) => ({
+        PATH: `${perlStub()}:${join(setup.vol, "bin")}:${process.env.PATH}`,
+      }),
+    ],
+    ["another digest", () => ({ GD_SYNC_DIGEST: "f".repeat(64) })],
+  ];
+  for (const [name, mutate] of cases) {
+    const setup = cargoVolume();
+    const env = mutate(setup) ?? {};
+    const result = await runCargo(CARGO_SCRIPT, [], setup, { env });
+    assert.equal(result.code, 75, `${name}: ${result.stderr}`);
+    assert.match(result.stderr, /changed since its last sync/, name);
+    assert.equal(existsSync(setup.argsFile), false, name);
+    assert.equal(existsSync(join(setup.src, ".sync-id")), true, name);
+  }
+});
+
+test("R12 an unset GD_SYNC_DIGEST never runs cargo", {
+  skip: CARGO_ONLY,
+}, async () => {
+  const setup = cargoVolume();
+  const result = await runCargo(CARGO_SCRIPT, [], setup, {
+    env: { GD_SYNC_DIGEST: undefined },
+  });
+  assert.equal(result.code, 74, result.stderr);
+  assert.equal(existsSync(setup.argsFile), false);
+});
+
+test("R12 missing or malformed run settings exit 74 before cargo", {
+  skip: CARGO_ONLY,
+}, async () => {
+  const rows = [
+    ["GD_SYNC_DIGEST unset", { GD_SYNC_DIGEST: undefined }],
+    ["GD_SYNC_DIGEST empty", { GD_SYNC_DIGEST: "" }],
+    ["GD_SYNC_DIGEST malformed", { GD_SYNC_DIGEST: "abc" }],
+    ["GD_SYNC_ID unset", { GD_SYNC_ID: undefined }],
+    ["GD_IMAGE unset", { GD_IMAGE: undefined }],
+    ["GD_IMAGE empty", { GD_IMAGE: "" }],
+    ["CARGO_TARGET_DIR unset", { CARGO_TARGET_DIR: undefined }],
+  ];
+  for (const [name, env] of rows) {
+    const setup = cargoVolume();
+    const result = await runCargo(CARGO_SCRIPT, [], setup, { env });
+    assert.equal(result.code, 74, `${name}: ${result.stderr}`);
+    assert.ok(
+      result.stderr.includes(
+        "rust-container: the cargo container started without valid run settings",
+      ),
+      `${name}: ${result.stderr}`,
+    );
+    assert.equal(existsSync(setup.argsFile), false, name);
+  }
+});
+
+test("R12 a rewrite cargo hid with its old mtime voids the id", {
+  skip: CARGO_ONLY,
+}, async () => {
+  const setup = cargoVolume();
+  const result = await runCargo(CARGO_SCRIPT, [], setup, {
+    env: { FAKE_MODE: "restamp" },
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(
+    result.stderr.includes(changedLine("content or mode differs: synced.txt")),
+    result.stderr,
+  );
+  assert.equal(existsSync(join(setup.src, ".sync-id")), false);
+});
+
 test("R12 cargo regenerating an absent path or deleting a synced one voids the id", {
   skip: CARGO_ONLY,
 }, async () => {
-  for (const [mode, exit, first] of [
-    ["regenerate", "101", "gone.txt"],
-    ["delete", "0", "synced.txt"],
+  for (const [mode, exit, detail] of [
+    ["regenerate", "101", "an entry exists at an absent path: gone.txt"],
+    ["delete", "0", "missing or not a regular file: synced.txt"],
   ]) {
     const setup = cargoVolume(SYNCED);
     const result = await runCargo(CARGO_SCRIPT, [], setup, {
       env: { FAKE_MODE: mode, FAKE_EXIT: exit },
     });
     assert.equal(result.code, Number(exit), `${mode}: ${result.stderr}`);
-    assert.ok(result.stderr.includes(changedLine(first)), result.stderr);
+    assert.ok(result.stderr.includes(changedLine(detail)), result.stderr);
     assert.equal(existsSync(join(setup.src, ".sync-id")), false, mode);
   }
 });
@@ -1833,6 +2610,7 @@ function dockerFake(events) {
     imageList: [],
     orphans: [],
     volumeId: null,
+    volumeDigest: null,
     syncCodes: [],
     cargoCode: 0,
     cargoCodes: [],
@@ -1926,15 +2704,22 @@ function dockerFake(events) {
         return ok();
       case "sync": {
         start();
-        const [, mode, , prev, next] = args.slice(args.indexOf("-c") + 2);
+        const [, mode, , prev, prevDigest, next, digest] = args.slice(
+          args.indexOf("-c") + 2,
+        );
         const members = tarMembers(options.input);
-        call.sync = { mode, prev, next, members };
+        call.sync = { mode, prev, prevDigest, next, digest, members };
         if (state.syncCodes.length > 0) {
           const forced = state.syncCodes.shift();
           if (typeof forced === "number") return fail(forced);
           return typeof forced === "function" ? forced(call) : forced;
         }
-        if (mode === "delta" && prev !== state.volumeId) return fail(75);
+        if (
+          mode === "delta" &&
+          (prev !== state.volumeId || prevDigest !== state.volumeDigest)
+        ) {
+          return fail(75);
+        }
         const end = members.at(-1);
         if (
           end.name !== ".gd-rust-container/end" ||
@@ -1943,16 +2728,21 @@ function dockerFake(events) {
           return fail(3);
         }
         state.volumeId = next;
+        state.volumeDigest = digest;
         return ok();
       }
       case "cargo": {
-        call.syncId = flagValues(args, "-e")
-          .find((entry) => entry.startsWith("GD_SYNC_ID="))
-          .slice("GD_SYNC_ID=".length);
+        const env = (name) =>
+          flagValues(args, "-e")
+            .find((entry) => entry.startsWith(`${name}=`))
+            .slice(name.length + 1);
+        call.syncId = env("GD_SYNC_ID");
+        call.digest = env("GD_SYNC_DIGEST");
         if (state.cargoHook) return state.cargoHook(call, start);
         start();
         if (state.cargoCodes.length > 0) return fail(state.cargoCodes.shift());
         if (call.syncId !== state.volumeId) return fail(75);
+        if (call.digest !== state.volumeDigest) return fail(75);
         return state.cargoCode === 0 ? ok() : fail(state.cargoCode);
       }
     }
@@ -2022,7 +2812,9 @@ function scenario({
     mkdirSync(join(repoRoot, dirname(path)), { recursive: true });
     writeFileSync(join(repoRoot, path), content);
   }
+  // Private, as ensurePrivateDir requires whatever the host's umask.
   const cacheDir = fresh("cache");
+  chmodSync(cacheDir, 0o700);
   if (pulledToday) {
     writeFileSync(
       join(cacheDir, "rust1-pull.json"),
@@ -2182,6 +2974,7 @@ test("R13 test happy path: call order, cargo argv, exit code and cache", async (
   assert.deepEqual(flagValues(args, "-e"), [
     `GD_IMAGE=${IMAGE_ID}`,
     `GD_SYNC_ID=${sync.sync.next}`,
+    `GD_SYNC_DIGEST=${sync.sync.digest}`,
   ]);
   const bash = args.indexOf("bash");
   assert.equal(args[bash - 1], IMAGE_ID);
@@ -2205,13 +2998,16 @@ test("R13 test happy path: call order, cargo argv, exit code and cache", async (
     "full",
     "/home/builder/src",
     "-",
+    "-",
     sync.sync.next,
+    sync.sync.digest,
   ]);
   assert.match(sync.sync.next, /^[0-9a-f]{32}$/);
   const cache = JSON.parse(readFileSync(s.cacheFile, "utf8"));
-  assert.equal(cache.version, 4);
+  assert.equal(cache.version, 5);
   assert.deepEqual(cache.missing, []);
   assert.equal(cache.syncId, sync.sync.next);
+  assert.equal(cache.digest, sync.sync.digest);
   assert.deepEqual(Object.keys(cache.files).sort(), [
     "dist/index.html",
     "src-tauri/Cargo.toml",
@@ -2224,16 +3020,31 @@ test("R13 test happy path: call order, cargo argv, exit code and cache", async (
   const lib = sync.sync.members.find((m) => m.name === "src-tauri/src/lib.rs");
   assert.equal(String(lib.data), "fn a() {}\n");
   assert.equal(lib.mode, 0o644);
-  assert.deepEqual(sync.sync.members.map((m) => m.name).slice(-3), [
+  assert.deepEqual(sync.sync.members.map((m) => m.name).slice(-2), [
     ".gd-rust-container/manifest",
-    ".gd-rust-container/absent",
     ".gd-rust-container/end",
   ]);
-  assert.equal(
-    String(sync.sync.members.at(-3).data),
-    "dist/index.html\0src-tauri/Cargo.toml\0src-tauri/src/lib.rs\0",
+  const manifest = sync.sync.members.at(-2).data;
+  const lf = (text) => Buffer.from(text.replaceAll("\r\n", "\n"));
+  assert.ok(
+    manifest.equals(
+      syncManifest(
+        new Map([
+          ["dist/index.html", fileHash("100644", STUB_DIST.data)],
+          [
+            "src-tauri/Cargo.toml",
+            fileHash("100644", lf(WORKTREE_FILES["src-tauri/Cargo.toml"])),
+          ],
+          [
+            "src-tauri/src/lib.rs",
+            fileHash("100644", lf(WORKTREE_FILES["src-tauri/src/lib.rs"])),
+          ],
+        ]),
+        [],
+      ),
+    ),
   );
-  assert.equal(sync.sync.members.at(-2).data.length, 0);
+  assert.equal(sync.sync.digest, sha256hex(manifest));
   assert.deepEqual(s.lock.handlersAtAcquire, [[]]);
   assert.equal(s.only("ps")[0].options.timeoutMs, 120_000);
   assert.equal(cargo.options.timeoutMs, undefined);
@@ -2507,9 +3318,9 @@ test("R14 failures under the lock exit 2, release and summarize", async () => {
       "could not pull rust:1 (Error response from daemon: offline)",
     ],
     [
-      "sync mismatch twice",
-      (s) => s.fake.state.syncCodes.push(75, 75),
-      "the source volume still does not match after a full sync",
+      "full sync mismatch",
+      (s) => s.fake.state.syncCodes.push(75),
+      "the source volume does not match after a full sync",
     ],
   ];
   for (const [name, arrange, line] of cases) {
@@ -2529,6 +3340,50 @@ test("R14 failures under the lock exit 2, release and summarize", async () => {
       cargo: true,
     },
   );
+});
+
+test("R14 a full sync's exit 75 fails at once, never as a cache mismatch", async () => {
+  const s = scenario();
+  s.fake.state.syncCodes.push(75);
+  const result = await s.run(["test"]);
+  assertFailedUnderLock(
+    s,
+    result,
+    "the source volume does not match after a full sync",
+  );
+  assert.deepEqual(
+    s.only("sync").map((call) => call.sync.mode),
+    ["full"],
+  );
+  assert.equal(
+    result.lines.some((l) =>
+      l.includes("does not match this worktree's sync cache"),
+    ),
+    false,
+    result.lines.join("\n"),
+  );
+});
+
+test("R14 a delta's exit 75 then a full sync's exit 75 exits 2", async () => {
+  const s = scenario();
+  assert.equal((await s.run(["test"])).code, 0);
+  writeFileSync(join(s.repoRoot, "src-tauri/src/lib.rs"), "fn h() {}\n");
+  s.fake.state.syncCodes.push(75, 75);
+  s.events.length = 0;
+  const { code, lines } = await s.run(["test"]);
+  assert.equal(code, 2, lines.join("\n"));
+  assertLine(lines, "the source volume does not match after a full sync");
+  assert.deepEqual(
+    s.only("sync").map((call) => call.sync.mode),
+    ["full", "delta", "full"],
+  );
+  assertLine(
+    lines,
+    "source volume does not match this worktree's sync cache; doing a full sync",
+  );
+  assert.deepEqual(s.events.slice(-3), ["sync", "sync", "release"]);
+  assert.equal(s.events.includes("cargo"), false);
+  assert.equal(existsSync(s.cacheFile), false, "cache written");
 });
 
 test("R14 a held volume lock (exit 73) in either container exits 2", async () => {
@@ -2711,28 +3566,30 @@ test("R14 a short archive at exit 0, docker not running and a start failure each
 test("R15 a second run sends exactly the changed file, deletes first, sentinel last", async () => {
   const s = scenario();
   assert.equal((await s.run(["test"])).code, 0);
-  const firstId = s.only("sync")[0].sync.next;
+  const first = s.only("sync")[0].sync;
   writeFileSync(join(s.repoRoot, "src-tauri/src/lib.rs"), "fn b() {}\r\n");
   const { code, lines } = await s.run(["test"]);
   assert.equal(code, 0);
   const second = s.only("sync")[1].sync;
   assert.equal(second.mode, "delta");
-  assert.equal(second.prev, firstId);
+  assert.equal(second.prev, first.next);
+  assert.equal(second.prevDigest, first.digest);
+  assert.notEqual(second.digest, first.digest);
   assert.deepEqual(
     second.members.map((m) => m.name),
     [
       ".gd-rust-container/deletes",
       "src-tauri/src/lib.rs",
       ".gd-rust-container/manifest",
-      ".gd-rust-container/absent",
       ".gd-rust-container/end",
     ],
   );
   assert.equal(second.members[0].data.length, 0);
   assert.equal(String(second.members[1].data), "fn b() {}\n");
-  assert.equal(String(second.members[4].data), second.next);
+  assert.equal(String(second.members[3].data), second.next);
   assertLine(lines, "sync (delta): 1 changed, 0 deleted, 2 unchanged in 0.0s");
   assert.equal(s.only("cargo")[1].syncId, second.next);
+  assert.equal(s.only("cargo")[1].digest, second.digest);
   assert.equal(
     JSON.parse(readFileSync(s.cacheFile, "utf8")).syncId,
     second.next,
@@ -2747,6 +3604,7 @@ test("R15 nothing changed skips the sync container and runs on the cached id", a
   assert.equal(code, 0);
   assert.equal(s.only("sync").length, 1);
   assert.equal(s.only("cargo")[1].syncId, cached);
+  assert.equal(s.only("cargo")[1].digest, s.only("sync")[0].sync.digest);
   assertLine(lines, "sync (delta): nothing changed (3 files) in 0.0s");
 });
 
@@ -2809,7 +3667,7 @@ test("R15 sync exit 75 drops the cache and re-syncs in full", async () => {
   const [, delta, full] = s.only("sync").map((call) => call.sync);
   assert.equal(delta.mode, "delta");
   assert.equal(full.mode, "full");
-  assert.equal(full.members.length, 7);
+  assert.equal(full.members.length, 6);
   assertLine(
     lines,
     "source volume does not match this worktree's sync cache; doing a full sync",
@@ -2833,16 +3691,17 @@ test("R15 a tracked file gone from disk is deleted; a nested repo row is skipped
     [
       ".gd-rust-container/deletes",
       ".gd-rust-container/manifest",
-      ".gd-rust-container/absent",
       ".gd-rust-container/end",
     ],
   );
   assert.equal(String(delta.members[0].data), "gone.txt\0");
-  assert.equal(
-    String(delta.members[1].data),
-    "dist/index.html\0src-tauri/Cargo.toml\0src-tauri/src/lib.rs\0",
-  );
-  assert.equal(String(delta.members[2].data), "gone.txt\0");
+  const cached = JSON.parse(readFileSync(s.cacheFile, "utf8"));
+  const manifest = syncManifest(new Map(Object.entries(cached.files)), [
+    "gone.txt",
+  ]);
+  assert.ok(delta.members[1].data.equals(manifest));
+  assert.equal(delta.digest, sha256hex(manifest));
+  assert.equal(cached.digest, delta.digest);
   assertLine(
     lines,
     "sync: 1 tracked path(s) missing from disk are treated as deleted (first: gone.txt)",
@@ -2883,7 +3742,6 @@ test("R15 index modes reach the archive; a mode-only change is a delta", async (
       ".gd-rust-container/deletes",
       "run.sh",
       ".gd-rust-container/manifest",
-      ".gd-rust-container/absent",
       ".gd-rust-container/end",
     ],
   );
@@ -2984,6 +3842,56 @@ test("R15 a failed cache write leaves no temp file and the run goes on", async (
   );
 });
 
+test("R15 a cache write failing after its temp was created removes the temp", async () => {
+  const s = scenario();
+  const full = Object.assign(new Error("full"), { code: "ENOSPC" });
+  const { code, lines } = await s.run(["test"], {
+    fs: {
+      writeFile: () => {
+        throw full;
+      },
+    },
+  });
+  assert.equal(code, 0, lines.join("\n"));
+  assertLine(
+    lines,
+    "could not write the sync cache (ENOSPC); the next run does a full sync",
+  );
+  assert.deepEqual(
+    readdirSync(s.cacheDir).filter((name) => name.endsWith(".tmp")),
+    [],
+  );
+  assert.equal(existsSync(s.cacheFile), false);
+});
+
+test("R15 a cache temp this run could not create is never removed", async () => {
+  for (const errCode of ["EEXIST", "EACCES"]) {
+    const s = scenario();
+    const removed = [];
+    const { code, lines } = await s.run(["test"], {
+      fs: {
+        open: () => {
+          throw Object.assign(new Error(errCode), { code: errCode });
+        },
+        rm: (path, options) => {
+          removed.push(path);
+          rmSync(path, options);
+        },
+      },
+    });
+    assert.equal(code, 0, `${errCode}\n${lines.join("\n")}`);
+    assertLine(
+      lines,
+      `could not write the sync cache (${errCode}); the next run does a full sync`,
+    );
+    assert.deepEqual(
+      removed.filter((path) => path.endsWith(".tmp")),
+      [],
+      errCode,
+    );
+  }
+});
+
 test("R15 a listed dist/index.html is replaced by CI's stub", async () => {
   const s = scenario({
     files: { ...WORKTREE_FILES, "dist/index.html": "<p>built</p>\n" },
@@ -3008,13 +3916,76 @@ test("R15 a change in the tracked paths missing from disk syncs and deletes them
       delta.members.find((m) => m.name === `.gd-rust-container/${name}`).data,
     );
   assert.equal(member("deletes"), "ghost.txt\0");
-  assert.equal(member("absent"), "ghost.txt\0");
+  assert.ok(member("manifest").includes("a ghost.txt\0"));
   assertLine(lines, "sync (delta): 0 changed, 0 deleted, 3 unchanged in 0.0s");
   assert.deepEqual(JSON.parse(readFileSync(s.cacheFile, "utf8")).missing, [
     "ghost.txt",
   ]);
   assert.equal((await s.run(["test"])).code, 0);
   assert.equal(s.only("sync").length, 2);
+});
+
+test("R15 the digest reaches the sync argv and the cargo env; a v4 cache syncs in full", async () => {
+  const s = scenario();
+  assert.equal((await s.run(["test"])).code, 0);
+  const first = s.only("sync")[0];
+  const manifest = first.sync.members.find(
+    (m) => m.name === ".gd-rust-container/manifest",
+  ).data;
+  assert.equal(first.sync.digest, sha256hex(manifest));
+  assert.deepEqual(first.args.slice(-4), [
+    "-",
+    "-",
+    first.sync.next,
+    first.sync.digest,
+  ]);
+  assert.ok(
+    flagValues(s.only("cargo")[0].args, "-e").includes(
+      `GD_SYNC_DIGEST=${first.sync.digest}`,
+    ),
+  );
+  const v5 = JSON.parse(readFileSync(s.cacheFile, "utf8"));
+  assert.equal(v5.version, 5);
+  const v4 = Object.fromEntries(
+    Object.entries({ ...v5, version: 4 }).filter(([key]) => key !== "digest"),
+  );
+  writeFileSync(s.cacheFile, JSON.stringify(v4));
+  const { code, lines } = await s.run(["test"]);
+  assert.equal(code, 0, lines.join("\n"));
+  assert.deepEqual(
+    s.only("sync").map((call) => call.sync.mode),
+    ["full", "full"],
+  );
+});
+
+test("R15 a non-UTF-8 listed path is reported once by hex and never synced", async () => {
+  const s = scenario();
+  const bad = [0x61, 0xff, 0x2e, 0x72, 0x73];
+  const { code, lines } = await s.run(["test"], {
+    listTree: async () => ({
+      eol: Buffer.concat([listing(s.rows), byteListing(EOL_HEAD, [bad])]),
+      stage: byteListing(MODE_HEAD, [bad]),
+      autocrlf: s.autocrlf,
+    }),
+  });
+  assert.equal(code, 0, lines.join("\n"));
+  assert.deepEqual(
+    lines.filter((line) => line.includes("not valid UTF-8")),
+    [
+      "rust-container: sync: skipped 1 listed path(s) that are not valid UTF-8 (first, as hex: 61ff2e7273)",
+    ],
+  );
+  assert.equal(
+    lines.some((line) => line.includes("missing from disk")),
+    false,
+  );
+  const { members } = s.only("sync")[0].sync;
+  const deletes = members.find((m) => m.name === ".gd-rust-container/deletes");
+  assert.equal(String(deletes?.data ?? "").includes(REPLACEMENT), false);
+  assert.equal(
+    members.some((m) => m.name.includes(REPLACEMENT)),
+    false,
+  );
 });
 
 // ------------------------------------------------------ R16 native monitor
@@ -3236,6 +4207,10 @@ test("R17 clean (this worktree) removes only its volumes and cache", async () =>
   assert.ok(s.fake.state.volumes.has(s.names.cargo));
   assert.equal(s.events[2], "ps");
   assertLine(lines, `removed volume ${s.names.src}`);
+  assert.equal(
+    lines.some((line) => line.includes("no volumes found")),
+    false,
+  );
   assert.equal(s.lock.released, 1);
 });
 
@@ -3544,6 +4519,630 @@ test("R17 a stop after cargo failed keeps cargo's code", async () => {
   assertLine(lines, "cargo test exited 101 after 0.0s");
   assertLine(lines, "done in 0.0s (exit 101)");
   assert.deepEqual([...s.signals.handlers.keys()], []);
+});
+
+/**
+ * Stops the run from inside its cargo call, as "R17 a stop while cargo runs
+ * kills it, removes its container and returns 1" does.
+ */
+function stopDuringCargo(s) {
+  s.fake.state.cargoHook = (_call, start) =>
+    new Promise((done) => {
+      const timer = setTimeout(() => done(ok()), 1000);
+      start(() => {
+        clearTimeout(timer);
+        done(fail(137));
+      });
+      s.signals.emit("SIGINT");
+    });
+}
+
+const unconfirmed = (name, reason) =>
+  `could not confirm container ${name} was removed (${reason}); the next run on this lock removes it if it is still there`;
+
+test("R17 a stop whose container removal fails says so; the lock is released once and the run exits 1", async () => {
+  const daemon =
+    "Error response from daemon: cannot remove container: daemon busy";
+  const spawnError = Object.assign(new Error("spawn docker ENOENT"), {
+    code: "ENOENT",
+  });
+  for (const [forced, reason] of [
+    [fail(1, daemon), daemon],
+    [{ ...fail(null), error: spawnError }, "ENOENT"],
+  ]) {
+    const s = scenario();
+    stopDuringCargo(s);
+    s.fake.state.forced.set("rm", forced);
+    const { code, lines } = await s.run(["test"]);
+    assert.equal(code, 1, lines.join("\n"));
+    const name = flagValues(s.only("cargo")[0].args, "--name")[0];
+    assertLine(lines, unconfirmed(name, reason));
+    assert.equal(s.lock.released, 1);
+    assert.deepEqual(s.events.slice(-3), ["cargo", "rm", "release"]);
+  }
+});
+
+test("R17 a removal whose result handling throws before cargo ends still releases the lock", async () => {
+  const s = scenario();
+  s.fake.state.cargoHook = (_call, start) =>
+    new Promise((done) => {
+      // The rm result settles first: cargo ends a macrotask after the kill.
+      start(() => setTimeout(() => done(fail(137)), 50));
+      s.signals.emit("SIGINT");
+    });
+  s.fake.state.forced.set("rm", fail(1, "daemon busy"));
+  const lines = [];
+  const { code } = await s.run(["test"], {
+    log: (line) => {
+      if (line.includes("could not confirm")) throw new Error("log threw");
+      lines.push(line);
+    },
+  });
+  assert.equal(code, 1, lines.join("\n"));
+  assert.equal(s.lock.released, 1);
+  assert.ok(
+    lines.some((l) => SUMMARY_FREE.test(l)),
+    lines.join("\n"),
+  );
+  assertLine(lines, "done in 0.0s (exit 1)");
+});
+
+test("R17 a stop whose removal times out says so", async () => {
+  const s = scenario();
+  stopDuringCargo(s);
+  s.fake.state.forced.set("rm", {
+    ...fail(null),
+    signal: "SIGTERM",
+    timedOut: true,
+  });
+  const { code, lines } = await s.run(["test"]);
+  assert.equal(code, 1, lines.join("\n"));
+  const name = flagValues(s.only("cargo")[0].args, "--name")[0];
+  assertLine(lines, unconfirmed(name, "`docker rm` timed out after 120.0s"));
+  assert.equal(s.lock.released, 1);
+});
+
+test("R17 a degraded stop's unconfirmed removal names docker rm -f", async () => {
+  const s = scenario({ degraded: true });
+  stopDuringCargo(s);
+  s.fake.state.forced.set("rm", fail(1, "daemon busy"));
+  const { code, lines } = await s.run(["test"]);
+  assert.equal(code, 1, lines.join("\n"));
+  const name = flagValues(s.only("cargo")[0].args, "--name")[0];
+  assertLine(
+    lines,
+    `could not confirm container ${name} was removed (daemon busy); remove it with docker rm -f ${name}`,
+  );
+  assert.equal(s.lock.released, 1);
+});
+
+test("R17 a removal already gone or under way logs nothing", async () => {
+  for (const stderr of [
+    "Error response from daemon: removal of container gd-x is already in progress",
+    "Error: No such container: gd-x",
+  ]) {
+    const s = scenario();
+    stopDuringCargo(s);
+    s.fake.state.forced.set("rm", fail(1, stderr));
+    const { code, lines } = await s.run(["test"]);
+    assert.equal(code, 1, lines.join("\n"));
+    assert.equal(
+      lines.some((line) => line.includes("could not confirm")),
+      false,
+      stderr,
+    );
+    assert.equal(s.lock.released, 1);
+  }
+});
+
+test("R17 clean of a worktree with no volumes says so", async () => {
+  const s = cleanScenario();
+  const never = join(root, "never-had-volumes");
+  const { code, lines } = await s.run(["clean", "--worktree", never]);
+  assert.equal(code, 0, lines.join("\n"));
+  assertLine(lines, `no volumes found for worktree ${resolve(never)}`);
+  const empty = scenario();
+  empty.fake.state.volumes.clear();
+  const result = await empty.run(["clean"]);
+  assert.equal(result.code, 0, result.lines.join("\n"));
+  assertLine(result.lines, `no volumes found for worktree ${empty.repoRoot}`);
+});
+
+// --------------------------------------------------- R21 host cache dir
+
+const CASES = [
+  {
+    platform: "linux",
+    env: { TMPDIR: "/tmp" },
+    home: "/home/u",
+    dir: `/home/u/.cache/${CACHE_LEAF}`,
+  },
+  {
+    platform: "linux",
+    env: { XDG_CACHE_HOME: "/x/c" },
+    home: "/home/u",
+    dir: `/x/c/${CACHE_LEAF}`,
+  },
+  {
+    platform: "linux",
+    env: { XDG_CACHE_HOME: "rel/c" },
+    home: "/home/u",
+    dir: `/home/u/.cache/${CACHE_LEAF}`,
+  },
+  {
+    platform: "linux",
+    env: { XDG_CACHE_HOME: "" },
+    home: "/home/u",
+    dir: `/home/u/.cache/${CACHE_LEAF}`,
+  },
+  {
+    platform: "darwin",
+    env: {},
+    home: "/Users/u",
+    dir: `/Users/u/Library/Caches/${CACHE_LEAF}`,
+  },
+  {
+    platform: "win32",
+    env: { LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local" },
+    home: "C:\\Users\\u",
+    dir: `C:\\Users\\u\\AppData\\Local\\${CACHE_LEAF}`,
+  },
+  {
+    platform: "win32",
+    env: {},
+    home: "C:\\Users\\u",
+    dir: `C:\\Users\\u\\AppData\\Local\\${CACHE_LEAF}`,
+  },
+];
+
+test("R21 defaultCacheDir: the linux default is ~/.cache even with TMPDIR=/tmp", () => {
+  assert.equal(defaultCacheDir(CASES[0]), CASES[0].dir);
+});
+
+test("R21 defaultCacheDir honours only an absolute XDG_CACHE_HOME", () => {
+  for (const c of CASES.slice(1, 4)) {
+    assert.equal(defaultCacheDir(c), c.dir, JSON.stringify(c.env));
+  }
+});
+
+test("R21 defaultCacheDir on darwin and win32", () => {
+  for (const c of CASES.slice(4)) {
+    assert.equal(defaultCacheDir(c), c.dir, JSON.stringify(c));
+  }
+});
+
+test("R21 defaultCacheDir ignores a LOCALAPPDATA that is not absolute", () => {
+  for (const local of ["rel\\Local", "C:rel"]) {
+    assert.equal(
+      defaultCacheDir({
+        platform: "win32",
+        env: { LOCALAPPDATA: local },
+        home: "C:\\Users\\u",
+      }),
+      `C:\\Users\\u\\AppData\\Local\\${CACHE_LEAF}`,
+      local,
+    );
+  }
+});
+
+/**
+ * The SystemError os.userInfo throws for a uid with no passwd entry; os.homedir
+ * throws it only when HOME is unset as well.
+ */
+function noPasswdEntry(syscall) {
+  return Object.assign(
+    new Error(
+      `A system error occurred: ${syscall} returned ENOENT (no such file or directory)`,
+    ),
+    { code: "ERR_SYSTEM_ERROR", info: { errno: -2, code: "ENOENT", syscall } },
+  );
+}
+
+test("R21 defaultCacheDir reads home only when no env dir is usable", () => {
+  const rows = [
+    ["win32", { LOCALAPPDATA: "C:\\L" }, `C:\\L\\${CACHE_LEAF}`],
+    ["linux", { XDG_CACHE_HOME: "/x/c" }, `/x/c/${CACHE_LEAF}`],
+  ];
+  for (const [platform, env, dir] of rows) {
+    let called = 0;
+    const home = () => {
+      called++;
+      throw noPasswdEntry("uv_os_homedir");
+    };
+    assert.equal(defaultCacheDir({ platform, env, home }), dir, platform);
+    assert.equal(called, 0, platform);
+  }
+  for (const [platform, env, dir] of [
+    [
+      "win32",
+      { LOCALAPPDATA: "C:rel" },
+      `C:\\H\\AppData\\Local\\${CACHE_LEAF}`,
+    ],
+    ["linux", { XDG_CACHE_HOME: "rel" }, `/h/.cache/${CACHE_LEAF}`],
+    ["darwin", {}, `/h/Library/Caches/${CACHE_LEAF}`],
+  ]) {
+    let called = 0;
+    const home = () => {
+      called++;
+      return platform === "win32" ? "C:\\H" : "/h";
+    };
+    assert.equal(defaultCacheDir({ platform, env, home }), dir, platform);
+    assert.equal(called, 1, platform);
+  }
+});
+
+test("R21 every default cache dir ends in the tool's own leaf", () => {
+  for (const c of CASES) {
+    const dir = defaultCacheDir(c);
+    const path = c.platform === "win32" ? win32 : posix;
+    assert.equal(path.basename(dir), CACHE_LEAF, dir);
+  }
+});
+
+test("R21 a planted entry at the cache temp path is neither written through nor removed", async () => {
+  const s = scenario();
+  const planted = `${s.cacheFile}.${"0".repeat(16)}.tmp`;
+  writeFileSync(planted, "planted");
+  const { code, lines } = await s.run(["test"], {
+    randomHex: (bytes) => "0".repeat(bytes * 2),
+  });
+  assert.equal(code, 0, lines.join("\n"));
+  assertLine(
+    lines,
+    "could not write the sync cache (EEXIST); the next run does a full sync",
+  );
+  assert.equal(readFileSync(planted, "utf8"), "planted");
+  assert.equal(existsSync(s.cacheFile), false);
+});
+
+test("R21 the host cache dir and files are private", {
+  skip: UNIX_ONLY,
+}, async () => {
+  const s = scenario();
+  const dir = join(fresh("c"), "cache");
+  const { code, lines } = await s.run(["test"], { cacheDir: dir });
+  assert.equal(code, 0, lines.join("\n"));
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  assert.equal(
+    statSync(join(dir, `sync-${s.names.src}.json`)).mode & 0o777,
+    0o600,
+  );
+});
+
+const NO_HOME_LINE =
+  "rust-container: no usable host cache dir (ENOENT); every run does a full sync and the daily rust:1 check";
+const NO_CACHE_LEAD = "rust-container: no usable host cache dir (";
+const NO_CACHE_DAILY_LINE =
+  "last daily rust:1 check: not recorded (no usable host cache dir)";
+
+/** Run options with no home directory and fs writes that only record. */
+function noHome() {
+  const calls = [];
+  const spy =
+    (name) =>
+    (...args) => {
+      calls.push([name, ...args]);
+    };
+  return {
+    calls,
+    extra: {
+      cacheDir: undefined,
+      homedir: () => {
+        throw noPasswdEntry("uv_os_homedir");
+      },
+      fs: {
+        mkdir: spy("mkdir"),
+        stat: spy("stat"),
+        lstat: spy("lstat"),
+        open: spy("open"),
+        close: spy("close"),
+        writeFile: spy("writeFile"),
+        rename: spy("rename"),
+        rm: spy("rm"),
+      },
+    },
+  };
+}
+
+test("R21 without a home directory the run has no host cache and never uses tmpdir", async () => {
+  const s = scenario();
+  const { calls, extra } = noHome();
+  for (let i = 0; i < 2; i++) {
+    const { code, lines } = await s.run(["test"], extra);
+    assert.equal(code, 0, lines.join("\n"));
+    assert.equal(lines.filter((line) => line === NO_HOME_LINE).length, 1);
+  }
+  assert.deepEqual(
+    s.only("sync").map((call) => call.sync.mode),
+    ["full", "full"],
+  );
+  assert.equal(s.only("pull").length, 2);
+  assert.deepEqual(calls, []);
+});
+
+test("R21 clean and info without a home directory touch no cache", async () => {
+  const runs = [
+    [cleanScenario(), ["clean"]],
+    [cleanScenario(), ["clean", "--all"]],
+    [scenario(), ["info"]],
+  ];
+  for (const [s, argv] of runs) {
+    const { calls, extra } = noHome();
+    const { code, lines } = await s.run(argv, extra);
+    const label = argv.join(" ");
+    assert.equal(code, 0, `${label}\n${lines.join("\n")}`);
+    assert.equal(
+      lines.filter((line) => line === NO_HOME_LINE).length,
+      1,
+      label,
+    );
+    assert.deepEqual(
+      lines.filter(
+        (line) =>
+          line.startsWith("rust-container: removed ") &&
+          !/^rust-container: removed (volume|image) /.test(line),
+      ),
+      [],
+      label,
+    );
+    assert.deepEqual(calls, [], label);
+    assert.equal(existsSync(s.cacheDir), true, label);
+    if (argv[0] === "info") {
+      assertLine(lines, NO_CACHE_DAILY_LINE);
+    }
+  }
+});
+
+test("R21 a relative home directory gives no host cache", async () => {
+  const s = scenario();
+  const { calls, extra } = noHome();
+  const { code, lines } = await s.run(["info"], {
+    ...extra,
+    platform: "linux",
+    env: { ...TEST_ENV },
+    homedir: () => "rel",
+  });
+  assert.equal(code, 0, lines.join("\n"));
+  assert.deepEqual(
+    lines.filter((line) => line.startsWith(NO_CACHE_LEAD)),
+    [
+      "rust-container: no usable host cache dir (not an absolute path: rel/.cache/gitdesktop-rust-container); every run does a full sync and the daily rust:1 check",
+    ],
+  );
+  assertLine(lines, NO_CACHE_DAILY_LINE);
+  assert.deepEqual(calls, []);
+});
+
+test("R21 a LOCALAPPDATA rooted only at the cwd's drive is ignored", () => {
+  for (const local of ["\\Users\\u\\Local", "/Local", "\\\\srv"]) {
+    let called = 0;
+    const home = () => {
+      called++;
+      return "C:\\Users\\u";
+    };
+    assert.equal(
+      defaultCacheDir({
+        platform: "win32",
+        env: { LOCALAPPDATA: local },
+        home,
+      }),
+      `C:\\Users\\u\\AppData\\Local\\${CACHE_LEAF}`,
+      local,
+    );
+    assert.equal(called, 1, local);
+  }
+});
+
+test("R21 a home rooted only at the cwd's drive gives no host cache", {
+  skip:
+    process.platform === "win32"
+      ? false
+      : "a win32 main row; never run on a POSIX host",
+}, async () => {
+  const s = scenario();
+  const { calls, extra } = noHome();
+  const { code, lines } = await s.run(["info"], {
+    ...extra,
+    platform: "win32",
+    env: { ...TEST_ENV },
+    homedir: () => "\\Users\\u",
+  });
+  assert.equal(code, 0, lines.join("\n"));
+  assert.deepEqual(
+    lines.filter((line) => line.startsWith(NO_CACHE_LEAD)),
+    [
+      `rust-container: no usable host cache dir (not rooted at a drive or share: \\Users\\u\\AppData\\Local\\${CACHE_LEAF}); every run does a full sync and the daily rust:1 check`,
+    ],
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("R21 a cache dir other users can write is never read or written", {
+  skip: UNIX_ONLY,
+}, async () => {
+  const s = scenario();
+  assert.equal((await s.run(["test"])).code, 0);
+  const planted = readFileSync(s.cacheFile, "utf8");
+  chmodSync(s.cacheDir, 0o777);
+  const listing = readdirSync(s.cacheDir).sort();
+  const { code, lines } = await s.run(["test"]);
+  assert.equal(code, 0, lines.join("\n"));
+  assert.deepEqual(
+    lines.filter((line) => line.startsWith(NO_CACHE_LEAD)),
+    [
+      `rust-container: no usable host cache dir (${s.cacheDir} is writable by other users); every run does a full sync and the daily rust:1 check`,
+    ],
+  );
+  assert.deepEqual(
+    s.only("sync").map((call) => call.sync.mode),
+    ["full", "full"],
+  );
+  assert.equal(s.only("pull").length, 1);
+  assert.equal(readFileSync(s.cacheFile, "utf8"), planted);
+  assert.deepEqual(readdirSync(s.cacheDir).sort(), listing);
+});
+
+test("R21 a cache dir found shared at write time is refused there", {
+  skip: UNIX_ONLY,
+}, async () => {
+  const s = scenario({ pulledToday: false });
+  const dir = join(fresh("c"), "cache");
+  const shared = {
+    isSymbolicLink: () => false,
+    isDirectory: () => true,
+    uid: process.getuid(),
+    mode: 0o40777,
+  };
+  const { code, lines } = await s.run(["test"], {
+    cacheDir: dir,
+    fs: { lstat: (path) => (path === dir ? shared : lstatSync(path)) },
+  });
+  assert.equal(code, 0, lines.join("\n"));
+  assertLine(
+    lines,
+    `could not write the sync cache (${dir} is writable by other users); the next run does a full sync`,
+  );
+  assertLine(
+    lines,
+    `could not record the daily rust:1 check (${dir} is writable by other users)`,
+  );
+  assert.deepEqual(readdirSync(dir), []);
+});
+
+test("R21 the cache dir is checked up front, and never made by the check", async () => {
+  const cache = "/home/u/.cache/gitdesktop-rust-container";
+  const rows = [
+    [4242, null],
+    [
+      0,
+      "rust-container: no usable host cache dir (/home/u belongs to uid 1000); every run does a full sync and the daily rust:1 check",
+    ],
+  ];
+  for (const [uid, want] of rows) {
+    const s = scenario();
+    const calls = [];
+    const owned = (owner) => ({ isDirectory: () => true, uid: owner });
+    const { code, lines } = await s.run(["info"], {
+      platform: "linux",
+      env: { ...TEST_ENV },
+      uid,
+      cacheDir: cache,
+      fs: {
+        stat: (path) => {
+          calls.push(["stat", path]);
+          if (path === "/home/u") return owned(uid === 0 ? 1000 : uid);
+          throw Object.assign(new Error("missing"), { code: "ENOENT" });
+        },
+        lstat: (path) => {
+          calls.push(["lstat", path]);
+          throw Object.assign(new Error("missing"), { code: "ENOENT" });
+        },
+        mkdir: (path) => calls.push(["mkdir", path]),
+        readFile: (path) => {
+          calls.push(["readFile", path]);
+          throw Object.assign(new Error("missing"), { code: "ENOENT" });
+        },
+      },
+    });
+    const label = `uid ${uid}`;
+    assert.equal(code, 0, `${label}\n${lines.join("\n")}`);
+    assert.deepEqual(
+      lines.filter((line) => line.startsWith(NO_CACHE_LEAD)),
+      want === null ? [] : [want],
+      label,
+    );
+    assert.deepEqual(
+      calls.slice(0, 2),
+      [
+        ["lstat", cache],
+        ["stat", cache],
+      ],
+      label,
+    );
+    assert.deepEqual(
+      calls.filter(([kind]) => kind === "mkdir" || kind === "lstat"),
+      [["lstat", cache]],
+      label,
+    );
+    assert.equal(
+      calls.some(
+        ([kind, path]) =>
+          kind === "readFile" && path === join(cache, "rust1-pull.json"),
+      ),
+      want === null,
+      label,
+    );
+    assertLine(
+      lines,
+      want === null ? "last daily rust:1 check: never" : NO_CACHE_DAILY_LINE,
+    );
+  }
+});
+
+const POSIX_SIDECAR = linuxOnly(
+  "the POSIX sidecar default, which main() takes from the host platform",
+);
+const SIDECAR_LINE =
+  "rust-container: no per-user dir for the lock sidecar (ENOENT); this run is not named, and if it is killed the next run does not wait for its children";
+
+test("R16 the container lock's sidecar sits in the native wrapper's per-user dir", {
+  skip: POSIX_SIDECAR,
+}, async () => {
+  const s = scenario();
+  const { code, lines } = await s.run(["test"], {
+    sidecarDir: undefined,
+    uid: 4242,
+    userHome: () => "/home/u",
+  });
+  assert.equal(code, 0, lines.join("\n"));
+  assert.equal(
+    s.lock.calls[0].sidecarDir,
+    "/home/u/.cache/gitdesktop-full-suite-4242",
+  );
+  assert.equal(
+    s.lock.calls[0].sidecarFile,
+    "/home/u/.cache/gitdesktop-full-suite-4242/gitdesktop-rust-container-40101.json",
+  );
+  assert.equal(lines.includes(SIDECAR_LINE), false);
+});
+
+test("R16 without a per-user dir the container lock has no sidecar", {
+  skip: POSIX_SIDECAR,
+}, async () => {
+  const s = scenario();
+  const { code, lines } = await s.run(["test"], {
+    sidecarDir: undefined,
+    uid: 4242,
+    userHome: () => {
+      throw noPasswdEntry("uv_os_get_passwd");
+    },
+  });
+  assert.equal(code, 0, lines.join("\n"));
+  assert.equal(s.lock.calls.length, 1);
+  assert.equal(s.lock.calls[0].sidecarDir, null);
+  assert.equal("sidecarFile" in s.lock.calls[0], false);
+  assert.equal(lines.filter((line) => line === SIDECAR_LINE).length, 1);
+});
+
+test("R16 nativeHolder reads the native wrapper's default dir", () => {
+  const dir = fresh("native-default");
+  writeFileSync(
+    sidecarPath(PORT_TEXT, dir),
+    JSON.stringify({ wrapperPid: process.pid, suite: "rust", cwd: "/w" }),
+  );
+  let calls = 0;
+  const resolveSidecarDir = () => {
+    calls++;
+    return { dir, problem: null };
+  };
+  assert.equal(nativeHolder(PORT_TEXT, { resolveSidecarDir }), "rust in /w");
+  assert.equal(calls, 1);
+  assert.equal(
+    nativeHolder(PORT_TEXT, {
+      resolveSidecarDir: () => ({ dir: null, problem: "no user id" }),
+    }),
+    "an unknown process",
+  );
 });
 
 // ----------------------------------------------- R19 spawnDocker (Linux)

@@ -1,41 +1,55 @@
 #!/usr/bin/env node
 // Runs `cargo test --manifest-path src-tauri/Cargo.toml` inside a warm Linux
 // container: a prebuilt image, per-worktree named volumes for the source copy
-// and the target dir, and a shared CARGO_HOME volume. The container must
-// test EXACTLY the worktree's current files, so the source volume is filled by
-// a host-side, content-addressed sync: only changed files travel (unchanged
-// ones keep their mtime, so cargo rebuilds only what changed), every sync is
-// identified by a random id the volume and the host cache both record, and the
-// archive ends with a sentinel member the container checks before the tree or
-// its sync id change.
+// and the target dir, and a shared CARGO_HOME volume. The source volume holds
+// the worktree's files as a Linux checkout with core.symlinks=false would hold
+// them (a tracked symlink arrives as a file holding its link text). A
+// host-side, content-addressed sync fills it: only changed files travel
+// (unchanged ones keep their mtime, so cargo rebuilds only what changed), every
+// sync is identified by a random id the volume and the host cache (when there
+// is one) both record, and the archive ends with a sentinel member the
+// container checks before the tree or its sync id change. The tree's content
+// is checked against the manifest digest the host passes (each file's exec
+// bit and bytes, and the tracked paths absent on the host) before a delta
+// changes it, after every sync lands, and before and after cargo runs.
 //
-// It holds its own port lock (27484, GD_RUST_CONTAINER_PORT), never the native
-// full-suite lock (GD_FULL_SUITE_PORT, default 27483, which must differ), and
-// logs whether that native lock was held during the run.
+// It holds its own port lock (default 27484, GD_RUST_CONTAINER_PORT), never the
+// native full-suite lock (GD_FULL_SUITE_PORT, default 27483, which must
+// differ), and logs whether that native lock was held during the run.
 // The container cannot see cfg(windows) code, CRLF behaviour or Windows path
 // rules, so it complements one native full run per batch; it never replaces it.
 //
-// Run: node scripts/rust-container.mjs test [cargo test args...] | clean [--worktree <path> | --stale | --all] | info
+// Run: node scripts/rust-container.mjs <command>
+//   test [cargo test args...]
+//   clean [--worktree <path> | --stale | --all]
+//   info
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readlinkSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import net from "node:net";
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   acquireLock,
+  defaultSidecarDir,
+  ensurePrivateDir,
+  errorText,
   isPidAlive,
+  isRootedWin32,
   portFromEnv,
   readSidecar,
   sidecarPath,
@@ -48,6 +62,9 @@ const PREFIX = "rust-container: ";
 const USAGE =
   "usage: node scripts/rust-container.mjs test [cargo test args...] | clean [--worktree <path> | --stale | --all] | info";
 const RESERVED_DIR = ".gd-rust-container";
+// `clean --all` removes the cache dir recursively, so every default ends in
+// this tool-owned leaf.
+export const CACHE_LEAF = "gitdesktop-rust-container";
 
 const defaultLog = (line) => process.stderr.write(`${line}\n`);
 
@@ -65,6 +82,34 @@ export function containerPortFromEnv(value) {
     );
   }
   return port;
+}
+
+/**
+ * The per-user host cache dir: never the shared temp dir, where another user
+ * could plant or read the cache. A relative XDG_CACHE_HOME is ignored, as the
+ * XDG spec requires, and so is a LOCALAPPDATA not rooted at a drive or a UNC
+ * share. `home` is a path or a function returning one, called only when no env
+ * value is usable, so a missing home never discards a usable env dir.
+ */
+export function defaultCacheDir({ platform, env, home }) {
+  const homeDir = () => (typeof home === "function" ? home() : home);
+  if (platform === "win32") {
+    const local = env.LOCALAPPDATA;
+    return win32.join(
+      isRootedWin32(local) ? local : win32.join(homeDir(), "AppData", "Local"),
+      CACHE_LEAF,
+    );
+  }
+  if (platform === "darwin") {
+    return posix.join(homeDir(), "Library", "Caches", CACHE_LEAF);
+  }
+  const xdg = env.XDG_CACHE_HOME;
+  return posix.join(
+    typeof xdg === "string" && posix.isAbsolute(xdg)
+      ? xdg
+      : posix.join(homeDir(), ".cache"),
+    CACHE_LEAF,
+  );
 }
 
 // Mirrors the "Install Linux dependencies" step of rust-tests.yml (set and
@@ -176,10 +221,14 @@ export function volumeNames(key) {
 }
 
 const EOL_META = /^i\/(\S*)\s+w\/(\S*)\s+attr\/(.*)$/;
+// fatal, so an invalid name is never merged into another; ignoreBOM, so a
+// leading U+FEFF stays part of the name.
+const PATH_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /**
  * The non-empty records of a NUL-separated listing, each split on its FIRST
- * tab only, since a path may hold tabs; `head` is null without a tab.
+ * tab only, since a path may hold tabs; `head` is null without a tab. A path
+ * that is not valid UTF-8 is null, with its bytes in `pathHex`.
  */
 function nulRecords(stdoutBuffer) {
   const records = [];
@@ -191,10 +240,16 @@ function nulRecords(stdoutBuffer) {
     start = end + 1;
     if (record.length === 0) continue;
     const tab = record.indexOf(9);
+    const pathBytes = record.subarray(tab + 1);
+    let path = null;
+    try {
+      path = PATH_DECODER.decode(pathBytes);
+    } catch {}
     records.push({
       text: record.toString("utf8"),
       head: tab === -1 ? null : record.subarray(0, tab).toString("utf8"),
-      path: record.subarray(tab + 1).toString("utf8"),
+      path,
+      pathHex: path === null ? pathBytes.toString("hex") : null,
     });
   }
   return records;
@@ -203,16 +258,21 @@ function nulRecords(stdoutBuffer) {
 /**
  * Rows of `git ls-files -z -co --exclude-standard --eol`; duplicates keep the
  * first. A record that does not parse throws: an unread row would drop a file.
+ * A path that is not valid UTF-8 adds its hex to `undecodable` and gets no row.
  */
-export function parseEolListing(stdoutBuffer) {
+export function parseEolListing(stdoutBuffer, undecodable = new Set()) {
   const rows = [];
   const seen = new Set();
-  for (const { text, head, path } of nulRecords(stdoutBuffer)) {
+  for (const { text, head, path, pathHex } of nulRecords(stdoutBuffer)) {
     const meta = head === null ? null : EOL_META.exec(head);
     if (meta === null) {
       throw new Error(
         `unreadable ls-files --eol record: ${JSON.stringify(text)}`,
       );
+    }
+    if (path === null) {
+      undecodable.add(pathHex);
+      continue;
     }
     if (seen.has(path)) continue;
     seen.add(path);
@@ -231,16 +291,21 @@ const MODE_RECORD = /^([0-7]{6}) [0-9a-f]{40,64} ([0-3])$/;
 /**
  * Index modes from `git ls-files -z -s` (`<mode> <sha> <stage>\t<path>`),
  * path -> mode. An unmerged path takes stage 0, else 2 (ours), else its first
- * stage listed. An unreadable record throws.
+ * stage listed. An unreadable record throws; a path that is not valid UTF-8
+ * adds its hex to `undecodable` and gets no mode.
  */
-export function parseModeListing(stdoutBuffer) {
+export function parseModeListing(stdoutBuffer, undecodable = new Set()) {
   const modes = new Map();
   const stages = new Map();
   const rank = (stage) => (stage === "0" ? 0 : stage === "2" ? 1 : 2);
-  for (const { text, head, path } of nulRecords(stdoutBuffer)) {
+  for (const { text, head, path, pathHex } of nulRecords(stdoutBuffer)) {
     const meta = head === null ? null : MODE_RECORD.exec(head);
     if (meta === null) {
       throw new Error(`unreadable ls-files -s record: ${JSON.stringify(text)}`);
+    }
+    if (path === null) {
+      undecodable.add(pathHex);
+      continue;
     }
     if (!stages.has(path) || rank(meta[2]) < rank(stages.get(path))) {
       stages.set(path, meta[2]);
@@ -328,10 +393,11 @@ function linkText(target, platform) {
  * Reads the listed files as the container gets them (LF per needsLf, 100755
  * index entries executable). A tracked symlink (index mode 120000) checked out
  * as a link arrives as its target text, what a core.symlinks=false checkout
- * holds. Any other link or junction, a nested repository or another
- * non-regular path is skipped, and a tracked path gone from disk is missing (so
- * a delta deletes it), both reported; an invalid path or any other read error
- * throws.
+ * holds. Only the last path component is checked: a symlinked ancestor, or a
+ * junction (a directory to Git for Windows), is read through, as native cargo
+ * reads it. A listed path that is itself another link or a non-regular file is
+ * skipped, and a tracked path gone from disk is missing (so a delta deletes
+ * it), both reported; an invalid path or any other read error throws.
  */
 export function readTree(
   root,
@@ -406,8 +472,46 @@ export function absentPaths(tree) {
   return tree.missing.filter((path) => !tree.files.has(path)).sort();
 }
 
+const HASH = /^[0-9a-f]{64}$/;
+const byteOrder = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
+
+/**
+ * The v5 manifest: NUL-terminated records sorted by path bytes, "f <fileHash>
+ * <path>" per file and "a <path>" per tracked path absent on the host; its
+ * sha256 is the digest the container scripts check the tree against.
+ */
+export function syncManifest(files, absent) {
+  const records = new Map();
+  for (const [path, hash] of files) {
+    if (!validTreePath(path)) {
+      throw new Error(`manifest path is invalid: ${JSON.stringify(path)}`);
+    }
+    if (typeof hash !== "string" || !HASH.test(hash)) {
+      throw new Error(`manifest hash is invalid for ${JSON.stringify(path)}`);
+    }
+    records.set(path, `f ${hash} ${path}\0`);
+  }
+  for (const path of absent) {
+    if (!validTreePath(path)) {
+      throw new Error(`manifest path is invalid: ${JSON.stringify(path)}`);
+    }
+    if (records.has(path)) {
+      throw new Error(
+        `manifest path is both a file and absent: ${JSON.stringify(path)}`,
+      );
+    }
+    records.set(path, `a ${path}\0`);
+  }
+  return Buffer.from(
+    [...records.keys()]
+      .sort(byteOrder)
+      .map((path) => records.get(path))
+      .join(""),
+  );
+}
+
 const SYNC_ID = /^[0-9a-f]{32}$/;
-const CACHE_VERSION = 4;
+const CACHE_VERSION = 5;
 
 function cacheFiles(cache) {
   const files = cache?.files;
@@ -430,6 +534,8 @@ function cacheMissing(cache) {
  * What to send: everything when the cache cannot vouch for the volume, else
  * only new or changed paths plus the cached paths that are gone. A cache
  * holding an unusable path list also means full: its deletes would be unsafe.
+ * A delta carries the cached manifest digest (`prevDigest`) its volume's tree
+ * is checked against before anything changes; a full sync carries null.
  */
 export function planSync({ files, cache }) {
   const paths = [...files.keys()].sort();
@@ -439,18 +545,32 @@ export function planSync({ files, cache }) {
     cache.version === CACHE_VERSION &&
     typeof cache.syncId === "string" &&
     SYNC_ID.test(cache.syncId) &&
+    typeof cache.digest === "string" &&
+    HASH.test(cache.digest) &&
     cacheMissing(cache) !== null
       ? cacheFiles(cache)
       : null;
   if (cached === null)
-    return { mode: "full", prev: null, send: paths, deletes: [] };
+    return {
+      mode: "full",
+      prev: null,
+      prevDigest: null,
+      send: paths,
+      deletes: [],
+    };
   const send = paths.filter(
     (path) => !Object.hasOwn(cached, path) || cached[path] !== files.get(path),
   );
   const deletes = Object.keys(cached)
     .filter((path) => !files.has(path))
     .sort();
-  return { mode: "delta", prev: cache.syncId, send, deletes };
+  return {
+    mode: "delta",
+    prev: cache.syncId,
+    prevDigest: cache.digest,
+    send,
+    deletes,
+  };
 }
 
 /**
@@ -554,37 +674,104 @@ export function tarBuffer(entries) {
   return Buffer.concat(parts);
 }
 
-// Both scripts refuse (75) on any drift before they write, so a killed cargo's
-// edits are never buried by a newer sync id.
-const DRIFT_FN = `# Prints the synced paths that changed in the tree since the last completed sync, one per
-# line: a synced file newer than .sync-id, a synced file gone, or a path that was absent on
-# the host at that sync and exists now. Run in the tree; prints nothing for a volume without
-# a manifest.
-drift() {
-  [ -f ../.sync-id ] && [ -f ../.sync-manifest ] || return 0
-  local present
-  present=$(mktemp)
-  (
-    export LC_ALL=C
-    find . -type f -printf '%P\\0' | sort -z > "$present"
-    find . -type f -newer ../.sync-id -printf '%P\\0' | sort -z | comm -z -12 - <(sort -z ../.sync-manifest)
-    comm -z -13 "$present" <(sort -z ../.sync-manifest)
-    if [ -f ../.sync-absent ]; then comm -z -12 "$present" <(sort -z ../.sync-absent); fi
-  ) | tr '\\0' '\\n'
-  rm -f "$present"
+// The tree check both container scripts run in the tree: exit 0 only when each
+// "f" record is a regular file whose fileHash (exec bit and bytes) matches,
+// nothing of any type sits at an "a" path, and every entry is a regular file
+// or a directory; unlisted ones are build output and pass. Any error it does
+// not catch exits 75; a die inside an eval, such as a module's optional load,
+// is left to that eval, but one raised while perl compiles code (an eval
+// string, or a file a require loads, through its use, BEGIN or, on the
+// image's perl 5.40, a syntax error) still exits 75, since $^S is undef then.
+// String.raw keeps perl's backslashes; the text must hold no single quote
+// (bash quotes it), no ${ and no backtick.
+export const VERIFY_PL = String.raw`use strict;
+use warnings;
+sub esc { my $s = shift; $s =~ s/([\x00-\x1f\x7f\\])/sprintf("\\x%02x", ord $1)/ge; return $s }
+sub fail { print STDERR "rust-container: verify: $_[0]\n"; exit 75 }
+BEGIN { $SIG{__DIE__} = sub { return if $^S; fail("cannot check the tree (" . esc((split /\n/, $_[0])[0] =~ s/\s+\z//r) . ")") } }
+use Digest::SHA ();
+use Errno qw(ENOENT ENOTDIR);
+use Fcntl qw(O_NOFOLLOW O_NONBLOCK O_RDONLY S_ISDIR S_ISREG);
+@ARGV == 2 or fail("usage: verify <manifest> <sha256>");
+my ($manifest, $want) = @ARGV;
+$want =~ /\A[0-9a-f]{64}\z/ or fail("bad expected digest");
+my @mst = lstat $manifest or fail("cannot open the manifest ($!)");
+S_ISREG($mst[2]) or fail("the manifest is not a regular file");
+sysopen(my $mh, $manifest, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or fail("cannot open the manifest ($!)");
+my $blob = "";
+while (1) {
+  my $n = sysread($mh, $blob, 1 << 20, length $blob);
+  defined $n or fail("cannot read the manifest ($!)");
+  last if $n == 0;
+}
+close $mh;
+Digest::SHA::sha256_hex($blob) eq $want or fail("the manifest does not match the host");
+$blob eq "" or substr($blob, -1) eq "\0" or fail("the manifest is truncated");
+my (%file, %absent);
+for my $rec (split /\0/, $blob) {
+  if ($rec =~ /\Af ([0-9a-f]{64}) (.+)\z/s) { $file{$2} = $1 }
+  elsif ($rec =~ /\Aa (.+)\z/s) { $absent{$1} = 1 }
+  else { fail("bad manifest record") }
+}
+my %present;
+my @dirs = (".");
+while (@dirs) {
+  my $dir = shift @dirs;
+  opendir(my $dh, $dir) or fail("cannot list " . esc($dir) . " ($!)");
+  my @names = readdir $dh;
+  closedir $dh;
+  for my $name (@names) {
+    next if $name eq "." || $name eq "..";
+    my $path = $dir eq "." ? $name : "$dir/$name";
+    my @st = lstat $path or fail("cannot stat " . esc($path) . " ($!)");
+    if (S_ISDIR($st[2])) { push @dirs, $path }
+    elsif (S_ISREG($st[2])) { $present{$path} = $st[2] }
+    else { fail("not a regular file or directory: " . esc($path)) }
+  }
+}
+my $buf;
+for my $path (sort keys %file) {
+  my $st = $present{$path};
+  defined $st or fail("missing or not a regular file: " . esc($path));
+  my $sha = Digest::SHA->new(256);
+  $sha->add((($st & 0100) ? "100755" : "100644") . "\0");
+  sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or fail("cannot open " . esc($path) . " ($!)");
+  while (1) {
+    my $n = sysread($fh, $buf, 1 << 20);
+    defined $n or fail("cannot read " . esc($path) . " ($!)");
+    last if $n == 0;
+    $sha->add($buf);
+  }
+  close $fh;
+  $sha->hexdigest eq $file{$path} or fail("content or mode differs: " . esc($path));
+}
+for my $path (sort keys %absent) {
+  lstat $path and fail("an entry exists at an absent path: " . esc($path));
+  $! == ENOENT || $! == ENOTDIR or fail("cannot stat " . esc($path) . " ($!)");
+}
+exit 0;
+`;
+
+const VERIFY_FN = `verify() {
+  perl -e '${VERIFY_PL}' -- "$@"
 }
 `;
 
-// Run as `bash -c "$SYNC_SCRIPT" sync <full|delta> <volume root> <prev|-> <next>`
-// with the archive on stdin; `.lock` (flock) keeps a second writer out (73).
+// Run as `bash -c "$SYNC_SCRIPT" sync <full|delta> <volume root> <prev id|->
+// <prev digest|-> <next id> <digest>`, the archive on stdin; `.lock` (flock)
+// keeps a second writer out (73).
+//
 // Nothing in the tree or .sync-id changes before the root guard, the end
-// sentinel and the delta preconditions pass. Deletes run before extraction, so
+// sentinel and the delta preconditions pass: a delta's tree is checked against
+// the previous digest before anything changes, and every sync's result against
+// the new digest before .sync-id is written. Deletes run before extraction, so
 // a file<->directory swap extracts cleanly; -m stamps the container's clock, so
 // a changed file is newer than the last build whatever the host/VM clock skew.
-export const SYNC_SCRIPT = `${DRIFT_FN}set -euo pipefail
-mode=$1 vol=$2 prev=$3 next=$4
+export const SYNC_SCRIPT = `${VERIFY_FN}set -euo pipefail
+mode=$1 vol=$2 prev=$3 prev_digest=$4 next=$5 digest=$6
 case $mode in full|delta) ;; *) echo "rust-container: sync: bad mode: $mode" >&2; exit 2 ;; esac
 [[ $next =~ ^[0-9a-f]{32}$ ]] || { echo "rust-container: sync: bad sync id" >&2; exit 2; }
+[[ $digest =~ ^[0-9a-f]{64}$ ]] || { echo "rust-container: sync: bad manifest digest" >&2; exit 2; }
 case $vol in /*) ;; *) echo "rust-container: sync: volume root must be absolute: $vol" >&2; exit 2 ;; esac
 cd "$vol" || exit 2
 if [ . -ef / ]; then echo "rust-container: sync: volume root resolves to /: $vol" >&2; exit 2; fi
@@ -599,38 +786,45 @@ if [ "$mode" = delta ]; then
   if [ "$(cat .sync-id 2>/dev/null || true)" != "$prev" ] || [ ! -d tree ]; then
     echo "rust-container: sync: the volume does not match the host cache" >&2; exit 75
   fi
-  if [ -n "$(cd tree && drift)" ]; then
+  if ! (cd tree && verify ../.sync-manifest "$prev_digest"); then
     echo "rust-container: sync: the volume's tree changed since its last sync" >&2; exit 75
   fi
 fi
-rm -f .sync-id
-if [ "$mode" = full ]; then rm -rf tree; mkdir tree; fi
+rm -f .sync-id .sync-absent
+if [ "$mode" = full ]; then rm -rf tree .sync-manifest; mkdir tree; fi
 cd tree
 tar -x -O -f "$work/sync.tar" .gd-rust-container/deletes | xargs -0 -r rm -f --
 find . -mindepth 1 -type d -empty -delete
 tar -x -m -f "$work/sync.tar"
 mv -f .gd-rust-container/manifest ../.sync-manifest
-mv -f .gd-rust-container/absent ../.sync-absent
 rm -rf .gd-rust-container
+if ! verify ../.sync-manifest "$digest"; then
+  echo "rust-container: sync: the volume's tree does not match this sync" >&2; exit 75
+fi
 printf '%s\\n' "$next" > ../.sync-id
 `;
 
 // Run as `bash -c "$CARGO_SCRIPT" cargo-test <args...>` in the VOLUME ROOT (a
 // missing -w dir would be created as root inside the volume), with a stdin the
-// host keeps open: its EOF (the wrapper died) stops cargo. fd 3 keeps that stdin
-// for the watcher; fd 9 holds the volume lock and is closed for both. A failure
-// before cargo exits 74; drift before cargo exits 75, and drift cargo caused
-// voids the sync id. Cargo's args stay positional.
-export const CARGO_SCRIPT = `${DRIFT_FN}set -euo pipefail
+// host keeps open: its EOF (the wrapper died) stops cargo. fd 3 keeps that
+// stdin for the watcher; fd 9 holds the volume lock and is closed for both.
+// Before cargo, a failure exits 74, another run holding the volume lock 73,
+// and 75 when the volume does not hold the expected sync or its tree fails the
+// content check; a tree that fails the check after cargo voids the sync id.
+// The first check sits in an if condition and the second runs under set +e, so
+// perl's exit status never becomes the script's; cargo's args stay positional.
+export const CARGO_SCRIPT = `${VERIFY_FN}set -euo pipefail
 exec 3<&0
 trap 'exit 74' ERR
+[[ \${GD_SYNC_ID-} =~ ^[0-9a-f]{32}$ && \${GD_SYNC_DIGEST-} =~ ^[0-9a-f]{64}$ && -n \${GD_IMAGE-} && -n \${CARGO_TARGET_DIR-} ]] \\
+  || { echo "rust-container: the cargo container started without valid run settings" >&2; exit 74; }
 exec 9> .lock
 flock -n 9 || { echo "rust-container: another run is using this source volume" >&2; exit 73; }
 if [ "$(cat .sync-id 2>/dev/null || true)" != "\${GD_SYNC_ID:?}" ] || [ ! -d tree ]; then
   echo "rust-container: the source volume does not hold the expected sync" >&2; exit 75
 fi
 cd tree
-if [ -n "$(drift)" ]; then
+if ! verify ../.sync-manifest "\${GD_SYNC_DIGEST:?}"; then
   echo "rust-container: the source volume's tree changed since its last sync" >&2; exit 75
 fi
 target=\${CARGO_TARGET_DIR:?}
@@ -650,11 +844,14 @@ trap 'kill -TERM "$cargo_pid" 2>/dev/null || true' INT TERM HUP
 set +e
 wait "$cargo_pid"
 code=$?
-changed=$(drift)
+report=$(verify ../.sync-manifest "$GD_SYNC_DIGEST" 2>&1 >/dev/null)
+verified=$?
 set -e
-if [ -n "$changed" ]; then
+if [ "$verified" -ne 0 ]; then
   rm -f ../.sync-id
-  echo "rust-container: cargo changed $(printf '%s\\n' "$changed" | wc -l) synced path(s) in the source volume (first: \${changed%%$'\\n'*}); the next run does a full sync" >&2
+  detail=\${report%%$'\\n'*}
+  detail=\${detail#rust-container: verify: }
+  echo "rust-container: cargo changed the source volume's tree (\${detail:-the check failed}); the next run does a full sync" >&2
 fi
 exit "$code"
 `;
@@ -666,13 +863,21 @@ function formatSeconds(ms) {
 
 /**
  * Who holds the native lock, from its sidecar, named only while the recorded
- * wrapper is alive: a stale sidecar names a run that is over.
+ * wrapper is alive: a stale sidecar names a run that is over. With no
+ * sidecarDir the native wrapper's own default dir is read; a null dir names
+ * an unknown process.
  */
 export function nativeHolder(
   port,
-  { sidecarDir = tmpdir(), isAlive = isPidAlive } = {},
+  {
+    sidecarDir,
+    resolveSidecarDir = defaultSidecarDir,
+    isAlive = isPidAlive,
+  } = {},
 ) {
-  const record = readSidecar(sidecarPath(port, sidecarDir));
+  const dir = sidecarDir === undefined ? resolveSidecarDir().dir : sidecarDir;
+  if (dir === null) return "an unknown process";
+  const record = readSidecar(sidecarPath(port, dir));
   if (
     record !== null &&
     isAlive(record.wrapperPid) &&
@@ -767,6 +972,9 @@ const EXIT_GRACE_MS = 5000;
 const LONG_TIMEOUT_MS = 600_000;
 // Docker's wording for an absent object; any other inspect failure is fatal.
 const MISSING_OBJECT = /no such (image|volume|object)/i;
+// The container is gone or going (--rm's AutoRemove), so a stop says nothing.
+const REMOVAL_UNDER_WAY =
+  /no such container|removal of container .* is already in progress/i;
 // A hook's env must not redirect the listing to another repository or index.
 const STRIPPED_GIT_ENV = new Set([
   "GIT_DIR",
@@ -1017,25 +1225,70 @@ export async function listWorktree(root, env = process.env) {
 
 function context(deps) {
   const platform = deps.platform ?? process.platform;
-  const sidecarDir = deps.sidecarDir ?? tmpdir();
+  const uid = deps.uid ?? process.getuid?.();
+  // Null when no per-user dir can be resolved: no shared temp.
+  let sidecarDir = deps.sidecarDir;
+  let sidecarProblem = null;
+  if (sidecarDir === undefined) {
+    ({ dir: sidecarDir, problem: sidecarProblem } = defaultSidecarDir({
+      platform,
+      uid,
+      userHome: deps.userHome,
+    }));
+  }
   const isAlive = deps.isAlive ?? isPidAlive;
-  return {
+  const env = deps.env ?? process.env;
+  // No home, or a cache dir that is not absolute (it would resolve against the
+  // cwd or its drive), means no host cache, never a shared-temp fallback.
+  let cacheDir = deps.cacheDir;
+  let cacheProblem = null;
+  if (cacheDir === undefined) {
+    try {
+      cacheDir = defaultCacheDir({
+        platform,
+        env,
+        home: deps.homedir ?? homedir,
+      });
+      const absolute =
+        platform === "win32"
+          ? isRootedWin32(cacheDir)
+          : posix.isAbsolute(cacheDir);
+      if (!absolute) {
+        cacheProblem =
+          platform === "win32"
+            ? `not rooted at a drive or share: ${cacheDir}`
+            : `not an absolute path: ${cacheDir}`;
+        cacheDir = null;
+      }
+    } catch (err) {
+      cacheDir = null;
+      cacheProblem = errorText(err);
+    }
+  }
+  const ctx = {
     platform,
+    uid,
     sidecarDir,
+    sidecarProblem,
     isAlive,
-    env: deps.env ?? process.env,
+    env,
     log: deps.log ?? defaultLog,
     repoRoot: resolve(deps.repoRoot ?? REPO_ROOT),
-    cacheDir: deps.cacheDir ?? join(tmpdir(), "gitdesktop-rust-container"),
+    cacheDir,
+    cacheProblem,
     docker: deps.docker ?? spawnDocker,
     listTree: deps.listTree ?? listWorktree,
     treeFs: deps.treeFs ?? { lstat: lstatSync, readFile: readFileSync },
     fs: {
       readFile: readFileSync,
+      open: openSync,
+      close: closeSync,
       writeFile: writeFileSync,
       rename: renameSync,
       rm: rmSync,
       mkdir: mkdirSync,
+      stat: statSync,
+      lstat: lstatSync,
       ...deps.fs,
     },
     acquire: deps.acquire ?? acquireLock,
@@ -1054,6 +1307,21 @@ function context(deps) {
     signals: deps.signals ?? process,
     pid: deps.pid ?? process.pid,
   };
+  // Checked up front, through ctx.fs and creating nothing: a refused dir is
+  // never read, written or removed (so `clean --all` leaves it alone).
+  if (ctx.cacheDir !== null) {
+    const problem = ensurePrivateDir(ctx.cacheDir, {
+      platform,
+      uid,
+      fs: ctx.fs,
+      create: false,
+    });
+    if (problem !== null) {
+      ctx.cacheDir = null;
+      ctx.cacheProblem = problem;
+    }
+  }
+  return ctx;
 }
 
 function say(ctx, line) {
@@ -1074,9 +1342,19 @@ function lockLog(ctx) {
 }
 
 function acquireFor(ctx, port, suite) {
+  const path = ctx.platform === "win32" ? win32 : posix;
   return ctx.acquire({
     port,
-    sidecarFile: join(ctx.sidecarDir, `gitdesktop-rust-container-${port}.json`),
+    // An explicit null keeps acquireLock from resolving a dir of its own.
+    sidecarDir: ctx.sidecarDir,
+    ...(ctx.sidecarDir === null
+      ? {}
+      : {
+          sidecarFile: path.join(
+            ctx.sidecarDir,
+            `gitdesktop-rust-container-${port}.json`,
+          ),
+        }),
     record: { wrapperPid: ctx.pid, suite, cwd: ctx.repoRoot },
     isAlive: ctx.isAlive,
     platform: ctx.platform,
@@ -1206,9 +1484,41 @@ function stopCurrent(ctx, run) {
     run.removals.push(
       Promise.resolve()
         .then(() => dockerShort(ctx, ["rm", "-f", current.name]))
+        .then(
+          (result) => {
+            if (result.code === 0 && !result.error) return;
+            if (!result.error && REMOVAL_UNDER_WAY.test(String(result.stderr)))
+              return;
+            unconfirmedRemoval(
+              ctx,
+              run,
+              current.name,
+              failureReason(result, ctx.shortTimeoutMs),
+            );
+          },
+          (err) =>
+            unconfirmedRemoval(
+              ctx,
+              run,
+              current.name,
+              err?.message ?? String(err),
+            ),
+        )
+        // Handled where it is made: runTest awaits it only once the run ends,
+        // and an unhandled rejection in between would end the process first.
         .catch(() => {}),
     );
   }
+}
+
+// A degraded lock never reaps, so only then is the user the one to remove it.
+function unconfirmedRemoval(ctx, run, name, reason) {
+  say(
+    ctx,
+    run.held.degraded
+      ? `could not confirm container ${name} was removed (${reason}); remove it with docker rm -f ${name}`
+      : `could not confirm container ${name} was removed (${reason}); the next run on this lock removes it if it is still there`,
+  );
 }
 
 async function reapOrphans(ctx, held, port) {
@@ -1269,11 +1579,14 @@ async function inspectRust1(ctx) {
   };
 }
 
+// A null cacheDir (none resolved, or one context() refused) means no host
+// cache: every cache file is null.
 function dailyFile(ctx) {
-  return join(ctx.cacheDir, "rust1-pull.json");
+  return ctx.cacheDir === null ? null : join(ctx.cacheDir, "rust1-pull.json");
 }
 
 function readJson(ctx, file) {
+  if (file === null) return null;
   try {
     return JSON.parse(String(ctx.fs.readFile(file)));
   } catch {
@@ -1281,16 +1594,35 @@ function readJson(ctx, file) {
   }
 }
 
+// Private to the user (ensurePrivateDir), under a random name, created
+// exclusively, and only a temp this call created is removed, so on POSIX an
+// entry another user planted there is refused, never written through or
+// removed; win32, whose exclusive create follows a dangling link, relies on
+// its per-user cache dir.
 function writeJsonAtomic(ctx, file, value) {
-  ctx.fs.mkdir(dirname(file), { recursive: true });
-  const temp = `${file}.${ctx.pid}.tmp`;
+  const problem = ensurePrivateDir(dirname(file), {
+    platform: ctx.platform,
+    uid: ctx.uid,
+    fs: ctx.fs,
+  });
+  if (problem !== null) throw new Error(problem);
+  const temp = `${file}.${ctx.randomHex(8)}.tmp`;
+  let created = false;
   try {
-    ctx.fs.writeFile(temp, JSON.stringify(value));
+    const fd = ctx.fs.open(temp, "wx", 0o600);
+    created = true;
+    try {
+      ctx.fs.writeFile(fd, JSON.stringify(value));
+    } finally {
+      ctx.fs.close(fd);
+    }
     ctx.fs.rename(temp, file);
   } catch (err) {
-    try {
-      ctx.fs.rm(temp, { force: true });
-    } catch {}
+    if (created) {
+      try {
+        ctx.fs.rm(temp, { force: true });
+      } catch {}
+    }
     throw err;
   }
 }
@@ -1301,10 +1633,12 @@ function lastDailyCheck(ctx) {
 }
 
 function recordDailyCheck(ctx, today) {
+  const file = dailyFile(ctx);
+  if (file === null) return;
   try {
-    writeJsonAtomic(ctx, dailyFile(ctx), { utcDate: today });
+    writeJsonAtomic(ctx, file, { utcDate: today });
   } catch (err) {
-    say(ctx, `could not record the daily rust:1 check (${err?.code ?? err})`);
+    say(ctx, `could not record the daily rust:1 check (${errorText(err)})`);
   }
 }
 
@@ -1496,12 +1830,16 @@ async function ensureVolumes(ctx, names) {
 }
 
 function cacheFile(ctx, srcVolume) {
-  return join(ctx.cacheDir, `sync-${srcVolume}.json`);
+  return ctx.cacheDir === null
+    ? null
+    : join(ctx.cacheDir, `sync-${srcVolume}.json`);
 }
 
 function dropCache(ctx, run) {
+  const file = cacheFile(ctx, run.names.src);
+  if (file === null) return;
   try {
-    ctx.fs.rm(cacheFile(ctx, run.names.src), { force: true });
+    ctx.fs.rm(file, { force: true });
   } catch {}
 }
 
@@ -1509,10 +1847,12 @@ async function readWorktree(ctx) {
   let listed;
   let rows;
   let modes;
+  // Shared by both listings, so a path in each counts once.
+  const undecodable = new Set();
   try {
     listed = await ctx.listTree(ctx.repoRoot, ctx.env);
-    rows = parseEolListing(listed.eol);
-    modes = parseModeListing(listed.stage);
+    rows = parseEolListing(listed.eol, undecodable);
+    modes = parseModeListing(listed.stage, undecodable);
   } catch (err) {
     throw new Failure(`cannot list the worktree: ${err?.message ?? err}`);
   }
@@ -1530,6 +1870,13 @@ async function readWorktree(ctx) {
     say(
       ctx,
       `sync: ${tree.symlinks.length} tracked symlink(s) arrive as regular files (first: ${tree.symlinks[0]})`,
+    );
+  }
+  if (undecodable.size > 0) {
+    const [first] = undecodable;
+    say(
+      ctx,
+      `sync: skipped ${undecodable.size} listed path(s) that are not valid UTF-8 (first, as hex: ${first})`,
     );
   }
   if (tree.skipped.length > 0) {
@@ -1560,13 +1907,12 @@ const nulJoined = (paths) =>
   );
 
 /**
- * One sync container: "synced" on a verified sync, "mismatch" on exit 75,
- * and for a delta, "failed" on any other container exit but 73 (the caller
- * retries in full); every other failure throws.
+ * The sync archive for `plan` (deletes, sent files, manifest, end sentinel
+ * `next`) and the sha256 of its manifest.
  */
-async function sendSync(ctx, run, tree, plan, ports) {
-  const next = ctx.randomHex(16);
+export function buildSyncArchive(tree, plan, next) {
   const absent = absentPaths(tree);
+  const manifest = syncManifest(hashes(tree), absent);
   const archive = tarBuffer([
     // Absent paths too: `rm -f` clears a copy cargo generated since, and a
     // path the volume lacks is harmless.
@@ -1582,13 +1928,23 @@ async function sendSync(ctx, run, tree, plan, ports) {
         mode: file.mode === EXECUTABLE ? 0o755 : 0o644,
       };
     }),
-    // Every path of the file set, and the tracked paths absent from disk, so
-    // the scripts can tell a synced file cargo changed, or a deleted one it
-    // regenerated, from a file cargo generated.
-    { name: `${RESERVED_DIR}/manifest`, data: nulJoined(tree.files.keys()) },
-    { name: `${RESERVED_DIR}/absent`, data: nulJoined(absent) },
+    // Every file's hash and every tracked path absent from disk, so the
+    // scripts can check the tree's content against the digest passed beside it.
+    { name: `${RESERVED_DIR}/manifest`, data: manifest },
     { name: `${RESERVED_DIR}/end`, data: Buffer.from(next) },
   ]);
+  return { archive, digest: sha256hex(manifest) };
+}
+
+/**
+ * One sync container: "synced" on a verified sync, "mismatch" on exit 75 (a
+ * precondition (delta) or result check failed), and for a delta, "failed" on
+ * any other container exit but 73 (the caller retries in full); every other
+ * failure throws.
+ */
+async function sendSync(ctx, run, tree, plan, ports) {
+  const next = ctx.randomHex(16);
+  const { archive, digest } = buildSyncArchive(tree, plan, next);
   const name = containerName(ctx, run, "sync");
   const result = await dockerLong(
     ctx,
@@ -1615,7 +1971,9 @@ async function sendSync(ctx, run, tree, plan, ports) {
       plan.mode,
       SRC_MOUNT,
       plan.prev ?? "-",
+      plan.prevDigest ?? "-",
       next,
+      digest,
     ],
     { input: archive, inherit: true, name },
   );
@@ -1639,20 +1997,24 @@ async function sendSync(ctx, run, tree, plan, ports) {
   }
   // Written only after a verified sync: the volume's id check turns a failed
   // write into a full sync next time.
+  const file = cacheFile(ctx, run.names.src);
   try {
-    writeJsonAtomic(ctx, cacheFile(ctx, run.names.src), {
-      version: CACHE_VERSION,
-      syncId: next,
-      files: Object.fromEntries(hashes(tree)),
-      missing: [...tree.missing].sort(),
-    });
+    if (file !== null)
+      writeJsonAtomic(ctx, file, {
+        version: CACHE_VERSION,
+        syncId: next,
+        digest,
+        files: Object.fromEntries(hashes(tree)),
+        missing: [...tree.missing].sort(),
+      });
   } catch (err) {
     say(
       ctx,
-      `could not write the sync cache (${err?.code ?? err}); the next run does a full sync`,
+      `could not write the sync cache (${errorText(err)}); the next run does a full sync`,
     );
   }
   run.syncId = next;
+  run.digest = digest;
   return "synced";
 }
 
@@ -1665,12 +2027,12 @@ function syncLine(ctx, plan, tree, startedMs) {
   return `sync (delta): ${plan.send.length} changed, ${plan.deletes.length} deleted, ${unchanged} unchanged in ${took}`;
 }
 
+const FULL_SYNC_MISMATCH = "the source volume does not match after a full sync";
+
 async function fullSync(ctx, run, ports, startedMs) {
   const plan = planSync({ files: hashes(run.tree), cache: null });
   if ((await sendSync(ctx, run, run.tree, plan, ports)) !== "synced") {
-    throw new Failure(
-      "the source volume still does not match after a full sync",
-    );
+    throw new Failure(FULL_SYNC_MISMATCH);
   }
   say(ctx, syncLine(ctx, plan, run.tree, startedMs));
 }
@@ -1687,6 +2049,7 @@ function resyncAfterMismatch(ctx, run) {
 async function syncTree(ctx, run, ports) {
   const started = ctx.now();
   run.tree = await readWorktree(ctx);
+  run.digest = sha256hex(syncManifest(hashes(run.tree), absentPaths(run.tree)));
   if (run.stopped) throw STOPPED;
   const cached = readJson(ctx, cacheFile(ctx, run.names.src));
   const plan = planSync({ files: hashes(run.tree), cache: cached });
@@ -1708,6 +2071,8 @@ async function syncTree(ctx, run, ports) {
     say(ctx, syncLine(ctx, plan, run.tree, started));
     return true;
   }
+  // A full sync's 75 is its own result check failing: resending cannot help.
+  if (plan.mode === "full") throw new Failure(FULL_SYNC_MISMATCH);
   if (outcome === "mismatch") resyncAfterMismatch(ctx, run);
   else dropCache(ctx, run);
   await fullSync(ctx, run, ports, started);
@@ -1743,6 +2108,8 @@ async function runCargo(ctx, run, args, ports) {
       `GD_IMAGE=${run.imageId}`,
       "-e",
       `GD_SYNC_ID=${run.syncId}`,
+      "-e",
+      `GD_SYNC_DIGEST=${run.digest}`,
       run.imageId,
       "bash",
       "-c",
@@ -1827,7 +2194,7 @@ async function runTest(ctx, args, ports, startMs) {
       code = 2;
     }
   } finally {
-    await Promise.all(run.removals);
+    await Promise.allSettled(run.removals);
     await monitor.finish();
     await held.release();
     for (const signal of signals) ctx.signals.removeListener(signal, onStop);
@@ -2003,6 +2370,7 @@ async function staleImages(ctx, labelArgs) {
 
 /** Removes a cache file or dir; a failure is logged and fails the clean. */
 function removeCache(ctx, path, options = { force: true }) {
+  if (path === null) return true;
   try {
     ctx.fs.rm(path, options);
     return true;
@@ -2016,7 +2384,11 @@ async function cleanSteps(ctx, held, target, port) {
   await reapOrphans(ctx, held, port);
   let failed = false;
   const kept = new Set();
-  for (const name of await cleanVolumes(ctx, target)) {
+  const names = await cleanVolumes(ctx, target);
+  if (target.mode === "worktree" && names.length === 0) {
+    say(ctx, `no volumes found for worktree ${target.path}`);
+  }
+  for (const name of names) {
     if (!(await remove(ctx, "volume", name))) {
       failed = true;
       kept.add(name);
@@ -2040,7 +2412,7 @@ async function cleanSteps(ctx, held, target, port) {
       if (!(await remove(ctx, "image", ref))) failed = true;
     }
   }
-  if (target.mode === "all") {
+  if (target.mode === "all" && ctx.cacheDir !== null) {
     if (removeCache(ctx, ctx.cacheDir, { recursive: true, force: true })) {
       say(ctx, `removed ${ctx.cacheDir}`);
     } else {
@@ -2086,7 +2458,11 @@ async function runInfo(ctx, ports) {
     say(ctx, `rust:1: rustc ${version}`);
     say(ctx, `image ${image}: ${built ? "built" : "not built"}`);
   }
-  say(ctx, `last daily rust:1 check: ${lastDailyCheck(ctx) ?? "never"}`);
+  const lastCheck =
+    ctx.cacheDir === null
+      ? "not recorded (no usable host cache dir)"
+      : (lastDailyCheck(ctx) ?? "never");
+  say(ctx, `last daily rust:1 check: ${lastCheck}`);
   return 0;
 }
 
@@ -2119,6 +2495,18 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   ) {
     say(ctx, USAGE);
     return 2;
+  }
+  if (ctx.cacheDir === null) {
+    say(
+      ctx,
+      `no usable host cache dir (${ctx.cacheProblem}); every run does a full sync and the daily rust:1 check`,
+    );
+  }
+  if (ctx.sidecarDir === null && command !== "info") {
+    say(
+      ctx,
+      `no per-user dir for the lock sidecar (${ctx.sidecarProblem}); this run is not named, and if it is killed the next run does not wait for its children`,
+    );
   }
   const ports = {};
   try {

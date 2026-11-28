@@ -2369,14 +2369,10 @@ mod tree_kill_tests {
     fn write_hook(repo: &str, lines: &[String]) {
         let hooks = Path::new(repo).join(".git").join("hooks");
         std::fs::create_dir_all(&hooks).expect("create the hooks dir");
-        let hook = hooks.join("pre-commit");
-        std::fs::write(&hook, format!("#!/bin/sh\n{}\n", lines.join("\n"))).expect("write hook");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-                .expect("make the hook executable");
-        }
+        crate::test_exec::write_executable(
+            &hooks.join("pre-commit"),
+            &format!("#!/bin/sh\n{}\n", lines.join("\n")),
+        );
     }
 
     /// Creates the hold file; removing it on drop lets a failed test's hook exit.
