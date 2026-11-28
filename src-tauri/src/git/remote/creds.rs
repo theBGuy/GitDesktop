@@ -645,6 +645,10 @@ mod tests {
     /// argv built in a helper the scanned fn calls, and any indented fn (an impl-block
     /// method, or one in an inline module such as gitlab.rs's and bitbucket.rs's
     /// `mod my_work_tests`, which sits above `mod tests` and so inside the cut text).
+    /// Also out of reach: a column-0 fn below `mod tests`, which the cut drops. Clippy's
+    /// `items_after_test_module` flags such a fn only when no module or macro invocation
+    /// follows the file's first inline `#[cfg(test)]` module; in ops.rs, pr.rs, gitlab.rs
+    /// and bitbucket.rs other modules follow it.
     #[test]
     fn branch_pushes_rerun_the_publishing_refusal_at_spawn() {
         use crate::github::repo_meta::tests::wiring_body;
@@ -956,12 +960,14 @@ mod tests {
             ["branches/refs.rs", "branches/update.rs"],
             "m7"
         );
+        // m8: a roster missing one remote/ file fails the set comparison.
         let m8: Vec<(&str, String)> = files
             .iter()
             .filter(|(file, _)| *file != "remote/fetch.rs")
             .cloned()
             .collect();
         assert_ne!(covered(&m8), on_disk_remote, "m8");
+        // m9: a plain-runner push planted in remote/push.rs's text is flagged.
         let mut m9 = files.clone();
         for (file, text) in &mut m9 {
             if *file == "remote/push.rs" {
@@ -969,10 +975,12 @@ mod tests {
             }
         }
         assert!(flag(&m9).contains(&"planted".to_string()), "m9");
+        // m10: a column-0 fn above an excluded file's test module fails the excluded check.
         let mod_text = std::fs::read_to_string(git_dir.join("remote/mod.rs")).unwrap();
         let m10 = format!("fn planted() {{}}\n{mod_text}");
         assert_ne!(m10, mod_text, "m10 changed nothing");
         assert!(!excluded_clean(&m10), "m10");
+        // m11: two remote/ files' texts swapped under their labels are both reported.
         let mut m11 = files.clone();
         let (push, creds) = (at("remote/push.rs"), at("remote/creds.rs"));
         let text = std::mem::take(&mut m11[push].1);
