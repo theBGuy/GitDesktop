@@ -1380,7 +1380,7 @@ mod tests {
     /// A read that fell back without the push atoms keeps every upstream fact and
     /// carries no destination. The shared tracking format's line is what the fallback
     /// reads, so it is fed straight in (the status read's own format can't be swapped
-    /// for one with an unknown atom; the live fallback is pinned in branches.rs).
+    /// for one with an unknown atom; the live fallback is pinned in branches/listing.rs).
     #[test]
     fn a_tracking_line_without_push_atoms_keeps_the_upstream_facts() {
         let refname = "refs/heads/feat/y";

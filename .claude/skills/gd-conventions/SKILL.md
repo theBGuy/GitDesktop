@@ -65,8 +65,8 @@ the length of the run; its exit code is the suite's.
 
 - **Scoped, while iterating.** Rust: the tests of each edited module,
   `cargo test --manifest-path src-tauri/Cargo.toml <module path>::` (file
-  `src-tauri/src/git/branches.rs` → `git::branches::`; several modules go
-  after `--`:
+  `src-tauri/src/git/branches/delete.rs` → `git::branches::delete::`;
+  several modules go after `--`:
   `cargo test --manifest-path src-tauri/Cargo.toml -- git::branches:: git::remote::`),
   plus the modules that CALL each changed item, found with
   `git grep -n "<item>" -- src-tauri/src`. A test that only NAMES the item
@@ -1220,7 +1220,7 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `unborn_head` (git/history.rs), which on git 2.43+ tells a missing branch ref
   from a broken one; a read that runs first and probes only after it fails goes
   through `read_unless_unborn` (same file). `commit_on_remote` and
-  `git_unpushed_count` in git/branches.rs are the models.
+  `git_unpushed_count` in git/branches/unpushed.rs are the models.
 - **AppError message classifiers** — a check over an AppError's `message`
   matches through `appErrorDetail` (`@/lib/error-summary`), since the wire
   message keeps the Rust Display lead (`invalid argument: …`); it strips only
@@ -2115,11 +2115,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   holder start and die and never sleep for either, and a survivor is proven
   by `confirm_alive`, never by a bare `alive()`.
 - **User input → git refspecs/argv** routes through the existing chokepoints:
-  `validate_ref_name` (git/branches.rs), `validate_tag_name` (git/ops.rs),
+  `validate_ref_name` (git/branches/names.rs), `validate_tag_name` (git/ops.rs),
   pushes via `build_push_args` (git/remote.rs) — never construct an inline
   refspec or re-derive the validation. Session-reserved branch names refuse
   through the shared `refuse_session_branch_name`/`is_session_branch_name`
-  guard (git/branches.rs, case-insensitive) at every branch-minting entry
+  guard (git/branches/names.rs, case-insensitive) at every branch-minting entry
   point; the two local-switch routes refuse only guess-creation so existing
   session-named branches stay reachable — never re-derive the prefix check.
   MCP tools push only through `git_push_same_name_core` (it refuses a named
