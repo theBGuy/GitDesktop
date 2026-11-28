@@ -82,7 +82,7 @@
 //      `TEST_GIT_HANG_GUARD` (git/runner.rs, test builds only) is the hang
 //      guard. A test fn passing it to product code under test, the
 //      lock-taking, retrying or credential runner wrappers (git/runner.rs,
-//      git/remote.rs) included, is not a site, and a runner-arm site takes no
+//      git/remote/creds.rs) included, is not a site, and a runner-arm site takes no
 //      allowlist row. A test attribute outside the code check L reads as test
 //      code fails the census test (testAttrsOutsideTestCode); the other blind
 //      spots print as its NOTE.
@@ -271,42 +271,42 @@ const REFSPEC_ALLOWLIST = [
       "validate_ref_name runs on the forge-supplied branch at fn entry, before refs/heads/<name> is built; the same validated name is the only source of the same-repo tracking refspec refs/heads/<name>:refs/remotes/<remote>/<name> (remote = a fixed lens literal); the pull/merge-request refs and the refs/gitdesktop pin are formatted from a u64 PR number (and, for the pin, the process id) only",
   },
   {
-    file: "git/remote.rs",
+    file: "git/remote/push.rs",
     fn: "git_push_with_policy",
     rationale:
       "validates branch, remote and remote_branch with validate_ref_name at fn entry",
   },
   {
-    file: "git/remote.rs",
+    file: "git/remote/push.rs",
     fn: "build_push_args",
     rationale:
       "the push-refspec chokepoint; reached only through NamedRoute::argv, whose route git_push_with_policy builds from names it validated first",
   },
   {
-    file: "git/remote.rs",
+    file: "git/remote/push.rs",
     fn: "create_lease_arg",
     rationale:
       "the create-only lease's chokepoint; its dest is a NamedRoute destination (the branch, the remote branch, or the config-derived tracked upstream's name), refused in NamedRoute::refuse before the argv is built when empty or wherever the full ref refs/heads/<dest> would fail validate_ref_name (so `:` `*` `?` `[` `\\` space and controls are refused, a leading dash is not), or HEAD's branch after validate_ref_name",
   },
   {
-    file: "git/remote.rs",
+    file: "git/remote/push.rs",
     fn: "pinned_lease_arg",
     rationale:
       "the pinned lease's chokepoint; its dest is git's own %(push) destination for the pinned branch, re-validated with validate_ref_name in tracking_degrade_preread, and its sha is git's rev-parse output",
   },
   {
-    file: "git/remote.rs",
+    file: "git/remote/publish.rs",
     fn: "publish_refspec",
     rationale: "the publish-refspec chokepoint; callers validate the branch",
   },
   {
-    file: "git/remote.rs",
+    file: "git/remote/push.rs",
     fn: "branch_has_reflog",
     rationale:
       "read-only `reflog exists` probe (never a refspec); the name is either git_push_with_policy's branch, validated with validate_ref_name at the arm entry, or HEAD's full `symbolic-ref` output stripped of `refs/heads/` — git's own ref name",
   },
   {
-    file: "git/remote.rs",
+    file: "git/remote/tracking.rs",
     fn: "parse_upstream_tracking_matches_real_for_each_ref_output",
     rationale: "#[cfg(test)] fixture — the branch name is a test literal",
   },
@@ -3139,7 +3139,7 @@ export const TEST_HANG_GUARD_ALLOWLIST = [
 ];
 
 export const TEST_HANG_GUARD_NOTE =
-  "Not seen: an alias (`use … DEFAULT_TIMEOUT as X`); a value bound to DEFAULT_TIMEOUT and passed to a helper by name; a helper delegating to product code that applies the budget; a nested fn inside a `#[cfg(test)]` fn outside any test module, methods of a `#[cfg(test)] impl` outside one, and `#[cfg(test)]` consts or statics outside one (all read as production); a helper outside any test module gated by a compound cfg that contains test (`#[cfg(all(test, unix))]`), read as production: a fn is test code only under an exact `#[cfg(test)]`, a module only under `#[cfg(test)]` or `#[cfg(all(test, …))]`; a fn outside any test module gated by an exact `#[cfg(test)]` whose signature holds a brace (`-> Foo<{ N }>`), whose body neither check L nor the census reads; a test module check L cannot read (gated `#[cfg(all(<x>, test))]` or `#[cfg(any(test, unix))]`, a gate spaced as `#[cfg (test)]` or `# [cfg(test)]`, a nested-bracket attribute between the gate and `mod`, `mod r#tests`, an inner `#![cfg(test)]` inside `mod tests {` (credited to the module's first fn only when that fn directly follows it), an out-of-line `mod tests;` file) fails the census test (testAttrsOutsideTestCode) as soon as it holds a test attribute check L does not read as test code, as does a bare `#[test]` fn outside any module, so what stays unseen there is a helper-only module under an unread gate (or one whose test fns each carry their own `#[cfg(test)]`, or an inner-gated module whose single test fn comes first); the census counts only an attribute whose last path segment is `test`, so a test spelled through `cfg_attr` (`#[cfg_attr(not(miri), test)]`) or by a test macro of another name (`#[rstest]`, `#[test_case(..)]`) is not counted; closure-form helpers inside test-fn bodies, except their direct runner calls; anywhere, a budget spelled other than the DEFAULT_TIMEOUT token (`Duration::from_secs(30)`, another constant), such as a `tokio::time::timeout` bound around a spawn; in a test fn, a DEFAULT_TIMEOUT that is not a direct argument of a plain spawn runner (product code under test keeps the product's budget on purpose), a lock-taking or retrying runner wrapper (`run_git_mutating*`, `run_git_config_write*`, `run_git_raw_index_retry`, `run_git_worktree_admin`, and git/remote.rs's credential wrappers `run_git_with_creds_*` and `run_git_mutating_with_creds*`), read as product code under test, a budget bound to a local first (`let t = DEFAULT_TIMEOUT;`) and passed by name, a token nested inside another call among a runner's arguments (`run_git(.., f(DEFAULT_TIMEOUT))`), a token inside a block, if/match, struct-literal, array or tuple argument of a runner, a turbofish or parenthesized runner call (`run_git::<T>(…)`, `(run_git)(…)`), and a runner reached through a wrapper or an alias; and out of reach by design: a fn named by a raw identifier or a non-ASCII name, which check L reads under the name's leading ASCII run (`r` for `fn r#helper`, `h` for `fn hélper`), so no allowlist row can target it and a row for that run covers every helper read under it in the file; such a name with no leading ASCII word character, which is `<unreadable>` directly in a test module and silent when nested in a test fn (except a direct runner argument, read as the test fn's) or gated `#[cfg(test)]` outside any module; a `macro_rules!` body defined outside test code and used by tests, and one allowlist row covers every same-named helper in its file";
+  "Not seen: an alias (`use … DEFAULT_TIMEOUT as X`); a value bound to DEFAULT_TIMEOUT and passed to a helper by name; a helper delegating to product code that applies the budget; a nested fn inside a `#[cfg(test)]` fn outside any test module, methods of a `#[cfg(test)] impl` outside one, and `#[cfg(test)]` consts or statics outside one (all read as production); a helper outside any test module gated by a compound cfg that contains test (`#[cfg(all(test, unix))]`), read as production: a fn is test code only under an exact `#[cfg(test)]`, a module only under `#[cfg(test)]` or `#[cfg(all(test, …))]`; a fn outside any test module gated by an exact `#[cfg(test)]` whose signature holds a brace (`-> Foo<{ N }>`), whose body neither check L nor the census reads; a test module check L cannot read (gated `#[cfg(all(<x>, test))]` or `#[cfg(any(test, unix))]`, a gate spaced as `#[cfg (test)]` or `# [cfg(test)]`, a nested-bracket attribute between the gate and `mod`, `mod r#tests`, an inner `#![cfg(test)]` inside `mod tests {` (credited to the module's first fn only when that fn directly follows it), an out-of-line `mod tests;` file) fails the census test (testAttrsOutsideTestCode) as soon as it holds a test attribute check L does not read as test code, as does a bare `#[test]` fn outside any module, so what stays unseen there is a helper-only module under an unread gate (or one whose test fns each carry their own `#[cfg(test)]`, or an inner-gated module whose single test fn comes first); the census counts only an attribute whose last path segment is `test`, so a test spelled through `cfg_attr` (`#[cfg_attr(not(miri), test)]`) or by a test macro of another name (`#[rstest]`, `#[test_case(..)]`) is not counted; closure-form helpers inside test-fn bodies, except their direct runner calls; anywhere, a budget spelled other than the DEFAULT_TIMEOUT token (`Duration::from_secs(30)`, another constant), such as a `tokio::time::timeout` bound around a spawn; in a test fn, a DEFAULT_TIMEOUT that is not a direct argument of a plain spawn runner (product code under test keeps the product's budget on purpose), a lock-taking or retrying runner wrapper (`run_git_mutating*`, `run_git_config_write*`, `run_git_raw_index_retry`, `run_git_worktree_admin`, and git/remote/creds.rs's credential wrappers `run_git_with_creds_*` and `run_git_mutating_with_creds*`), read as product code under test, a budget bound to a local first (`let t = DEFAULT_TIMEOUT;`) and passed by name, a token nested inside another call among a runner's arguments (`run_git(.., f(DEFAULT_TIMEOUT))`), a token inside a block, if/match, struct-literal, array or tuple argument of a runner, a turbofish or parenthesized runner call (`run_git::<T>(…)`, `(run_git)(…)`), and a runner reached through a wrapper or an alias; and out of reach by design: a fn named by a raw identifier or a non-ASCII name, which check L reads under the name's leading ASCII run (`r` for `fn r#helper`, `h` for `fn hélper`), so no allowlist row can target it and a row for that run covers every helper read under it in the file; such a name with no leading ASCII word character, which is `<unreadable>` directly in a test module and silent when nested in a test fn (except a direct runner argument, read as the test fn's) or gated `#[cfg(test)]` outside any module; a `macro_rules!` body defined outside test code and used by tests, and one allowlist row covers every same-named helper in its file";
 
 const TEST_HANG_GUARD_FIX =
   "check L: a test helper's git spawn budget is a hang guard — pass " +
@@ -3151,7 +3151,7 @@ const TEST_RUNNER_FIX =
   "DEFAULT_TIMEOUT — pass crate::git::runner::TEST_GIT_HANG_GUARD (test " +
   "builds only); a runner's spawn budget in a test is a hang guard";
 // Every `fn run_git*` declared outside test modules anywhere under
-// src-tauri/src (git/runner.rs and git/remote.rs today), private ones
+// src-tauri/src (git/runner.rs and git/remote/creds.rs today), private ones
 // included, is in exactly one list: the runner arm matches a callee by its
 // last path segment in every file, so the pin test reads every file through
 // gitRunnerDeclarations. The runner arm guards the PLAIN spawn runners, which

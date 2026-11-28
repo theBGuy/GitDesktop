@@ -5433,7 +5433,7 @@ test("a rust allowlist record no hit maps to is stale, matched as (file, fn)", (
     { file: "git/ops.rs", fn: "live_one", rationale: "x" },
     { file: "git/ops.rs", fn: "site_removed", rationale: "x" },
     // Same fn name, different file: the pair must match, not either half.
-    { file: "git/remote.rs", fn: "live_one", rationale: "x" },
+    { file: "git/remote/push.rs", fn: "live_one", rationale: "x" },
   ];
   const hits = [
     { file: "git/ops.rs", fn: "live_one", allowlisted: true },
@@ -5441,7 +5441,7 @@ test("a rust allowlist record no hit maps to is stale, matched as (file, fn)", (
   ];
   assert.deepEqual(
     staleAllowlistEntries(list, hits).map((e) => `${e.file}::${e.fn}`),
-    ["git/ops.rs::site_removed", "git/remote.rs::live_one"],
+    ["git/ops.rs::site_removed", "git/remote/push.rs::live_one"],
   );
   // An empty allowlist (SECRET_ARGV_ALLOWLIST today) is a no-op, not a failure.
   assert.deepEqual(staleAllowlistEntries([], hits), []);
@@ -6774,7 +6774,7 @@ test("merge guard unions the arms of an if or match verb", () => {
   for (const body of [
     'let op = if mode == "rebase" { "rebase" } else { "fetch" };\nrun(&[op, sha]);',
     'let op = if a { "merge" } else { other() };\nrun(&[op, sha]);',
-    // The shape at remote.rs/autostash.rs: an op label that never reaches argv.
+    // The shape at remote/pull.rs and autostash.rs: an op label that never reaches argv.
     'let op = if mode == "rebase" { "rebase" } else { "merge" };\nrefuse_mid_op_for(&repo, op);',
   ]) {
     assert.deepEqual(mergeGuardHits(unguarded(body)), [], body);
@@ -10124,7 +10124,7 @@ test("check L's note names what it cannot see", () => {
     /DEFAULT_TIMEOUT as X/,
     /passed to a helper by name/,
     /not a direct argument of a plain spawn runner/,
-    /lock-taking or retrying runner wrapper \(`run_git_mutating\*`, `run_git_config_write\*`, `run_git_raw_index_retry`, `run_git_worktree_admin`, and git\/remote\.rs's credential wrappers `run_git_with_creds_\*` and `run_git_mutating_with_creds\*`\), read as product code under test/,
+    /lock-taking or retrying runner wrapper \(`run_git_mutating\*`, `run_git_config_write\*`, `run_git_raw_index_retry`, `run_git_worktree_admin`, and git\/remote\/creds\.rs's credential wrappers `run_git_with_creds_\*` and `run_git_mutating_with_creds\*`\), read as product code under test/,
     /a token inside a block, if\/match, struct-literal, array or tuple argument of a runner/,
     /a turbofish or parenthesized runner call \(`run_git::<T>\(…\)`, `\(run_git\)\(…\)`\)/,
     /closure-form helpers inside test-fn bodies, except their direct runner calls/,
