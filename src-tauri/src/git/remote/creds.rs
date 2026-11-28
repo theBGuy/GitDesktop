@@ -109,14 +109,14 @@ async fn run_git_with_creds_rechecked(
 /// `NETWORK_TIMEOUT` and must not stall staging or a commit for that long. The pull
 /// cores' bare fall-through is the one caller whose command also touches the working
 /// tree: it holds the working-tree lock across this call, which is the only sanctioned
-/// nesting direction (see `run_git_mutating`). Every other caller here — fetch, push,
+/// nesting direction (see `run_git_mutating`). Every other caller in `git::remote` — fetch, push,
 /// set-head — holds nothing but the network domain this takes.
 ///
 /// A `push -u` whose upstream write lost `.git/config.lock` still exits 0 (measured,
 /// git 2.51.1), so every same-name publish gets its upstream re-set here, once the
 /// network hold is released; the push itself is never re-run.
 ///
-/// Outside this module, an argv that pushes a named local branch goes through
+/// Outside `git::remote`, an argv that pushes a named local branch goes through
 /// [`run_git_mutating_with_creds_for_branch`] instead, so its refusal is re-read at spawn.
 pub(crate) async fn run_git_mutating_with_creds(
     state: &AppState,
@@ -261,7 +261,7 @@ mod tests {
     };
     use crate::git::runner::{TestGitEnv, TEST_GIT_HANG_GUARD};
 
-    // --- Auth-class classifier for the ambient-credential fallback. ---
+    // --- The credential runner: auth-class fallback, rechecks, upstream repair, roster. ---
 
     #[test]
     fn auth_class_matches_rejected_credentials() {
@@ -535,8 +535,8 @@ mod tests {
         assert_eq!(feat_x_tip(&origin).await, feat_x_tip(&work).await);
     }
 
-    /// The production text of a module: CRLF-normalized, cut where a `#[cfg(test)]` line
-    /// opens a private `mod tests {`; a `pub(crate) mod tests` is kept whole.
+    /// A module's production text, CRLF-normalized: cut at a `#[cfg(test)]` line that follows
+    /// a newline and opens `mod tests {`; a byte-0 one or a `pub(crate) mod tests` is kept.
     fn production_text(source: &str) -> String {
         let source = source.replace("\r\n", "\n");
         match source.split_once("\n#[cfg(test)]\nmod tests {") {

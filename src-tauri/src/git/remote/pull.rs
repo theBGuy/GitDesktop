@@ -224,7 +224,7 @@ mod tests {
         );
     }
 
-    // --- The fork-point guard on a rebase-mode pull. ---
+    // --- The rebase fork-point guard, merge mode, and the fall-through's ignored guard. ---
 
     /// A clone whose PUSHED commit `V` the upstream then force-pushed away — the
     /// state a bare `git pull --rebase` replays out of existence. Returns the

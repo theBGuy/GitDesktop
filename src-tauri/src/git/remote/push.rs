@@ -58,7 +58,7 @@ impl From<PushGuard> for PushGuardWire {
     }
 }
 
-/// What a GUI push is pinned to: HEAD's branch (never [`ExpectedRef::Any`]) and,
+/// What a GUI push pins: HEAD's branch (never [`crate::git::commit::ExpectedRef::Any`]) and,
 /// optionally, its tip. Compared after the early HEAD read and before every spawn.
 #[derive(Debug, Clone)]
 pub(super) struct PushPins {
@@ -194,7 +194,7 @@ pub(crate) enum PushGuard {
 /// means anything alongside an explicit `branch` and `remote`, so any other
 /// combination is rejected rather than silently ignored.
 ///
-/// Private to this module on purpose: MCP tools push only through
+/// Private to `git::remote` on purpose: MCP tools push only through
 /// [`git_push_same_name_core`] (refuses a named push onto a differently named
 /// branch of a named remote) and [`git_force_push_head_core`] (HEAD only, so git's
 /// push.default applies), never through this pinned, follow-the-routing-rule entry.
@@ -581,7 +581,7 @@ struct HeadPush {
 }
 
 /// The remote a HEAD push authenticates against and is mirror-checked on. `Bare` is
-/// git's own routing ([`PushConfig::bare_push_remote`]), None when the winning value is
+/// git's own routing ([`crate::git::status::PushConfig::bare_push_remote`]), None if the winner is
 /// empty; `Publish` is HEAD's configured push remote (unusable refuses), else origin.
 /// `remotes` is consulted only for a validly named HEAD. With no push remote configured,
 /// `tracking` (HEAD's upstream read) refuses an Untracked HEAD as the named route does
@@ -609,7 +609,7 @@ fn head_push_remote(
     }
 }
 
-/// `branch`'s configured push remote ([`PushConfig::push_remote_setting`]), validated:
+/// `branch`'s push remote ([`crate::git::status::PushConfig::push_remote_setting`]), validated:
 /// empty, an invalid name or not one of `remotes` is
 /// [`PushRemoteUnusable`](AppError::PushRemoteUnusable), naming the key that won.
 fn configured_push_remote_checked<'c>(

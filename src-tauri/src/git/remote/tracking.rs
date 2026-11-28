@@ -100,7 +100,7 @@ impl<'a> TrackingLine<'a> {
     }
 }
 
-/// What a local branch tracks, as [`build_push_args`] needs it.
+/// What a local branch tracks, as `push::build_push_args` needs it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Upstream {
     /// No upstream configured.

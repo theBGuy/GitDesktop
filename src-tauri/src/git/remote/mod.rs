@@ -42,7 +42,7 @@ mod tests {
     use super::*;
     use crate::git::runner::TEST_GIT_HANG_GUARD;
 
-    // --- Pure arg-building for a named-branch push. ---
+    // --- Push fixtures the seam tests share, plus the seeded origin's hostile-config test. ---
 
     /// The upstream a decision-table row tracks: `""` is none, else that branch.
     pub(super) fn up(name: &str) -> Upstream {
@@ -206,7 +206,7 @@ mod tests {
 
     /// git's per-ref reason when `--force-with-lease` finds the remote-tracking ref
     /// behind the real remote — verbatim from `! [rejected] … (…)`. The prod-side
-    /// twin is [`IF_INCLUDES_REJECTION`]; this one only ever appears in git's report.
+    /// twin is `push::IF_INCLUDES_REJECTION`; this one only ever appears in git's report.
     pub(super) const STALE_LEASE_REJECTION: &str = "stale info";
 
     /// Assert git's failure report still carries a `! [rejected] … (<reason>)` line
@@ -254,7 +254,7 @@ mod tests {
             .expect("a branch pin")
     }
 
-    // --- Real-repo tests for git_remote_remove (temp_dir, git on PATH). ---
+    // --- Real-repo helpers the seam tests share (temp_dir, git on PATH). ---
 
     pub(super) async fn run(repo: &str, args: &[&str]) -> String {
         run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
