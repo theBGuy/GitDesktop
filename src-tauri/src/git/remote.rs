@@ -5019,7 +5019,8 @@ mod tests {
         assert_eq!(feat_x_tip(&origin).await, feat_x_tip(&work).await);
     }
 
-    /// The production text of a module: CRLF-normalized, cut before its `mod tests`.
+    /// The production text of a module: CRLF-normalized, cut where a `#[cfg(test)]` line
+    /// opens a private `mod tests {`; a `pub(crate) mod tests` is kept whole.
     fn production_text(source: &str) -> String {
         let source = source.replace("\r\n", "\n");
         match source.split_once("\n#[cfg(test)]\nmod tests {") {

@@ -2531,11 +2531,14 @@ export function checkMergeIgnoredGuard(
 // Exact quoted literals miss victims using "refs/heads/<name>" or larger literals
 // containing the marker branch name.
 
-// Delegation is one level: a site's function installs the override when it calls,
-// by bare name, a function whose own body sets TestRootOverride in any corpus file,
-// so a same-named function anywhere counts and only adds evaluated sites. Other rows
-// are read only when a site needs a helper, failing closed on one that does not lex;
-// each file also fails its own scan. Helper-of-helper and reverse delegation are skipped.
+// A site's function installs the override by calling a function whose own body sets
+// TestRootOverride in any corpus file (a same-named one anywhere only adds sites), by
+// name however qualified or by a `use` alias in its file, chains included; a helper named
+// with a turbofish counts, called or not. A corpus that passes validation (an invalid one
+// fails closed first) has every row checked for NUL bytes, the scanned file as passed in;
+// other rows are lexed only when a site needs a helper, failing closed on one that does
+// not lex; each file also fails its own scan. Not followed: helper-of-helper, reverse
+// delegation, fn-pointer or `let` rebindings, raw (`r#`) or non-ASCII names.
 
 // Binding resolution uses the last same-named let before the call, even when
 // that binding belongs to an already-closed inner block.
@@ -2585,6 +2588,15 @@ function overrideHelpersOf(text) {
   return overrideHelperNames.get(text);
 }
 
+const NUL = String.fromCharCode(0);
+const nulRows = new Map();
+
+// A NUL byte marks binary input this guard does not read: fail closed even where it lexes.
+function holdsNul(text) {
+  if (!nulRows.has(text)) nulRows.set(text, text.includes(NUL));
+  return nulRows.get(text);
+}
+
 export function checkTestMarkerBranches(file, src, _lines, hits, corpus) {
   src = src.replace(/\r\n/g, "\n");
   const push = (at, fn, fix) =>
@@ -2622,6 +2634,17 @@ export function checkTestMarkerBranches(file, src, _lines, hits, corpus) {
     );
     return;
   }
+  const binary = sources.find((row) => holdsNul(row.src));
+  if (binary) {
+    hits.push({
+      file: binary.file,
+      line: 0,
+      fn: "<unreadable>",
+      allowlisted: allowed(TEST_MARKER_ALLOWLIST, binary.file, "<unreadable>"),
+      fix: `check I cannot read binary bytes in ${binary.file}`,
+    });
+    return;
+  }
   const { code, masked, unterminated } = lexRust(src);
   if (unterminated >= 0) {
     push(
@@ -2652,12 +2675,29 @@ export function checkTestMarkerBranches(file, src, _lines, hits, corpus) {
       }
       for (const name of names) helpers.add(name);
     }
+    const aliases = [];
+    for (const use of masked.matchAll(/\buse\b[^;]*;/g)) {
+      for (const [, name, alias] of use[0].matchAll(
+        /\b([A-Za-z_]\w*)\s+as\s+([A-Za-z_]\w*)\b/g,
+      )) {
+        if (alias !== "_") aliases.push([name, alias]);
+      }
+    }
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const [name, alias] of aliases) {
+        if (helpers.has(name) && !helpers.has(alias)) {
+          helpers.add(alias);
+          grew = true;
+        }
+      }
+    }
   };
   const installsOverride = (fn) => {
     if (override.test(body(fn))) return true;
     if (!helpers) resolveHelpers();
     return [...helpers].some((name) =>
-      new RegExp(String.raw`\b${name}\s*\(`).test(body(fn)),
+      new RegExp(String.raw`\b${name}\s*(?:::\s*<|\()`).test(body(fn)),
     );
   };
   const literal = /^"(?:\\.|[^"\\])*"$/;

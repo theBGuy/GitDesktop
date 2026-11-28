@@ -5753,7 +5753,7 @@ test("marker branches fail closed on a corpus file that does not lex", () => {
   assert.match(hits[0].fix, /closed literals and comments.*helpers\.rs/);
 });
 
-test("marker branches read other rows only for a site that needs a helper", () => {
+test("marker branches lex other rows only for a site that needs a helper", () => {
   const holder = markerHolder('"held-alone"');
   const corpus = [
     { file: "holder.rs", src: holder },
@@ -5768,6 +5768,95 @@ test("marker branches read other rows only for a site that needs a helper", () =
   assert.match(own[0].fix, /closed literals and comments/);
 });
 
+test("marker branches follow a `use` alias of an override helper in the scanned file", () => {
+  const helper = crossFileHelper("TestRootOverride::set(root);")[1];
+  const holder = (imports) => `${imports}
+    ${markerHolder('"feature"', "install_root(&root);")}
+    fn victim() { switch("feature"); }`;
+  const hitsOf = (imports) => {
+    const src = holder(imports);
+    return markerBranchHits(src, "", [{ file: "holder.rs", src }, helper]);
+  };
+  for (const imports of [
+    "use crate::helpers::tests::x_root as install_root;",
+    `use crate::{
+      helpers::tests::{other, x_root as install_root},
+      self as root,
+    };`,
+  ]) {
+    const hits = hitsOf(imports);
+    assert.equal(hits.length, 1, imports);
+    assert.equal(hits[0].fn, "holder");
+    assert.match(hits[0].fix, /unique/);
+  }
+  for (const imports of [
+    "// use crate::helpers::tests::x_root as install_root;",
+    'const S: &str = "use crate::helpers::tests::x_root as install_root;";',
+  ]) {
+    assert.equal(hitsOf(imports).length, 0, imports);
+  }
+});
+
+const helperCallHits = (imports, call) => {
+  const src = `${imports}
+    ${markerHolder('"feature"', call)}
+    fn victim() { switch("feature"); }`;
+  return markerBranchHits(src, "", [
+    { file: "holder.rs", src },
+    crossFileHelper("TestRootOverride::set(root);")[1],
+  ]);
+};
+
+test("marker branches follow `use` alias chains in either order", () => {
+  const first = "use crate::helpers::tests::x_root as a;";
+  const second = "use self::a as b;";
+  for (const imports of [`${first}\n${second}`, `${second}\n${first}`]) {
+    assert.equal(helperCallHits(imports, "b(&root);").length, 1, imports);
+  }
+  const threeHops = `use self::b as c;\n${second}\n${first}`;
+  assert.equal(helperCallHits(threeHops, "c(&root);").length, 1);
+  const cycle = "use self::p as q;\nuse self::q as p;";
+  assert.equal(helperCallHits(cycle, "q(&root);").length, 0);
+});
+
+test("marker branches count any turbofish mention of an override helper", () => {
+  for (const [imports, call] of [
+    ["", "x_root::<&Path>(&root);"],
+    ["", "crate::helpers::tests::x_root::<&Path>(&root);"],
+    [
+      "use crate::helpers::tests::x_root as install_root;",
+      "install_root::<&Path>(&root);",
+    ],
+    ["", "x_root::<Vec<Box<Path>>>(&root);"],
+    ["", "x_root::<[u8; 4]>(&root);"],
+    ["", "x_root::<(u8, u8)>(&root);"],
+    ["", "x_root::<fn() -> u8>(&root);"],
+    ["", "x_root::<[[u8; 4]; 2]>(&root);"],
+  ]) {
+    assert.equal(helperCallHits(imports, call).length, 1, call);
+  }
+  const noCall = "let f = x_root::<u8>; { other::<u8>(1); }";
+  assert.equal(
+    helperCallHits("", noCall).length,
+    1,
+    `accepted over-match: a turbofish mention without a call counts (${noCall})`,
+  );
+  assert.equal(helperCallHits("", "other::<u8>(1);").length, 0);
+});
+
+test("marker branches fail closed on a corpus row holding a NUL byte", () => {
+  const corpus = crossFileHelper("TestRootOverride::set(root);");
+  corpus[1] = {
+    file: corpus[1].file,
+    src: `${corpus[1].src}${String.fromCharCode(0)}`,
+  };
+  const hits = markerBranchHits(crossFileHolder, "", corpus);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].file, "helpers.rs");
+  assert.equal(hits[0].fn, "<unreadable>");
+  assert.match(hits[0].fix, /binary bytes in helpers\.rs/);
+});
+
 test("marker branches key other-file helpers on the file's text, not its path", () => {
   const installs = crossFileHelper("TestRootOverride::set(root);");
   assert.equal(markerBranchHits(crossFileHolder, "", installs).length, 1);
@@ -5776,8 +5865,10 @@ test("marker branches key other-file helpers on the file's text, not its path", 
   assert.equal(markerBranchHits(crossFileHolder, "", edited).length, 0);
 });
 
-// Check I prints OK when it stops evaluating a site, so the real tree must keep every named
-// site; a duplicate row of the scanned text turns each evaluated site into a hit.
+// Check I prints OK when it stops evaluating a site, so the real tree must keep every
+// named site; a duplicate row of the scanned text turns each evaluated site into a
+// uniqueness hit. Sites are checked per function: a second marker in one function
+// keeps this green while either of the two is still evaluated.
 test("check I still evaluates every named test-held marker site in the real tree", () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const corpus = readdirSync(join(root, "src-tauri/src"), { recursive: true })
@@ -5801,7 +5892,12 @@ test("check I still evaluates every named test-held marker site in the real tree
         { file: "<duplicate>", src: row.src },
       ]);
       for (const hit of hits)
-        if (hit.fn !== "<unreadable>") evaluated.add(`${hit.file} ${hit.fn}`);
+        if (
+          hit.fix.startsWith(
+            "check I: test-held update markers must use a branch name unique",
+          )
+        )
+          evaluated.add(`${hit.file} ${hit.fn}`);
     }
     return [
       "git/autostash.rs a_refused_switch_never_stashes",
@@ -5827,6 +5923,22 @@ test("check I still evaluates every named test-held marker site in the real tree
       "git/branches/rename.rs a_rename_that_waited_refuses_an_update_started_during_the_wait",
     ],
     "m1",
+  );
+  // m2: an unresolvable binding files "cannot resolve", not an evaluated site.
+  const rename = corpus.findIndex(
+    (row) => row.file === "git/branches/rename.rs",
+  );
+  const unbound = corpus[rename].src.replace(
+    'let branch = "rename-waits-update";',
+    "let branch = name();",
+  );
+  assert.notEqual(unbound, corpus[rename].src, "m2 changed nothing");
+  assert.deepEqual(
+    missing(corpus.with(rename, { file: corpus[rename].file, src: unbound })),
+    [
+      "git/branches/rename.rs a_rename_that_waited_refuses_an_update_started_during_the_wait",
+    ],
+    "m2",
   );
 });
 
