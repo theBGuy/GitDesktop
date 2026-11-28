@@ -1880,21 +1880,13 @@ mod tests {
         let sentinel = base_dir.join("hook-fired");
         let hook = repo.join(".git").join("hooks").join("pre-merge-commit");
         std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        std::fs::write(
+        crate::test_exec::write_executable(
             &hook,
-            format!(
+            &format!(
                 "#!/bin/sh\necho fired > \"{}\"\nexit 1\n",
                 sentinel.to_string_lossy().replace('\\', "/")
             ),
-        )
-        .unwrap();
-        // git IGNORES a hook without the executable bit on POSIX, which would let the
-        // merge succeed and leave this test asserting nothing.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
 
         let tmp = base_dir.join("declined-hook-wt");
         let tmp_s = tmp.to_string_lossy().into_owned();

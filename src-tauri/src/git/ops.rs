@@ -13690,13 +13690,7 @@ mod tests {
     fn write_hook(repo: &str, name: &str, body: &str) {
         let hooks = std::path::Path::new(repo).join(".git/hooks");
         std::fs::create_dir_all(&hooks).unwrap();
-        let path = hooks.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::test_exec::write_executable(&hooks.join(name), &format!("#!/bin/sh\n{body}\n"));
     }
 
     /// Commits a file under an author other than the repo's configured user.
@@ -23706,13 +23700,7 @@ detached
         let script = format!(
             "#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX\n{body}\nexit 0\n"
         );
-        std::fs::write(&hook, script).unwrap();
-        // git ignores a hook without the executable bit on POSIX.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::test_exec::write_executable(&hook, &script);
     }
 
     /// A path as a `sh` hook spells it: a Windows backslash is an escape character there.

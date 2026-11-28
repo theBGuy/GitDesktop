@@ -4917,12 +4917,7 @@ mod tests {
             let dir = std::path::Path::new(work).with_file_name(name);
             std::fs::create_dir_all(&dir).unwrap();
             let file = dir.join("pre-push");
-            std::fs::write(&file, body).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            crate::test_exec::write_executable(&file, body);
             vec![format!(
                 "core.hooksPath={}",
                 dir.to_string_lossy().replace('\\', "/")
@@ -10001,16 +9996,10 @@ and the repository exists.
         let dir = std::path::Path::new(&work).with_file_name("reject-and-move");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("pre-push");
-        std::fs::write(
+        crate::test_exec::write_executable(
             &file,
             "#!/bin/sh\ngit symbolic-ref HEAD refs/heads/other\necho 'fatal: Authentication failed for origin' >&2\nexit 1\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         let moving = vec![format!(
             "core.hooksPath={}",
             dir.to_string_lossy().replace('\\', "/")

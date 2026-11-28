@@ -6,14 +6,17 @@
 //
 // Holding the port IS the serialization. Two binds of 127.0.0.1:<port> refuse
 // each other (EADDRINUSE), and the OS frees the port when its holder exits,
-// however it exits. A sidecar JSON file beside it, written only by the holder,
-// names the run; a new holder waits while the previous run is still alive,
-// for at most MAX_HOLD_MS after that run started. On POSIX the child runs in
-// its own process group, "alive" means any process of that group, and the
-// port is held until the group is gone, or at most about 10 s after its leader
-// exits (SIGKILL after 5 s, then released anyway): cargo does not forward
-// signals to its test binary, which a hard-killed wrapper also leaves running
-// (and no child keeps the port). kill(-pgid, 0) counts unreaped zombies, so a
+// however it exits. A sidecar JSON file, written only by the holder, names the
+// run. On POSIX it lives in a private dir under the passwd home (see
+// defaultSidecarDir), so every session of one user meets at one path, and a
+// record another user wrote is ignored; on win32 it lives in the per-user temp
+// dir. A new holder waits while the previous run is still alive, for at most
+// MAX_HOLD_MS after that run started. On POSIX the child runs in its own
+// process group, "alive" means any process of that group, and the port is held
+// until the group is gone, or at most about 10 s after its leader exits
+// (SIGKILL after 5 s, then released anyway): cargo does not forward signals to
+// its test binary, which a hard-killed wrapper also leaves running (and no
+// child keeps the port). kill(-pgid, 0) counts unreaped zombies, so a
 // container needs an init (`docker run --init`), or a killed run's group reads
 // alive until the cap. On Windows the kill-on-close jobs of libuv and cargo
 // end the tree with the wrapper, so "alive" means the child's pid.
@@ -29,8 +32,15 @@
 // GD_FULL_SUITE_KEEP_PATH=1 keeps PATH, e.g. to run the cmd\git.exe shim
 // topology proc_tree's guards exist for.
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   statSync,
@@ -38,8 +48,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import net from "node:net";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve, win32 } from "node:path";
+import { tmpdir, userInfo } from "node:os";
+import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -56,6 +66,7 @@ const USAGE =
   "usage: node scripts/full-suite.mjs <rust|vitest|all> [extra args...] (all takes no extra args)";
 
 const defaultLog = (line) => process.stderr.write(`${line}\n`);
+const randomSuffix = () => randomBytes(8).toString("hex");
 const defaultSleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /** The port from GD_FULL_SUITE_PORT; unset or empty means DEFAULT_PORT. */
@@ -290,8 +301,133 @@ export function rustStepEnv({ env, platform, keepPath, probe, exists }) {
   }
 }
 
-export function sidecarPath(port, dir = tmpdir()) {
+export function sidecarPath(port, dir) {
   return join(dir, `gitdesktop-full-suite-${port}.json`);
+}
+
+/**
+ * A win32 path rooted at a drive (`C:\`) or a UNC share (`\\server\share`).
+ * win32.isAbsolute also accepts `\x` and `/x`, which resolve on the cwd's
+ * drive root, where other users may create folders.
+ */
+export function isRootedWin32(path) {
+  return (
+    typeof path === "string" &&
+    (/^[A-Za-z]:[\\/]/.test(path) || /^[\\/]{2}[^\\/]+[\\/][^\\/]+/.test(path))
+  );
+}
+
+/**
+ * The cause of a failure, for a log line. os.userInfo and os.homedir throw a
+ * SystemError whose code is ERR_SYSTEM_ERROR, with the errno in info.code; a
+ * plain Error carries only its message.
+ */
+export function errorText(err) {
+  return err?.info?.code ?? err?.code ?? err?.message ?? String(err);
+}
+
+/**
+ * The per-user sidecar dir as `{ dir, problem }`, dir null when there is none
+ * (never a shared-temp fallback). The sidecar is a rendezvous, so on POSIX the
+ * dir comes from the passwd home and the uid, never HOME or XDG_CACHE_HOME:
+ * every session of one uid computes the same path whatever its environment,
+ * and a sudo run that keeps HOME resolves root's own home. win32 keeps its
+ * per-user temp dir.
+ */
+export function defaultSidecarDir({
+  platform = process.platform,
+  uid = process.getuid?.(),
+  userHome = () => userInfo().homedir,
+  tmp = tmpdir,
+} = {}) {
+  if (platform === "win32") {
+    const dir = tmp();
+    return isRootedWin32(dir)
+      ? { dir, problem: null }
+      : {
+          dir: null,
+          problem: `temp dir not rooted at a drive or share: ${dir}`,
+        };
+  }
+  if (!Number.isInteger(uid)) return { dir: null, problem: "no user id" };
+  let home;
+  try {
+    home = userHome();
+  } catch (err) {
+    return { dir: null, problem: errorText(err) };
+  }
+  if (typeof home !== "string" || !posix.isAbsolute(home)) {
+    return { dir: null, problem: `home is not an absolute path: ${home}` };
+  }
+  const leaf = `gitdesktop-full-suite-${uid}`;
+  return {
+    dir:
+      platform === "darwin"
+        ? posix.join(home, "Library", "Caches", leaf)
+        : posix.join(home, ".cache", leaf),
+    problem: null,
+  };
+}
+
+/**
+ * Makes `dir` and, on POSIX, checks it is private, answering null or why not;
+ * it never throws. The dir must be a directory, not a link, that `uid` owns,
+ * with no group or other write bit (mode bits; ACLs are not read); a link at
+ * the dir, dangling or not, is refused first. Only when the dir has to be
+ * created is the nearest existing ancestor (links followed, so a dangling one
+ * reads as absent) checked first, as a directory `uid` owns, so a root run
+ * never creates a dir in a home whose nearest existing folder is the user's.
+ * With `create` false an absent dir is answered null after that ancestor check
+ * and nothing is made.
+ */
+export function ensurePrivateDir(
+  dir,
+  {
+    platform = process.platform,
+    uid = process.getuid?.(),
+    fs = { stat: statSync, lstat: lstatSync, mkdir: mkdirSync },
+    create = true,
+  } = {},
+) {
+  try {
+    if (platform === "win32") {
+      if (create) fs.mkdir(dir, { recursive: true });
+      return null;
+    }
+    if (!Number.isInteger(uid)) return "no user id";
+    try {
+      if (fs.lstat(dir).isSymbolicLink()) return `${dir} is a symlink`;
+    } catch (err) {
+      if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") throw err;
+    }
+    let existing = dir;
+    let info;
+    for (;;) {
+      try {
+        info = fs.stat(existing);
+        break;
+      } catch (err) {
+        const parent = dirname(existing);
+        const absent = err?.code === "ENOENT" || err?.code === "ENOTDIR";
+        if (!absent || parent === existing) throw err;
+        existing = parent;
+      }
+    }
+    if (!info.isDirectory()) return `${existing} is not a directory`;
+    if (info.uid !== uid) return `${existing} belongs to uid ${info.uid}`;
+    if (create) fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    else if (existing !== dir) return null;
+    const leaf = fs.lstat(dir);
+    if (leaf.isSymbolicLink()) return `${dir} is a symlink`;
+    if (!leaf.isDirectory()) return `${dir} is not a directory`;
+    if (leaf.uid !== uid) return `${dir} belongs to uid ${leaf.uid}`;
+    if ((leaf.mode & 0o022) !== 0) {
+      return `${dir} is writable by other users`;
+    }
+    return null;
+  } catch (err) {
+    return errorText(err);
+  }
 }
 
 function vitestEntry(repoRoot) {
@@ -400,14 +536,46 @@ export function isRunAlive(pid, platform = process.platform) {
   return platform === "win32" ? isPidAlive(pid) : isGroupAlive(pid);
 }
 
-/** The sidecar's record, or null when it is missing or not a JSON object. */
-export function readSidecar(file) {
+/**
+ * The sidecar's record, or null when it is missing or not a JSON object. When
+ * the uid is known (POSIX; tests seam it with `fstat`), a sidecar that is not
+ * a regular file this uid owns is null too: a record another user planted in
+ * the sidecar dir never blocks or names this run's wait. That also keeps root
+ * and the user apart (a sudo run ignores the user's orphan records and back);
+ * the port still serializes live holders. The dir is per user as well: a
+ * private dir under the passwd home on POSIX, the user's temp dir on win32.
+ */
+export function readSidecar(
+  file,
+  { fstat = fstatSync, uid = process.getuid?.() } = {},
+) {
+  let fd;
   try {
-    const record = JSON.parse(readFileSync(file, "utf8"));
+    // A symlink at the sidecar path is not followed, and a FIFO opens at once
+    // instead of blocking the reader; both flags are undefined on win32.
+    fd = openSync(
+      file,
+      constants.O_RDONLY |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0),
+    );
+  } catch {
+    return null;
+  }
+  try {
+    if (uid !== undefined) {
+      const info = fstat(fd);
+      if (!info.isFile() || info.uid !== uid) return null;
+    }
+    const record = JSON.parse(readFileSync(fd, "utf8"));
     if (record === null || typeof record !== "object") return null;
     return Array.isArray(record) ? null : record;
   } catch {
     return null;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {}
   }
 }
 
@@ -467,18 +635,32 @@ export function bindPort(port) {
 }
 
 // Whole record to a temp file, then a rename over the sidecar, so a holder
-// killed mid-write never leaves a truncated record. A write that fails costs
-// the next run its child check, never this run its suite.
-function writeSidecar(file, record, log) {
-  const tmp = `${file}.${process.pid}.tmp`;
+// killed mid-write never leaves a truncated record. Called only for a dir
+// acquireLock accepted (ensurePrivateDir: on POSIX a private dir this uid
+// owns). The temp's name is random, it is created exclusively and only a temp
+// this call created is removed, so on POSIX an entry another user planted
+// there is refused, never written through or removed; win32, whose exclusive
+// create follows a dangling link, relies on its per-user temp dir. A failed
+// write costs the next run its child check, never this run its suite.
+function writeSidecar(file, record, log, suffix) {
+  const tmp = `${file}.${suffix}.tmp`;
+  let created = false;
   try {
-    writeFileSync(tmp, JSON.stringify(record));
+    const fd = openSync(tmp, "wx");
+    created = true;
+    try {
+      writeFileSync(fd, JSON.stringify(record));
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, file);
   } catch (err) {
-    try {
-      unlinkSync(tmp);
-    } catch {}
-    log(`${PREFIX}could not write sidecar ${file} (${err?.code ?? err})`);
+    if (created) {
+      try {
+        unlinkSync(tmp);
+      } catch {}
+    }
+    log(`${PREFIX}could not write sidecar ${file} (${errorText(err)})`);
   }
 }
 
@@ -490,14 +672,23 @@ function removeSidecar(file) {
 
 /**
  * Waits for the port, then for any previous run that is still alive (its
- * process group on POSIX, its child on win32), then writes this run's
- * record. Contention always waits; only a bind error other than EADDRINUSE
- * on every attempt for a whole announceMs runs unserialized.
+ * process group on POSIX, its child on win32), then writes this run's record.
+ * Contention always waits; only a bind error other than EADDRINUSE on every
+ * attempt for a whole announceMs runs unserialized. With neither sidecarDir
+ * nor sidecarFile the dir comes from resolveSidecarDir; a null dir with no
+ * sidecarFile (resolved, or passed by a caller that reported it) holds the
+ * port with no sidecar: nothing is read, written or removed. The sidecar's dir
+ * is decided once, after the bind (ensureDir): a refused dir is logged once
+ * and never written or removed, though the previous run's record is still
+ * read there (on POSIX readSidecar refuses a link at the file's path and a
+ * file another user owns).
  */
 export async function acquireLock({
   port = DEFAULT_PORT,
-  sidecarDir = tmpdir(),
+  sidecarDir,
   sidecarFile,
+  resolveSidecarDir = defaultSidecarDir,
+  ensureDir = ensurePrivateDir,
   record,
   bind = bindPort,
   platform = process.platform,
@@ -508,10 +699,30 @@ export async function acquireLock({
   pollMs = 2000,
   announceMs = 30000,
   maxHoldMs = MAX_HOLD_MS,
+  tempSuffix = randomSuffix,
+  sidecarOwner,
   log = defaultLog,
 }) {
   const waitStart = now();
-  const waitFile = sidecarFile ?? sidecarPath(port, sidecarDir);
+  let dir = sidecarDir;
+  if (dir === undefined && sidecarFile === undefined) {
+    let problem;
+    try {
+      ({ dir, problem } = resolveSidecarDir());
+    } catch (err) {
+      problem = errorText(err);
+    }
+    dir ??= null;
+    if (dir === null) {
+      log(
+        `${PREFIX}no per-user dir for the sidecar (${problem}); this run is not named, and a killed run's children are not waited for`,
+      );
+    }
+  }
+  const fileFor = (p) =>
+    sidecarFile ??
+    (dir === null || dir === undefined ? null : sidecarPath(p, dir));
+  const waitFile = fileFor(port);
   let announcedAt = null;
   let failingSince = null;
   let server;
@@ -524,7 +735,7 @@ export async function acquireLock({
         failingSince = null;
         if (announcedAt === null || now() - announcedAt >= announceMs) {
           announcedAt = now();
-          log(waitingLine(port, waitFile, isWrapperAlive, now));
+          log(waitingLine(port, waitFile, isWrapperAlive, now, sidecarOwner));
         }
       } else if (failingSince === null) {
         failingSince = now();
@@ -544,12 +755,27 @@ export async function acquireLock({
   }
 
   const heldPort = server.address().port;
-  const file = sidecarFile ?? sidecarPath(heldPort, sidecarDir);
+  const file = fileFor(heldPort);
+  let writable = false;
+  if (file !== null) {
+    let problem;
+    try {
+      problem = ensureDir(dirname(file));
+    } catch (err) {
+      problem = errorText(err);
+    }
+    writable = problem === null;
+    if (!writable) {
+      log(
+        `${PREFIX}could not use the sidecar dir ${dirname(file)} (${problem}); this run is not named, and if it is killed the next run does not wait for its children`,
+      );
+    }
+  }
   // The child check reads the previous run's record and never writes it, so
   // a wrapper stopped here leaves that evidence for the next holder.
   let orphanAt = null;
   for (;;) {
-    const previous = readSidecar(file);
+    const previous = file === null ? null : readSidecar(file, sidecarOwner);
     if (!orphanBlocks(previous, { isAlive, now, maxHoldMs })) break;
     if (orphanAt === null || now() - orphanAt >= announceMs) {
       orphanAt = now();
@@ -573,7 +799,7 @@ export async function acquireLock({
     cwd: record.cwd,
     startedAt: new Date(now()).toISOString(),
   };
-  writeSidecar(file, own, log);
+  if (writable) writeSidecar(file, own, log, tempSuffix());
   const waited = Math.round((now() - waitStart) / 1000);
   log(
     `${PREFIX}lock acquired for ${own.suite} on port ${heldPort} after waiting ${waited}s`,
@@ -583,14 +809,14 @@ export async function acquireLock({
     port: heldPort,
     degraded: false,
     setChild(pid) {
-      if (released || !validPid(pid)) return;
-      writeSidecar(file, { ...own, childPid: pid }, log);
+      if (released || !validPid(pid) || !writable) return;
+      writeSidecar(file, { ...own, childPid: pid }, log, tempSuffix());
     },
     // Sidecar first, then the port: a waiter that wins the bind must never
     // find this run's record naming a child that has already exited.
     release() {
       released ??= new Promise((done) => {
-        removeSidecar(file);
+        if (writable) removeSidecar(file);
         server.close(() => done());
       });
       return released;
@@ -598,8 +824,11 @@ export async function acquireLock({
   };
 }
 
-function waitingLine(port, file, isWrapperAlive, now) {
-  const record = readSidecar(file);
+function waitingLine(port, file, isWrapperAlive, now, sidecarOwner) {
+  if (file === null) {
+    return `${PREFIX}waiting - held by an unknown process on port ${port} (or by a wrapper still checking a previous run's child)`;
+  }
+  const record = readSidecar(file, sidecarOwner);
   if (
     record &&
     validPid(record.wrapperPid) &&

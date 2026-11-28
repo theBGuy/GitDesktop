@@ -2247,6 +2247,15 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `DEFAULT_TIMEOUT`. A budget a test passes to product code under test, the
   lock-taking and retrying wrappers included, stays the product's (a helper
   that does so takes an allowlist row; guard: check-rust-invariants check L).
+- **A test that writes a script and then runs it as a program** (a git hook, a
+  fake tool on PATH) writes it with `crate::test_exec::write_executable`: on
+  unix a `sh` child writes it, so no forked child of the test binary holds its
+  write descriptor and the exec never fails with ETXTBSY. A file production
+  code wrote in-process is removed and re-written with it before a test runs
+  it (the helper alone keeps the file's inode, which a leaked descriptor still
+  names; hooks.rs `rematerialize_pre_push`). A ratchet in test_exec.rs,
+  `execute_bit_literals_match_the_allowlist`, pins the count of literal
+  execute-bit modes per file, production lines included.
 - **Forge gating:** per-action `Implemented` flags. Shared-with-GitHub
   controls gate on `canWrite || forgeFeatureReady` (GitHub must be zero-diff);
   provider-only controls gate on `forgeFeatureReady` alone with the flag

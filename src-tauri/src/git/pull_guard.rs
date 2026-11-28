@@ -2664,19 +2664,11 @@ mod tests {
             .join("hooks")
             .join("reference-transaction");
         std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        std::fs::write(
+        crate::test_exec::write_executable(
             &hook,
             "#!/bin/sh\nif [ \"$1\" = \"committed\" ]; then\n  \
              printf 'ref: refs/heads/elsewhere\\n' > \"${GIT_DIR:-.git}/HEAD\"\nfi\n",
-        )
-        .unwrap();
-        // git IGNORES a hook without the executable bit on POSIX, which would leave the
-        // branch unswitched and this test asserting nothing.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
 
         let state = AppState::default();
         let target = resolve(&clone)

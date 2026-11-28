@@ -6,16 +6,21 @@
 // were still its own: "free again" is proven by a contender that was already
 // waiting acquiring it. Every sidecar lives under one mkdtemp dir.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import {
+import { spawn, spawnSync } from "node:child_process";
+import fs, {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, win32 } from "node:path";
@@ -27,11 +32,15 @@ import {
   bindPort,
   commandsFor,
   DEFAULT_PORT,
+  defaultSidecarDir,
+  ensurePrivateDir,
+  errorText,
   exeSuffixes,
   firstGitOnPath,
   isFile,
   isGroupAlive,
   isPidAlive,
+  isRootedWin32,
   keepPathFromEnv,
   killGroup,
   MAX_HOLD_MS,
@@ -1222,6 +1231,7 @@ test("B15 preflight refuses before any bind", async () => {
   const deps = (extra) => ({
     env: {},
     repoRoot: empty,
+    sidecarDir: empty,
     bind: async (port) => {
       binds.push(port);
       throw new Error("bind must not be reached");
@@ -1263,6 +1273,7 @@ test("B16 main binds the port GD_FULL_SUITE_PORT names", async () => {
   await assert.rejects(
     main(["vitest"], {
       env: { GD_FULL_SUITE_PORT: "30123" },
+      sidecarDir: caseDir("b16"),
       exists: () => true,
       bind: async (port) => {
         bound.push(port);
@@ -2265,8 +2276,816 @@ test("B35 the default file checks refuse a directory named git.exe", {
   assert.equal("env" in seams.calls.runs[0].steps[0], false);
 });
 
+const refusalOf = (sidecarFile) =>
+  `full-suite: could not write sidecar ${sidecarFile} (EEXIST)`;
+
+test("B38 an entry planted at the sidecar's temp path is neither written through nor removed", async () => {
+  const dir = caseDir("b38");
+  const sidecarFile = join(dir, "run.json");
+  const planted = `${sidecarFile}.planted.tmp`;
+  writeFileSync(planted, "PLANTED");
+  const refused = refusalOf(sidecarFile);
+  const lines = [];
+  const held = await acquireLock({
+    port: 0,
+    sidecarFile,
+    record: holderRecord(),
+    tempSuffix: () => "planted",
+    log: (line) => lines.push(line),
+  });
+  assert.equal(held.degraded, false);
+  assert.equal(readFileSync(planted, "utf8"), "PLANTED");
+  assert.equal(existsSync(sidecarFile), false);
+  assert.equal(lines.filter((line) => line === refused).length, 1);
+  held.setChild(777);
+  assert.equal(readFileSync(planted, "utf8"), "PLANTED");
+  assert.equal(existsSync(sidecarFile), false);
+  assert.equal(lines.filter((line) => line === refused).length, 2);
+  await held.release();
+  assert.deepEqual(readdirSync(dir), [basename(planted)]);
+});
+
+test("B39 the default temp name is never the wrapper's pid", async () => {
+  const dir = caseDir("b39");
+  const sidecarFile = join(dir, "run.json");
+  const planted = `${sidecarFile}.${process.pid}.tmp`;
+  writeFileSync(planted, "PLANTED");
+  const lines = [];
+  const held = await acquireLock({
+    port: 0,
+    sidecarFile,
+    record: holderRecord(),
+    log: (line) => lines.push(line),
+  });
+  assert.equal(readSidecar(sidecarFile)?.wrapperPid, process.pid);
+  held.setChild(777);
+  assert.equal(readSidecar(sidecarFile)?.childPid, 777);
+  assert.equal(readFileSync(planted, "utf8"), "PLANTED");
+  assert.equal(
+    lines.some((line) => line.includes("could not write sidecar")),
+    false,
+  );
+  await held.release();
+  assert.deepEqual(readdirSync(dir), [basename(planted)]);
+});
+
+test("B40 every sidecar write draws its own temp name", async () => {
+  const dir = caseDir("b40");
+  const sidecarFile = join(dir, "run.json");
+  const names = [];
+  const held = await acquireLock({
+    port: 0,
+    sidecarFile,
+    record: holderRecord(),
+    tempSuffix: () => {
+      const suffix = `w${names.length}`;
+      names.push(suffix);
+      return suffix;
+    },
+    log: noop,
+  });
+  held.setChild(777);
+  assert.deepEqual(names, ["w0", "w1"]);
+  assert.equal(readSidecar(sidecarFile)?.childPid, 777);
+  assert.deepEqual(readdirSync(dir), ["run.json"]);
+  await held.release();
+});
+
+const POSIX_LINK_CONTRACT = WIN32
+  ? "an exclusive create follows a dangling link on win32; this test pins the POSIX contract"
+  : false;
+
+test("B41 a symlink planted at the temp path is not followed", {
+  skip: POSIX_LINK_CONTRACT,
+}, async () => {
+  const dir = caseDir("b41");
+  const sidecarFile = join(dir, "run.json");
+  const victim = join(dir, "victim");
+  const absent = join(dir, "absent");
+  writeFileSync(victim, "ORIGINAL");
+  const live = `${sidecarFile}.planted.tmp`;
+  const dangling = `${sidecarFile}.dangling.tmp`;
+  symlinkSync(victim, live);
+  symlinkSync(absent, dangling);
+  const suffixes = ["planted", "dangling"];
+  const refused = refusalOf(sidecarFile);
+  const lines = [];
+  const held = await acquireLock({
+    port: 0,
+    sidecarFile,
+    record: holderRecord(),
+    tempSuffix: () => suffixes.shift(),
+    log: (line) => lines.push(line),
+  });
+  held.setChild(777);
+  assert.equal(readFileSync(victim, "utf8"), "ORIGINAL");
+  assert.equal(existsSync(absent), false);
+  assert.equal(lstatSync(live).isSymbolicLink(), true);
+  assert.equal(lstatSync(dangling).isSymbolicLink(), true);
+  assert.equal(existsSync(sidecarFile), false);
+  assert.equal(lines.filter((line) => line === refused).length, 2);
+  await held.release();
+});
+
+test("B42 a temp the write created is removed when its rename fails", async () => {
+  const dir = caseDir("b42");
+  const sidecarFile = join(dir, "run.json");
+  // A non-empty directory at the sidecar path fails the rename on every
+  // platform (EPERM on win32, EISDIR on Linux).
+  mkdirSync(sidecarFile);
+  writeFileSync(join(sidecarFile, "child"), "x");
+  const lines = [];
+  const held = await acquireLock({
+    port: 0,
+    sidecarFile,
+    record: holderRecord(),
+    tempSuffix: () => "t",
+    log: (line) => lines.push(line),
+  });
+  assert.equal(held.degraded, false);
+  const failed = lines.filter((line) =>
+    line.includes("could not write sidecar"),
+  );
+  assert.equal(failed.length, 1);
+  assert.match(failed[0], /\((EPERM|EISDIR)\)$/);
+  assert.deepEqual(readdirSync(dir), [basename(sidecarFile)]);
+  await held.release();
+});
+
+test("B43 each default temp name is a fresh 16-hex suffix", async () => {
+  const dir = caseDir("b43");
+  const sidecarFile = join(dir, "run.json");
+  const names = [];
+  // syncBuiltinESMExports carries the wrapper into full-suite.mjs's named
+  // openSync binding, so the default names are read, never guessed.
+  const realOpen = fs.openSync;
+  fs.openSync = (path, ...rest) => {
+    if (String(path).startsWith(`${sidecarFile}.`)) {
+      names.push(String(path).slice(sidecarFile.length));
+    }
+    return realOpen(path, ...rest);
+  };
+  syncBuiltinESMExports();
+  try {
+    const held = await acquireLock({
+      port: 0,
+      sidecarFile,
+      record: holderRecord(),
+      log: noop,
+    });
+    held.setChild(777);
+    await held.release();
+  } finally {
+    fs.openSync = realOpen;
+    syncBuiltinESMExports();
+  }
+  assert.equal(names.length, 2);
+  for (const name of names) assert.match(name, /^\.[0-9a-f]{16}\.tmp$/);
+  assert.notEqual(names[0], names[1]);
+});
+
+const OWN_UID = 4100;
+const OTHER_UID = 4101;
+// readSidecar's owner seam: a sidecar of this type, owned by `owner`, read as
+// OWN_UID. It runs on every platform, win32 included.
+const ownedBy = (owner, regular = true) => ({
+  fstat: () => ({ isFile: () => regular, uid: owner }),
+  uid: OWN_UID,
+});
+
+test("B44 readSidecar reads only a regular file the current uid owns", () => {
+  const dir = caseDir("b44");
+  const file = join(dir, "run.json");
+  const body = writeRecord(file, { startedAt: new Date().toISOString() });
+  assert.deepEqual(readSidecar(file, ownedBy(OWN_UID)), JSON.parse(body));
+  assert.equal(readSidecar(file, ownedBy(OTHER_UID)), null);
+  assert.equal(readSidecar(file, ownedBy(OWN_UID, false)), null);
+});
+
+test("B45 a live record another uid owns never blocks the child check", async () => {
+  const now = Date.now();
+  // The same fake shape both ways: the own row proves the record would block.
+  for (const [name, owner] of [
+    ["foreign", OTHER_UID],
+    ["own", OWN_UID],
+  ]) {
+    const dir = caseDir("b45");
+    const sidecarFile = join(dir, "previous.json");
+    writeRecord(sidecarFile, { startedAt: new Date(now).toISOString() });
+    const clock = manualClock(now);
+    let alive = true;
+    const state = track(
+      acquireLock({
+        port: 0,
+        sidecarFile,
+        record: holderRecord(),
+        isAlive: () => alive,
+        sidecarOwner: ownedBy(owner),
+        now: clock.now,
+        sleep: clock.sleep,
+        log: noop,
+      }),
+    );
+    assert.equal(await settledAtOnce(state, clock), owner === OTHER_UID, name);
+    alive = false;
+    const held = await bounded(clock.drive(state), name);
+    await held.release();
+  }
+});
+
+test("B46 a record another uid owns never names the port's holder", async () => {
+  for (const [name, owner] of [
+    ["foreign", OTHER_UID],
+    ["own", OWN_UID],
+  ]) {
+    const dir = caseDir("b46");
+    const server = await listenLoopback();
+    const port = server.address().port;
+    const file = sidecarPath(port, dir);
+    const clock = manualClock();
+    const lines = [];
+    writeRecord(file, {
+      wrapperPid: 31337,
+      startedAt: new Date(clock.now()).toISOString(),
+    });
+    try {
+      const contender = track(
+        acquireLock({
+          port,
+          sidecarDir: dir,
+          record: holderRecord(),
+          isAlive: () => false,
+          isWrapperAlive: () => true,
+          sidecarOwner: ownedBy(owner),
+          now: clock.now,
+          sleep: clock.sleep,
+          log: (line) => lines.push(line),
+        }),
+      );
+      await clock.idle();
+      const expected =
+        owner === OTHER_UID
+          ? `full-suite: waiting - held by an unknown process on port ${port} (or by a wrapper still checking a previous run's child) [sidecar ${file}]`
+          : `full-suite: waiting - rust holds port ${port} (wrapper pid 31337, child pid ${FAKE_CHILD}, cwd C:/previous, started 0s ago) [sidecar ${file}]`;
+      assert.deepEqual(lines, [expected], name);
+      await closeServer(server);
+      const held = await bounded(clock.drive(contender), name);
+      await held.release();
+    } finally {
+      if (server.listening) await closeServer(server);
+    }
+  }
+});
+
+const POSIX_FILE_TYPES = WIN32
+  ? "symlinks and FIFOs at the sidecar path are a POSIX concern; win32's temp dir is per user"
+  : false;
+
+test("B47 a symlink at the sidecar path is not followed", {
+  skip: POSIX_FILE_TYPES,
+}, () => {
+  const dir = caseDir("b47");
+  const target = join(dir, "target.json");
+  const link = join(dir, "link.json");
+  const body = writeRecord(target, { startedAt: new Date().toISOString() });
+  symlinkSync(target, link);
+  assert.deepEqual(readSidecar(target), JSON.parse(body));
+  assert.equal(readSidecar(link), null);
+});
+
+test("B48 a FIFO at the sidecar path reads as no record without blocking", {
+  skip: POSIX_FILE_TYPES,
+}, () => {
+  const dir = caseDir("b48");
+  const fifo = join(dir, "run.json");
+  const made = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
+  assert.equal(made.status, 0, made.stderr);
+  // A child process, so a read that blocks fails on the timeout instead of
+  // hanging this file.
+  const read = spawnSync(
+    NODE,
+    [
+      "--input-type=module",
+      "-e",
+      [
+        `import { readSidecar } from ${JSON.stringify(pathToFileURL(SCRIPT).href)};`,
+        `console.log(JSON.stringify(readSidecar(${JSON.stringify(fifo)})));`,
+      ].join("\n"),
+    ],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+  assert.equal(read.signal, null, "the read blocked on the FIFO");
+  assert.equal(read.status, 0, read.stderr);
+  assert.equal(read.stdout.trim(), "null");
+});
+
 test("B18 no test here names DEFAULT_PORT as a port to bind", () => {
   const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
   assert.equal(source.includes(["port", "DEFAULT_PORT"].join(": ")), false);
   assert.equal(source.includes(String(DEFAULT_PORT)), false);
+});
+
+test("B49 isRootedWin32 accepts only drive and UNC share roots", () => {
+  for (const path of ["C:\\x", "C:/x", "\\\\srv\\share\\x", "//srv/share"]) {
+    assert.equal(isRootedWin32(path), true, path);
+  }
+  for (const path of [
+    "\\x",
+    "/x",
+    "C:x",
+    "x\\y",
+    "\\\\srv",
+    "\\\\srv\\",
+    "\\\\",
+    "",
+    undefined,
+    null,
+  ]) {
+    assert.equal(isRootedWin32(path), false, String(path));
+  }
+});
+
+/**
+ * Counting seams for defaultSidecarDir; tmp and userHome return the given
+ * values, and userHome throws one that is an Error.
+ */
+function dirSeams({ tmp = "C:\\Users\\u\\Temp", home = "/home/u" } = {}) {
+  const calls = { tmp: 0, home: 0 };
+  return {
+    calls,
+    tmp: () => {
+      calls.tmp += 1;
+      return tmp;
+    },
+    userHome: () => {
+      calls.home += 1;
+      if (home instanceof Error) throw home;
+      return home;
+    },
+  };
+}
+
+test("B50 defaultSidecarDir on win32 is the per-user temp dir, never the home", () => {
+  const seams = dirSeams();
+  const { tmp, userHome } = seams;
+  assert.deepEqual(
+    defaultSidecarDir({ platform: "win32", uid: 4242, tmp, userHome }),
+    { dir: "C:\\Users\\u\\Temp", problem: null },
+  );
+  assert.deepEqual(seams.calls, { tmp: 1, home: 0 });
+  const unrooted = dirSeams({ tmp: "\\temp" });
+  assert.deepEqual(
+    defaultSidecarDir({
+      platform: "win32",
+      tmp: unrooted.tmp,
+      userHome: unrooted.userHome,
+    }),
+    { dir: null, problem: "temp dir not rooted at a drive or share: \\temp" },
+  );
+  assert.deepEqual(unrooted.calls, { tmp: 1, home: 0 });
+});
+
+/** The SystemError os.userInfo throws for a uid with no passwd entry. */
+function noPasswdEntry(syscall = "uv_os_get_passwd") {
+  return Object.assign(
+    new Error(
+      `A system error occurred: ${syscall} returned ENOENT (no such file or directory)`,
+    ),
+    { code: "ERR_SYSTEM_ERROR", info: { errno: -2, code: "ENOENT", syscall } },
+  );
+}
+
+test("B51 defaultSidecarDir on POSIX is the passwd home's cache and the uid", () => {
+  const rows = [
+    ["linux", 4242, "/home/u", "/home/u/.cache/gitdesktop-full-suite-4242"],
+    [
+      "darwin",
+      501,
+      "/Users/u",
+      "/Users/u/Library/Caches/gitdesktop-full-suite-501",
+    ],
+    ["linux", 0, "/root", "/root/.cache/gitdesktop-full-suite-0"],
+  ];
+  const saved = process.env.XDG_CACHE_HOME;
+  // The env is no input: a session with XDG set meets one without it.
+  process.env.XDG_CACHE_HOME = "/elsewhere";
+  try {
+    for (const [platform, uid, home, dir] of rows) {
+      const seams = dirSeams({ home });
+      const { tmp, userHome } = seams;
+      assert.deepEqual(
+        defaultSidecarDir({ platform, uid, tmp, userHome }),
+        { dir, problem: null },
+        dir,
+      );
+      assert.deepEqual(seams.calls, { tmp: 0, home: 1 }, dir);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = saved;
+  }
+});
+
+test("B52 defaultSidecarDir has no POSIX dir without a uid or an absolute home", () => {
+  for (const uid of [null, "4242", 1.5]) {
+    const { tmp, userHome } = dirSeams();
+    assert.equal(
+      defaultSidecarDir({ platform: "linux", uid, tmp, userHome }).dir,
+      null,
+      String(uid),
+    );
+  }
+  const gone = dirSeams({ home: noPasswdEntry() });
+  assert.deepEqual(
+    defaultSidecarDir({
+      platform: "linux",
+      uid: 4242,
+      tmp: gone.tmp,
+      userHome: gone.userHome,
+    }),
+    { dir: null, problem: "ENOENT" },
+  );
+  for (const home of ["rel", "", undefined]) {
+    const { tmp } = dirSeams();
+    const userHome = () => home;
+    assert.deepEqual(
+      defaultSidecarDir({ platform: "linux", uid: 4242, tmp, userHome }),
+      { dir: null, problem: `home is not an absolute path: ${home}` },
+      String(home),
+    );
+  }
+});
+
+test("B60 errorText names a SystemError's errno, else the code or message", () => {
+  const rows = [
+    [noPasswdEntry(), "ENOENT"],
+    [Object.assign(new Error("busy"), { code: "EBUSY" }), "EBUSY"],
+    [
+      new Error("/c is writable by other users"),
+      "/c is writable by other users",
+    ],
+    ["plain text", "plain text"],
+    [undefined, "undefined"],
+  ];
+  for (const [err, want] of rows) assert.equal(errorText(err), want, want);
+});
+
+const POSIX_MODES = WIN32 ? "POSIX owners and modes" : false;
+const ENOENT = () => Object.assign(new Error("missing"), { code: "ENOENT" });
+const ENOTDIR = () =>
+  Object.assign(new Error("not a directory"), { code: "ENOTDIR" });
+const dirInfo = (fields) => ({
+  isDirectory: () => true,
+  isSymbolicLink: () => false,
+  mode: 0o40700,
+  uid: 4242,
+  ...fields,
+});
+
+test("B53 ensurePrivateDir refuses an ancestor another uid owns and creates nothing", () => {
+  const made = [];
+  const lstats = [];
+  const problem = ensurePrivateDir("/home/u/.cache/leaf", {
+    platform: "linux",
+    uid: 4242,
+    fs: {
+      stat: (path) => {
+        if (path === "/home/u") return dirInfo({ uid: 1001 });
+        throw ENOENT();
+      },
+      lstat: (path) => {
+        lstats.push(path);
+        throw ENOENT();
+      },
+      mkdir: (path) => made.push(path),
+    },
+  });
+  assert.equal(problem, "/home/u belongs to uid 1001");
+  assert.deepEqual(made, []);
+  assert.deepEqual(lstats, ["/home/u/.cache/leaf"]);
+  // A POSIX fs answers ENOTDIR for any path under a file.
+  const filed = ensurePrivateDir("/home/u/.cache/leaf", {
+    platform: "linux",
+    uid: 4242,
+    fs: {
+      stat: (path) => {
+        if (path === "/home/u") return dirInfo({ isDirectory: () => false });
+        throw path.startsWith("/home/u/") ? ENOTDIR() : ENOENT();
+      },
+      lstat: (path) => {
+        lstats.push(path);
+        throw ENOTDIR();
+      },
+      mkdir: (path) => made.push(path),
+    },
+  });
+  assert.equal(filed, "/home/u is not a directory");
+  assert.deepEqual(made, []);
+  assert.deepEqual(lstats, ["/home/u/.cache/leaf", "/home/u/.cache/leaf"]);
+});
+
+test("B61 ensurePrivateDir with create false makes nothing", () => {
+  const rows = [
+    ["/home/u", 4242, null],
+    ["/home/u", 1001, "/home/u belongs to uid 1001"],
+    [
+      "/home/u/.cache/leaf",
+      4242,
+      "/home/u/.cache/leaf is writable by other users",
+    ],
+  ];
+  for (const [present, owner, want] of rows) {
+    const made = [];
+    const problem = ensurePrivateDir("/home/u/.cache/leaf", {
+      platform: "linux",
+      uid: 4242,
+      create: false,
+      fs: {
+        stat: (path) => {
+          if (path === present) return dirInfo({ uid: owner });
+          throw ENOENT();
+        },
+        lstat: () => dirInfo({ mode: 0o40777 }),
+        mkdir: (path) => made.push(path),
+      },
+    });
+    assert.equal(problem, want, present);
+    assert.deepEqual(made, [], present);
+  }
+  const made = [];
+  assert.equal(
+    ensurePrivateDir("C:\\x", {
+      platform: "win32",
+      create: false,
+      fs: { mkdir: (...args) => made.push(args) },
+    }),
+    null,
+  );
+  assert.deepEqual(made, []);
+});
+
+test("B54 ensurePrivateDir refuses a linked or shared leaf (seamed)", () => {
+  const rows = [
+    [dirInfo({ isSymbolicLink: () => true }), "/c/leaf is a symlink"],
+    [dirInfo({ mode: 0o40777 }), "/c/leaf is writable by other users"],
+    [dirInfo({ uid: 1001 }), "/c/leaf belongs to uid 1001"],
+    [dirInfo({ isDirectory: () => false }), "/c/leaf is not a directory"],
+    [dirInfo(), null],
+  ];
+  for (const [leaf, want] of rows) {
+    const problem = ensurePrivateDir("/c/leaf", {
+      platform: "linux",
+      uid: 4242,
+      fs: { stat: () => dirInfo(), lstat: () => leaf, mkdir: () => {} },
+    });
+    assert.equal(problem, want);
+  }
+  const made = [];
+  assert.equal(
+    ensurePrivateDir("C:\\x", {
+      platform: "win32",
+      fs: {
+        stat: () => {
+          throw new Error("stat reached");
+        },
+        lstat: () => {
+          throw new Error("lstat reached");
+        },
+        mkdir: (...args) => made.push(args),
+      },
+    }),
+    null,
+  );
+  assert.deepEqual(made, [["C:\\x", { recursive: true }]]);
+});
+
+test("B63 ensurePrivateDir refuses a dangling link at the dir in both modes (seamed)", () => {
+  for (const create of [false, true]) {
+    const made = [];
+    const problem = ensurePrivateDir("/c/leaf", {
+      platform: "linux",
+      uid: 4242,
+      create,
+      fs: {
+        stat: (path) => {
+          if (path === "/c") return dirInfo();
+          throw ENOENT();
+        },
+        lstat: (path) => {
+          if (path === "/c/leaf") {
+            return dirInfo({
+              isSymbolicLink: () => true,
+              isDirectory: () => false,
+            });
+          }
+          throw ENOENT();
+        },
+        mkdir: (path) => made.push(path),
+      },
+    });
+    assert.equal(problem, "/c/leaf is a symlink", `create ${create}`);
+    assert.deepEqual(made, [], `create ${create}`);
+  }
+});
+
+test("B64 ensurePrivateDir on a real POSIX tree names a dangling leaf link and a file above the dir", {
+  skip: POSIX_MODES,
+}, () => {
+  const base = caseDir("b64");
+  const dangling = join(base, "dangling");
+  symlinkSync(join(base, "nowhere"), dangling);
+  const file = join(base, "file");
+  writeFileSync(file, "file bytes");
+  const rows = [
+    [dangling, `${dangling} is a symlink`],
+    [join(file, "a", "leaf"), `${file} is not a directory`],
+  ];
+  for (const [dir, want] of rows) {
+    for (const create of [false, true]) {
+      const label = `${dir} create ${create}`;
+      assert.equal(ensurePrivateDir(dir, { create }), want, label);
+      assert.deepEqual(readdirSync(base).sort(), ["dangling", "file"], label);
+    }
+  }
+  assert.equal(readFileSync(file, "utf8"), "file bytes");
+});
+
+test("B55 ensurePrivateDir on a real POSIX tree", { skip: POSIX_MODES }, () => {
+  const base = caseDir("b55");
+  const nested = join(base, "a", "b");
+  assert.equal(ensurePrivateDir(nested), null);
+  assert.equal(statSync(nested).mode & 0o777, 0o700);
+  assert.equal(ensurePrivateDir(nested), null);
+  const link = join(base, "link");
+  symlinkSync(nested, link);
+  assert.equal(ensurePrivateDir(link), `${link} is a symlink`);
+  const shared = join(base, "shared");
+  mkdirSync(shared);
+  chmodSync(shared, 0o777);
+  assert.equal(
+    ensurePrivateDir(shared),
+    `${shared} is writable by other users`,
+  );
+});
+
+test("B56 a refused sidecar dir is logged once and never written or removed", async () => {
+  const dir = caseDir("b56");
+  const sidecarFile = join(dir, "planted.json");
+  writeFileSync(sidecarFile, "planted bytes");
+  const lines = [];
+  let checks = 0;
+  const held = await acquireLock({
+    port: 0,
+    sidecarFile,
+    ensureDir: () => {
+      checks += 1;
+      return "planted refusal";
+    },
+    record: holderRecord(),
+    log: (line) => lines.push(line),
+  });
+  held.setChild(777);
+  held.setChild(778);
+  await held.release();
+  assert.equal(checks, 1);
+  assert.deepEqual(
+    lines.filter((line) => line.includes("sidecar")),
+    [
+      `full-suite: could not use the sidecar dir ${dir} (planted refusal); this run is not named, and if it is killed the next run does not wait for its children`,
+    ],
+  );
+  assert.ok(
+    lines.some((line) =>
+      line.startsWith("full-suite: lock acquired for rust "),
+    ),
+    lines.join("\n"),
+  );
+  assert.equal(readFileSync(sidecarFile, "utf8"), "planted bytes");
+  assert.deepEqual(readdirSync(dir), ["planted.json"]);
+});
+
+test("B62 a sidecar dir that is a symlink is refused and its file kept", {
+  skip: POSIX_MODES,
+}, async () => {
+  const base = caseDir("b62");
+  const target = join(base, "target");
+  mkdirSync(target, { mode: 0o700 });
+  const link = join(base, "link");
+  symlinkSync(target, link);
+  writeFileSync(join(target, "run.json"), "planted bytes");
+  const lines = [];
+  const held = await acquireLock({
+    port: 0,
+    sidecarFile: join(link, "run.json"),
+    record: holderRecord(),
+    log: (line) => lines.push(line),
+  });
+  held.setChild(777);
+  await held.release();
+  assert.equal(
+    lines.filter((line) => line.includes(`${link} is a symlink`)).length,
+    1,
+    lines.join("\n"),
+  );
+  assert.equal(readFileSync(join(target, "run.json"), "utf8"), "planted bytes");
+});
+
+test("B57 with no dir given the lock resolves one and writes there", async () => {
+  const dir = caseDir("b57");
+  let calls = 0;
+  const held = await acquireLock({
+    port: 0,
+    resolveSidecarDir: () => {
+      calls += 1;
+      return { dir, problem: null };
+    },
+    record: holderRecord(),
+    log: noop,
+  });
+  assert.equal(calls, 1);
+  assert.equal(readSidecar(sidecarPath(held.port, dir))?.suite, "rust");
+  await held.release();
+  assert.deepEqual(readdirSync(dir), []);
+});
+
+test("B58 with no per-user dir the lock holds the port and names nobody", async () => {
+  const server = await listenLoopback();
+  const port = server.address().port;
+  const clock = manualClock();
+  const lines = [];
+  const cwdBefore = readdirSync(process.cwd()).sort();
+  const noDir =
+    "full-suite: no per-user dir for the sidecar (no user id); this run is not named, and a killed run's children are not waited for";
+  const unknown = `full-suite: waiting - held by an unknown process on port ${port} (or by a wrapper still checking a previous run's child)`;
+  try {
+    const contender = track(
+      acquireLock({
+        port,
+        resolveSidecarDir: () => ({ dir: null, problem: "no user id" }),
+        ensureDir: () => {
+          throw new Error("no dir may be made");
+        },
+        record: holderRecord(),
+        now: clock.now,
+        sleep: clock.sleep,
+        log: (line) => lines.push(line),
+      }),
+    );
+    await clock.idle();
+    await clock.tick(15);
+    await clock.idle();
+    assert.equal(contender.done, false);
+    assert.deepEqual(lines, [noDir, unknown, unknown]);
+    await closeServer(server);
+    const held = await bounded(
+      clock.drive(contender),
+      `contender on port ${port}`,
+    );
+    held.setChild(777);
+    await held.release();
+    assert.equal(lines.length, 4);
+    assert.match(
+      lines[3],
+      /^full-suite: lock acquired for rust on port \d+ after waiting \d+s$/,
+    );
+    assert.deepEqual(readdirSync(process.cwd()).sort(), cwdBefore);
+  } finally {
+    if (server.listening) await closeServer(server);
+  }
+});
+
+test("B59 an explicit null dir has no sidecar and no line; a sidecarFile still counts", async () => {
+  const lines = [];
+  const resolveSidecarDir = () => {
+    throw new Error("an explicit dir is never resolved");
+  };
+  const bare = await acquireLock({
+    port: 0,
+    sidecarDir: null,
+    resolveSidecarDir,
+    record: holderRecord(),
+    log: (line) => lines.push(line),
+  });
+  bare.setChild(777);
+  await bare.release();
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^full-suite: lock acquired for rust /);
+  const dir = caseDir("b59");
+  const sidecarFile = join(dir, "missing", "nested", "run.json");
+  const filed = await acquireLock({
+    port: 0,
+    sidecarDir: null,
+    sidecarFile,
+    resolveSidecarDir,
+    record: holderRecord(),
+    log: (line) => lines.push(line),
+  });
+  assert.equal(readSidecar(sidecarFile)?.suite, "rust");
+  if (!WIN32) {
+    assert.equal(statSync(join(dir, "missing")).mode & 0o777, 0o700);
+    assert.equal(statSync(join(dir, "missing", "nested")).mode & 0o777, 0o700);
+  }
+  await filed.release();
+  assert.equal(lines.length, 2);
+  assert.equal(existsSync(sidecarFile), false);
 });

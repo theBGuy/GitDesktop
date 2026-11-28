@@ -13,6 +13,7 @@
     "test:vitest:full": "node scripts/full-suite.mjs vitest",
     "test:rust:full": "node scripts/full-suite.mjs rust",
     "test:all:full": "node scripts/full-suite.mjs all",
+    "test:rust:container": "node scripts/rust-container.mjs test",
     "preview": "vite preview",
     "changelog": "node scripts/changelog-draft.mjs",
     "changelog:preview": "node scripts/changelog-draft.mjs --preview",

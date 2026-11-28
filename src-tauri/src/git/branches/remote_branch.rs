@@ -3916,16 +3916,10 @@ mod tests {
             run(&f.repo, &["tag", "-a", "v-follow", "-m", "v", &f.old]).await;
             let hook = std::path::Path::new(&f.bare).join("hooks").join("update");
             std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-            std::fs::write(
+            crate::test_exec::write_executable(
                 &hook,
                 "#!/bin/sh\ncase \"$1\" in refs/tags/*) echo no tags >&2; exit 1;; esac\nexit 0\n",
-            )
-            .unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            );
             let outcome = act(&f, "new", None).await;
             assert!(
                 matches!(outcome, RemoteRenameOutcome::Renamed { warning: None }),

@@ -2734,8 +2734,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         let hook = dir.join("pre-commit");
         let script = format!("#!/bin/sh\necho ran > \"{}\"\n", slashed(marker));
-        std::fs::write(&hook, script).unwrap();
-        set_hook_executable(&hook).unwrap();
+        crate::test_exec::write_executable(&hook, &script);
         git_ok(wt, &["commit", "-q", "--allow-empty", "-m", "probe"]).await;
         std::fs::remove_file(&hook).unwrap();
         let ran = marker.exists();
@@ -2876,6 +2875,7 @@ mod tests {
     async fn keep_local_hook_and_guard_agree_on_every_flag_shape() {
         let (_g, _base, repo, remote) = hook_repo("shapes").await;
         assert_status(&install(&repo).await, Installed, None, None);
+        rematerialize_pre_push(&repo).await;
         git_ok(&repo, &["checkout", "-q", "-b", "feat/x"]).await;
         let key = crate::git::branches::keep_local_key("feat/x");
         let config = Path::new(&repo).join(".git").join("config");
@@ -2921,6 +2921,7 @@ mod tests {
     async fn keep_local_hook_stops_upstream_and_all_pushes_and_passes_detached() {
         let (_g, _base, repo, remote) = hook_repo("forms").await;
         assert_status(&install(&repo).await, Installed, None, None);
+        rematerialize_pre_push(&repo).await;
         git_ok(&repo, &["checkout", "-q", "-b", "feat/x"]).await;
         crate::git::branches::set_branch_keep_local_core(&repo, "feat/x", true)
             .await
@@ -2952,6 +2953,8 @@ mod tests {
         assert_status(&install(&wt).await, Installed, None, None);
         assert!(managed_file(&repo, "pre-push").is_file());
         assert_status(&status(&repo).await, Installed, None, None);
+        rematerialize_pre_push(&repo).await;
+        assert_status(&status(&wt).await, Installed, None, None);
         crate::git::branches::set_branch_keep_local_core(&repo, "wtb", true)
             .await
             .unwrap();
@@ -3300,6 +3303,7 @@ mod tests {
     async fn keep_local_hook_stops_a_marked_push_and_passes_the_rest() {
         let (_g, _base, repo, remote) = hook_repo("push").await;
         assert_status(&install(&repo).await, Installed, None, None);
+        rematerialize_pre_push(&repo).await;
         let marked = "is marked Keep local";
         let marked_line = "\"feat/x\" is marked Keep local, so this push was stopped. Turn off";
         let push_ok = |args: &'static [&'static str]| {
@@ -3372,13 +3376,32 @@ mod tests {
 
     /// Writes `body` as the repository's own pre-push hook, executable.
     fn write_pre_push(repo: &str, body: &str) {
+        crate::test_exec::write_executable(&managed_file(repo, "pre-push"), body);
+    }
+
+    /// Re-writes the installed pre-push in `repo` (the common dir's checkout) as a fresh
+    /// file with the same bytes, for a test that then runs it. The install writes it
+    /// in-process, and a child another test thread forks meanwhile keeps that write
+    /// descriptor until its own exec, failing git's exec of the hook with ETXTBSY. The
+    /// remove is what helps: `write_executable` keeps an existing file's inode, which such a
+    /// leaked descriptor still names.
+    async fn rematerialize_pre_push(repo: &str) {
         let file = managed_file(repo, "pre-push");
-        std::fs::write(&file, body).unwrap();
+        let body = std::fs::read_to_string(&file).unwrap();
+        // Held open across the swap, so the fresh file cannot take the old inode number.
+        #[cfg(unix)]
+        let old = std::fs::File::open(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        crate::test_exec::write_executable(&file, &body);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            use std::os::unix::fs::MetadataExt;
+            let was = old.metadata().unwrap().ino();
+            let now = file.metadata().unwrap().ino();
+            assert_ne!(was, now, "the hook git runs is a fresh inode");
         }
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), body);
+        assert_status(&status(repo).await, Installed, None, None);
     }
 
     /// The managed script run with errexit on (git runs the hook through its own sh)
